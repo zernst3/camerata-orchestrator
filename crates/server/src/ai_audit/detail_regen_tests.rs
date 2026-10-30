@@ -1139,16 +1139,20 @@ fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
     // The echo.
     let mut wrong_path = entry(&f, FULL);
     wrong_path.path = Some("other.rs".to_string());
-    assert_eq!(accept_entry(&f, &wrong_path, ""), Err(Reject::Mismatch));
+    assert_eq!(
+        accept_entry(&f, &wrong_path, "", &[]),
+        Err(Reject::Mismatch)
+    );
     let mut no_line = entry(&f, FULL);
     no_line.line = None;
-    assert_eq!(accept_entry(&f, &no_line, ""), Err(Reject::Mismatch));
+    assert_eq!(accept_entry(&f, &no_line, "", &[]), Err(Reject::Mismatch));
     // Every path or identifier the statement names must survive.
     assert_eq!(
         accept_entry(
             &f,
             &entry(&f, "The handler trusts a flag from src/config.rs."),
-            ""
+            "",
+            &[]
         ),
         Err(Reject::DropsNamedToken(
             "REQUIRE_WEBHOOK_SIGNATURE".to_string()
@@ -1158,37 +1162,44 @@ fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
         accept_entry(
             &f,
             &entry(&f, "REQUIRE_WEBHOOK_SIGNATURE is trusted by the handler."),
-            ""
+            "",
+            &[]
         ),
         Err(Reject::DropsNamedToken("src/config.rs".to_string()))
     );
-    assert!(accept_entry(&f, &entry(&f, FULL), "").is_ok());
+    assert!(accept_entry(&f, &entry(&f, FULL), "", &[]).is_ok());
     // A new precondition is refused, unless the statement or the code shown already makes it.
     let invented = format!("{FULL} Exploiting it only if the caller holds a session.");
     assert_eq!(
-        accept_entry(&f, &entry(&f, &invented), "let x = 1;"),
+        accept_entry(&f, &entry(&f, &invented), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
     );
-    assert!(accept_entry(&f, &entry(&f, &invented), "// only if the caller is local").is_ok());
+    assert!(accept_entry(
+        &f,
+        &entry(&f, &invented),
+        "// only if the caller is local",
+        &[]
+    )
+    .is_ok());
     let conditional = statement(&format!("{SHORT} Only if the flag is false."));
-    assert!(accept_entry(&conditional, &entry(&conditional, &invented), "").is_ok());
+    assert!(accept_entry(&conditional, &entry(&conditional, &invented), "", &[]).is_ok());
     // "requires no ..." negates, and is not a precondition.
     let negated = format!("{FULL} The endpoint requires no authentication.");
-    assert!(accept_entry(&f, &entry(&f, &negated), "").is_ok());
+    assert!(accept_entry(&f, &entry(&f, &negated), "", &[]).is_ok());
 }
 
 #[test]
 fn a_borderline_statement_stays_borderline() {
     let f = statement(&format!("Borderline: {SHORT}"));
-    let kept = accept_entry(&f, &entry(&f, FULL), "").unwrap();
+    let kept = accept_entry(&f, &entry(&f, FULL), "", &[]).unwrap();
     assert_eq!(kept, format!("Borderline: {FULL}"));
     // Already there, in any case: not doubled.
     let said = format!("borderline: {FULL}");
-    assert_eq!(accept_entry(&f, &entry(&f, &said), "").unwrap(), said);
+    assert_eq!(accept_entry(&f, &entry(&f, &said), "", &[]).unwrap(), said);
     // A confident statement is not made borderline.
     let confident = statement(SHORT);
     assert_eq!(
-        accept_entry(&confident, &entry(&confident, FULL), "").unwrap(),
+        accept_entry(&confident, &entry(&confident, FULL), "", &[]).unwrap(),
         FULL
     );
 }
@@ -1197,6 +1208,7 @@ fn a_borderline_statement_stays_borderline() {
 fn named_tokens_are_paths_and_identifiers_not_words() {
     let tokens: Vec<String> = named_tokens(
         "Trusts `REQUIRE_WEBHOOK_SIGNATURE` from src/config.rs, e.g. the WebhookPayload, via std::fs and webhook.rs.",
+        &[],
     )
     .into_iter()
     .map(|t| t.text)
@@ -1211,7 +1223,7 @@ fn named_tokens_are_paths_and_identifiers_not_words() {
             "webhook.rs"
         ]
     );
-    let paths: Vec<bool> = named_tokens("src/config.rs and CamelCaseName")
+    let paths: Vec<bool> = named_tokens("src/config.rs and CamelCaseName", &[])
         .into_iter()
         .map(|t| t.is_path)
         .collect();
@@ -1722,26 +1734,26 @@ fn a_dot_slash_or_leading_slash_path_is_the_same_path() {
         line: Some(line),
         detail: FULL.to_string(),
     };
-    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "").is_ok());
-    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "").is_ok());
-    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "").is_ok());
+    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "", &[]).is_ok());
+    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "", &[]).is_ok());
+    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "", &[]).is_ok());
     // Anything else is still a different place: another file, a suffix of it, another line.
     assert_eq!(
-        accept_entry(&f, &with("other/webhook.rs", 9), ""),
+        accept_entry(&f, &with("other/webhook.rs", 9), "", &[]),
         Err(Reject::Mismatch)
     );
     assert_eq!(
-        accept_entry(&f, &with("handlers/webhook.rs", 9), ""),
+        accept_entry(&f, &with("handlers/webhook.rs", 9), "", &[]),
         Err(Reject::Mismatch)
     );
     assert_eq!(
-        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), ""),
+        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), "", &[]),
         Err(Reject::Mismatch)
     );
     // The finding's own path is read the same way.
     let mut dotted = statement(SHORT);
     dotted.path = format!("./{HANDLER}");
-    assert!(accept_entry(&dotted, &with(HANDLER, 9), "").is_ok());
+    assert!(accept_entry(&dotted, &with(HANDLER, 9), "", &[]).is_ok());
 }
 
 #[tokio::test]
@@ -1768,11 +1780,11 @@ fn a_secret_shaped_name_the_statement_kept_is_compared_after_the_same_redaction(
         "The key {} in src/config.rs is committed; move it to the environment.",
         p.value
     );
-    let written = accept_entry(&f, &entry(&f, &reply), "").expect("both sides redacted alike");
+    let written = accept_entry(&f, &entry(&f, &reply), "", &[]).expect("both sides redacted alike");
     assert!(!written.contains(&p.value), "the value is never written");
     // A reply that drops the key's name still fails.
     assert!(matches!(
-        accept_entry(&f, &entry(&f, "It is committed in src/config.rs."), ""),
+        accept_entry(&f, &entry(&f, "It is committed in src/config.rs."), "", &[]),
         Err(Reject::DropsNamedToken(_))
     ));
 }
@@ -1967,4 +1979,167 @@ async fn a_stopped_run_sends_no_second_detail_try() {
     assert!(meter.outage_stopped(), "three transport failures in a row");
     assert_eq!(llm.prompts(Role::Regen).len(), 3);
     assert_eq!(failed.len(), 1);
+}
+
+// ── P2: a slash-joined word pair is not a path; a compound token needs its parts ────────────
+
+#[test]
+fn a_slash_joined_word_pair_is_not_a_path_and_is_not_asked_for_whole() {
+    let f = statement("Risking collisions/overwrites between uploads in src/upload.rs.");
+    let text = "Two uploads of one name overwrite each other, a collision, in src/upload.rs.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // The pair is not a named token at all.
+    assert!(named_tokens("collisions/overwrites", &[]).is_empty());
+}
+
+#[test]
+fn a_path_without_an_extension_is_a_path_only_when_it_resolves_in_the_file_set() {
+    let files = vec![(
+        "lib/supabase/client.ts".to_string(),
+        "export const x = 1;".to_string(),
+    )];
+    let tokens = named_tokens("see lib/supabase for the client", &files);
+    assert_eq!(tokens.len(), 1);
+    assert!(tokens[0].is_path);
+    assert!(named_tokens("see lib/supabase for the client", &[]).is_empty());
+}
+
+#[test]
+fn a_named_file_dropped_from_the_text_is_still_rejected() {
+    let f = statement("The client is built in lib/supabase/client.ts without a check.");
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "The client is built without a check."),
+            "",
+            &[]
+        ),
+        Err(Reject::DropsNamedToken(
+            "lib/supabase/client.ts".to_string()
+        ))
+    );
+    // A bare file name with a known extension is also still required whole.
+    let f = statement("The seed.sql grants everything.");
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "The seed grants everything to everyone."),
+            "",
+            &[]
+        ),
+        Err(Reject::DropsNamedToken("seed.sql".to_string()))
+    );
+}
+
+#[test]
+fn a_compound_token_is_accepted_when_each_part_is_present() {
+    let f = statement("No getAuthenticatorAssuranceLevel/aal2 check before the update.");
+    let text = "The action never calls getAuthenticatorAssuranceLevel() or compares it to aal2 \
+                before it updates the row.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // A part missing from the text is a dropped name.
+    let text = "The action never calls getAuthenticatorAssuranceLevel() before it updates the row.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "", &[]),
+        Err(Reject::DropsNamedToken("aal2".to_string()))
+    );
+    // A dotted column reference is accepted when the text names each part.
+    let f = statement("Trigger skips audit_log.action for service writes.");
+    let text = "The trigger skips the action column in internal.audit_log for service writes.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    let f = statement("created_by/modified_by are client supplied.");
+    assert!(accept_entry(
+        &f,
+        &entry(&f, "Both created_by and modified_by come from the client."),
+        "",
+        &[]
+    )
+    .is_ok());
+}
+
+// ── P3: the exploit-precondition check reads the explanation of a confident statement ───────
+
+#[test]
+fn a_real_exploit_precondition_on_a_confident_statement_is_still_rejected() {
+    let f = statement(SHORT);
+    let text = format!("{FULL} Exploitation requires a valid session cookie.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // Even in a sentence that opens like a fix, a sentence about exploiting it is read.
+    let text = format!("{FULL} Add the check, though an attacker can abuse it only if logged in.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // And a "requires" with a backticked object in a sentence about exploiting it.
+    let text = format!("{FULL} Exploiting it requires a `session` cookie.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_borderline_statement_may_say_what_would_settle_it() {
+    let f =
+        statement("Borderline: profile edits are not gated for verified members in src/config.rs.");
+    let text = "It is a problem only if profile edits are meant for verified members, as \
+                REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
+    let kept = accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).unwrap();
+    assert!(kept.starts_with("Borderline: "));
+    // The same words on a confident statement are an invented precondition.
+    let confident = statement("Profile edits are not gated for verified members in src/config.rs.");
+    assert_eq!(
+        accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_fix_direction_sentence_is_not_read_for_a_precondition() {
+    let f = statement("The select policy is open to every row in src/config.rs.");
+    let text = "Any signed-in user can read every row of the table in src/config.rs. Replace the \
+                policy with one that depends on the row owner.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    let text = "Any signed-in user can read every row of the table in src/config.rs. To fix this, \
+                the owner must confirm the defaults, assuming nothing else reads it.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // The same words in an explanation sentence are read.
+    let text = "Any signed-in user can read every row of the table in src/config.rs, assuming the \
+                table is shared. Replace the policy.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_requires_whose_object_is_a_backticked_construct_is_not_a_precondition() {
+    let f = statement("The select policy is open to every row in src/config.rs.");
+    let text = "The policy requires a `to authenticated` clause and does not have one, in \
+                src/config.rs, so every row is readable.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // A bare "requires" is still one.
+    let text = "The policy requires a role clause and does not have one, in src/config.rs.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn the_shared_precondition_phrase_check_is_unchanged() {
+    // Calibration's raise-block reads the whole text with this function; the detail check
+    // narrows what it passes in, never what the function counts.
+    assert!(mentions_exploit_precondition(
+        "The policy requires a `to authenticated` clause."
+    ));
+    assert!(mentions_exploit_precondition(
+        "Replace it, assuming nothing else reads it."
+    ));
+    assert!(!mentions_exploit_precondition(
+        "The endpoint requires no authentication."
+    ));
 }

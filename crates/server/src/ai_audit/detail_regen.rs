@@ -84,8 +84,9 @@ Each finding below starts with an opaque id in square brackets, then its rule an
 Rules, every finding:
 - Keep every fact the short statement already makes: each file name, symbol, flag and other file it names stays in your explanation, spelled exactly as given. Never contradict it.
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
-- Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so.
-- If the statement says the case is borderline, keep saying so and say what would settle it.
+- Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. The fix direction may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
+- If the statement says the case is borderline, start your explanation with "Borderline:", keep saying so, and say what would settle it.
+- A name the statement joins with a slash or a dot (a/b, table.column) may be written as its separate parts, each spelled exactly as given.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
@@ -145,6 +146,10 @@ pub(super) struct NamedToken {
     pub text: String,
     /// A file path or file name (`src/config.rs`, `webhook.rs`), as opposed to a symbol.
     pub is_path: bool,
+    /// For a compound token (`audit_log.action`, `getAuthenticatorAssuranceLevel/aal2`): its
+    /// parts of three or more characters, each of which the text must contain. Empty for a path
+    /// or a single symbol, which the text must contain whole.
+    pub parts: Vec<String>,
 }
 
 /// Strip the punctuation a token picks up from the sentence around it.
@@ -185,6 +190,38 @@ fn looks_like_file_name(token: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.'))
 }
 
+/// Extensions that make a `name.ext` token a file name (`seed.sql`, `actions.ts`) rather than a
+/// member access (`supabase.from`, `audit_log.action`), unless the token resolves in the file set.
+const KNOWN_FILE_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "sql", "md", "yml", "yaml", "toml", "py",
+    "rb", "go", "java", "kt", "cs", "css", "scss", "html", "sh", "lock", "txt", "conf", "cfg",
+    "ini", "xml", "env", "local", "example", "svg", "vue", "php", "swift", "c", "h", "cpp", "hpp",
+    "proto", "graphql", "tf", "csv", "gradle", "lua", "dart", "ex", "exs", "mdx",
+];
+
+/// Whether `token`'s last extension is one of [`KNOWN_FILE_EXTENSIONS`].
+fn has_known_extension(token: &str) -> bool {
+    token
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| KNOWN_FILE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// Whether `token` names a file in `files`, or a directory holding one: exact, a trailing part of
+/// a path, or a path leading to it.
+fn resolves_in_files(files: &[(String, String)], token: &str) -> bool {
+    let token = token.trim_start_matches("./").trim_end_matches('/');
+    if token.is_empty() {
+        return false;
+    }
+    files.iter().any(|(p, _)| {
+        p == token
+            || p.ends_with(&format!("/{token}"))
+            || token.ends_with(&format!("/{p}"))
+            || p.starts_with(&format!("{token}/"))
+            || p.contains(&format!("/{token}/"))
+    })
+}
+
 /// `WebhookPayload`, `parseURL`: a lowercase letter followed later by an uppercase one, in a
 /// token long enough to be an identifier rather than a word.
 fn looks_like_camel_case(token: &str) -> bool {
@@ -196,18 +233,54 @@ fn looks_like_camel_case(token: &str) -> bool {
             .any(|(a, b)| a.is_lowercase() && b.is_uppercase())
 }
 
-/// Every path-like or identifier-like token of `text`, in order of appearance, without repeats:
-/// a token containing `/`, `::`, `_`, a file extension, or CamelCase.
-pub(super) fn named_tokens(text: &str) -> Vec<NamedToken> {
+/// An identifier-shaped word: `snake_case` or `camelCase`.
+fn looks_like_symbol_word(part: &str) -> bool {
+    part.contains('_') || looks_like_camel_case(part)
+}
+
+/// Every path-like or identifier-like token of `text`, in order of appearance, without repeats.
+///
+/// * A path is a token with a known file extension (`src/config.rs`, `seed.sql`), a slash token
+///   with such a part, or a token that resolves in `files` (a file, or a directory holding one).
+///   A slash-joined pair of plain words (`collisions/overwrites`) is prose, not a path.
+/// * A compound token (`audit_log.action`, `created_by/modified_by`, `Supabase/PostgREST`) that
+///   is not a path is kept as its parts: the text must contain each part of three or more
+///   characters, not the spelling that joined them.
+/// * Otherwise a token containing `::`, `_` or CamelCase is a symbol the text must contain whole.
+pub(super) fn named_tokens(text: &str, files: &[(String, String)]) -> Vec<NamedToken> {
     let mut out: Vec<NamedToken> = Vec::new();
     for raw in text.split_whitespace() {
         let token = trim_token(raw);
         if token.is_empty() {
             continue;
         }
-        let is_file = looks_like_file_name(token);
-        let is_path = is_file || token.contains('/');
-        let is_symbol = token.contains("::") || token.contains('_') || looks_like_camel_case(token);
+        let file_shaped = looks_like_file_name(token);
+        let is_path = (file_shaped
+            && (has_known_extension(token) || resolves_in_files(files, token)))
+            || (token.contains('/')
+                && (token
+                    .split('/')
+                    .any(|part| looks_like_file_name(part) && has_known_extension(part))
+                    || resolves_in_files(files, token)));
+        let mut parts: Vec<String> = Vec::new();
+        let is_symbol = if is_path {
+            false
+        } else if token.contains("::") {
+            true
+        } else if token.contains('/') || file_shaped || token.contains('.') {
+            let pieces: Vec<&str> = token
+                .split(['/', '.'])
+                .filter(|p| p.chars().count() >= 3)
+                .collect();
+            let compound = file_shaped || pieces.iter().any(|p| looks_like_symbol_word(p));
+            if compound {
+                parts = pieces.iter().map(|p| (*p).to_string()).collect();
+            }
+            // A compound with nothing to ask for, or a pair of plain words, is prose.
+            !parts.is_empty()
+        } else {
+            token.contains('_') || looks_like_camel_case(token)
+        };
         if !(is_path || is_symbol) {
             continue;
         }
@@ -217,6 +290,7 @@ pub(super) fn named_tokens(text: &str) -> Vec<NamedToken> {
         out.push(NamedToken {
             text: token.to_string(),
             is_path,
+            parts,
         });
     }
     out
@@ -274,7 +348,7 @@ fn push_map_line(lines: &mut Vec<String>, path: &str, content: &str) {
 /// finding (a flag set in one file, trusted in another) explainable on an incremental run,
 /// where the file it names is not among the files scanned.
 fn named_file_excerpts(f: &Finding, files: &[(String, String)]) -> String {
-    let tokens = named_tokens(&f.detail);
+    let tokens = named_tokens(&f.detail, files);
     let named_files: Vec<&(String, String)> = tokens
         .iter()
         .filter(|t| t.is_path)
@@ -488,10 +562,167 @@ fn normalized_path(path: &str) -> &str {
     p
 }
 
+/// Whether a statement is marked borderline (`Borderline: ...`, any case).
+fn is_borderline(statement: &str) -> bool {
+    statement
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("borderline:")
+}
+
+/// Words that put a sentence about how the problem is EXPLOITED, which the precondition check
+/// always reads, whatever else the sentence says.
+const EXPLOIT_WORDS: &[&str] = &["exploit", "attack", "abus", "adversar", "malicious"];
+
+/// Leading words of a fix-direction sentence ("Replace the policy with ...", "To fix this, ...",
+/// "The fix is ..."): what the sentence tells the reader to DO, not how the problem is exploited.
+const FIX_DIRECTION_LEADS: &[&str] = &[
+    "fix",
+    "fixing",
+    "to fix",
+    "the fix",
+    "a fix",
+    "to address",
+    "to resolve",
+    "to close",
+    "to remedy",
+    "remediation",
+    "replace",
+    "add",
+    "move",
+    "change",
+    "use",
+    "wrap",
+    "remove",
+    "set",
+    "enable",
+    "restrict",
+    "validate",
+    "verify",
+    "switch",
+    "update",
+    "rotate",
+    "store",
+    "keep",
+    "limit",
+    "scope",
+    "check",
+    "ensure",
+    "make",
+    "put",
+    "pass",
+    "call",
+    "apply",
+    "configure",
+    "rename",
+    "split",
+    "extract",
+    "require",
+    "drop",
+    "delete",
+    "gate",
+    "guard",
+    "sanitize",
+    "escape",
+    "hash",
+    "encode",
+    "reject",
+    "deny",
+    "constrain",
+    "tighten",
+    "harden",
+    "mask",
+    "redact",
+    "bind",
+    "pin",
+    "load",
+    "write",
+    "read",
+    "return",
+    "create",
+];
+
+/// The sentences of `text`, split at a full stop, `!` or `?` followed by white space, and at a
+/// line break.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let end_of_sentence = match b {
+            b'\n' => true,
+            b'.' | b'!' | b'?' => bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace),
+            _ => false,
+        };
+        if end_of_sentence {
+            let s = text[start..=i].trim();
+            if !s.is_empty() {
+                out.push(s);
+            }
+            start = i + 1;
+        }
+    }
+    let rest = text[start..].trim();
+    if !rest.is_empty() {
+        out.push(rest);
+    }
+    out
+}
+
+/// Whether `sentence` opens with one of [`FIX_DIRECTION_LEADS`] as a whole word (phrase).
+fn is_fix_direction(sentence: &str) -> bool {
+    let lower = sentence.trim_start().to_ascii_lowercase();
+    FIX_DIRECTION_LEADS.iter().any(|lead| {
+        lower.strip_prefix(lead).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        })
+    })
+}
+
+/// `text` with a "requires" removed when its object is a backticked code construct ("the
+/// policy requires a `to authenticated` clause"): that is what the CODE needs, not a condition
+/// on exploiting it.
+fn without_code_requirements(sentence: &str) -> String {
+    let re = regex::Regex::new(r"(?i)\brequires\s+(?:(?:a|an|the|its|that)\s+)?`[^`]*`")
+        .expect("static regex");
+    re.replace_all(sentence, "").into_owned()
+}
+
+/// The part of a regenerated text the exploit-precondition check reads: the explanation, not the
+/// fix direction. A sentence is left out when it opens with a fix verb ("Replace ...", "To fix
+/// this, ...") and says nothing about exploiting the problem; a "requires" whose object is a
+/// backticked code construct is not counted, in a sentence that says nothing about exploiting
+/// it either. Every other sentence is read in full, so "exploitation requires a valid session"
+/// is still a precondition wherever it stands.
+pub(super) fn precondition_scope(text: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for sentence in sentences(text) {
+        let lower = sentence.to_ascii_lowercase();
+        let about_exploitation = EXPLOIT_WORDS.iter().any(|w| lower.contains(w));
+        if !about_exploitation && is_fix_direction(sentence) {
+            continue;
+        }
+        if about_exploitation {
+            kept.push(sentence.to_string());
+        } else {
+            kept.push(without_code_requirements(sentence));
+        }
+    }
+    kept.join(" ")
+}
+
 /// The checks one entry must pass to be written (the id match is done by the caller, which
 /// knows the batch). Returns the text to write: the model's, with `Borderline: ` put back at the
-/// front when the statement was borderline and the text lost it.
-pub(super) fn accept_entry(f: &Finding, entry: &Entry, code_shown: &str) -> Result<String, Reject> {
+/// front when the statement was borderline and the text lost it. `files` is the file set a
+/// named path is looked up in (see [`named_tokens`]).
+pub(super) fn accept_entry(
+    f: &Finding,
+    entry: &Entry,
+    code_shown: &str,
+    files: &[(String, String)],
+) -> Result<String, Reject> {
     // The path is read forgivingly (a leading "./" or "/" is not a different file); the line is
     // not: any other line is another place.
     if entry.path.as_deref().map(normalized_path) != Some(normalized_path(&f.path))
@@ -501,32 +732,35 @@ pub(super) fn accept_entry(f: &Finding, entry: &Entry, code_shown: &str) -> Resu
     }
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
-    // Every path or identifier the statement named stays. Both sides go through the same secret
-    // redaction: the text is what would be written, and a name the redactor rewrites in the
-    // statement is rewritten the same way in the text, so a kept secret-shaped name is not
-    // mistaken for a dropped one.
+    // Every path or identifier the statement named stays; a compound name stays as its parts.
+    // Both sides go through the same secret redaction: the text is what would be written, and a
+    // name the redactor rewrites in the statement is rewritten the same way in the text, so a
+    // kept secret-shaped name is not mistaken for a dropped one.
     let redacted_short = camerata_secrets::redact_str(short);
-    for token in named_tokens(&redacted_short) {
-        if !text.contains(&token.text) {
-            return Err(Reject::DropsNamedToken(token.text));
+    for token in named_tokens(&redacted_short, files) {
+        if token.parts.is_empty() {
+            if !text.contains(&token.text) {
+                return Err(Reject::DropsNamedToken(token.text));
+            }
+        } else if let Some(missing) = token.parts.iter().find(|p| !text.contains(p.as_str())) {
+            return Err(Reject::DropsNamedToken(missing.clone()));
         }
     }
     // No new exploit precondition. The same phrase list as calibration's raise-block and the D5
     // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would
-    // silently stop calibration raising a critical, on a claim nobody made.
-    if mentions_exploit_precondition(&text)
+    // silently stop calibration raising a critical, on a claim nobody made. A borderline
+    // statement is exempt (the prompt orders the model to say what would settle it, and
+    // calibration already reads borderline as low confidence); the check reads the explanation,
+    // not the fix direction ([`precondition_scope`]).
+    if !is_borderline(short)
+        && mentions_exploit_precondition(&precondition_scope(&text))
         && !mentions_exploit_precondition(short)
         && !mentions_exploit_precondition(code_shown)
     {
         return Err(Reject::InventedPrecondition);
     }
     // A borderline statement stays borderline, deterministically.
-    let borderline = |s: &str| {
-        s.trim_start()
-            .to_ascii_lowercase()
-            .starts_with("borderline:")
-    };
-    if borderline(short) && !borderline(&text) {
+    if is_borderline(short) && !is_borderline(&text) {
         return Ok(format!("Borderline: {text}"));
     }
     Ok(text)
@@ -653,7 +887,7 @@ async fn run_detail_round(
                 continue;
             }
             let idx = batch[pos];
-            match accept_entry(&findings[idx], entry, &blocks[pos].code_shown) {
+            match accept_entry(&findings[idx], entry, &blocks[pos].code_shown, files) {
                 Ok(text) => {
                     findings[idx].detail = compose_detail(&findings[idx].detail, &text);
                     written[pos] = true;

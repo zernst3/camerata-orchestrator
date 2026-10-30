@@ -1387,7 +1387,11 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 ///
 /// 2: client content framed under a per-run random delimiter token, named in the system prompt
 /// (`crate::prompt_frame`).
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 2;
+///
+/// 3: the detail-regeneration prompt allows a fix direction to say what the fix needs, asks a
+/// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
+/// a dot be written as its parts.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 3;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).

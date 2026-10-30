@@ -3143,13 +3143,24 @@ accepted on its own and only when all of these hold (`detail_regen::accept_entry
   not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
   in another order, an id the batch does not have, an id used twice, a wrong echo: none of
   these can land a text on a neighbour; the entry is simply not written.
-- Every path or identifier the short statement names (a token with `/`, `::`, `_`, a file
-  extension or CamelCase) appears in the text, spelled as given.
+- Every path or identifier the short statement names appears in the text, spelled as given: a
+  token with a known file extension or one that resolves in the file set (a file, or a
+  directory holding one), a `::`, `_` or CamelCase symbol. A slash-joined pair of plain words
+  (`collisions/overwrites`) is prose and is not asked for. A compound name that is not a file
+  (`audit_log.action`, `created_by/modified_by`, `getAuthenticatorAssuranceLevel/aal2`) is
+  asked for as its parts: each part of three or more characters must appear, not the spelling
+  that joined them. A dropped real file name is still rejected.
 - It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
-  calibration's raise-block and the D5 cap already use; one list) that neither the short
-  statement nor the code shown makes. An invented "requires a valid session" would stop
-  calibration raising a critical on a claim nobody made. The check can reject a harmless
-  "depends on", which costs a marker and not a wrong severity; the sweep reports the rate.
+  calibration's raise-block and the D5 cap already use; one list, unchanged) that neither the
+  short statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check is skipped for a statement
+  that starts "Borderline:" (the prompt orders the explanation to say what would settle it).
+  It reads the explanation sentences and not a fix-direction sentence (one that opens with a
+  fix verb and says nothing about exploiting the problem), and a "requires" whose object is a
+  backticked code construct ("the policy requires a `to authenticated` clause") is not a
+  condition on exploiting it. A sentence about exploiting, attacking or abusing the problem is
+  always read in full. The check can still reject a harmless "depends on" in an explanation
+  sentence, which costs a marker and not a wrong severity; the sweep reports the rate.
 - A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
   front when it lost it.
 
