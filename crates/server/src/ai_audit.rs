@@ -4819,11 +4819,17 @@ Your only job is telling the developer EXACTLY what to change, in THIS codebase.
 Rules, every fix:
 - Name the REAL file/symbol/column/function from the evidence given for that finding (its own
   path, snippet, detail, captured objects, and surrounding code). NEVER invent a name that
-  isn't present anywhere in the evidence you were given for that finding.
+  isn't present anywhere in the evidence you were given for that finding: a name or file path
+  in backticks must appear in that evidence, and so must every table, column, function, file
+  or variable name inside a code snippet (ordinary words and universal names such as
+  `Authorization`, `console.error` and try/catch/finally are fine). When the fix needs a NEW
+  name, describe it in plain words ("a new helper that returns the signed URL") instead of
+  naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
   app/auth/signout/route.ts does") instead of describing the pattern generically.
-- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight.
+- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight;
+  the snippet is yours to write, only the existing names it uses must come from the evidence.
 - Say WHAT to change and WHERE — NEVER how this finding was detected. Do not mention
   Camerata, a scanner, a linter, a rule id, a regex, "the audit", or any detection mechanism.
 - NEVER assert something about the codebase's current state that contradicts the finding's own
@@ -5001,24 +5007,164 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
 /// could go looking for. Deliberately short: anything NOT on this list must be grounded.
 const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined", "todo"];
 
+/// Names that exist in every codebase or runtime and so are never "invented" by a fix: a
+/// fix may name them whether or not the finding's evidence happens to show them. Kept
+/// short on purpose; a name that is merely common in the repo does not belong here. Matched
+/// exactly (case-sensitive) against a backticked span or a path-like token.
+const UNIVERSAL_FIX_NAMES: &[&str] = &[
+    "Authorization",
+    "console.error",
+    "console.log",
+    "console.warn",
+    "console.info",
+    "process.exit",
+    "process.env",
+    "finally",
+    "try",
+    "catch",
+    "devDependencies",
+    "dependencies",
+    "toString",
+    "toISOString",
+    "hasOwnProperty",
+    "addEventListener",
+    "setTimeout",
+    "setInterval",
+    "clearTimeout",
+    "encodeURIComponent",
+    "decodeURIComponent",
+    "parseInt",
+    "parseFloat",
+    "localStorage",
+    "sessionStorage",
+    "preventDefault",
+    "stopPropagation",
+    "current_user",
+    "session_user",
+    "current_setting",
+    "set_config",
+    "gen_random_uuid",
+];
+
+/// File extensions that make a dotted token inside a code snippet a file name worth
+/// grounding (`lib/x.ts`, `.env.local`) rather than a member access (`console.error`).
+const FIX_FILE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "sql", "env", "md", "yml", "yaml", "toml",
+    "py", "rs", "css", "scss", "html", "sh", "lock", "txt", "conf", "cfg", "ini", "xml", "local",
+    "example",
+];
+
+/// Characters that separate the words of a code snippet.
+const SNIPPET_SEPARATORS: &str = "(){}[]<>=+*,;\"'|&!?`";
+
+/// True when a backticked span is a code snippet (whitespace, call parentheses, brackets,
+/// operators, quotes or separators in it) rather than one name. A fix quoting its own new
+/// code is not in the evidence by construction, so such a span is not checked as one
+/// identifier: only the names chosen inside it are (see [`snippet_names`]).
+fn is_code_snippet(span: &str) -> bool {
+    span.chars()
+        .any(|c| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+}
+
+/// Whether a dotted or slashed word in a snippet is a file name (`lib/x.ts`, `seed.sql`,
+/// `.env.local`) rather than a member access (`console.error`, `req.json`). `followed_by_call`
+/// is true when the word is immediately followed by `(`, which makes it a call.
+fn is_file_like(word: &str, followed_by_call: bool) -> bool {
+    if followed_by_call {
+        return false;
+    }
+    if word.contains('/') {
+        return word.contains('.');
+    }
+    word.rsplit_once('.').is_some_and(|(stem, ext)| {
+        FIX_FILE_EXTENSIONS.contains(&ext) && (ext != "env" || stem.is_empty())
+    })
+}
+
+/// The tokens of a code snippet worth grounding: any file name in it, and any word of 3 or
+/// more characters shaped like a name somebody chose (see [`is_chosen_name`]). Ordinary
+/// words, language keywords, SQL keywords and single-word builtins (`err`, `catch`, `table`,
+/// `Promise`) are never asked for: the snippet is the fix's own new code.
+fn snippet_names(span: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = span;
+    while !rest.is_empty() {
+        let skip = rest
+            .find(|c: char| !(c.is_whitespace() || SNIPPET_SEPARATORS.contains(c)))
+            .unwrap_or(rest.len());
+        rest = &rest[skip..];
+        if rest.is_empty() {
+            break;
+        }
+        let len = rest
+            .find(|c: char| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+            .unwrap_or(rest.len());
+        let (raw, after) = rest.split_at(len);
+        rest = after;
+        let word = raw.trim_matches(|c: char| matches!(c, ':' | '-'));
+        let followed_by_call = after.starts_with('(');
+        let word_trimmed = word.trim_end_matches('.');
+        if is_file_like(word_trimmed, followed_by_call) {
+            out.push(word_trimmed.to_string());
+            continue;
+        }
+        for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if tok.len() >= 3 && is_chosen_name(tok) {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Whether a token looks like a name its author chose (`snake_case`, `camelCase`, or a
+/// `PascalCase` word with two or more capitals) rather than a plain word, keyword or acronym.
+fn is_chosen_name(tok: &str) -> bool {
+    if tok.contains('_') {
+        // `NODE_ENV`, `owner_id`, `member_contacts`; not a bare run of underscores or digits.
+        return tok.chars().any(|c| c.is_ascii_alphabetic());
+    }
+    let first_upper = tok.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    let uppers = tok.chars().filter(|c| c.is_ascii_uppercase()).count();
+    let has_lower = tok.chars().any(|c| c.is_ascii_lowercase());
+    has_lower
+        && if first_upper {
+            uppers >= 2
+        } else {
+            uppers >= 1
+        }
+}
+
 /// **Identifier-grounding validator (pure).** Every concrete identifier a generated `fix`
 /// names — a `` `backticked` `` symbol/column, or a bare file-path-like token
 /// (`lib/redirect.ts`, `schema.sql`, `package.json`) — must appear verbatim in `evidence`
 /// (the finding's own path/snippet/detail/captures/surrounding code — see
-/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`]. Returns the FIRST offending
-/// identifier found, so the caller can hand the model a concrete, specific correction
-/// ("you named X, which isn't in the evidence") rather than a vague rejection. Returns
-/// `None` when every named identifier is grounded (including a fix that names none at all —
-/// pure prose is never rejected on this axis).
+/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`] / [`UNIVERSAL_FIX_NAMES`].
+/// A backticked span that is a code snippet (see [`is_code_snippet`]) is the fix's own new
+/// code, so only the names chosen inside it (and any file path in it) are checked, never the
+/// whole span. Returns the FIRST offending identifier found, so the caller can hand the
+/// model a concrete, specific correction ("you named X, which isn't in the evidence") rather
+/// than a vague rejection. Returns `None` when every named identifier is grounded (including
+/// a fix that names none at all — pure prose is never rejected on this axis).
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
     let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
     let mut candidates: Vec<String> = Vec::new();
+    // The fix with its snippet spans blanked: a `console.error` or `process.exit` inside a
+    // snippet is code, not a file name, and the snippet's own file names are collected from
+    // the snippet itself.
+    let mut prose = fix.to_string();
     for cap in backtick_re.captures_iter(fix) {
-        candidates.push(cap[1].to_string());
+        let span = &cap[1];
+        if is_code_snippet(span) {
+            candidates.extend(snippet_names(span));
+            prose = prose.replace(&cap[0], " ");
+        } else {
+            candidates.push(span.to_string());
+        }
     }
-    for m in path_re.find_iter(fix) {
+    for m in path_re.find_iter(&prose) {
         candidates.push(m.as_str().to_string());
     }
 
@@ -5027,7 +5173,9 @@ pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<St
         if trimmed.is_empty() {
             continue;
         }
-        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str())
+            || UNIVERSAL_FIX_NAMES.contains(&trimmed)
+        {
             continue;
         }
         if !evidence.contains(trimmed) {
@@ -5331,7 +5479,8 @@ async fn run_fix_specifics_round(
                     orig_idx,
                     format!(
                         "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence"
+                         evidence; keep your fix and its code snippet, but use only names \
+                         from the evidence, or describe a new name in plain words"
                     ),
                 );
                 still_pending.push(orig_idx);
@@ -21313,6 +21462,97 @@ mod tests {
         assert_eq!(
             find_ungrounded_identifier(fix, evidence),
             Some("lib/nonexistent-helper.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_accepts_a_code_snippet_whose_names_are_all_ordinary_words() {
+        // The fix IS the new code, so the snippet is not in the evidence; its plain words
+        // (`err`, `console`, `process`, `catch`) are not identifiers to ground.
+        let evidence = "scripts/seed.ts line 3: main();";
+        let fix = "Wrap the entry point: `main().catch((err) => { console.error(err); \
+                    process.exit(1); })`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_checks_only_identifier_like_names_inside_a_snippet() {
+        let evidence = "create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.member_contacts enable row level security;`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+
+        let fix = "Run `alter table public.billing_accounts enable row level security;`.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("billing_accounts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_camel_case_symbol_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        let fix = "Call `await rotateServiceKey(client)` before returning.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("rotateServiceKey".to_string())
+        );
+        let fix = "Use `const res = NextResponse.next({ request })` here.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("NextResponse".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_bare_invented_symbol() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        assert_eq!(
+            find_ungrounded_identifier("Replace it with `rotateServiceKey`.", evidence),
+            Some("rotateServiceKey".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_skips_universal_names_absent_from_the_evidence() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Read the `Authorization` header.",
+            "Close the client in a `finally` block.",
+            "Log it with `console.error` and rethrow.",
+            "Move it under `devDependencies`.",
+            "Wrap it in `try` and `catch`.",
+            "Log with console.error(err) in a catch block.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_path_named_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Add `import { admin } from \"lib/supabase/missing.ts\"` at the top.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("lib/supabase/missing.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_does_not_read_a_member_call_in_a_snippet_as_a_file() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Parse it with `const body = await req.json()` and validate it.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn the_fix_prompt_and_the_checker_agree_on_snippets() {
+        let prompt = fix_specific_system_prompt();
+        assert!(prompt.contains("code snippet"));
+        assert!(prompt.contains("describe it in plain words"));
+        // The prompt invites a snippet, and the checker accepts one made of ordinary words.
+        assert_eq!(
+            find_ungrounded_identifier("Add `if (!user) { return null; }` first.", "x"),
+            None
         );
     }
 
