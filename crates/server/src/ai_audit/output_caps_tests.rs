@@ -195,3 +195,200 @@ async fn a_reply_cut_off_at_its_cap_with_no_text_is_recorded_as_wasted_in_the_te
         "the output billed is what each reply spent: its whole cap"
     );
 }
+
+// ── P10: generous caps, headroom, the runaway ceiling, a retry that changes the request ──────
+
+/// P10: a cap is the work with headroom plus the thinking allowance, within the runaway ceiling,
+/// and the ceiling is a guard and not a budget: nothing a real batch asks for comes near it.
+#[test]
+fn a_cap_is_the_work_with_headroom_plus_thinking_within_the_runaway_ceiling() {
+    use camerata_ui_core::scan as s;
+    assert_eq!(s::OUTPUT_HEADROOM_FACTOR, 2);
+    // A full 15-rule scan at high effort: 2 x 9,600 + 12,000.
+    assert_eq!(scan_max_tokens(15), 31_200);
+    // A full detail batch at medium: 2 x 4,500 + 4,000.
+    assert_eq!(s::regen_call_max_tokens(s::REGEN_BATCH_SIZE), 13_000);
+    // A full fix batch at low: 2 x 6,250 + 2,000.
+    assert_eq!(fix_max_tokens(FIX_BATCH_SIZE), 14_500);
+    assert_eq!(calibration_max_tokens(CALIBRATION_BATCH_SIZE), 16_000);
+    // Every real batch is well under the ceiling; a runaway request is held at it.
+    for cap in [
+        scan_max_tokens(15),
+        s::regen_call_max_tokens(s::REGEN_BATCH_SIZE),
+        fix_max_tokens(FIX_BATCH_SIZE),
+        calibration_max_tokens(CALIBRATION_BATCH_SIZE),
+        alternatives_max_tokens(25),
+    ] {
+        assert!(cap < s::AGGREGATE_MAX_TOKENS_CEILING, "{cap}");
+    }
+    assert_eq!(scan_max_tokens(10_000), s::AGGREGATE_MAX_TOKENS_CEILING);
+    // The ceiling follows the model's own limit on the wire: nothing above it is sent.
+    assert!(s::AGGREGATE_MAX_TOKENS_CEILING <= 128_000);
+}
+
+/// P10 / P4: the truncation retry stays for a true runaway and CHANGES the request: the second
+/// send asks for a higher cap, and a reply already cut off at the ceiling is not sent again
+/// unchanged (there is no higher cap to ask for).
+#[tokio::test]
+async fn the_truncation_retry_raises_the_cap_and_is_never_the_same_request_twice() {
+    async fn caps_for(n_rules: usize) -> Vec<u32> {
+        let llm = ThinksUntilTheCap {
+            seen: Mutex::new(Vec::new()),
+        };
+        let files: Vec<(String, String)> = vec![("a.rs".to_string(), "fn a() {}".to_string())];
+        let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+        let rules: Vec<(String, String)> = (0..n_rules)
+            .map(|i| (format!("RULE-{i}"), format!("rule {i}")))
+            .collect();
+        let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
+        let adopted: std::collections::HashSet<String> =
+            rules.iter().map(|(id, _)| id.clone()).collect();
+        run_passes(
+            &llm,
+            REPO,
+            "REPO MAP:\na.rs: fn a()\n",
+            &crate::prompt_frame::FrameNonce::generate(),
+            &adopted,
+            None,
+            None,
+            None,
+            &chunks,
+            None,
+            &batches,
+            1,
+            "pass",
+            "caps",
+            None,
+            false,
+        )
+        .await;
+        let seen = llm.seen.lock().unwrap();
+        seen.iter().map(|r| r.max_tokens).collect()
+    }
+    // A normal batch: one retry, at a higher cap (the cut-off reply was a runaway).
+    let caps = caps_for(15).await;
+    assert_eq!(caps.len(), 2, "the first send and one retry: {caps:?}");
+    assert!(caps[1] > caps[0], "the retry raises the cap: {caps:?}");
+    // A request already at the ceiling cannot be raised: it is not sent a second time.
+    let caps = caps_for(1_000).await;
+    assert_eq!(
+        caps,
+        vec![camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_CEILING],
+        "a cut-off at the ceiling is not re-sent unchanged"
+    );
+}
+
+// ── P10: the spend limit reserves against what a request may cost ────────────────────────────
+
+fn capped_meter(cap: f64) -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    })
+}
+
+/// A scan-sized request on Opus 5.5 ($4 / $20 per million) with a 128,000-token cap.
+fn opus_request_with_a_128k_cap() -> LlmRequest {
+    LlmRequest::new("x".repeat(3_000))
+        .with_model("claude-opus-5-5")
+        .with_max_tokens(128_000)
+}
+
+fn paid_reply(model: &str, cost: f64) -> LlmResponse {
+    LlmResponse {
+        text: String::new(),
+        model: model.to_string(),
+        backend: "api".to_string(),
+        cost_usd: Some(cost),
+        input_tokens: Some(1_000),
+        output_tokens: Some(100),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        or_cache_discount: None,
+        truncated: false,
+    }
+}
+
+#[test]
+fn the_request_ceiling_prices_the_input_and_the_whole_cap() {
+    let ceiling = request_ceiling_usd(&opus_request_with_a_128k_cap()).unwrap();
+    // 128,000 output tokens at $20 per million is $2.56; the 3,000-character prompt adds a
+    // thousand input tokens at $4 per million.
+    assert!((ceiling - (2.56 + 0.004)).abs() < 1e-6, "{ceiling}");
+    // A cap above what the model can write is priced at what it can write.
+    let huge = LlmRequest::new("p")
+        .with_model("claude-opus-5-5")
+        .with_max_tokens(900_000);
+    let priced = request_ceiling_usd(&huge).unwrap();
+    assert!((priced - 2.56).abs() < 0.001, "{priced}");
+    // A model with no price adds nothing (the cap's own pre-flight refuses it).
+    let unpriced = LlmRequest::new("p")
+        .with_model("claude-from-the-future")
+        .with_max_tokens(1_000);
+    assert_eq!(request_ceiling_usd(&unpriced), None);
+}
+
+/// The spend limit's overshoot bound holds with a 128k cap. Before, the reserve was the most a
+/// past call had cost, so after one cheap call every pass was admitted and each could cost
+/// $2.56 (more than the whole limit between them). Now a pass in flight is reserved at what its
+/// request may cost: admission stops while the in-flight reserve plus spend reaches the limit,
+/// and the total at worst is the limit plus ONE request's ceiling.
+#[tokio::test]
+async fn the_spend_limit_overshoot_bound_holds_with_a_128k_cap() {
+    let cap = 10.0;
+    let meter = capped_meter(cap);
+    let req = opus_request_with_a_128k_cap();
+    let ceiling = request_ceiling_usd(&req).unwrap();
+
+    // A cheap first call has been seen: the old reserve would now be a cent.
+    meter.record_stage(Stage::ScanPass, &paid_reply("claude-opus-5-5", 0.01));
+    let spent_before = meter.spent_usd();
+    meter.note_request(&req);
+
+    // Every pass the limit admits is in flight at once, and each then costs its whole ceiling.
+    let mut permits = Vec::new();
+    while let Ok(permit) = meter.admit().await {
+        permits.push(permit);
+        assert!(permits.len() < 100, "the limit never closed");
+    }
+    let admitted = permits.len();
+    let worst_case_total = spent_before + admitted as f64 * ceiling;
+    assert!(
+        worst_case_total <= cap + ceiling,
+        "{admitted} passes at ${ceiling:.3} each: ${worst_case_total:.2} against a ${cap} limit \
+         (bound: limit + one request = ${:.2})",
+        cap + ceiling
+    );
+    // The cheap-reserve behaviour would have admitted the whole limit's worth of cents.
+    assert!(admitted <= 4, "admitted {admitted}");
+    assert!(admitted >= 3, "the limit still lets work run: {admitted}");
+}
+
+/// The first pass of a run is no longer admitted against a zero reserve: with a request's
+/// ceiling known, the second concurrent pass is judged against it at once instead of waiting for
+/// a first cost to arrive, and it is refused when the first pass's reserve already reaches the
+/// limit.
+#[tokio::test]
+async fn the_reserve_exists_before_any_call_has_cost_anything() {
+    let meter = capped_meter(2.0);
+    let first = meter.admit().await.expect("the first pass is admitted");
+    meter.note_request(&opus_request_with_a_128k_cap());
+    // $2.56 reserved for the pass in flight against a $2 limit: nothing more is admitted, and the
+    // pass does not wait for a cost that may never be small.
+    assert!(meter.admit().await.is_err());
+    drop(first);
+}
+
+/// With no limit set the reserve is not consulted at all: no request is noted and nothing is
+/// ever refused.
+#[tokio::test]
+async fn a_run_with_no_limit_is_never_refused_by_the_reserve() {
+    let meter = UsageMeter::default();
+    meter.note_request(&opus_request_with_a_128k_cap());
+    let mut permits = Vec::new();
+    for _ in 0..50 {
+        permits.push(meter.admit().await.expect("no limit, no refusal"));
+    }
+    assert!(!meter.retry_blocked());
+    assert!(!meter.cap_reached());
+}

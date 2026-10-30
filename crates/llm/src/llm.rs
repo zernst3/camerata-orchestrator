@@ -1400,6 +1400,108 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// The Messages endpoint the API leg posts to.
+const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
+/// The shared client for STREAMED calls. Unlike [`shared_http_client`] it has no total timeout:
+/// a healthy streamed reply may run for minutes, and the idle window
+/// ([`Llm::complete_api_streaming`]) is what fails a dead one. Only the connect step is bounded.
+pub(crate) fn shared_stream_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build the shared Anthropic streaming reqwest::Client")
+    })
+}
+
+/// A `reqwest` response body read a chunk at a time.
+struct ResponseChunks(reqwest::Response);
+
+#[async_trait::async_trait]
+impl crate::sse::ChunkSource for ResponseChunks {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.0
+            .chunk()
+            .await
+            .map(|c| c.map(|b| b.to_vec()))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// One attempt at a streamed Messages call: send, then read the event stream under the idle
+/// window. `Done` carries the folded message (shaped like a non-streaming reply); a stream that
+/// died after delivering text is `Done` too, with the stop reason of a reply cut off at the limit
+/// and its output recorded at `max_tokens` (see [`Llm::complete_api_streaming`]).
+async fn stream_attempt(
+    url: &str,
+    key: &str,
+    body: &serde_json::Value,
+    idle: std::time::Duration,
+    max_tokens: u64,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> crate::retry::StreamAttempt<serde_json::Value> {
+    use crate::retry::{RawResponse, StreamAttempt};
+    use crate::sse::{read_stream, SseAccumulator, StreamEnd};
+
+    let sent = shared_stream_client()
+        .post(url)
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await;
+    let resp = match sent {
+        Ok(r) => r,
+        Err(e) => return StreamAttempt::Connect(e.to_string()),
+    };
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        let retry_after = crate::retry::retry_after_from_headers(resp.headers());
+        let request_id = resp
+            .headers()
+            .get("request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = resp.text().await.unwrap_or_default();
+        return StreamAttempt::Status(RawResponse {
+            status,
+            body,
+            retry_after,
+            request_id,
+        });
+    }
+    let mut acc = SseAccumulator::default();
+    let end = read_stream(&mut ResponseChunks(resp), idle, &mut acc, on_delta).await;
+    if acc.is_finished() {
+        // The model reported its stop reason; only the trailing `message_stop` was lost.
+        return StreamAttempt::Done(acc.message(None));
+    }
+    match end {
+        StreamEnd::Finished => StreamAttempt::Done(acc.message(None)),
+        failed if acc.has_text() => {
+            eprintln!(
+                "[camerata-llm] the stream ended before the reply was finished ({failed:?}); \
+                 keeping the text that arrived as a reply cut off at the limit"
+            );
+            StreamAttempt::Done(acc.message(Some(max_tokens)))
+        }
+        StreamEnd::Stalled(window) => StreamAttempt::Stalled(format!(
+            "the reply stream went silent for {}s (set CAMERATA_LLM_IDLE_SECS to tune)",
+            window.as_secs()
+        )),
+        StreamEnd::Broken(message) => match acc.provider_error() {
+            Some((error_type, text)) => StreamAttempt::Provider {
+                error_type: error_type.clone(),
+                message: text.clone(),
+            },
+            None => StreamAttempt::Interrupted(message),
+        },
+    }
+}
+
 /// The Anthropic prompt-cache TTL requested via `cache_control` on the API path (both the
 /// single-call `complete_api` path and the Message Batches path — see
 /// [`build_batch_item`]). Anthropic bills a 5-minute ephemeral cache at the normal
@@ -1609,6 +1711,9 @@ pub struct Llm {
     /// Waits between retry attempts. `None` = real sleeping; tests inject a recording sleeper so
     /// the backoff schedule is asserted without waiting.
     sleeper: Option<std::sync::Arc<dyn crate::retry::Sleeper>>,
+    /// The Messages endpoint to post to; `None` = the production endpoint. A test points it at
+    /// a local mock server so the whole streamed path runs without a network.
+    messages_url: Option<String>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -1646,6 +1751,7 @@ impl Llm {
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         }
     }
 
@@ -1680,6 +1786,17 @@ impl Llm {
     pub fn with_sleeper(mut self, sleeper: std::sync::Arc<dyn crate::retry::Sleeper>) -> Self {
         self.sleeper = Some(sleeper);
         self
+    }
+
+    /// Post Messages calls to `url` instead of the production endpoint. For tests that run the
+    /// streamed API leg against a local mock server; production never sets it.
+    pub fn with_messages_url(mut self, url: impl Into<String>) -> Self {
+        self.messages_url = Some(url.into());
+        self
+    }
+
+    fn messages_url(&self) -> &str {
+        self.messages_url.as_deref().unwrap_or(MESSAGES_URL)
     }
 
     fn sleeper(&self) -> &dyn crate::retry::Sleeper {
@@ -1769,9 +1886,12 @@ impl Llm {
                 r
             }
             (Vendor::Anthropic, Backend::Api) => {
-                let r = self.complete_api(&req, &model).await;
+                // Streamed end to end: each text delta reaches `on_delta` as it arrives, so the
+                // listener is never handed the whole reply at once at the end.
+                let r = self
+                    .complete_api_streaming(self.messages_url(), &req, &model, on_delta)
+                    .await;
                 if let Ok(resp) = &r {
-                    on_delta(&resp.text);
                     self.ledger_record(resp);
                 }
                 r
@@ -2006,6 +2126,33 @@ impl Llm {
     /// [`call_with_fallback`]/a different model — a transient limit on the CHOSEN model is
     /// not a reason to silently answer from a different one.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        self.complete_api_streaming(self.messages_url(), req, model, &mut |_| {})
+            .await
+    }
+
+    /// The API leg: the request is sent with `stream: true` and the server-sent events are read
+    /// to the end of the reply, each text delta passed to `on_delta` as it arrives.
+    ///
+    /// Why a stream. The reply is generated for as long as it takes, minutes for a large
+    /// `max_tokens`, and a fixed total timeout around a one-shot request turns a healthy long
+    /// reply into a transport failure that is retried (a second payment for the same answer).
+    /// A stream shows progress, so only SILENCE is a failure: the idle window
+    /// (`CAMERATA_LLM_IDLE_SECS`, 120 seconds by default, the CLI leg's knob) governs, never the
+    /// total time, and the output ceiling can follow the model's own limit.
+    ///
+    /// A stream that dies after delivering text is SALVAGED (as the CLI leg does): the text that
+    /// arrived is returned as a reply cut off at the limit, so the stage keeps every complete
+    /// entry in it and asks only for the rest. The output such a call was billed is unknown, so
+    /// it is recorded at the request's cap (the most it could have generated): a spend limit
+    /// never under-counts. A stream that stalls or breaks with NOTHING delivered is a Transport
+    /// failure; a stall is retried once, the other failures on the standard schedule.
+    async fn complete_api_streaming(
+        &self,
+        url: &str,
+        req: &LlmRequest,
+        model: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "API backend selected but no Anthropic API key is configured; {}",
@@ -2014,26 +2161,26 @@ impl Llm {
         })?;
 
         let basis = PriceBasis::realtime();
-        let body = messages_request_body(req, model, basis.cache_ttl);
+        let mut body = messages_request_body(req, model, basis.cache_ttl);
+        body["stream"] = serde_json::json!(true);
+        let max_tokens = body["max_tokens"].as_u64().unwrap_or(0);
+        let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
+        // Every attempt writes to the same listener; a retry only starts when nothing was
+        // delivered, so no text is ever forwarded twice.
+        let listener = tokio::sync::Mutex::new(on_delta);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
-        let make_request = || {
-            shared_http_client()
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
+        let attempt = || async {
+            let mut guard = listener.lock().await;
+            stream_attempt(url, key, &body, idle, max_tokens, &mut **guard).await
         };
-        let out = crate::retry::execute_traced(make_request, self.sleeper(), model).await?;
-        if !(200..300).contains(&out.status) {
-            return Err(http_failure("Anthropic API", out));
+        match crate::retry::execute_stream(attempt, self.sleeper(), model).await? {
+            crate::retry::StreamResult::Done(message, _trail) => {
+                self.api_response_or_refusal(&message, model, basis)
+            }
+            crate::retry::StreamResult::Http(out) => Err(http_failure("Anthropic API", out)),
         }
-        let text = out.body;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        self.api_response_or_refusal(&v, model, basis)
     }
 
     /// Turn a parsed Messages response into the call's result. A refusal is an `Err`, but a
@@ -2186,6 +2333,17 @@ fn apply_request_effort(req: &LlmRequest, model: &str, body: &mut serde_json::Va
     }
 }
 
+/// The `max_tokens` a request is sent with: its own, never above what `model` can write in one
+/// reply (the registry's `max_output`; a model the registry lists without a figure keeps the
+/// request's own). The API answers a larger value with HTTP 400, and a stage's runaway ceiling
+/// is a constant that does not know the model.
+fn request_max_tokens(req: &LlmRequest, model: &str) -> u32 {
+    match crate::model_registry::max_output_for(model) {
+        Some(limit) => req.max_tokens.min(limit),
+        None => req.max_tokens,
+    }
+}
+
 /// Pure request-body builder for [`Llm::complete_api`]: the user message (split into cached
 /// blocks per `req.cache_breakpoints`), the optional system prompt, the request's own effort
 /// ([`apply_request_effort`]), and then [`crate::model_registry::conform_messages_body`], the
@@ -2196,7 +2354,7 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
     let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": req.max_tokens,
+        "max_tokens": request_max_tokens(req, model),
         "messages": [{ "role": "user", "content": user_content }],
     });
     if let Some(system) = &req.system {
@@ -2289,7 +2447,7 @@ pub fn build_batch_item(
         custom_id: custom_id.into(),
         params: BatchItemParams {
             model: model.to_string(),
-            max_tokens: req.max_tokens,
+            max_tokens: request_max_tokens(req, model),
             system: req.system.clone(),
             messages: vec![BatchMessage {
                 role: "user".to_string(),
@@ -3207,6 +3365,10 @@ pub async fn call_with_fallback(
 #[cfg(test)]
 mod temperature_tests;
 
+// The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
+#[cfg(test)]
+mod stream_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3322,6 +3484,7 @@ mod tests {
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         };
         // A request that names no model is refused, never filled in.
         let err = llm
@@ -3876,6 +4039,7 @@ mod tests {
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         };
         let err = llm
             .complete(LlmRequest::new("hi").with_model("claude-sonnet-5-5"))
@@ -4376,6 +4540,7 @@ malformed line, not json
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         })
     }
 
@@ -4992,6 +5157,7 @@ exit 1
             ledger: Some(ledger.clone()),
             sessions: None,
             sleeper: None,
+            messages_url: None,
         };
         let refused = serde_json::json!({
             "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
@@ -5345,6 +5511,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         }
     }
 
@@ -5493,6 +5660,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
             ledger: None,
             sessions: None,
             sleeper: None,
+            messages_url: None,
         }
         .with_session_sink(sink.clone());
         // No key: the call fails before any network, and must not have recorded a session.

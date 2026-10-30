@@ -70,6 +70,10 @@ pub(crate) enum RetryReason {
     HttpStatus(u16),
     Network,
     Overloaded,
+    /// A streamed reply went silent for the idle window with nothing usable delivered. Retried
+    /// ONCE: a stall that repeats is not a blip the schedule will clear, and each stalled
+    /// attempt may already have been billed by the provider for the tokens it generated.
+    StreamStall,
 }
 
 impl RetryReason {
@@ -91,13 +95,18 @@ pub(crate) fn should_retry(reason: RetryReason) -> bool {
         RetryReason::HttpStatus(status) => {
             status == 429 || status == 529 || (500..600).contains(&status)
         }
-        RetryReason::Network | RetryReason::Overloaded => true,
+        RetryReason::Network | RetryReason::Overloaded | RetryReason::StreamStall => true,
     }
 }
 
+/// The one wait before the one retry of a stalled stream, in seconds.
+const STREAM_STALL_SCHEDULE_SECS: [u64; 1] = [2];
+
 /// The waits for this kind of failure, in seconds, one per retry.
 fn schedule_for(reason: RetryReason) -> &'static [u64] {
-    if reason.is_overloaded() {
+    if reason == RetryReason::StreamStall {
+        &STREAM_STALL_SCHEDULE_SECS
+    } else if reason.is_overloaded() {
         &OVERLOADED_SCHEDULE_SECS
     } else {
         &BACKOFF_SCHEDULE_SECS
@@ -227,6 +236,41 @@ pub(crate) struct RawResponse {
     pub request_id: Option<String>,
 }
 
+/// What a retried call remembers of its last failed attempt: the HTTP answer, if the failure was
+/// one, and the message (`String::new()` for an HTTP answer).
+type LastAttempt = (Option<RawResponse>, String);
+
+/// The step a non-2xx HTTP answer comes to: retried while the schedule allows when the status
+/// can clear, stopped when waiting cannot fix it. Shared by the one-shot and the streamed call.
+fn non_success_step<T>(resp: RawResponse, mut record: AttemptRecord) -> Step<T, LastAttempt> {
+    let (etype, emsg) = crate::failure::provider_error_of(&resp.body);
+    record.http_status = Some(resp.status);
+    record.error_type = etype;
+    record.message = crate::failure::scrub_message(
+        emsg.as_deref().unwrap_or(&resp.body),
+        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    record.request_id.clone_from(&resp.request_id);
+    let reason = RetryReason::HttpStatus(resp.status);
+    // A 429 that says the account is out of credit or usage will not clear.
+    let (_, helps) =
+        crate::failure::classify_http(resp.status, record.error_type.as_deref(), &record.message);
+    let retry_after = resp.retry_after;
+    if should_retry(reason) && helps {
+        Step::Retry {
+            reason,
+            retry_after,
+            record,
+            last: (Some(resp), String::new()),
+        }
+    } else {
+        Step::Stop {
+            record,
+            last: (Some(resp), String::new()),
+        }
+    }
+}
+
 /// The final HTTP answer of a call (success or a terminal failure) and the trail of the
 /// attempts that failed on the way.
 pub(crate) struct ApiOutcome {
@@ -249,44 +293,13 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<RawResponse, String>>,
 {
-    type Last = (Option<RawResponse>, String);
-    let result = drive::<RawResponse, Last, _, _>(sleeper, |_attempt| {
+    let result = drive::<RawResponse, LastAttempt, _, _>(sleeper, |_attempt| {
         let sent = send();
         async move {
             let mut record = AttemptRecord::new("api", model);
             match sent.await {
                 Ok(resp) if (200..300).contains(&resp.status) => Step::Done(resp),
-                Ok(resp) => {
-                    let (etype, emsg) = crate::failure::provider_error_of(&resp.body);
-                    record.http_status = Some(resp.status);
-                    record.error_type = etype;
-                    record.message = crate::failure::scrub_message(
-                        emsg.as_deref().unwrap_or(&resp.body),
-                        crate::failure::MAX_RECORD_MESSAGE_CHARS,
-                    );
-                    record.request_id.clone_from(&resp.request_id);
-                    let reason = RetryReason::HttpStatus(resp.status);
-                    // A 429 that says the account is out of credit or usage will not clear.
-                    let (_, helps) = crate::failure::classify_http(
-                        resp.status,
-                        record.error_type.as_deref(),
-                        &record.message,
-                    );
-                    let retry_after = resp.retry_after;
-                    if should_retry(reason) && helps {
-                        Step::Retry {
-                            reason,
-                            retry_after,
-                            record,
-                            last: (Some(resp), String::new()),
-                        }
-                    } else {
-                        Step::Stop {
-                            record,
-                            last: (Some(resp), String::new()),
-                        }
-                    }
-                }
+                Ok(resp) => non_success_step(resp, record),
                 Err(e) => {
                     record.message =
                         crate::failure::scrub_message(&e, crate::failure::MAX_RECORD_MESSAGE_CHARS);
@@ -369,6 +382,119 @@ where
     F: Fn() -> reqwest::RequestBuilder,
 {
     execute_http(reqwest_send(make_request), sleeper, model).await
+}
+
+/// What one attempt at a STREAMED call came to.
+pub(crate) enum StreamAttempt<T> {
+    /// The reply arrived (whole, or salvaged from a stream that died after delivering text).
+    Done(T),
+    /// The provider answered with a non-2xx status before any stream began.
+    Status(RawResponse),
+    /// No bytes for the idle window and no usable text delivered.
+    Stalled(String),
+    /// The stream broke or closed early with no usable text delivered.
+    Interrupted(String),
+    /// The provider sent an `error` event with no usable text delivered: its type and message.
+    Provider { error_type: String, message: String },
+    /// The request could not be sent at all (connect, DNS, TLS).
+    Connect(String),
+}
+
+/// What a streamed call came to once its retries ran out or it succeeded.
+pub(crate) enum StreamResult<T> {
+    /// The reply, with the trail of failed attempts before it.
+    Done(T, Vec<AttemptRecord>),
+    /// A non-2xx answer that outlasted the retries or that waiting does not fix: the caller
+    /// formats its own error from the status, as for the one-shot call.
+    Http(ApiOutcome),
+}
+
+/// [`execute_http`] for a streamed call. `send` runs one attempt end to end (send the request,
+/// read the stream) and reports what came of it; the same request is sent every time. Policy:
+/// a connection failure, an interrupted stream and an `api_error` event follow the standard
+/// schedule; an overloaded answer or event follows the longer one; a stream that stalls with
+/// nothing usable is retried ONCE ([`RetryReason::StreamStall`]); an error event waiting cannot
+/// fix stops at once. Whatever outlasts the retries is a typed Transport failure.
+pub(crate) async fn execute_stream<F, Fut, T>(
+    send: F,
+    sleeper: &dyn Sleeper,
+    model: &str,
+) -> anyhow::Result<StreamResult<T>>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = StreamAttempt<T>>,
+{
+    let result = drive::<T, LastAttempt, _, _>(sleeper, |_attempt| {
+        let sent = send();
+        async move {
+            let mut record = AttemptRecord::new("api", model);
+            let transport = |reason: RetryReason, message: String, mut record: AttemptRecord| {
+                record.message = crate::failure::scrub_message(
+                    &message,
+                    crate::failure::MAX_RECORD_MESSAGE_CHARS,
+                );
+                Step::Retry {
+                    reason,
+                    retry_after: None,
+                    record,
+                    last: (None, message),
+                }
+            };
+            match sent.await {
+                StreamAttempt::Done(value) => Step::Done(value),
+                StreamAttempt::Status(resp) => non_success_step(resp, record),
+                StreamAttempt::Stalled(m) => transport(RetryReason::StreamStall, m, record),
+                StreamAttempt::Interrupted(m) | StreamAttempt::Connect(m) => {
+                    transport(RetryReason::Network, m, record)
+                }
+                StreamAttempt::Provider {
+                    error_type,
+                    message,
+                } => {
+                    let reason = match error_type.as_str() {
+                        "overloaded_error" => Some(RetryReason::Overloaded),
+                        "rate_limit_error" => Some(RetryReason::HttpStatus(429)),
+                        "api_error" => Some(RetryReason::HttpStatus(500)),
+                        _ => None,
+                    };
+                    record.error_type = Some(error_type.clone());
+                    let text = format!("{error_type}: {message}");
+                    match reason {
+                        Some(reason) => transport(reason, text, record),
+                        None => {
+                            record.message = crate::failure::scrub_message(
+                                &text,
+                                crate::failure::MAX_RECORD_MESSAGE_CHARS,
+                            );
+                            Step::Stop {
+                                record,
+                                last: (None, text),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    match result {
+        Ok((value, attempts)) => Ok(StreamResult::Done(value, attempts)),
+        Err(((Some(resp), _), attempts)) => Ok(StreamResult::Http(ApiOutcome {
+            status: resp.status,
+            body: resp.body,
+            attempts,
+        })),
+        Err(((None, message), attempts)) => {
+            let retries = attempts.len().saturating_sub(1);
+            let mut failure = LlmCallFailure::new(
+                FailureClass::Transport,
+                format!("Anthropic API request failed after {retries} retries: {message}"),
+            );
+            failure.attempts = attempts;
+            failure.retryable = true;
+            Err(anyhow::Error::new(failure))
+        }
+    }
 }
 
 /// Drive an HTTP call with retry/backoff on the real clock and return the final `(status, body)`.
@@ -694,5 +820,116 @@ mod tests {
         assert_eq!(failure.attempts.len(), 4, "first try plus three retries");
         assert!(err.to_string().contains("failed after 3 retries"), "{err}");
         assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+    }
+
+    // ── streamed calls ──────────────────────────────────────────────────────────────────
+
+    /// A stalled stream (silent for the idle window, nothing usable delivered) is a Transport
+    /// failure retried ONCE: two sends, one wait, then the typed failure with both attempts.
+    #[tokio::test]
+    async fn a_stalled_stream_is_a_transport_failure_retried_once() {
+        let sleeper = RecordingSleeper::default();
+        let sends = AtomicUsize::new(0);
+        let err = execute_stream(
+            || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                async { StreamAttempt::<u32>::Stalled("silent for 120s".to_string()) }
+            },
+            &sleeper,
+            "m",
+        )
+        .await
+        .err()
+        .expect("a stall that repeats surfaces");
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            2,
+            "the first send and one retry"
+        );
+        assert_eq!(sleeper.waits(), vec![2]);
+        let failure = crate::failure::call_failure_of(&err).expect("typed");
+        assert_eq!(failure.class, FailureClass::Transport);
+        assert_eq!(failure.attempts.len(), 2);
+        assert!(failure.retryable);
+        assert!(err.to_string().contains("silent for 120s"), "{err}");
+    }
+
+    /// The retry of a stall can answer, and then it is the reply.
+    #[tokio::test]
+    async fn a_stall_that_clears_on_the_retry_returns_the_reply_with_the_trail() {
+        let sleeper = RecordingSleeper::default();
+        let sends = AtomicUsize::new(0);
+        let out = execute_stream(
+            || {
+                let n = sends.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        StreamAttempt::Stalled("silent".to_string())
+                    } else {
+                        StreamAttempt::Done(7u32)
+                    }
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await
+        .unwrap();
+        match out {
+            StreamResult::Done(v, trail) => {
+                assert_eq!(v, 7);
+                assert_eq!(trail.len(), 1);
+                assert_eq!(trail[0].wait_secs, Some(2));
+            }
+            StreamResult::Http(_) => panic!("not an HTTP failure"),
+        }
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    /// An interrupted stream follows the standard schedule, an overloaded event the longer one,
+    /// and a provider error that waiting cannot fix stops at once.
+    #[tokio::test]
+    async fn interrupted_overloaded_and_fatal_stream_failures_follow_their_schedules() {
+        let sleeper = RecordingSleeper::default();
+        let _ = execute_stream(
+            || async { StreamAttempt::<u32>::Interrupted("reset".to_string()) },
+            &sleeper,
+            "m",
+        )
+        .await;
+        assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+
+        let sleeper = RecordingSleeper::default();
+        let _ = execute_stream(
+            || async {
+                StreamAttempt::<u32>::Provider {
+                    error_type: "overloaded_error".to_string(),
+                    message: "Overloaded".to_string(),
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await;
+        assert_eq!(sleeper.waits(), vec![5, 20, 60, 120]);
+
+        let sleeper = RecordingSleeper::default();
+        let sends = AtomicUsize::new(0);
+        let _ = execute_stream(
+            || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                async {
+                    StreamAttempt::<u32>::Provider {
+                        error_type: "invalid_request_error".to_string(),
+                        message: "bad".to_string(),
+                    }
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await;
+        assert_eq!(sends.load(Ordering::SeqCst), 1, "not retried");
+        assert!(sleeper.waits().is_empty());
     }
 }

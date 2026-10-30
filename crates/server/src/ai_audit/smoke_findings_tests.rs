@@ -348,12 +348,12 @@ fn the_alternatives_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floo
     assert_eq!(thinking, 4_000);
     assert_eq!(
         alternatives_max_tokens(1),
-        ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
+        2 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
         "a small batch gets its text plus the thinking allowance"
     );
     assert_eq!(
         alternatives_max_tokens(25),
-        25 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
+        2 * 25 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
         "a full batch of 25 rules gets its measured budget plus the allowance"
     );
     assert!(alternatives_max_tokens(25) > 4_096);
@@ -492,14 +492,14 @@ fn the_scan_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
     assert_eq!(thinking, 12_000);
     assert_eq!(
         scan_max_tokens(1),
-        SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
+        2 * SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
         "a small batch gets its text plus the thinking allowance"
     );
     assert!(scan_max_tokens(1) >= SCAN_MAX_TOKENS_FLOOR);
     assert!(scan_max_tokens(12) >= SCAN_MAX_TOKENS_FLOOR);
     assert_eq!(
         scan_max_tokens(15),
-        15 * SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
+        2 * 15 * SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
         "a full 15-rule batch gets its measured budget plus the allowance"
     );
     assert!(

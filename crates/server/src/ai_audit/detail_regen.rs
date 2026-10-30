@@ -871,6 +871,7 @@ async fn run_detail_round(
         // Streaming transport, as the other aggregate stages: the CLI leg's heartbeat and
         // partial-output salvage apply, and a flat deadline does not.
         let mut on_delta = |_: &str| {};
+        super::note_request(meter, &req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             Err(e) => {

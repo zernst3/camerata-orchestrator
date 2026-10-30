@@ -1415,8 +1415,8 @@ async fn a_batch_asks_for_the_output_it_needs_per_finding() {
     let allowance =
         camerata_ui_core::scan::thinking_allowance_tokens(camerata_ui_core::scan::DETAIL_EFFORT);
     assert_eq!(allowance, 4_000);
-    assert_eq!(asks[0], 4_500 + allowance);
-    assert_eq!(asks[1], 5 * 450 + allowance);
+    assert_eq!(asks[0], 2 * 4_500 + allowance);
+    assert_eq!(asks[1], 2 * 5 * 450 + allowance);
     assert!(asks.iter().all(|&t| t >= 4_096 + 300));
     assert_eq!(
         asks[0],

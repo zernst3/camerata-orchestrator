@@ -596,6 +596,11 @@ pub struct UsageMeter {
     /// The largest dollar cost any single call has had so far, in micro-dollars. The cap's
     /// per-pass reserve (see [`crate::cost_cap`]).
     max_call_micro_usd: AtomicU64,
+    /// The largest price any REQUEST this run has built could cost, in micro-dollars: its input at
+    /// the full input rate plus its `max_tokens` at the output rate ([`request_ceiling_usd`]). The
+    /// other half of the cap's per-pass reserve, so the reserve tracks what a call is allowed to
+    /// cost and not only what past calls happened to cost (see [`crate::cost_cap`]).
+    max_request_micro_usd: AtomicU64,
     /// How this run executes: efficiency switches and the spend cap. Set once, before the first
     /// call, by [`Self::with_controls`]; the default is every measure on and no cap.
     controls: crate::cost_cap::RunControls,
@@ -706,8 +711,41 @@ impl UsageMeter {
         if budget.cost_unknown {
             return true;
         }
-        let reserve = self.max_call_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
         self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+    }
+
+    /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
+    /// the most any single call has cost so far and the most any request built so far could
+    /// cost. Taking the request's ceiling into account means the first pass of a run is no
+    /// longer admitted against a zero reserve, and that a generous `max_tokens` (a 128,000-token
+    /// ceiling on Opus is $2.56 of output alone) tightens admission instead of widening the
+    /// overshoot the cap can reach.
+    fn reserve_micro_usd(&self) -> u64 {
+        self.max_call_micro_usd
+            .load(Ordering::Relaxed)
+            .max(self.max_request_micro_usd.load(Ordering::Relaxed))
+    }
+
+    /// Tell the cap about a request about to be sent: the most it could cost joins the reserve
+    /// ([`request_ceiling_usd`]). Call it for every request, before it is sent; with no cap set
+    /// it does nothing. A request whose model has no list price adds nothing here (a call that
+    /// cannot be priced already makes a cap unenforceable, and the pre-flight refuses it).
+    pub fn note_request(&self, req: &LlmRequest) {
+        if self.controls.max_cost_usd.is_none() {
+            return;
+        }
+        let Some(ceiling) = request_ceiling_usd(req) else {
+            return;
+        };
+        let micro = crate::llm::usd_to_micro_ceil(ceiling);
+        let before = self
+            .max_request_micro_usd
+            .fetch_max(micro, Ordering::Relaxed);
+        if before == 0 && micro > 0 {
+            // Passes waiting for a first figure to reserve against can go on.
+            self.admission.notify_waiters();
+        }
     }
 
     fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
@@ -731,20 +769,20 @@ impl UsageMeter {
             if budget.cost_unknown {
                 return Admission::CapReached;
             }
-            let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
-            // Until one call has reported a cost there is nothing to reserve against, so only
-            // ONE pass may be in flight: a cap must never be a number that concurrent passes
-            // can all slip under at once (warm_schedule off, a free first call, ...).
-            if reserve_micro == 0 && budget.in_flight >= 1 {
-                return if self.spent_usd() >= cap {
-                    Admission::CapReached
-                } else {
-                    Admission::Wait
-                };
-            }
+            let reserve_micro = self.reserve_micro_usd();
             let reserve = reserve_micro as f64 / 1_000_000.0;
+            // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
+            // a pass whose request alone reaches the limit closes admission at once, whether or
+            // not any call has reported a cost yet.
             if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
                 return Admission::CapReached;
+            }
+            // Until one call has reported a cost the run has not seen what a call really costs
+            // (a request's ceiling is an upper bound, usually far above it), so only ONE pass may
+            // be in flight: a cap must never be a number that concurrent passes can all slip
+            // under at once (warm_schedule off, a free first call, ...).
+            if self.max_call_micro_usd.load(Ordering::Relaxed) == 0 && budget.in_flight >= 1 {
+                return Admission::Wait;
             }
         }
         budget.in_flight += 1;
@@ -968,6 +1006,38 @@ impl UsageMeter {
 fn meter_failed(meter: Option<&UsageMeter>, stage: Stage, error: &anyhow::Error) {
     if let Some(m) = meter {
         m.record_failed(stage, error);
+    }
+}
+
+/// The most one request can cost, in dollars: its whole prompt (system and user text, at a
+/// conservative three characters a token) at the full input rate, no cache discount, plus its
+/// `max_tokens` (never above what the model can write) at the output rate. `None` for a model
+/// the registry has no price for. The figure a spend limit reserves per call
+/// ([`UsageMeter::note_request`]).
+pub fn request_ceiling_usd(req: &LlmRequest) -> Option<f64> {
+    let chars = req.prompt.len() + req.system.as_ref().map_or(0, String::len);
+    let input = (chars as u64).div_ceil(3).max(1);
+    let output = match camerata_llm::model_registry::max_output_for(&req.model) {
+        Some(limit) => req.max_tokens.min(limit),
+        None => req.max_tokens,
+    };
+    crate::llm::usage_cost_usd(
+        &req.model,
+        &crate::llm::CallUsage {
+            input: Some(input),
+            output: Some(u64::from(output)),
+            cache_read: 0,
+            cache_creation: 0,
+            cache_creation_1h: None,
+        },
+        crate::llm::PriceBasis::realtime(),
+    )
+}
+
+/// [`UsageMeter::note_request`] for a call site that may have no meter.
+pub(crate) fn note_request(meter: Option<&UsageMeter>, req: &LlmRequest) {
+    if let Some(m) = meter {
+        m.note_request(req);
     }
 }
 
@@ -3529,7 +3599,9 @@ pub async fn verify_findings(
             // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
             // byte-for-byte identical to before this change.
             let mut on_delta = |_: &str| {};
-            let calibration = llm.complete_streaming(build_req(), &mut on_delta).await;
+            let req = build_req();
+            note_request(meter, &req);
+            let calibration = llm.complete_streaming(req, &mut on_delta).await;
             if let Err(e) = &calibration {
                 meter_failed(meter, Stage::Calibration, e);
             }
@@ -3614,6 +3686,7 @@ pub async fn verify_findings(
             Stage::Calibration,
         );
         let mut on_delta = |_: &str| {};
+        note_request(meter, &req);
         match llm.complete_streaming(req, &mut on_delta).await {
             Ok(resp) => {
                 if let Some(m) = meter {
@@ -4788,6 +4861,7 @@ impl AlternativesAsk<'_> {
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
+        note_request(meter, &req);
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
         // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
@@ -5644,6 +5718,7 @@ async fn run_fix_specifics_round(
         let mut on_delta = |_: &str| {};
         ledger.sent(batch);
         let request_key = crate::run_store::journal::request_key(&req);
+        note_request(meter, &req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
@@ -6373,7 +6448,7 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let resp = match send_audit_request(llm, req.clone(), feedback, session).await {
+    let resp = match send_audit_request(llm, req.clone(), feedback, session, meter).await {
         Ok(r) => r,
         Err(e) => {
             meter_failed(meter, Stage::ScanPass, &e);
@@ -6638,7 +6713,14 @@ async fn retry_unusable_scan_reply(
     let mut wasted_counted = false;
     let mut stopped_by_cap = false;
     let mut truncation_retried = false;
-    if resp.truncated && efficiency_of(meter).truncation_retry {
+    // The retry must CHANGE the request: it raises the cap. A reply already cut off at the runaway
+    // ceiling has no higher cap to ask for, and the same request again would be paid for twice
+    // and cut off the same way, so there it is not sent (the pass is reported as cut off).
+    let retry_cap = req
+        .max_tokens
+        .saturating_mul(2)
+        .min(AGGREGATE_MAX_TOKENS_CEILING);
+    if resp.truncated && efficiency_of(meter).truncation_retry && retry_cap > req.max_tokens {
         if cap_reached() {
             stopped_by_cap = true;
         } else {
@@ -6647,15 +6729,12 @@ async fn retry_unusable_scan_reply(
                 m.record_wasted(Stage::ScanPass, &resp);
             }
             wasted_counted = true;
-            let retry_cap = req
-                .max_tokens
-                .saturating_mul(2)
-                .min(AGGREGATE_MAX_TOKENS_CEILING);
             match send_audit_request(
                 llm,
                 req.clone().with_max_tokens(retry_cap),
                 feedback,
                 session,
+                meter,
             )
             .await
             {
@@ -6690,7 +6769,7 @@ async fn retry_unusable_scan_reply(
         let mut retry_req = req.clone();
         retry_req.prompt.push_str("\n\n");
         retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
-        match send_audit_request(llm, retry_req, feedback, session).await {
+        match send_audit_request(llm, retry_req, feedback, session, meter).await {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
@@ -6726,7 +6805,10 @@ async fn send_audit_request(
     req: LlmRequest,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
+    meter: Option<&UsageMeter>,
 ) -> anyhow::Result<crate::llm::LlmResponse> {
+    // What this request could cost joins the spend limit's reserve before it is sent.
+    note_request(meter, &req);
     if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
         // repo size and only a genuine hang (no output for the idle window) aborts. No
@@ -6734,11 +6816,11 @@ async fn send_audit_request(
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
         llm.complete_streaming(req, &mut on_delta).await
     } else {
-        // Non-streaming has no progress signal; bound it with the coarse total backstop.
-        let cap = total_backstop();
-        tokio::time::timeout(cap, llm.complete(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
+        // Streamed as well, with no listener: the idle window governs here too. A fixed total
+        // backstop around a reply that may legitimately run for minutes (a large `max_tokens`)
+        // would fail a healthy call and pay for it twice; only silence is a failure.
+        let mut on_delta = |_: &str| {};
+        llm.complete_streaming(req, &mut on_delta).await
     }
 }
 
@@ -7546,7 +7628,7 @@ async fn run_passes_batch(
                 continue;
             };
             let session = format!("audit-{repo}-batch-{}-second-try", w.custom_id);
-            match send_audit_request(realtime, w.req.clone(), None, &session).await {
+            match send_audit_request(realtime, w.req.clone(), None, &session, meter).await {
                 Ok(resp) => {
                     if let Some(m) = meter {
                         m.record_stage(Stage::ScanPass, &resp);

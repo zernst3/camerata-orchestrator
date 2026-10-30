@@ -95,8 +95,12 @@ pub fn regen_round_batch_size(round: usize) -> usize {
 /// many output tokens. The server's `scaled_max_tokens` clamps to it.
 pub const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
 
-/// The ceiling of `max_tokens` for one aggregate call.
-pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+/// The RUNAWAY CEILING of `max_tokens` for one call: a guard against a model stuck repeating
+/// itself, not a budget (a reply that finishes costs what it generated, whatever the cap). The
+/// API leg streams, so a long reply no longer races a total timeout and the ceiling can sit far
+/// above any real reply (a full 15-rule scan at high effort asks for 31,200); the transport
+/// clamps every request to its model's own output limit (128,000 for the 5.x models).
+pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 64_000;
 
 /// The effort the scan stage asks for (`output_config.effort`). The scan's judgment is the
 /// product, so it keeps `high` on every model: never lowered without an answer-key comparison.
@@ -137,18 +141,26 @@ pub fn thinking_allowance_tokens(effort: &str) -> u32 {
     }
 }
 
-/// The `max_tokens` for a reply whose visible text is `text_tokens` and which runs at `effort`:
-/// the text plus the thinking allowance ([`thinking_allowance_tokens`]), within the aggregate
-/// floor and ceiling.
+/// How many times the work's visible text a reply's cap allows. A cap is a runaway guard and not a
+/// budget: the API bills the tokens a reply actually generates, so a cap of twice the expected
+/// text costs exactly what a tight one does on every reply that finishes, and it is the tight cap
+/// that turns a slightly long reply into a cut-off, a retry and a second payment.
+pub const OUTPUT_HEADROOM_FACTOR: u32 = 2;
+
+/// The `max_tokens` for a reply whose expected visible text is `text_tokens` and which runs at
+/// `effort`: the work with headroom plus the thinking allowance,
+/// `OUTPUT_HEADROOM_FACTOR x text + thinking_allowance_tokens(effort)`, within the aggregate floor
+/// and the runaway ceiling.
 pub fn output_cap_tokens(text_tokens: u32, effort: &str) -> u32 {
     text_tokens
+        .saturating_mul(OUTPUT_HEADROOM_FACTOR)
         .saturating_add(thinking_allowance_tokens(effort))
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
 }
 
 /// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding text
-/// budget plus the thinking allowance of the stage's effort ([`DETAIL_EFFORT`]), within the
-/// aggregate floor and ceiling, exactly as the server sizes the request.
+/// budget with headroom plus the thinking allowance of the stage's effort ([`DETAIL_EFFORT`]),
+/// within the aggregate floor and the runaway ceiling, exactly as the server sizes the request.
 pub fn regen_call_max_tokens(findings: usize) -> u32 {
     output_cap_tokens(
         (findings as u32).saturating_mul(REGEN_TOKENS_PER_FINDING),
@@ -2452,16 +2464,17 @@ mod tests {
                 "never below the old per-finding figure"
             );
         }
-        // 86 findings (the size of a real run), exactly, each call at its text budget plus the
-        // 4,000-token thinking allowance of the stage's medium effort: round 1 is 8 full calls of
-        // 10 findings (8,500 tokens each) and one of 6 (6,700); round 2 is 17 calls of 5 (6,250)
-        // and one of 1 (4,450); rounds 3 and 4 are 86 single-finding calls each (4,450).
+        // 86 findings (the size of a real run), exactly, each call at twice its text budget plus
+        // the 4,000-token thinking allowance of the stage's medium effort: round 1 is 8 full
+        // calls of 10 findings (13,000 tokens each) and one of 6 (9,400); round 2 is 17 calls of
+        // 5 (8,500) and one of 1 (4,900); rounds 3 and 4 are 86 single-finding calls each
+        // (4,900).
         let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
         assert_eq!(r.findings, 86.0);
         assert_eq!(r.calls, 9 + 18 + 86 + 86);
         assert_eq!(
             r.output_tokens,
-            f64::from(8 * 8_500 + 6_700 + 17 * 6_250 + 4_450 + 2 * 86 * 4_450)
+            f64::from(8 * 13_000 + 9_400 + 17 * 8_500 + 4_900 + 2 * 86 * 4_900)
         );
         let none = regeneration_estimate(0.0);
         assert_eq!(
@@ -2480,14 +2493,17 @@ mod tests {
     #[test]
     fn a_regeneration_call_is_priced_at_the_max_tokens_it_is_sent_with() {
         assert_eq!(thinking_allowance_tokens(DETAIL_EFFORT), 4_000);
-        assert_eq!(regen_call_max_tokens(1), REGEN_TOKENS_PER_FINDING + 4_000);
+        assert_eq!(
+            regen_call_max_tokens(1),
+            2 * REGEN_TOKENS_PER_FINDING + 4_000
+        );
         assert_eq!(
             regen_call_max_tokens(5),
-            5 * REGEN_TOKENS_PER_FINDING + 4_000
+            2 * 5 * REGEN_TOKENS_PER_FINDING + 4_000
         );
         assert_eq!(
             regen_call_max_tokens(REGEN_BATCH_SIZE),
-            REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING + 4_000
+            2 * REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING + 4_000
         );
         assert!(regen_call_max_tokens(1) >= AGGREGATE_MAX_TOKENS_FLOOR);
         assert_eq!(regen_round_batch_size(0), REGEN_BATCH_SIZE);
@@ -2504,7 +2520,7 @@ mod tests {
         assert_eq!(thinking_allowance_tokens("high"), 12_000);
         assert_eq!(thinking_allowance_tokens("xhigh"), 12_000);
         assert_eq!(output_cap_tokens(0, "low"), AGGREGATE_MAX_TOKENS_FLOOR);
-        assert_eq!(output_cap_tokens(9_600, "high"), 21_600);
+        assert_eq!(output_cap_tokens(9_600, "high"), 31_200);
         assert_eq!(
             output_cap_tokens(u32::MAX, "high"),
             AGGREGATE_MAX_TOKENS_CEILING

@@ -32,6 +32,9 @@ pub mod rate_limit;
 // Internal retry/backoff policy for the Anthropic API transport (`llm::complete_api` +
 // the Message Batches path). Not part of the public surface — `llm` is the only caller.
 pub(crate) mod retry;
+// The Messages API's server-sent events: the stream parser and the idle-timeout reader behind
+// the API leg of `llm::Llm`.
+pub(crate) mod sse;
 // Claude Code session bookkeeping for the CLI backend: the id each `claude -p` spawn is tagged
 // with and the sink that remembers them, so source deletion can remove exactly those files.
 pub mod session_sink;
