@@ -1038,9 +1038,25 @@ pub async fn run_inspect_pipeline_with(
             None
         };
         let audit_model = camerata_server::ai_audit::resolve_audit_model(model);
+        // The models the run calls beyond the scan, resolved the way the stages resolve them: the
+        // fix stage, and the clone judge when a clone rule is selected. Both are in the figure.
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let judge_selected = camerata_server::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        )
+        .iter()
+        .any(|(roles, _)| roles.contains("the clone judge"));
         let pf = preflight::build(&preflight::PreflightInputs {
             backend: args.backend,
             batch,
+            fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
+                controls.fix_model_for(model, calibration_model),
+            )),
+            clone_judge_model: judge_selected.then(|| controls.clone_judge_model_for()),
             calibration_model: calibration_model
                 .map(str::to_string)
                 .unwrap_or_else(|| audit_model.clone()),

@@ -370,6 +370,9 @@ pub async fn run_repeatability_with(
     let pf = preflight::build(&preflight::PreflightInputs {
         backend: args.backend,
         batch: false,
+        // The measurement command prices the audit passes only; its limit is the per-run budget.
+        fix_model: None,
+        clone_judge_model: None,
         calibration_model: calibration_model
             .map(str::to_string)
             .unwrap_or_else(|| audit_model.clone()),
