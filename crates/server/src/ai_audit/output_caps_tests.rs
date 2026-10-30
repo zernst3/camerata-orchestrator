@@ -577,9 +577,11 @@ async fn a_cut_off_calibration_reply_keeps_its_complete_verdicts_and_only_the_re
     assert_eq!(calibration.usage.wasted_calls, 1);
 }
 
-/// A reply cut off before the first verdict answered nothing: ALL findings are asked again, alone
-/// (a smaller request than a repeat of the same one would be only if the batch were smaller; the
-/// cap is the same sum, and the call is recorded as wasted whole).
+/// A reply cut off before the first verdict answered nothing: ALL findings are asked again, and
+/// the call is recorded as wasted whole. The same findings over the same prompt would be the SAME
+/// request, which is never sent twice (Zach's rule: a retry changes the request): the re-ask
+/// raises the cap, as the scan's truncation retry does, so the model has the room the first call
+/// proved it needed.
 #[tokio::test]
 async fn a_reply_cut_off_before_any_verdict_is_wasted_whole_and_every_finding_is_asked_again() {
     let cut = r#"{"verdicts":[{"index":0,"sever"#.to_string();
@@ -592,7 +594,18 @@ async fn a_reply_cut_off_before_any_verdict_is_wasted_whole_and_every_finding_is
     let llm = Scripted::new(vec![(cut, true), (all, false)]);
     let meter = UsageMeter::default();
     let (out, _) = calibrate(&llm, 3, Some(&meter)).await;
-    assert_eq!(llm.seen.lock().unwrap().len(), 2);
+    let seen = llm.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0].prompt, seen[1].prompt,
+        "the same findings are asked again"
+    );
+    assert_eq!(seen[0].max_tokens, calibration_max_tokens(3));
+    assert_eq!(
+        seen[1].max_tokens,
+        2 * calibration_max_tokens(3),
+        "the re-ask is a CHANGED request: twice the cap, never the same send"
+    );
     assert!((0..3).all(|n| severity_of(&out, n) == "low"));
     let calibration = meter
         .stage_telemetry(1_000)

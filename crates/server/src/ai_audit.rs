@@ -3474,8 +3474,12 @@ fn answered_verdicts(raw: &str, n: usize) -> Vec<serde_json::Value> {
 
 /// A calibration reply cut off at the output limit, made whole: the verdicts it wrote out in full,
 /// then ONE re-ask of just the findings it did not reach (the same prompt over those findings
-/// alone, a smaller request with its own cap, never the same request again), merged back under the
-/// original indices as `{"verdicts":[...]}`. A reply that is not cut off is `first.text` unchanged.
+/// alone, a smaller request with its own cap), merged back under the original indices as
+/// `{"verdicts":[...]}`. A reply that is not cut off is `first.text` unchanged. The re-ask is never
+/// the same request again: when the reply answered NOTHING the findings are the same, so the
+/// re-ask raises the cap to twice `first_cap` (the cap the first call was sent with) within the
+/// runaway ceiling, as the scan's truncation retry does; a first cap already at the ceiling has
+/// nothing to change, and then no re-ask is sent.
 ///
 /// The cut-off call is recorded as wasted by the share of the findings it left unanswered (all of
 /// it when it answered none). The re-ask goes through the spend limit like any retry, and a re-ask
@@ -3488,6 +3492,7 @@ async fn reask_unanswered_verdicts(
     system: &str,
     chunk: &[Finding],
     first: &crate::llm::LlmResponse,
+    first_cap: u32,
     prompt_for: &(dyn Fn(&[&Finding]) -> String + Sync),
 ) -> String {
     if !first.truncated {
@@ -3511,12 +3516,24 @@ async fn reask_unanswered_verdicts(
             );
         }
     }
-    if !missing.is_empty() && !meter.is_some_and(UsageMeter::retry_blocked) {
+    // The re-ask's cap: sized for the findings left when some were answered (a smaller, different
+    // request); twice the first cap when none were (the same findings, so the cap is what changes).
+    let reask_cap = if answered.is_empty() {
+        let raised = first_cap
+            .saturating_mul(2)
+            .min(AGGREGATE_MAX_TOKENS_CEILING);
+        (raised > first_cap).then_some(raised)
+    } else {
+        Some(calibration_max_tokens(missing.len()))
+    };
+    let reask_cap =
+        reask_cap.filter(|_| !missing.is_empty() && !meter.is_some_and(UsageMeter::retry_blocked));
+    if let Some(cap) = reask_cap {
         let items: Vec<&Finding> = missing.iter().map(|&i| &chunk[i]).collect();
         let req = with_stage_effort(
             LlmRequest::new(prompt_for(&items))
                 .with_system(system.to_string())
-                .with_max_tokens(calibration_max_tokens(items.len()))
+                .with_max_tokens(cap)
                 .with_temperature(AUDIT_TEMPERATURE)
                 .with_model(stage_model(calibration_model)),
             Stage::Calibration,
@@ -3756,6 +3773,7 @@ pub async fn verify_findings(
                     &system,
                     &chunk,
                     &resp,
+                    calibration_max_tokens(chunk_len),
                     &calibration_prompt,
                 )
                 .await;
@@ -3843,6 +3861,7 @@ pub async fn verify_findings(
                     &system,
                     &chunk,
                     &resp,
+                    calibration_max_tokens(chunk.len()),
                     &calibration_prompt,
                 )
                 .await;
