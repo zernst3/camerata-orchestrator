@@ -26,6 +26,8 @@ const TWO_COMPLETE_ONE_CUT: &str = r#"```json
 struct ScriptedLlm {
     replies: Mutex<Vec<(String, bool)>>,
     calls: AtomicUsize,
+    /// The `max_tokens` of every request, in order.
+    caps: Mutex<Vec<u32>>,
 }
 
 impl ScriptedLlm {
@@ -33,6 +35,7 @@ impl ScriptedLlm {
         Self {
             replies: Mutex::new(replies.iter().map(|(t, c)| (t.to_string(), *c)).collect()),
             calls: AtomicUsize::new(0),
+            caps: Mutex::new(Vec::new()),
         }
     }
     fn calls(&self) -> usize {
@@ -57,8 +60,9 @@ fn response(text: &str, truncated: bool) -> LlmResponse {
 
 #[async_trait::async_trait]
 impl LlmPort for ScriptedLlm {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.caps.lock().unwrap().push(req.max_tokens);
         let mut replies = self.replies.lock().unwrap();
         let (text, truncated) = if replies.len() > 1 {
             replies.remove(0)
@@ -159,15 +163,30 @@ fn salvage_of_a_reply_with_no_complete_finding_is_empty_not_a_panic() {
     );
 }
 
+/// A request whose reply is cut off every time is sent exactly twice: the first send and the
+/// retry at a raised cap. The end-of-run second try would be a third send of the retry's own
+/// request, paid for again; a content failure does not get it.
+#[tokio::test]
+async fn a_pass_cut_off_on_every_send_is_sent_twice_with_a_raised_cap_and_never_a_third_time() {
+    let llm = ScriptedLlm::new(&[(CUT_OFF_EMPTY, true)]);
+    let (_findings, _p, _r, ok, failures) = scan(&llm, 3).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(llm.calls(), 2);
+    let caps = llm.caps.lock().unwrap().clone();
+    assert_eq!(caps.len(), 2);
+    assert!(caps[1] > caps[0], "the retry changes the request: {caps:?}");
+}
+
 #[tokio::test]
 async fn a_reply_cut_off_after_the_retry_is_a_failed_pass_that_keeps_its_complete_findings() {
     let llm = ScriptedLlm::new(&[(CUT_OFF, true)]);
     let (findings, _p, _r, ok, failures) = scan(&llm, 3).await;
     assert_eq!(
         llm.calls(),
-        4,
-        "the first send plus the one truncation retry, and the same again when the pass is tried \
-         once more at the end of the round"
+        2,
+        "the first send plus the one truncation retry at twice the cap; a cut-off reply is a \
+         content failure, so the pass is not tried again unchanged at the end of the round"
     );
     assert_eq!(ok, 0, "a cut-off pass earns no `ran` credit");
     assert_eq!(

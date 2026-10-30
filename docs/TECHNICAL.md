@@ -3143,13 +3143,26 @@ accepted on its own and only when all of these hold (`detail_regen::accept_entry
   not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
   in another order, an id the batch does not have, an id used twice, a wrong echo: none of
   these can land a text on a neighbour; the entry is simply not written.
-- Every path or identifier the short statement names (a token with `/`, `::`, `_`, a file
-  extension or CamelCase) appears in the text, spelled as given.
+- Every path or identifier the short statement names appears in the text, spelled as given: a
+  token with a known file extension or one that resolves in the file set (a file, or a
+  directory holding one), a `::`, `_` or CamelCase symbol. A slash-joined pair of plain words
+  (`collisions/overwrites`) is prose and is not asked for. A compound name that is not a file
+  and has a symbol-shaped part (`audit_log.action`, `created_by/modified_by`,
+  `getAuthenticatorAssuranceLevel/aal2`) is asked for as its parts: each part of three or more
+  characters must appear, not the spelling that joined them. A dotted name of plain words
+  (`supabase.from`, `req.json`) is a member access, one symbol asked for whole: split, its parts
+  are words every text has. A dropped real file name is still rejected.
 - It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
-  calibration's raise-block and the D5 cap already use; one list) that neither the short
-  statement nor the code shown makes. An invented "requires a valid session" would stop
-  calibration raising a critical on a claim nobody made. The check can reject a harmless
-  "depends on", which costs a marker and not a wrong severity; the sweep reports the rate.
+  calibration's raise-block and the D5 cap already use; one list, unchanged) that neither the
+  short statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check is skipped for a statement
+  that starts "Borderline:" (the prompt orders the explanation to say what would settle it).
+  It reads the explanation sentences and not a fix-direction sentence (one that opens with a
+  fix verb and says nothing about exploiting the problem), and a "requires" whose object is a
+  backticked code construct ("the policy requires a `to authenticated` clause") is not a
+  condition on exploiting it. A sentence about exploiting, attacking or abusing the problem is
+  always read in full. The check can still reject a harmless "depends on" in an explanation
+  sentence, which costs a marker and not a wrong severity; the sweep reports the rate.
 - A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
   front when it lost it.
 
@@ -3158,7 +3171,7 @@ repeat round runs it again in a batch of half the size (5), a third round sends 
 still pending one finding to a call, and what is still unwritten then gets the marker. Every
 call passes the spend-limit check first. The output budget is 450 tokens a finding (a full
 detail with its JSON wrapping was measured at about 280, and 160 cut off 4 of 10 calls on a
-real run). A reply cut off at the output limit is still counted as waste in the telemetry,
+real run). A reply cut off at the output limit is still counted as waste in the telemetry (whole; a reply that was not cut off counts the share of its entries that were rejected, so the stage's waste figure is no longer zero when checks turned entries down),
 but its complete entries are kept: the entries are read one by one with the same walker the
 scan uses to salvage a cut-off reply (`complete_array_objects`), and only the findings the
 cut-off lost go to the next round. The echoed path is compared after dropping a leading `./`
@@ -6143,7 +6156,33 @@ production build and see the warning and the note instead.
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
 
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
-attempts as history: a part that a later attempt completed stays with a `resolved_at` time.
+attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An
+attempt of a part whose replies came back and were turned down lists why in `rejections`, one line
+per finding (its place, and the name the fix invented or the name the detail dropped); the
+cockpit's failure panel shows the same lines under the attempt.
+
+**Why a stored reply was set aside.** Each call entry in the run store (`calls/<key>.json`) has an
+optional `reason`, set at the point of rejection and only on the reply that was rejected: a reply
+cut off at the output limit or holding no JSON (status `unusable`), a fix reply with a fix that
+named something not in the evidence or that contradicted the detail, a detail reply with an entry
+that dropped a name or added a condition. A reply EVERY entry of which was turned down is set aside
+(status `rejected`), so a resume asks again. A reply only part of which was turned down stays
+`done` and carries the reason: the entries it got right are replayed on a resume instead of being
+paid for again, and the ones turned down were re-asked by the stage's own rounds with a changed
+request, stored under their own keys. A reply every entry of which was accepted stays `done` with
+no reason. The stages reach the store through `LlmPort::note_rejected_reply(request_key, reason,
+whole)`, a no-op on every completer but the journal.
+The stage-wide set-aside at the end of an attempt (`quarantine_rejected`) now applies to the other
+content-failed stages only, with the failed part named as the reason.
+
+**End-of-run second try.** A part that failed gets one more try at the end of its stage only when the
+failure was transport trouble (a dropped connection, a timeout, a 429, a 5xx), the one case where the
+same request can succeed. A reply the model gave and that was unusable (cut off, malformed, refused, or
+turned down by a check) is a content failure: a retry of it must change the request, which the stages'
+own rounds do (a doubled output cap, a smaller batch, a feedback line naming the problem, a note on
+the scan's malformed-reply retry saying the previous reply held no JSON), and the same request is
+never sent a further time. `FailureClass::is_retried_at_end` is the one rule; the detail and fix
+stages re-send only the findings whose last attempt failed in transport.
 
 **Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
 

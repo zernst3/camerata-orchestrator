@@ -274,3 +274,99 @@ fn fix_outcome_and_routing_both_survive_one_snapshot() {
     assert_eq!(again.fix_outcome, t.fix_outcome);
     assert_eq!(again.routing, t.routing);
 }
+
+// ── P7: the waste the telemetry used to miss ────────────────────────────────────────────────
+
+fn usage_of(meter: &UsageMeter, stage: Stage) -> crate::stage_telemetry::StageUsage {
+    meter
+        .stage_telemetry(1_000)
+        .stages
+        .iter()
+        .find(|s| s.stage == stage)
+        .unwrap_or_else(|| panic!("{stage:?} was recorded"))
+        .usage
+        .clone()
+}
+
+/// Replies cut off at the output limit, one per calibration chunk.
+struct CutOffCalibration;
+
+#[async_trait::async_trait]
+impl LlmPort for CutOffCalibration {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Ok(LlmResponse {
+            text: r#"{"verdicts":[{"index":0,"sever"#.to_string(),
+            model: "stub".to_string(),
+            backend: "api".to_string(),
+            cost_usd: Some(0.5),
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: true,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn three_cut_off_calibration_replies_are_three_wasted_calls() {
+    // Three chunks of findings, each answered with a reply cut off at the output limit: none
+    // produced a verdict, so all three calls bought nothing.
+    let findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE * 2 + 1)
+        .map(|i| {
+            let mut f = fixture_finding();
+            f.line = i + 1;
+            f
+        })
+        .collect();
+    let meter = UsageMeter::default();
+    let (out, _failed) = verify_findings(
+        &CutOffCalibration,
+        "o/r",
+        findings.clone(),
+        None,
+        None,
+        Some(&meter),
+        false,
+        "",
+    )
+    .await;
+    assert_eq!(out.len(), findings.len(), "no finding is dropped");
+    let usage = usage_of(&meter, Stage::Calibration);
+    assert_eq!(usage.calls, 3);
+    assert_eq!(usage.wasted_calls, 3, "{usage:?}");
+    assert_eq!(usage.wasted_input_tokens, usage.input_tokens);
+    assert_eq!(usage.wasted_output_tokens, usage.output_tokens);
+}
+
+#[tokio::test]
+async fn a_complete_calibration_reply_is_not_counted_as_waste() {
+    let llm = UsageStub {
+        text: r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"x"}]}"#
+            .to_string(),
+    };
+    let meter = UsageMeter::default();
+    let _ = verify_findings(
+        &llm,
+        "o/r",
+        vec![fixture_finding()],
+        None,
+        None,
+        Some(&meter),
+        false,
+        "",
+    )
+    .await;
+    assert_eq!(usage_of(&meter, Stage::Calibration).wasted_calls, 0);
+}

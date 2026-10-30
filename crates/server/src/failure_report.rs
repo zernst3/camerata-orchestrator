@@ -172,6 +172,9 @@ impl FailureReport {
                 if let Some(t) = &a.stderr_tail {
                     line.push_str(&format!(" [stderr: {t}]"));
                 }
+                for reason in &a.rejections {
+                    line.push_str(&format!("\n  - turned down: {reason}"));
+                }
                 out.push_str(&line);
             }
             out.push('\n');

@@ -261,8 +261,8 @@ async fn rejected_fix_attempts_are_counted_as_wasted_tokens() {
     assert_eq!(out[0].fix_specific, None);
     assert_eq!(failed.len(), 1);
     let fix = meter.stage_telemetry(1_000).stages[0].usage.clone();
-    // The rounds, the solo retry and the end-of-run second try.
-    let attempts = (MAX_FIX_REGENERATIONS + 3) as u64;
+    // The rounds and the solo retry; a rejected fix is not sent again at the end of the run.
+    let attempts = (MAX_FIX_REGENERATIONS + 2) as u64;
     assert_eq!(fix.calls, attempts);
     assert_eq!(fix.wasted_calls, attempts, "every attempt was thrown away");
     assert_eq!(fix.wasted_input_tokens, fix.input_tokens);

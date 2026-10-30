@@ -138,6 +138,12 @@ impl FailedPass {
 /// prompt tends to fail the same way and every retry is billed.
 pub(crate) const MALFORMED_REPLY_RETRIES: usize = 2;
 
+/// The line a malformed-reply retry adds to the user prompt. A retry after a content failure
+/// must change the request (the same prompt sent again pays twice for the same answer), and this
+/// tells the model what was wrong with its reply. Camerata's own words, outside the framed client
+/// content, appended after the whole original prompt so the cached prefix is unchanged.
+pub(crate) const MALFORMED_REPLY_NOTE: &str = "Your previous reply to this exact request held no JSON object that parses. Reply with ONLY the JSON object described above, no prose before or after it.";
+
 /// One scan pass (a file chunk x rule batch) that produced NO answer, and why. Collected by
 /// every pass runner ([`run_passes`], [`run_passes_batch`], [`run_routed_passes`],
 /// [`run_security_passes`]) instead of keeping only the last error, so a round where 1 of 40
@@ -331,10 +337,19 @@ impl StageTrail {
 
     /// The stage's calls answered but the answer was unusable (no fix, no estimate): keep one
     /// record saying so, so the failed pass shows when each try ended without a result.
-    pub(crate) fn note_unusable(&mut self, message: &str, second_try: bool) {
+    ///
+    /// `rejections` says why each reply of the part was turned down (see
+    /// [`AttemptRecord::rejections`]); empty when the part never got a reply to turn down.
+    pub(crate) fn note_unusable(
+        &mut self,
+        message: &str,
+        second_try: bool,
+        rejections: Vec<String>,
+    ) {
         let mut record = Self::describe(FailureClass::Content, message);
         record.second_try = second_try;
         record.model = resolve_audit_model(None);
+        record.rejections = bounded_rejections(rejections);
         self.attempts.push(record);
         self.class.get_or_insert(FailureClass::Content);
     }
@@ -353,6 +368,29 @@ impl StageTrail {
     pub(crate) fn class(&self) -> FailureClass {
         self.class.unwrap_or(FailureClass::Content)
     }
+}
+
+/// The most rejection reasons one attempt record keeps.
+const MAX_RECORDED_REJECTIONS: usize = 40;
+
+/// Rejection reasons as an attempt record keeps them: each scrubbed of secrets and capped, the
+/// first [`MAX_RECORDED_REJECTIONS`] of them, and a last line counting the rest.
+pub(crate) fn bounded_rejections(reasons: Vec<String>) -> Vec<String> {
+    let total = reasons.len();
+    let mut out: Vec<String> = reasons
+        .into_iter()
+        .take(MAX_RECORDED_REJECTIONS)
+        .map(|r| {
+            camerata_llm::failure::scrub_message(
+                &r,
+                camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+            )
+        })
+        .collect();
+    if total > MAX_RECORDED_REJECTIONS {
+        out.push(format!("and {} more", total - MAX_RECORDED_REJECTIONS));
+    }
+    out
 }
 
 /// The error a stage returns when both its tries failed: the second failure with the whole
@@ -1387,7 +1425,12 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 ///
 /// 2: client content framed under a per-run random delimiter token, named in the system prompt
 /// (`crate::prompt_frame`).
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 2;
+///
+/// 3: the detail-regeneration prompt allows a fix direction to say what the fix needs, asks a
+/// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
+/// a dot be written as its parts when a part is itself a name (a plain member access such as
+/// supabase.from stays as written).
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 3;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
@@ -3430,6 +3473,11 @@ pub async fn verify_findings(
             } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
+                    // A reply cut off at the output limit holds no verdict worth reading: the
+                    // call bought nothing, and the telemetry says so.
+                    if resp.truncated {
+                        m.record_wasted(Stage::Calibration, &resp);
+                    }
                 }
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
@@ -3505,6 +3553,9 @@ pub async fn verify_findings(
             Ok(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
+                    if resp.truncated {
+                        m.record_wasted(Stage::Calibration, &resp);
+                    }
                 }
                 let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
                 chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);
@@ -3534,6 +3585,7 @@ pub async fn verify_findings(
             trail.note_unusable(
                 "the calibration reply held no usable remediation-effort estimate",
                 false,
+                Vec::new(),
             );
         }
         estimation_failed_passes.push(FailedPass {
@@ -4819,11 +4871,17 @@ Your only job is telling the developer EXACTLY what to change, in THIS codebase.
 Rules, every fix:
 - Name the REAL file/symbol/column/function from the evidence given for that finding (its own
   path, snippet, detail, captured objects, and surrounding code). NEVER invent a name that
-  isn't present anywhere in the evidence you were given for that finding.
+  isn't present anywhere in the evidence you were given for that finding: a name or file path
+  in backticks must appear in that evidence, and so must every table, column, function, file
+  or variable name inside a code snippet (ordinary words and universal names such as
+  `Authorization`, `console.error` and try/catch/finally are fine). When the fix needs a NEW
+  name, describe it in plain words ("a new helper that returns the signed URL") instead of
+  naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
   app/auth/signout/route.ts does") instead of describing the pattern generically.
-- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight.
+- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight;
+  the snippet is yours to write, only the existing names it uses must come from the evidence.
 - Say WHAT to change and WHERE — NEVER how this finding was detected. Do not mention
   Camerata, a scanner, a linter, a rule id, a regex, "the audit", or any detection mechanism.
 - NEVER assert something about the codebase's current state that contradicts the finding's own
@@ -5001,24 +5059,196 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
 /// could go looking for. Deliberately short: anything NOT on this list must be grounded.
 const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined", "todo"];
 
+/// Names that exist in every codebase or runtime and so are never "invented" by a fix: a
+/// fix may name them whether or not the finding's evidence happens to show them. Kept
+/// short on purpose; a name that is merely common in the repo does not belong here. Matched
+/// exactly (case-sensitive) against a backticked span or a path-like token.
+const UNIVERSAL_FIX_NAMES: &[&str] = &[
+    "Authorization",
+    "console.error",
+    "console.log",
+    "console.warn",
+    "console.info",
+    "process.exit",
+    "process.env",
+    "finally",
+    "try",
+    "catch",
+    "devDependencies",
+    "dependencies",
+    "toString",
+    "toISOString",
+    "hasOwnProperty",
+    "addEventListener",
+    "setTimeout",
+    "setInterval",
+    "clearTimeout",
+    "encodeURIComponent",
+    "decodeURIComponent",
+    "parseInt",
+    "parseFloat",
+    "localStorage",
+    "sessionStorage",
+    "preventDefault",
+    "stopPropagation",
+    "current_user",
+    "session_user",
+    "current_setting",
+    "set_config",
+    "gen_random_uuid",
+];
+
+/// File extensions that make a dotted token inside a code snippet a file name worth
+/// grounding (`lib/x.ts`, `.env.local`) rather than a member access (`console.error`).
+const FIX_FILE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "sql", "env", "md", "yml", "yaml", "toml",
+    "py", "rs", "css", "scss", "html", "sh", "lock", "txt", "conf", "cfg", "ini", "xml", "local",
+    "example",
+];
+
+/// Characters that separate the words of a code snippet.
+const SNIPPET_SEPARATORS: &str = "(){}[]<>=+*,;\"'|&!?`";
+
+/// True when a backticked span is a code snippet (whitespace, call parentheses, brackets,
+/// operators, quotes or separators in it) rather than one name. A fix quoting its own new
+/// code is not in the evidence by construction, so such a span is not checked as one
+/// identifier: only the names chosen inside it are (see [`snippet_names`]).
+fn is_code_snippet(span: &str) -> bool {
+    span.chars()
+        .any(|c| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+}
+
+/// Whether a dotted or slashed word in a snippet is a file name (`lib/x.ts`, `seed.sql`,
+/// `.env.local`) rather than a member access (`console.error`, `req.json`). `followed_by_call`
+/// is true when the word is immediately followed by `(`, which makes it a call.
+fn is_file_like(word: &str, followed_by_call: bool) -> bool {
+    if followed_by_call {
+        return false;
+    }
+    if word.contains('/') {
+        return word.contains('.');
+    }
+    word.rsplit_once('.').is_some_and(|(stem, ext)| {
+        FIX_FILE_EXTENSIONS.contains(&ext) && (ext != "env" || stem.is_empty())
+    })
+}
+
+/// The tokens of a code snippet worth grounding: any file name in it, any schema-qualified
+/// table or environment variable it names (see [`qualified_object`]), and any word of 3 or
+/// more characters shaped like a name somebody chose (see [`is_chosen_name`]). Ordinary
+/// words, language keywords, SQL keywords and single-word builtins (`err`, `catch`, `table`,
+/// `Promise`) are never asked for: the snippet is the fix's own new code.
+fn snippet_names(span: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = span;
+    while !rest.is_empty() {
+        let skip = rest
+            .find(|c: char| !(c.is_whitespace() || SNIPPET_SEPARATORS.contains(c)))
+            .unwrap_or(rest.len());
+        rest = &rest[skip..];
+        if rest.is_empty() {
+            break;
+        }
+        let len = rest
+            .find(|c: char| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+            .unwrap_or(rest.len());
+        let (raw, after) = rest.split_at(len);
+        rest = after;
+        let word = raw.trim_matches(|c: char| matches!(c, ':' | '-'));
+        let followed_by_call = after.starts_with('(');
+        let word_trimmed = word.trim_end_matches('.');
+        if is_file_like(word_trimmed, followed_by_call) {
+            out.push(word_trimmed.to_string());
+            continue;
+        }
+        // `public.documents`, `storage.objects`: a schema-qualified name is a table (or, when
+        // called, a function) somebody chose, even as one lowercase word; `process.env.SECRET`
+        // is an environment variable somebody chose, even with no underscore. Neither shape is
+        // caught by `is_chosen_name`, so the object name is asked for here. A qualified CALL
+        // (`auth.uid()`) is a builtin or an existing function, not a table.
+        if let Some(obj) = qualified_object(word_trimmed, followed_by_call) {
+            if obj.len() >= 3 {
+                out.push(obj.to_string());
+            }
+        }
+        for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if tok.len() >= 3 && is_chosen_name(tok) {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Database schemas whose qualified names (`public.documents`) name a table or function.
+const SCHEMA_QUALIFIERS: &[&str] = &["public", "auth", "internal", "storage", "extensions"];
+
+/// The object a qualified word in a snippet names: the table of `schema.table` (not when the
+/// word is called, which makes it a function such as `auth.uid()`), or the variable of
+/// `process.env.NAME`. `None` for any other word.
+fn qualified_object(word: &str, followed_by_call: bool) -> Option<&str> {
+    if let Some(name) = word.strip_prefix("process.env.") {
+        return Some(name).filter(|n| !n.is_empty());
+    }
+    if followed_by_call {
+        return None;
+    }
+    let (schema, name) = word.split_once('.')?;
+    if SCHEMA_QUALIFIERS.contains(&schema) && !name.is_empty() && !name.contains('.') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Whether a token looks like a name its author chose (`snake_case`, `camelCase`, or a
+/// `PascalCase` word with two or more capitals) rather than a plain word, keyword or acronym.
+fn is_chosen_name(tok: &str) -> bool {
+    if tok.contains('_') {
+        // `NODE_ENV`, `owner_id`, `member_contacts`; not a bare run of underscores or digits.
+        return tok.chars().any(|c| c.is_ascii_alphabetic());
+    }
+    let first_upper = tok.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    let uppers = tok.chars().filter(|c| c.is_ascii_uppercase()).count();
+    let has_lower = tok.chars().any(|c| c.is_ascii_lowercase());
+    has_lower
+        && if first_upper {
+            uppers >= 2
+        } else {
+            uppers >= 1
+        }
+}
+
 /// **Identifier-grounding validator (pure).** Every concrete identifier a generated `fix`
 /// names — a `` `backticked` `` symbol/column, or a bare file-path-like token
 /// (`lib/redirect.ts`, `schema.sql`, `package.json`) — must appear verbatim in `evidence`
 /// (the finding's own path/snippet/detail/captures/surrounding code — see
-/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`]. Returns the FIRST offending
-/// identifier found, so the caller can hand the model a concrete, specific correction
-/// ("you named X, which isn't in the evidence") rather than a vague rejection. Returns
-/// `None` when every named identifier is grounded (including a fix that names none at all —
-/// pure prose is never rejected on this axis).
+/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`] / [`UNIVERSAL_FIX_NAMES`].
+/// A backticked span that is a code snippet (see [`is_code_snippet`]) is the fix's own new
+/// code, so only the names chosen inside it (and any file path in it) are checked, never the
+/// whole span. Returns the FIRST offending identifier found, so the caller can hand the
+/// model a concrete, specific correction ("you named X, which isn't in the evidence") rather
+/// than a vague rejection. Returns `None` when every named identifier is grounded (including
+/// a fix that names none at all — pure prose is never rejected on this axis).
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
     let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
     let mut candidates: Vec<String> = Vec::new();
+    // The fix with its snippet spans blanked: a `console.error` or `process.exit` inside a
+    // snippet is code, not a file name, and the snippet's own file names are collected from
+    // the snippet itself.
+    let mut prose = fix.to_string();
     for cap in backtick_re.captures_iter(fix) {
-        candidates.push(cap[1].to_string());
+        let span = &cap[1];
+        if is_code_snippet(span) {
+            candidates.extend(snippet_names(span));
+            prose = prose.replace(&cap[0], " ");
+        } else {
+            candidates.push(span.to_string());
+        }
     }
-    for m in path_re.find_iter(fix) {
+    for m in path_re.find_iter(&prose) {
         candidates.push(m.as_str().to_string());
     }
 
@@ -5027,7 +5257,9 @@ pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<St
         if trimmed.is_empty() {
             continue;
         }
-        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str())
+            || UNIVERSAL_FIX_NAMES.contains(&trimmed)
+        {
             continue;
         }
         if !evidence.contains(trimmed) {
@@ -5153,6 +5385,38 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Why each of `pending` still has no fix, as the failed part records it: the place of the
+/// finding and the reason its latest reply was turned down. A finding with no reason on file
+/// never got a reply back (the call failed in transport, or the spend limit stopped it).
+fn fix_rejections(
+    findings: &[Finding],
+    pending: &[usize],
+    feedback: &std::collections::HashMap<usize, String>,
+    ledger: &FixLedger,
+) -> Vec<String> {
+    pending
+        .iter()
+        .map(|&i| {
+            let f = &findings[i];
+            let earlier = feedback.get(&i).map(String::as_str);
+            let why = match (ledger.last_miss.get(&i), earlier) {
+                (Some(FixMiss::TransportFailed), Some(e)) => {
+                    format!(
+                        "the last call failed in transport (an earlier reply was turned down: {e})"
+                    )
+                }
+                (Some(FixMiss::TransportFailed), None) => {
+                    "the last call failed in transport".to_string()
+                }
+                (Some(FixMiss::CapStopped), _) => "the spend limit stopped the call".to_string(),
+                (None, Some(e)) => e.to_string(),
+                (None, None) => "no reply came back for it".to_string(),
+            };
+            format!("{}:{} {}: {why}", f.path, f.line, f.rule_id)
+        })
+        .collect()
+}
+
 /// Why a finding never got a response from the fix model on its last attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FixMiss {
@@ -5176,6 +5440,9 @@ struct FixLedger {
     answered: std::collections::HashSet<usize>,
     /// For a finding that missed its latest attempt without an answer: why.
     last_miss: std::collections::HashMap<usize, FixMiss>,
+    /// Findings whose latest attempt failed in transport (see [`second_try_allowed`]): the only
+    /// ones the end-of-run second try sends again.
+    retry_at_end: std::collections::HashSet<usize>,
 }
 
 impl FixLedger {
@@ -5185,9 +5452,25 @@ impl FixLedger {
         }
     }
 
-    /// A call is about to be made for `batch`.
+    /// A call is about to be made for `batch`: how each of its findings last failed starts afresh.
     fn sent(&mut self, batch: &[usize]) {
         self.sent.extend(batch.iter().copied());
+        for i in batch {
+            self.retry_at_end.remove(i);
+        }
+    }
+
+    /// The call for `batch` failed in transport and the run may still send it again at the end.
+    fn retryable_at_end(&mut self, batch: &[usize]) {
+        self.retry_at_end.extend(batch.iter().copied());
+    }
+
+    /// The members of `pending` the end-of-run second try covers (transport failures only).
+    fn split_for_second_try(&self, pending: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        pending
+            .iter()
+            .copied()
+            .partition(|i| self.retry_at_end.contains(i))
     }
 
     /// A call for `batch` returned a response.
@@ -5292,6 +5575,7 @@ async fn run_fix_specifics_round(
         // transcript sink to feed.
         let mut on_delta = |_: &str| {};
         ledger.sent(batch);
+        let request_key = crate::run_store::journal::request_key(&req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
@@ -5301,6 +5585,9 @@ async fn run_fix_specifics_round(
             Err(e) => {
                 meter_failed(meter, Stage::FixGeneration, &e);
                 trail.note_error(&e, second_try);
+                if second_try_allowed(&e, meter) {
+                    ledger.retryable_at_end(batch);
+                }
                 ledger.miss(batch, FixMiss::TransportFailed);
                 still_pending.extend(batch.iter().copied());
                 continue;
@@ -5312,12 +5599,19 @@ async fn run_fix_specifics_round(
         }
         let parsed = parse_fix_specifics(&resp.text);
         let rejected_before = still_pending.len();
+        // Why each fix of THIS reply was turned down, named by place; the reply carries them.
+        let mut turned_down: Vec<String> = Vec::new();
+        let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
             let Some(text) = parsed.get(&pos) else {
                 feedback
                     .entry(orig_idx)
                     .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    "the reply held no fix for this finding",
+                ));
                 still_pending.push(orig_idx);
                 continue;
             };
@@ -5327,22 +5621,32 @@ async fn run_fix_specifics_round(
             let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
             if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!("named `{bad}`, which is not in the finding's evidence"),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
                         "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence"
+                         evidence; keep your fix and its code snippet, but use only names \
+                         from the evidence, or describe a new name in plain words"
                     ),
                 );
                 still_pending.push(orig_idx);
                 continue;
             }
             if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                turned_down.push(place(&findings[orig_idx], &reason));
                 feedback.insert(orig_idx, reason);
                 still_pending.push(orig_idx);
                 continue;
             }
             if let Some(leak) = fix_leaks_methodology(text) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!("described detection methodology (\"{leak}\")"),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
@@ -5354,6 +5658,18 @@ async fn run_fix_specifics_round(
                 continue;
             }
             findings[orig_idx].fix_specific = Some(text.clone());
+        }
+        // The reply records the reasons, and only this reply. It is set aside only when EVERY
+        // fix in it was turned down: a reply with an accepted fix stays good, so a resume
+        // replays that fix instead of paying for the whole batch again.
+        if !turned_down.is_empty() {
+            let why = format!(
+                "{} of {} fix(es) turned down: {}",
+                turned_down.len(),
+                batch.len(),
+                turned_down.join("; ")
+            );
+            llm.note_rejected_reply(&request_key, &why, turned_down.len() == batch.len());
         }
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
@@ -5569,16 +5885,23 @@ pub async fn generate_fix_specifics(
         .await;
     }
 
-    // END-OF-RUN SECOND TRY. What is still pending after every round gets one more solo try, when
-    // the provider has had the whole stage to recover, through the same admission and spend
-    // checks. A run that has stopped sends nothing. Only a part that fails this too is a
-    // give-up (and so a failed part, which locks a client export).
-    if !pending.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+    // END-OF-RUN SECOND TRY, for transport trouble only. A finding whose last attempt could not
+    // reach the provider gets one more solo try, when the provider has had the whole stage to
+    // recover, through the same admission and spend checks. A finding the model answered and the
+    // self-check turned down is not sent again: the rounds already changed the request for it
+    // (a feedback line, then a batch of one), and the same solo request a second time pays twice
+    // for the same answer. A run that has stopped sends nothing. Only a part that is still
+    // without a fix after this is a give-up (and so a failed part, which locks a client export).
+    if !pending.is_empty() {
         trail.note_unusable(
             "no usable fix was returned after the stage's own rounds",
             false,
+            fix_rejections(&findings, &pending, &feedback, &ledger),
         );
-        pending = run_fix_specifics_round(
+    }
+    let (retry, left_alone) = ledger.split_for_second_try(&pending);
+    if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        let still = run_fix_specifics_round(
             llm,
             repo,
             &system,
@@ -5589,18 +5912,23 @@ pub async fn generate_fix_specifics(
             files,
             &mut findings,
             &mut feedback,
-            &pending,
+            &retry,
             1,
             &mut ledger,
             &mut trail,
             true,
         )
         .await;
-        if !pending.is_empty() {
-            trail.note_unusable("no usable fix was returned on the second try", true);
+        if !still.is_empty() {
+            trail.note_unusable(
+                "no usable fix was returned on the second try",
+                true,
+                fix_rejections(&findings, &still, &feedback, &ledger),
+            );
         }
-    } else if !pending.is_empty() {
-        trail.note_unusable("no usable fix was returned", false);
+        pending = left_alone;
+        pending.extend(still);
+        pending.sort_unstable();
     }
 
     // C6-B3: a give-up is never silent and never leaves the finding with no fix line when a
@@ -6218,9 +6546,11 @@ struct ScanReply {
 ///    chunk's findings are lost. At most one retry, and a retry that itself fails leaves the
 ///    first response in place.
 /// 2. MALFORMED-REPLY RETRY (H4). A complete reply (not cut off) that holds no JSON object the
-///    parser can read is sent again, at most `malformed_retries_allowed` times (a batch item
-///    passes zero: its reply is reported as a failed pass instead). A transport error on a retry
-///    ends the retries and leaves the malformed reply in place.
+///    parser can read is asked again with [`MALFORMED_REPLY_NOTE`] added to the prompt (never
+///    the identical request: a retry after a content failure changes the request), at most
+///    `malformed_retries_allowed` times (a batch item passes zero: its reply is reported as a
+///    failed pass instead). A transport error on a retry ends the retries and leaves the
+///    malformed reply in place.
 ///
 /// Every retry is one more billed call, so each checks the spend limit before sending: with the
 /// limit reached the retry is not sent and `stopped_by_cap` is set.
@@ -6284,7 +6614,12 @@ async fn retry_unusable_scan_reply(
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
-        match send_audit_request(llm, req.clone(), feedback, session).await {
+        // Never the same request again: the retry says what was wrong with the reply. Built
+        // from the ORIGINAL request each time, so the note appears once whatever the count.
+        let mut retry_req = req.clone();
+        retry_req.prompt.push_str("\n\n");
+        retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
+        match send_audit_request(llm, retry_req, feedback, session).await {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
@@ -7092,20 +7427,22 @@ async fn run_passes_batch(
                     }
                     continue;
                 }
-                let again = match retry.results.remove(&w.custom_id) {
+                // A second failure that was a model refusal (billed) is a content failure: the
+                // real-time second try does not send the item a third time.
+                let (again, second_tryable) = match retry.results.remove(&w.custom_id) {
                     Some(Ok(resp)) => {
                         round.results.insert(w.custom_id.clone(), Ok(resp));
                         continue;
                     }
-                    Some(Err(again)) => again.reason,
-                    None => "missing from the batch results again".to_string(),
+                    Some(Err(again)) => (again.reason, again.second_tryable),
+                    None => ("missing from the batch results again".to_string(), true),
                 };
                 round.results.insert(
                     w.custom_id.clone(),
                     Err(ItemFailure {
                         reason: format!("{first}; resubmitted once and failed again: {again}"),
                         resubmittable: false,
-                        second_tryable: true,
+                        second_tryable,
                     }),
                 );
             }
@@ -7250,7 +7587,7 @@ async fn run_passes_batch(
         let name = format!("{label} {}/{n_c} \u{b7} rules {}/{n_b}", w.ci + 1, w.bi + 1);
         if let Some(failure) = out.4.iter_mut().find(|f| f.pass == name) {
             let mut trail = StageTrail::default();
-            trail.note_unusable(&failure.error, false);
+            trail.note_unusable(&failure.error, false, Vec::new());
             trail.note_error(e, true);
             failure.class = trail.class();
             failure.attempts = trail.attempts;
@@ -12347,6 +12684,9 @@ mod run_completion_tests;
 
 #[cfg(test)]
 mod second_try_tests;
+
+#[cfg(test)]
+mod rejection_reason_tests;
 
 #[cfg(test)]
 mod injection_tests;
@@ -21316,6 +21656,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn find_ungrounded_identifier_accepts_a_code_snippet_whose_names_are_all_ordinary_words() {
+        // The fix IS the new code, so the snippet is not in the evidence; its plain words
+        // (`err`, `console`, `process`, `catch`) are not identifiers to ground.
+        let evidence = "scripts/seed.ts line 3: main();";
+        let fix = "Wrap the entry point: `main().catch((err) => { console.error(err); \
+                    process.exit(1); })`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_checks_only_identifier_like_names_inside_a_snippet() {
+        let evidence = "create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.member_contacts enable row level security;`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+
+        let fix = "Run `alter table public.billing_accounts enable row level security;`.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("billing_accounts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_camel_case_symbol_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        let fix = "Call `await rotateServiceKey(client)` before returning.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("rotateServiceKey".to_string())
+        );
+        let fix = "Use `const res = NextResponse.next({ request })` here.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("NextResponse".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_table_or_env_var_inside_a_snippet() {
+        // A schema-qualified name (`public.documents`) names a table or function somebody chose,
+        // even when it is one lowercase word; an environment variable read (`process.env.SECRET`)
+        // is a chosen name even when it has no underscore. Neither is in this evidence.
+        let evidence =
+            "supabase/migrations/0004_contacts.sql: create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.documents enable row level security;` in the migration.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("documents".to_string())
+        );
+        let fix = "Read it as `const key = process.env.SECRET;` instead of hard-coding it.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("SECRET".to_string())
+        );
+        // The real table, and a schema-qualified CALL (`auth.uid()`), are fine.
+        let fix = "Run `alter table public.member_contacts enable row level security;` then add \
+                   `create policy p on public.member_contacts using (owner_id = auth.uid());`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_bare_invented_symbol() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        assert_eq!(
+            find_ungrounded_identifier("Replace it with `rotateServiceKey`.", evidence),
+            Some("rotateServiceKey".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_skips_universal_names_absent_from_the_evidence() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Read the `Authorization` header.",
+            "Close the client in a `finally` block.",
+            "Log it with `console.error` and rethrow.",
+            "Move it under `devDependencies`.",
+            "Wrap it in `try` and `catch`.",
+            "Log with console.error(err) in a catch block.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_path_named_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Add `import { admin } from \"lib/supabase/missing.ts\"` at the top.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("lib/supabase/missing.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_does_not_read_a_member_call_in_a_snippet_as_a_file() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Parse it with `const body = await req.json()` and validate it.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn the_fix_prompt_and_the_checker_agree_on_snippets() {
+        let prompt = fix_specific_system_prompt();
+        assert!(prompt.contains("code snippet"));
+        assert!(prompt.contains("describe it in plain words"));
+        // The prompt invites a snippet, and the checker accepts one made of ordinary words.
+        assert_eq!(
+            find_ungrounded_identifier("Add `if (!user) { return null; }` first.", "x"),
+            None
+        );
+    }
+
     // ── fix_contradicts_detail (pure, rule-based) ───────────────────────────────────────
 
     #[test]
@@ -21722,9 +22176,9 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
-        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4), plus the
-        // end-of-run second try.
-        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 3);
+        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4). A rejected
+        // fix is a content failure and gets no end-of-run second try.
+        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
         assert_eq!(
             failed_passes.len(),
             1,

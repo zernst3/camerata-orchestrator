@@ -32,6 +32,8 @@ enum Fail {
     Empty,
     /// The provider is unreachable.
     Transport,
+    /// The provider answered with an unusable reply and the transport reports it as content.
+    Content,
 }
 
 /// Fails the first `fail_first` calls, then answers `good`. Records every system prompt.
@@ -74,6 +76,10 @@ impl LlmPort for FailThenGood {
                 Fail::Transport => Err(anyhow::Error::new(LlmCallFailure::new(
                     FailureClass::Transport,
                     "Anthropic API HTTP 529: overloaded",
+                ))),
+                Fail::Content => Err(anyhow::Error::new(LlmCallFailure::new(
+                    FailureClass::Content,
+                    "the model refused the request",
                 ))),
             };
         }
@@ -122,25 +128,28 @@ fn finding_with_code() -> (Finding, Vec<(String, String)>) {
     (f, files)
 }
 
-/// The fix stage's own rounds (three batched, one solo) all fail; the end-of-run second try gets
-/// the fix. No failed pass, so the client export is allowed.
+/// The fix stage's own rounds (three batched, one solo) all come back with nothing usable. The
+/// provider answered, so this is a content failure: it is not sent a fifth time unchanged at the
+/// end of the run, and the part is a give-up.
 #[tokio::test]
-async fn a_fix_that_fails_every_round_then_succeeds_on_the_second_try_leaves_no_failed_pass() {
+async fn a_fix_the_model_answered_with_nothing_usable_gets_no_second_try() {
     let (f, files) = finding_with_code();
     let llm = FailThenGood::new(MAX_FIX_REGENERATIONS + 2, Fail::Empty, GOOD_FIX, NO_FIX);
     let (out, failed) =
         generate_fix_specifics(&llm, "o/r", vec![f], &files, None, None, None).await;
-    assert!(failed.is_empty(), "{failed:?}");
-    assert_eq!(
-        out[0].fix_specific.as_deref(),
-        Some("Validate `raw` before it reaches `query`.")
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].class, FailureClass::Content);
+    assert!(
+        failed[0].attempts.iter().all(|a| !a.second_try),
+        "{:?}",
+        failed[0].attempts
     );
+    assert!(out[0].fix_specific.is_none());
     assert_eq!(
         llm.calls(),
-        MAX_FIX_REGENERATIONS + 3,
-        "one more call: the second try"
+        MAX_FIX_REGENERATIONS + 2,
+        "the rounds only: three batched and one solo, never the same request again"
     );
-    assert!(report_with(failed).incomplete_reasons().is_empty());
 }
 
 #[tokio::test]
@@ -468,4 +477,112 @@ async fn the_alternatives_second_try_happens_before_the_scan_reads_the_result() 
             .any(|f| f.pass == "rule-alternative recommendations"),
         "{failed:?}"
     );
+}
+
+// ── P4: no identical re-send after a content failure ─────────────────────────────────────────
+
+#[tokio::test]
+async fn a_calibration_call_that_failed_on_content_is_not_sent_again_at_the_end() {
+    let llm = FailThenGood::new(usize::MAX, Fail::Content, VERDICT_WITH_EFFORT, "");
+    let (_out, failed) = verify_findings(
+        &llm,
+        "me/api",
+        vec![calibration_finding()],
+        None,
+        None,
+        None,
+        false,
+        "This repository has 1 code files.",
+    )
+    .await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].class, FailureClass::Content);
+    assert!(failed[0].attempts.iter().all(|a| !a.second_try));
+    assert_eq!(llm.calls(), 1, "the same request is not paid for twice");
+}
+
+#[tokio::test]
+async fn an_alternatives_call_that_failed_on_content_is_not_sent_again_at_the_end() {
+    let llm = FailThenGood::new(usize::MAX, Fail::Content, GOOD_ALT, "");
+    let files = vec![("a.rs".to_string(), "fn f() {}".to_string())];
+    let err = recommend_alternatives(
+        &llm,
+        "me/api",
+        &files,
+        &files,
+        &crate::prompt_frame::FrameNonce::generate(),
+        &[two_option_alternatives()],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("the call failed and is not retried unchanged");
+    assert_eq!(classify_pass_error(&err), FailureClass::Content);
+    assert_eq!(llm.calls(), 1);
+}
+
+/// Two fix findings. Every call that names `src/a.ts` fails in transport; a call for `src/b.ts`
+/// alone is answered with a fix naming something that is not in the evidence.
+struct MixedFixFailures {
+    calls: AtomicUsize,
+    prompts: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for MixedFixFailures {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.prompts.lock().unwrap().push(req.prompt.clone());
+        if req.prompt.contains("src/a.ts") {
+            return Err(anyhow::Error::new(LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API HTTP 529: overloaded",
+            )));
+        }
+        Ok(response(
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+        ))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn only_the_fix_that_failed_in_transport_gets_the_second_try() {
+    let (a, mut files) = finding_with_code();
+    let mut a = a;
+    a.path = "src/a.ts".to_string();
+    files[0].0 = "src/a.ts".to_string();
+    let mut b = a.clone();
+    b.path = "src/b.ts".to_string();
+    files.push(("src/b.ts".to_string(), files[0].1.clone()));
+    let llm = MixedFixFailures {
+        calls: AtomicUsize::new(0),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let (_out, failed) =
+        generate_fix_specifics(&llm, "o/r", vec![a, b], &files, None, None, None).await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    // Three batched rounds (both findings, all failing in transport), then a solo round for each
+    // (a: transport, b: answered and rejected), then ONE second try, for a only.
+    assert_eq!(llm.calls.load(Ordering::SeqCst), MAX_FIX_REGENERATIONS + 4);
+    let prompts = llm.prompts.lock().unwrap().clone();
+    let b_only = prompts
+        .iter()
+        .filter(|p| p.contains("src/b.ts") && !p.contains("src/a.ts"))
+        .count();
+    assert_eq!(
+        b_only, 1,
+        "b was answered, so it is asked once and not again"
+    );
+    assert!(failed[0].attempts.iter().any(|a| a.second_try));
 }

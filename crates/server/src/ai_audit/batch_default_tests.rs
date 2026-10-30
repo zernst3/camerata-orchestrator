@@ -1188,3 +1188,31 @@ async fn a_row_echoing_an_unpriced_model_id_is_priced_as_the_requested_model() {
         "{notes:?}"
     );
 }
+
+/// P4: a model refusal in a batch is a content failure. The model answered (and was billed), so
+/// the item is not resubmitted in a follow-up batch and not sent again in real time.
+#[tokio::test(start_paused = true)]
+async fn a_billed_batch_refusal_is_not_resubmitted_or_sent_again_in_real_time() {
+    let api = FakeBatch::new(|_round, id| {
+        if id == "c0-b0" {
+            Reply::Refused
+        } else {
+            Reply::Ok
+        }
+    });
+    let m = meter(eff(true), None);
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 3);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].error.contains("refusal"),
+        "{}",
+        failures[0].error
+    );
+    assert_eq!(api.submitted_ids().len(), 1, "no follow-up batch");
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        0,
+        "no real-time second try"
+    );
+}

@@ -723,8 +723,9 @@ async fn a_failed_regeneration_keeps_the_finding_marked_and_reports_a_failed_pas
         assert!(pass.reason.contains("2 of 2"), "{}", pass.reason);
         assert!(pass.reason.contains(DETAIL_INCOMPLETE_MARKER));
         // Three rounds were attempted before giving up: both findings in one call, again in
-        // one, then one call each; then the second try, one call each again.
-        assert_eq!(llm.prompts(Role::Regen).len(), 6);
+        // one, then one call each. Neither failure is a transport failure, so there is no
+        // second try: the same solo request a second time would pay twice for the same answer.
+        assert_eq!(llm.prompts(Role::Regen).len(), 4);
         // Calibration still ran: the failure does not stop the pipeline.
         assert!(llm.roles().contains(&Role::Calibrate));
     }
@@ -1139,16 +1140,20 @@ fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
     // The echo.
     let mut wrong_path = entry(&f, FULL);
     wrong_path.path = Some("other.rs".to_string());
-    assert_eq!(accept_entry(&f, &wrong_path, ""), Err(Reject::Mismatch));
+    assert_eq!(
+        accept_entry(&f, &wrong_path, "", &[]),
+        Err(Reject::Mismatch)
+    );
     let mut no_line = entry(&f, FULL);
     no_line.line = None;
-    assert_eq!(accept_entry(&f, &no_line, ""), Err(Reject::Mismatch));
+    assert_eq!(accept_entry(&f, &no_line, "", &[]), Err(Reject::Mismatch));
     // Every path or identifier the statement names must survive.
     assert_eq!(
         accept_entry(
             &f,
             &entry(&f, "The handler trusts a flag from src/config.rs."),
-            ""
+            "",
+            &[]
         ),
         Err(Reject::DropsNamedToken(
             "REQUIRE_WEBHOOK_SIGNATURE".to_string()
@@ -1158,37 +1163,44 @@ fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
         accept_entry(
             &f,
             &entry(&f, "REQUIRE_WEBHOOK_SIGNATURE is trusted by the handler."),
-            ""
+            "",
+            &[]
         ),
         Err(Reject::DropsNamedToken("src/config.rs".to_string()))
     );
-    assert!(accept_entry(&f, &entry(&f, FULL), "").is_ok());
+    assert!(accept_entry(&f, &entry(&f, FULL), "", &[]).is_ok());
     // A new precondition is refused, unless the statement or the code shown already makes it.
     let invented = format!("{FULL} Exploiting it only if the caller holds a session.");
     assert_eq!(
-        accept_entry(&f, &entry(&f, &invented), "let x = 1;"),
+        accept_entry(&f, &entry(&f, &invented), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
     );
-    assert!(accept_entry(&f, &entry(&f, &invented), "// only if the caller is local").is_ok());
+    assert!(accept_entry(
+        &f,
+        &entry(&f, &invented),
+        "// only if the caller is local",
+        &[]
+    )
+    .is_ok());
     let conditional = statement(&format!("{SHORT} Only if the flag is false."));
-    assert!(accept_entry(&conditional, &entry(&conditional, &invented), "").is_ok());
+    assert!(accept_entry(&conditional, &entry(&conditional, &invented), "", &[]).is_ok());
     // "requires no ..." negates, and is not a precondition.
     let negated = format!("{FULL} The endpoint requires no authentication.");
-    assert!(accept_entry(&f, &entry(&f, &negated), "").is_ok());
+    assert!(accept_entry(&f, &entry(&f, &negated), "", &[]).is_ok());
 }
 
 #[test]
 fn a_borderline_statement_stays_borderline() {
     let f = statement(&format!("Borderline: {SHORT}"));
-    let kept = accept_entry(&f, &entry(&f, FULL), "").unwrap();
+    let kept = accept_entry(&f, &entry(&f, FULL), "", &[]).unwrap();
     assert_eq!(kept, format!("Borderline: {FULL}"));
     // Already there, in any case: not doubled.
     let said = format!("borderline: {FULL}");
-    assert_eq!(accept_entry(&f, &entry(&f, &said), "").unwrap(), said);
+    assert_eq!(accept_entry(&f, &entry(&f, &said), "", &[]).unwrap(), said);
     // A confident statement is not made borderline.
     let confident = statement(SHORT);
     assert_eq!(
-        accept_entry(&confident, &entry(&confident, FULL), "").unwrap(),
+        accept_entry(&confident, &entry(&confident, FULL), "", &[]).unwrap(),
         FULL
     );
 }
@@ -1197,6 +1209,7 @@ fn a_borderline_statement_stays_borderline() {
 fn named_tokens_are_paths_and_identifiers_not_words() {
     let tokens: Vec<String> = named_tokens(
         "Trusts `REQUIRE_WEBHOOK_SIGNATURE` from src/config.rs, e.g. the WebhookPayload, via std::fs and webhook.rs.",
+        &[],
     )
     .into_iter()
     .map(|t| t.text)
@@ -1211,7 +1224,7 @@ fn named_tokens_are_paths_and_identifiers_not_words() {
             "webhook.rs"
         ]
     );
-    let paths: Vec<bool> = named_tokens("src/config.rs and CamelCaseName")
+    let paths: Vec<bool> = named_tokens("src/config.rs and CamelCaseName", &[])
         .into_iter()
         .map(|t| t.is_path)
         .collect();
@@ -1364,9 +1377,10 @@ async fn each_round_is_smaller_and_the_last_is_one_finding_at_a_time() {
         None,
     )
     .await;
-    // Round 3 is twelve calls of one, and the end-of-run second try is twelve more.
+    // Round 3 is twelve calls of one. The replies were answered (not a transport failure), so
+    // the end-of-run second try sends nothing.
     let mut expected = vec![10, 2, 5, 5, 2];
-    expected.extend([1; 24]);
+    expected.extend([1; 12]);
     assert_eq!(call_sizes(&llm), expected);
     assert_eq!(out.len(), 12, "none dropped");
     assert!(out
@@ -1539,38 +1553,39 @@ fn rejections(meter: &UsageMeter) -> crate::stage_telemetry::DetailRejections {
 
 #[tokio::test]
 async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
-    // A wrong line is turned down once per attempt: 3 rounds and the second try, 1 finding.
+    // A wrong line is turned down once per attempt: 3 rounds, 1 finding (an answered reply gets
+    // no second try).
     let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.mismatch, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.mismatch, r.total()), (3, 3), "{r:?}");
 
     let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.invented_precondition, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
 
     // An id that is not the batch's is a missing id, charged to the finding the entry was meant
-    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 and
-    // the second try's 1, 1 are eight attempts, so eight counts, not sixteen.
+    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 are
+    // six attempts, so six counts, not twelve.
     let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
-    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1, 1, 1]);
+    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1]);
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.left_out, r.total()), (8, 0, 8), "{r:?}");
+    assert_eq!((r.missing_id, r.left_out, r.total()), (6, 0, 6), "{r:?}");
 
-    // A finding the reply simply left out: once per attempt, the second try's included (the last of a batch is dropped, and a
-    // batch of one is dropped whole).
+    // A finding the reply simply left out: once per attempt (the last of a batch is dropped, and
+    // a batch of one is dropped whole).
     let llm = RoleLlm::new(&terse_scan(2), Regen::DropsLast);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.left_out, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.left_out, r.total()), (3, 3), "{r:?}");
     let table = meter.stage_telemetry(0).render_table();
-    assert!(table.contains("4 left out"), "{table}");
+    assert!(table.contains("3 left out"), "{table}");
 }
 
 #[tokio::test]
@@ -1620,9 +1635,9 @@ async fn an_id_used_twice_counts_once_for_the_finding_it_names() {
     .await;
     assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER), "{out:?}");
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.missing_id, r.total()), (3, 3), "{r:?}");
     assert!(
-        failed[0].reason.contains("fell short 4 times"),
+        failed[0].reason.contains("fell short 3 times"),
         "{}",
         failed[0].reason
     );
@@ -1673,11 +1688,11 @@ async fn a_dropped_named_token_is_counted_under_its_own_reason() {
     )
     .await;
     let r = rejections(&meter);
-    assert_eq!((r.drops_named_token, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.drops_named_token, r.total()), (3, 3), "{r:?}");
     // The failed pass (which can reach a client) carries the total in plain words and none of
     // the breakdown.
     let reason = &failed[0].reason;
-    assert!(reason.contains("fell short 4 times"), "{reason}");
+    assert!(reason.contains("fell short 3 times"), "{reason}");
     assert!(
         !reason.to_ascii_lowercase().contains("mismatch"),
         "{reason}"
@@ -1722,26 +1737,26 @@ fn a_dot_slash_or_leading_slash_path_is_the_same_path() {
         line: Some(line),
         detail: FULL.to_string(),
     };
-    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "").is_ok());
-    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "").is_ok());
-    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "").is_ok());
+    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "", &[]).is_ok());
+    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "", &[]).is_ok());
+    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "", &[]).is_ok());
     // Anything else is still a different place: another file, a suffix of it, another line.
     assert_eq!(
-        accept_entry(&f, &with("other/webhook.rs", 9), ""),
+        accept_entry(&f, &with("other/webhook.rs", 9), "", &[]),
         Err(Reject::Mismatch)
     );
     assert_eq!(
-        accept_entry(&f, &with("handlers/webhook.rs", 9), ""),
+        accept_entry(&f, &with("handlers/webhook.rs", 9), "", &[]),
         Err(Reject::Mismatch)
     );
     assert_eq!(
-        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), ""),
+        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), "", &[]),
         Err(Reject::Mismatch)
     );
     // The finding's own path is read the same way.
     let mut dotted = statement(SHORT);
     dotted.path = format!("./{HANDLER}");
-    assert!(accept_entry(&dotted, &with(HANDLER, 9), "").is_ok());
+    assert!(accept_entry(&dotted, &with(HANDLER, 9), "", &[]).is_ok());
 }
 
 #[tokio::test]
@@ -1768,11 +1783,11 @@ fn a_secret_shaped_name_the_statement_kept_is_compared_after_the_same_redaction(
         "The key {} in src/config.rs is committed; move it to the environment.",
         p.value
     );
-    let written = accept_entry(&f, &entry(&f, &reply), "").expect("both sides redacted alike");
+    let written = accept_entry(&f, &entry(&f, &reply), "", &[]).expect("both sides redacted alike");
     assert!(!written.contains(&p.value), "the value is never written");
     // A reply that drops the key's name still fails.
     assert!(matches!(
-        accept_entry(&f, &entry(&f, "It is committed in src/config.rs."), ""),
+        accept_entry(&f, &entry(&f, "It is committed in src/config.rs."), "", &[]),
         Err(Reject::DropsNamedToken(_))
     ));
 }
@@ -1967,4 +1982,398 @@ async fn a_stopped_run_sends_no_second_detail_try() {
     assert!(meter.outage_stopped(), "three transport failures in a row");
     assert_eq!(llm.prompts(Role::Regen).len(), 3);
     assert_eq!(failed.len(), 1);
+}
+
+// ── P2: a slash-joined word pair is not a path; a compound token needs its parts ────────────
+
+#[test]
+fn a_slash_joined_word_pair_is_not_a_path_and_is_not_asked_for_whole() {
+    let f = statement("Risking collisions/overwrites between uploads in src/upload.rs.");
+    let text = "Two uploads of one name overwrite each other, a collision, in src/upload.rs.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // The pair is not a named token at all.
+    assert!(named_tokens("collisions/overwrites", &[]).is_empty());
+}
+
+#[test]
+fn a_path_without_an_extension_is_a_path_only_when_it_resolves_in_the_file_set() {
+    let files = vec![(
+        "lib/supabase/client.ts".to_string(),
+        "export const x = 1;".to_string(),
+    )];
+    let tokens = named_tokens("see lib/supabase for the client", &files);
+    assert_eq!(tokens.len(), 1);
+    assert!(tokens[0].is_path);
+    assert!(named_tokens("see lib/supabase for the client", &[]).is_empty());
+}
+
+#[test]
+fn a_named_file_dropped_from_the_text_is_still_rejected() {
+    let f = statement("The client is built in lib/supabase/client.ts without a check.");
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "The client is built without a check."),
+            "",
+            &[]
+        ),
+        Err(Reject::DropsNamedToken(
+            "lib/supabase/client.ts".to_string()
+        ))
+    );
+    // A bare file name with a known extension is also still required whole.
+    let f = statement("The seed.sql grants everything.");
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "The seed grants everything to everyone."),
+            "",
+            &[]
+        ),
+        Err(Reject::DropsNamedToken("seed.sql".to_string()))
+    );
+}
+
+#[test]
+fn a_compound_token_is_accepted_when_each_part_is_present() {
+    let f = statement("No getAuthenticatorAssuranceLevel/aal2 check before the update.");
+    let text = "The action never calls getAuthenticatorAssuranceLevel() or compares it to aal2 \
+                before it updates the row.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // A part missing from the text is a dropped name.
+    let text = "The action never calls getAuthenticatorAssuranceLevel() before it updates the row.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "", &[]),
+        Err(Reject::DropsNamedToken("aal2".to_string()))
+    );
+    // A dotted column reference is accepted when the text names each part.
+    let f = statement("Trigger skips audit_log.action for service writes.");
+    let text = "The trigger skips the action column in internal.audit_log for service writes.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    let f = statement("created_by/modified_by are client supplied.");
+    assert!(accept_entry(
+        &f,
+        &entry(&f, "Both created_by and modified_by come from the client."),
+        "",
+        &[]
+    )
+    .is_ok());
+}
+
+/// A dotted name made only of plain words (`supabase.from`, `req.json`, `error.message`) is a
+/// member access, one symbol: its parts are words any text contains ("from", "json", "error"),
+/// so splitting it would let the dropped name through. It is required whole, as before P2.
+#[test]
+fn a_dotted_member_access_of_plain_words_is_still_required_whole() {
+    let f = statement("The handler calls supabase.from(...) directly with no repository layer.");
+    let text = "The handler queries the database directly from the component through the \
+                supabase client, with no repository layer in between.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "", &[]),
+        Err(Reject::DropsNamedToken("supabase.from".to_string()))
+    );
+    let text = "The handler calls supabase.from(\"documents\") itself, with no repository layer.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // The token is one symbol with no parts to split.
+    let tokens = named_tokens("calls supabase.from(...) directly", &[]);
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].text, "supabase.from");
+    assert!(tokens[0].parts.is_empty());
+    // Prose abbreviations are still not tokens.
+    assert!(named_tokens("e.g. the handler, i.e. this one", &[]).is_empty());
+}
+
+// ── P3: the exploit-precondition check reads the explanation of a confident statement ───────
+
+#[test]
+fn a_real_exploit_precondition_on_a_confident_statement_is_still_rejected() {
+    let f = statement(SHORT);
+    let text = format!("{FULL} Exploitation requires a valid session cookie.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // Even in a sentence that opens like a fix, a sentence about exploiting it is read.
+    let text = format!("{FULL} Add the check, though an attacker can abuse it only if logged in.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // And a "requires" with a backticked object in a sentence about exploiting it.
+    let text = format!("{FULL} Exploiting it requires a `session` cookie.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_borderline_statement_may_say_what_would_settle_it() {
+    let f =
+        statement("Borderline: profile edits are not gated for verified members in src/config.rs.");
+    let text = "It is a problem only if profile edits are meant for verified members, as \
+                REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
+    let kept = accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).unwrap();
+    assert!(kept.starts_with("Borderline: "));
+    // The same words on a confident statement are an invented precondition.
+    let confident = statement("Profile edits are not gated for verified members in src/config.rs.");
+    assert_eq!(
+        accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_fix_direction_sentence_is_not_read_for_a_precondition() {
+    let f = statement("The select policy is open to every row in src/config.rs.");
+    let text = "Any signed-in user can read every row of the table in src/config.rs. Replace the \
+                policy with one that depends on the row owner.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    let text = "Any signed-in user can read every row of the table in src/config.rs. To fix this, \
+                the owner must confirm the defaults, assuming nothing else reads it.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // The same words in an explanation sentence are read.
+    let text = "Any signed-in user can read every row of the table in src/config.rs, assuming the \
+                table is shared. Replace the policy.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn a_requires_whose_object_is_a_backticked_construct_is_not_a_precondition() {
+    let f = statement("The select policy is open to every row in src/config.rs.");
+    let text = "The policy requires a `to authenticated` clause and does not have one, in \
+                src/config.rs, so every row is readable.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // A bare "requires" is still one.
+    let text = "The policy requires a role clause and does not have one, in src/config.rs.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+#[test]
+fn the_shared_precondition_phrase_check_is_unchanged() {
+    // Calibration's raise-block reads the whole text with this function; the detail check
+    // narrows what it passes in, never what the function counts.
+    assert!(mentions_exploit_precondition(
+        "The policy requires a `to authenticated` clause."
+    ));
+    assert!(mentions_exploit_precondition(
+        "Replace it, assuming nothing else reads it."
+    ));
+    assert!(!mentions_exploit_precondition(
+        "The endpoint requires no authentication."
+    ));
+}
+
+// ── P6: why a detail reply was turned down ──────────────────────────────────────────────────
+
+#[test]
+fn a_rejection_names_what_was_wrong() {
+    assert!(Reject::DropsNamedToken("seed.sql".to_string())
+        .reason()
+        .contains("`seed.sql`"));
+    assert!(Reject::Mismatch.reason().contains("path or line"));
+    assert!(Reject::InventedPrecondition
+        .reason()
+        .contains("exploit precondition"));
+}
+
+/// Round one answers only the first of two findings; round two (one finding) answers it. The
+/// round-one reply names the finding it left out but stays good (the explanation it did write
+/// is kept, so a resume replays it instead of paying for both again); the round-two reply stays
+/// good with no reason.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stays_done() {
+    use crate::run_store::journal::{CallFile, EntryStatus, JournalLlm};
+    crate::prompt_frame::with_seed(Some([5u8; crate::prompt_frame::NONCE_BYTES]), async {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", dir.path());
+        let repo = tempfile::tempdir().unwrap();
+        let store = crate::run_store::RunStore::create(crate::run_store::NewRun {
+            project_key: "p".to_string(),
+            repos: vec![(REPO.to_string(), repo.path().to_path_buf())],
+            models: crate::run_store::ModelsRecord {
+                audit: "claude-a".to_string(),
+                calibration: "claude-a".to_string(),
+                fix: "claude-a".to_string(),
+                backend: "api".to_string(),
+                mode: "parallel".to_string(),
+                resolved: true,
+            },
+            ai_scan_key: crate::scan_cache::AiScanKey {
+                audit_model: "claude-a".to_string(),
+                calibration_model: String::new(),
+                prompt_schema_version: AUDIT_PROMPT_SCHEMA_VERSION,
+                directives_fingerprint: "fp".to_string(),
+                terse_output: true,
+                applies_to_routing: false,
+            },
+            args: serde_json::json!({}),
+            estimate_usd: None,
+            include_alternatives: false,
+            origin: crate::run_store::RunOrigin::Cli,
+            project_id: None,
+        })
+        .unwrap();
+        let llm = RoleLlm::new("{}", Regen::FirstOnly);
+        let journal = JournalLlm::new(&llm, store.clone());
+        let (out, failed) = regenerate_full_details(
+            &journal,
+            REPO,
+            n_findings(2),
+            &files(),
+            &[],
+            &nonce(),
+            None,
+            None,
+        )
+        .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(out
+            .iter()
+            .all(|f| !f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+
+        let files: Vec<CallFile> = std::fs::read_dir(store.dir().join("calls"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).ok())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let entries: Vec<_> = files.iter().map(|f| f.entries[&0].clone()).collect();
+        assert!(
+            entries.iter().all(|e| e.status == EntryStatus::Done),
+            "a reply with a written explanation in it stays good: {entries:?}"
+        );
+        let first = entries
+            .iter()
+            .find(|e| e.reason.is_some())
+            .expect("the partly rejected reply says why");
+        let reason = first.reason.as_deref().unwrap();
+        assert!(
+            reason.starts_with("1 of 2 detail(s) turned down"),
+            "{reason}"
+        );
+        assert!(reason.contains("left this finding out"), "{reason}");
+        assert_eq!(entries.iter().filter(|e| e.reason.is_none()).count(), 1);
+    })
+    .await;
+}
+
+/// The failed part's last attempt lists, per finding, why its latest reply was turned down.
+#[tokio::test]
+async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
+    let (_out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(failed.len(), 1);
+    let listed: Vec<&String> = failed[0]
+        .attempts
+        .iter()
+        .flat_map(|a| a.rejections.iter())
+        .collect();
+    assert_eq!(listed.len(), 1, "{:?}", failed[0].attempts);
+    assert!(listed[0].contains("exploit precondition"), "{}", listed[0]);
+}
+
+// ── P7: a detail reply counts as wasted by the share of its entries rejected ────────────────
+
+#[tokio::test]
+async fn a_detail_reply_is_wasted_by_the_share_of_its_entries_rejected() {
+    // Round one answers 1 of 2 findings (the other is left out): half of that call is waste.
+    // Round two asks for the one left and gets it: no waste.
+    let llm = RoleLlm::new("{}", Regen::FirstOnly);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (_out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let usage = meter
+        .stage_telemetry(0)
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .expect("the stage was recorded")
+        .usage
+        .clone();
+    assert_eq!(usage.calls, 2);
+    assert_eq!(
+        usage.wasted_calls, 1,
+        "only the half-rejected call: {usage:?}"
+    );
+    assert_eq!(usage.wasted_input_tokens, 500, "half of 1,000: {usage:?}");
+    assert_eq!(usage.wasted_output_tokens, 50, "half of 100: {usage:?}");
+}
+
+#[tokio::test]
+async fn a_detail_reply_with_every_entry_written_is_not_waste() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::Writes);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let stages = meter.stage_telemetry(0).stages;
+    let usage = &stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.wasted_calls, 0, "{usage:?}");
+}
+
+#[tokio::test]
+async fn a_cut_off_detail_reply_stays_counted_whole_and_is_not_counted_twice() {
+    // Cut off after one complete entry: the call is wasted once (as before), not once for the
+    // cut-off and again for the entry it lost.
+    let llm = RoleLlm::new("{}", Regen::CutAfter(1));
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let stages = meter.stage_telemetry(0).stages;
+    let usage = &stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.wasted_calls, 1, "{usage:?}");
+    assert_eq!(usage.wasted_input_tokens, 1_000, "{usage:?}");
 }
