@@ -2168,9 +2168,14 @@ pub struct BatchMessage {
 /// Write the request's own `effort` (when it asks for one) into `body.output_config.effort`.
 /// Must run BEFORE [`crate::model_registry::conform_messages_body`]: the conformer only fills
 /// the model's effort default when none is present, so a caller-chosen effort wins. A blank
-/// effort is treated as none. The one place a request's effort reaches a wire body (real-time
-/// and batch alike).
-fn apply_request_effort(req: &LlmRequest, body: &mut serde_json::Value) {
+/// effort is treated as none. Sent only to a model that accepts an effort setting
+/// ([`crate::model_registry::accepts_effort`]): the stage that chose it does not know which
+/// model it will run on, and an older model answers the field with HTTP 400. The one place a
+/// request's effort reaches a wire body (real-time and batch alike).
+fn apply_request_effort(req: &LlmRequest, model: &str, body: &mut serde_json::Value) {
+    if !crate::model_registry::accepts_effort(model) {
+        return;
+    }
     if let Some(effort) = req
         .effort
         .as_deref()
@@ -2197,7 +2202,7 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
     if let Some(system) = &req.system {
         body["system"] = serde_json::json!(system);
     }
-    apply_request_effort(req, &mut body);
+    apply_request_effort(req, model, &mut body);
     if let Some(t) = req.temperature_for(model) {
         body["temperature"] = serde_json::json!(t);
     }
@@ -2278,7 +2283,7 @@ pub fn build_batch_item(
     // added (`output_config`) onto the typed params. The typed struct has no field for any
     // rejected parameter, so there is nothing to strip.
     let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
-    apply_request_effort(req, &mut shape);
+    apply_request_effort(req, model, &mut shape);
     crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
@@ -4121,6 +4126,37 @@ mod tests {
         ] {
             let body = messages_request_body(&req, "claude-haiku-5-5", CacheTtl::FiveMinutes);
             assert_eq!(body["output_config"]["effort"], "high", "{body}");
+        }
+    }
+
+    /// A stage chooses its effort without knowing the model: every model of the 5.x line carries
+    /// it (Opus 5.5 and Haiku 5.5 default to `medium` and Sonnet 5.5 to `high`, so the chosen
+    /// effort wins on all of them), and a model that does not take the setting never receives it.
+    #[test]
+    fn a_stage_effort_reaches_every_model_that_takes_one_and_no_other() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+        ] {
+            let req = LlmRequest::new("detail").with_effort("medium");
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert_eq!(body["output_config"]["effort"], "medium", "{model}: {body}");
+            let batch =
+                serde_json::to_value(build_batch_item("c0-b0", &req, model, BATCH_CACHE_TTL))
+                    .unwrap();
+            assert_eq!(
+                batch["params"]["output_config"]["effort"], "medium",
+                "{model}"
+            );
+        }
+        for model in ["claude-haiku-4-5-20251001", "claude-unheard-of-9"] {
+            let req = LlmRequest::new("detail").with_effort("medium");
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert!(body.get("output_config").is_none(), "{model}: {body}");
         }
     }
 

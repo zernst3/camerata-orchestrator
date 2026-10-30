@@ -204,8 +204,9 @@ async fn an_explicit_fix_model_wins_over_the_switch_in_both_positions() {
         for call in &calls {
             assert_eq!(call.model, "explicit-fix-model", "{calls:?}");
             assert_eq!(
-                call.effort, None,
-                "effort is only sent when the fix model is Haiku: {calls:?}"
+                call.effort.as_deref(),
+                Some(FIX_STAGE_EFFORT),
+                "the fix stage asks for its effort on every model: {calls:?}"
             );
         }
     }

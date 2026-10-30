@@ -1410,16 +1410,30 @@ async fn a_batch_asks_for_the_output_it_needs_per_finding() {
         .iter()
         .map(|(_, q)| q.max_tokens)
         .collect();
-    // 10 findings at 450 is 4,500 (above the 4,096 floor); 5 and 1 are held to the floor.
-    assert_eq!(asks[0], 4_500);
-    assert_eq!(asks[1], 4_096);
-    assert!(asks.iter().all(|&t| t >= 4_096));
+    // The text of 10 findings is 10 x 450 = 4,500 tokens; the stage runs at medium effort, so the
+    // thinking allowance (4,000) rides on top. Half a batch and one finding follow the same sum.
+    let allowance =
+        camerata_ui_core::scan::thinking_allowance_tokens(camerata_ui_core::scan::DETAIL_EFFORT);
+    assert_eq!(allowance, 4_000);
+    assert_eq!(asks[0], 4_500 + allowance);
+    assert_eq!(asks[1], 5 * 450 + allowance);
+    assert!(asks.iter().all(|&t| t >= 4_096 + 300));
     assert_eq!(
         asks[0],
-        scaled_max_tokens(
-            camerata_ui_core::scan::REGEN_BATCH_SIZE,
-            camerata_ui_core::scan::REGEN_TOKENS_PER_FINDING
-        )
+        camerata_ui_core::scan::regen_call_max_tokens(camerata_ui_core::scan::REGEN_BATCH_SIZE)
+    );
+    // Every round asks for medium effort (the detail rewrite is the scan's sentence, expanded).
+    let efforts: Vec<Option<String>> = llm
+        .log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, q)| q.effort.clone())
+        .collect();
+    assert!(!efforts.is_empty());
+    assert!(
+        efforts.iter().all(|e| e.as_deref() == Some("medium")),
+        "{efforts:?}"
     );
 }
 

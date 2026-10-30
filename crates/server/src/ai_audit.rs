@@ -3232,24 +3232,66 @@ pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
 }
 
+/// `max_tokens` for a call describing `n_items` things whose reply runs at `effort`: the
+/// per-item text budget PLUS the effort's thinking allowance
+/// ([`camerata_ui_core::scan::output_cap_tokens`]), within the floor and the ceiling. The 5.x
+/// models think before they write and the thinking counts against `max_tokens`; a cap that
+/// covers only the text cuts the reply off with nothing in it.
+pub(crate) fn staged_max_tokens(n_items: usize, per_item_tokens: u32, effort: &str) -> u32 {
+    camerata_ui_core::scan::output_cap_tokens(
+        (n_items as u32).saturating_mul(per_item_tokens),
+        effort,
+    )
+}
+
+/// The effort each stage asks for (`output_config.effort`), or `None` for a stage that keeps the
+/// model's own default (the deep tier and the clone judge). Per STAGE, never per model: the
+/// registry's per-model default (Opus 5.5 and Haiku 5.5 default to `medium` and were forced to
+/// `high` for every call) is only the fallback for a request that names none.
+pub(crate) fn stage_effort(stage: Stage) -> Option<&'static str> {
+    use camerata_ui_core::scan as s;
+    match stage {
+        Stage::ScanPass => Some(s::SCAN_EFFORT),
+        Stage::DetailRegeneration => Some(s::DETAIL_EFFORT),
+        Stage::Calibration => Some(s::CALIBRATION_EFFORT),
+        Stage::Alternatives => Some(s::ALTERNATIVES_EFFORT),
+        Stage::FixGeneration => Some(s::FIX_EFFORT),
+        Stage::DeepTier | Stage::CloneJudge => None,
+    }
+}
+
+/// `req` with `stage`'s effort set ([`stage_effort`]).
+pub(crate) fn with_stage_effort(req: LlmRequest, stage: Stage) -> LlmRequest {
+    match stage_effort(stage) {
+        Some(effort) => req.with_effort(effort),
+        None => req,
+    }
+}
+
 /// `max_tokens` for one scan request holding `n_rules` rules: the measured per-rule output budget
 /// ([`camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE`], the figure the pre-flight estimate
-/// prices the scan's output from) through [`scaled_max_tokens`], never below the flat cap the scan
-/// used before it scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the
-/// shared ceiling. A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
+/// prices the scan's output from) plus the scan's thinking allowance ([`staged_max_tokens`] at
+/// [`camerata_ui_core::scan::SCAN_EFFORT`]), never below the flat cap the scan used before it
+/// scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the shared ceiling.
+/// A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
 pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
-    scaled_max_tokens(n_rules, camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE)
-        .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
+    staged_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::SCAN_EFFORT,
+    )
+    .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
 }
 
 /// `max_tokens` for one alternatives request asking about `n_rules` rules: the measured per-rule
 /// budget ([`camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE`], the figure the
-/// pre-flight estimate prices the stage from) through [`scaled_max_tokens`], so never below the
-/// flat 4096 the stage used before it scaled and never above the shared ceiling.
+/// pre-flight estimate prices the stage from) plus the stage's thinking allowance, so never below
+/// the flat 4096 the stage used before it scaled and never above the shared ceiling.
 pub(crate) fn alternatives_max_tokens(n_rules: usize) -> u32 {
-    scaled_max_tokens(
+    staged_max_tokens(
         n_rules,
         camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::ALTERNATIVES_EFFORT,
     )
 }
 
@@ -3271,6 +3313,26 @@ const CALIBRATION_BATCH_SIZE: usize = 40;
 /// full prose sentence describing a concrete, codebase-specific change, materially longer
 /// than a calibration verdict.
 const FIX_TOKENS_PER_FINDING: u32 = 250;
+
+/// `max_tokens` for one calibration call over `n_findings` findings: the per-verdict text budget
+/// plus the calibration stage's thinking allowance.
+pub(crate) fn calibration_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        VERIFY_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::CALIBRATION_EFFORT,
+    )
+}
+
+/// `max_tokens` for one fix call over `n_findings` findings: the per-fix text budget plus the
+/// fix stage's thinking allowance.
+pub(crate) fn fix_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        FIX_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::FIX_EFFORT,
+    )
+}
 
 /// How many findings fit in ONE fix-generation call. Same rationale as
 /// `CALIBRATION_BATCH_SIZE` (a full chunk already exceeds the old flat floor); smaller
@@ -3410,11 +3472,14 @@ pub async fn verify_findings(
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
         // request per pass (LlmRequest is consumed by complete_streaming).
         let build_req = || {
-            LlmRequest::new(prompt.clone())
-                .with_system(system.clone())
-                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING))
-                .with_temperature(AUDIT_TEMPERATURE)
-                .with_model(stage_model(calibration_model))
+            with_stage_effort(
+                LlmRequest::new(prompt.clone())
+                    .with_system(system.clone())
+                    .with_max_tokens(calibration_max_tokens(chunk_len))
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_model(stage_model(calibration_model)),
+                Stage::Calibration,
+            )
         };
 
         // Register (or replace) this pass's transcript entry with the REAL prompt before the
@@ -3540,14 +3605,14 @@ pub async fn verify_findings(
             uncalibrated.remove(&chunk_idx);
             continue;
         };
-        let req = LlmRequest::new(prompt)
-            .with_system(system.clone())
-            .with_max_tokens(scaled_max_tokens(
-                chunk_results[chunk_idx].len(),
-                VERIFY_TOKENS_PER_FINDING,
-            ))
-            .with_temperature(AUDIT_TEMPERATURE)
-            .with_model(stage_model(calibration_model));
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.clone())
+                .with_max_tokens(calibration_max_tokens(chunk_results[chunk_idx].len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
         let mut on_delta = |_: &str| {};
         match llm.complete_streaming(req, &mut on_delta).await {
             Ok(resp) => {
@@ -4712,14 +4777,17 @@ impl AlternativesAsk<'_> {
                 },
             );
         }
-        let req = LlmRequest::new(prompt)
-            .with_system(crate::prompt_frame::with_untrusted_clause(
-                alternatives_system_prompt(),
-                nonce,
-            ))
-            .with_max_tokens(alternatives_max_tokens(rules.len()))
-            .with_temperature(AUDIT_TEMPERATURE)
-            .with_model(stage_model(audit_model));
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(crate::prompt_frame::with_untrusted_clause(
+                    alternatives_system_prompt(),
+                    nonce,
+                ))
+                .with_max_tokens(alternatives_max_tokens(rules.len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(audit_model)),
+            Stage::Alternatives,
+        );
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
         // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
@@ -4816,12 +4884,12 @@ const MAX_FIX_REGENERATIONS: usize = 2;
 /// [`DEFAULT_MODEL`] (the cockpit and the CLI print its name); re-exported here for the server.
 pub use camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
 
-/// Rank 10: the `output_config.effort` the fix call sends when it runs on
-/// [`FIX_STAGE_HAIKU_MODEL`]. That model thinks adaptively at `medium` unless told otherwise;
-/// the fix task is bounded by its evidence and re-checked, so `low` is the starting point (see
-/// `docs/TECHNICAL.md`, "Fix stage model and effort"). Raise it only when the give-up rate or a
-/// fix-quality sample says the fixes need more.
-pub const FIX_STAGE_EFFORT: &str = "low";
+/// Rank 10: the `output_config.effort` the fix call sends, on every model. The 5.x models think
+/// adaptively at `medium` unless told otherwise; the fix task is bounded by its evidence and
+/// re-checked, so `low` is the starting point (see `docs/TECHNICAL.md`, "Fix stage model and
+/// effort"). Raise it only when the give-up rate or a fix-quality sample says the fixes need
+/// more.
+pub const FIX_STAGE_EFFORT: &str = camerata_ui_core::scan::FIX_EFFORT;
 
 /// The model the fix stage runs on, in precedence order:
 ///
@@ -4849,14 +4917,14 @@ pub fn resolve_fix_model<'a>(
     calibration_model.or(model)
 }
 
-/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whenever the fix model is
-/// [`FIX_STAGE_HAIKU_MODEL`], whether it got there by default (`fix_on_haiku` on) or because
-/// the operator picked it explicitly (with the switch on or off); any other model gets none and
-/// keeps the request it always had. Gated on the model, not the switch, because the effort is a
-/// property of how Haiku 5.5 behaves (it thinks at `medium` unless told) and not every model
-/// accepts an effort setting, so an explicit non-Haiku pick must not receive it.
-pub fn fix_effort(fix_model: Option<&str>) -> Option<&'static str> {
-    (fix_model == Some(FIX_STAGE_HAIKU_MODEL)).then_some(FIX_STAGE_EFFORT)
+/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whatever the fix model is,
+/// because the effort belongs to the STAGE, not the model (Opus 5.5 and Haiku 5.5 both default
+/// to `medium`, Sonnet 5.5 to `high`; a fix is one bounded sentence per finding at any of
+/// them). The request carries it only to a model that accepts an effort setting
+/// (`camerata_llm::model_registry::accepts_effort`), so an explicit pick of an older model keeps
+/// the request it always had.
+pub fn fix_effort() -> &'static str {
+    FIX_STAGE_EFFORT
 }
 
 /// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
@@ -5562,13 +5630,13 @@ async fn run_fix_specifics_round(
                 build_fix_specific_block(&refs, files, corpus, &local_feedback, nonce)
             )
         };
-        let mut req = LlmRequest::new(prompt)
-            .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING))
-            .with_model(stage_model(fix_model));
-        if let Some(effort) = fix_effort(fix_model) {
-            req = req.with_effort(effort);
-        }
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.to_string())
+                .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_model(stage_model(fix_model)),
+            Stage::FixGeneration,
+        );
         // Routed through the STREAMING transport (not the flat `complete`) so a large
         // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
         // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
@@ -6291,14 +6359,17 @@ async fn audit_pass(
     // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
     n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
-    let mut req = LlmRequest::new(prompt)
-        .with_system(crate::prompt_frame::with_untrusted_clause(
-            audit_system_prompt_with(terse_output_of(meter)),
-            nonce,
-        ))
-        .with_max_tokens(scan_max_tokens(n_rules))
-        .with_temperature(AUDIT_TEMPERATURE)
-        .with_model(stage_model(audit_model));
+    let mut req = with_stage_effort(
+        LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                audit_system_prompt_with(terse_output_of(meter)),
+                nonce,
+            ))
+            .with_max_tokens(scan_max_tokens(n_rules))
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_model(stage_model(audit_model)),
+        Stage::ScanPass,
+    );
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
@@ -7299,15 +7370,18 @@ async fn run_passes_batch(
                 &task_line,
                 &rb,
             );
-            let req = LlmRequest::new(prompt)
-                .with_system(crate::prompt_frame::with_untrusted_clause(
-                    audit_system_prompt_with(terse_output_of(meter)),
-                    nonce,
-                ))
-                .with_max_tokens(scan_max_tokens(batch.len()))
-                .with_model(model.clone())
-                .with_cache_breakpoints(cache_bps)
-                .with_temperature(AUDIT_TEMPERATURE);
+            let req = with_stage_effort(
+                LlmRequest::new(prompt)
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        audit_system_prompt_with(terse_output_of(meter)),
+                        nonce,
+                    ))
+                    .with_max_tokens(scan_max_tokens(batch.len()))
+                    .with_model(model.clone())
+                    .with_cache_breakpoints(cache_bps)
+                    .with_temperature(AUDIT_TEMPERATURE),
+                Stage::ScanPass,
+            );
             work.push(BatchWork {
                 custom_id: format!("c{ci}-b{bi}"),
                 ci,
@@ -12721,6 +12795,9 @@ mod smoke_findings_tests;
 mod drift_tests;
 
 #[cfg(test)]
+mod output_caps_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -14276,12 +14353,21 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "a full single chunk makes exactly one call");
-        let expected = scaled_max_tokens(CALIBRATION_BATCH_SIZE, VERIFY_TOKENS_PER_FINDING);
+        let expected = calibration_max_tokens(CALIBRATION_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
         );
         assert_eq!(seen[0].max_tokens, expected);
+        assert_eq!(
+            seen[0].effort.as_deref(),
+            Some("medium"),
+            "calibration runs at medium effort"
+        );
+        assert!(
+            expected >= CALIBRATION_BATCH_SIZE as u32 * VERIFY_TOKENS_PER_FINDING + 4_000,
+            "the cap covers the verdicts' text plus the thinking allowance"
+        );
     }
 
     /// A SMALL finding set must see ZERO behavior change — it stays pinned at the original
@@ -14304,7 +14390,8 @@ mod tests {
         .await;
 
         let seen = completer.seen.lock().unwrap();
-        assert_eq!(seen[0].max_tokens, 4096);
+        assert_eq!(seen[0].max_tokens, calibration_max_tokens(1));
+        assert!(seen[0].max_tokens >= 4096, "never under the old flat floor");
     }
 
     /// A fake that streams a FEW tokens of real output and then returns `Ok` with only that
@@ -22371,7 +22458,7 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
-        let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
+        let expected = fix_max_tokens(FIX_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
@@ -22405,8 +22492,8 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         let batched_rounds = MAX_FIX_REGENERATIONS + 1;
-        let batched_max_tokens = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
-        let solo_max_tokens = scaled_max_tokens(1, FIX_TOKENS_PER_FINDING);
+        let batched_max_tokens = fix_max_tokens(FIX_BATCH_SIZE);
+        let solo_max_tokens = fix_max_tokens(1);
         assert!(
             seen.len() > batched_rounds,
             "expected solo-round calls after the batched rounds, got {} total calls",

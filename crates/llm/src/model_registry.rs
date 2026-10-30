@@ -292,6 +292,26 @@ pub fn accepts_sampling_params(model_id: &str) -> bool {
         .strict_params
 }
 
+/// Whether `model_id` accepts `output_config.effort`: every model of the 5.x line (strict
+/// request shape) does; the older Haiku in the catalog and an id the catalog does not know do
+/// not get one (a field the API answers with HTTP 400 is worse than a default effort). Callers
+/// that choose an effort per stage ([`crate::llm::LlmRequest::with_effort`]) can set it for any
+/// model; the request body carries it only where this is true.
+pub fn accepts_effort(model_id: &str) -> bool {
+    registry_entry_for(model_id)
+        .is_some_and(|e| e.shape.strict_params || e.shape.effort != EffortPolicy::Omit)
+}
+
+/// The most output tokens one reply of `model_id` may carry (the registry's `max_output`), or
+/// `None` for a model the catalog does not know or lists without a figure. A request's
+/// `max_tokens` is clamped to this so a runaway guard never asks for more than the model can
+/// write.
+pub fn max_output_for(model_id: &str) -> Option<u32> {
+    registry_entry_for(model_id)
+        .map(|e| e.max_output)
+        .filter(|n| *n > 0)
+}
+
 /// THE one place a Messages-API request body is made valid for its model. Every Anthropic
 /// `/v1/messages`, batch `params` and `count_tokens` body is passed through this just before
 /// it is sent; no call site tests a model id itself.
@@ -2607,6 +2627,28 @@ mod tests {
             assert_eq!(e.context, ctx, "{id}");
             assert_eq!(e.max_output, max_out, "{id}");
         }
+    }
+
+    /// A stage sizes its runaway guard from the model's own output limit, and sends an effort
+    /// only where the model takes one.
+    #[test]
+    fn the_registry_answers_what_a_model_can_write_and_whether_it_takes_an_effort() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            assert_eq!(max_output_for(id), Some(128_000), "{id}");
+            assert!(accepts_effort(id), "{id}");
+        }
+        // A dated alias resolves like its base.
+        assert_eq!(max_output_for("claude-sonnet-5-5-20261001"), Some(128_000));
+        // Listed without a figure, or not listed: no limit is claimed, and no effort is sent.
+        assert_eq!(max_output_for("claude-haiku-4-5-20251001"), None);
+        assert_eq!(max_output_for("claude-unheard-of-9"), None);
+        assert!(!accepts_effort("claude-haiku-4-5-20251001"));
+        assert!(!accepts_effort("claude-unheard-of-9"));
     }
 
     #[test]

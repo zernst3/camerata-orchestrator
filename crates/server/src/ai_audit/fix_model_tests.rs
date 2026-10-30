@@ -58,49 +58,14 @@ fn switch_off_is_exactly_calibration_or_scan_model() {
     }
 }
 
-/// ONE effort rule: `low` whenever the fix model is Haiku 5.5, and nothing for any other model.
-/// It does not depend on the switch: Haiku reached by default (switch on) and Haiku picked
-/// explicitly (switch on or off) are the same call.
+/// ONE effort rule: `low` for the fix stage, whatever the fix model is and whatever the switch
+/// says. The effort belongs to the stage; Opus 5.5 and Haiku 5.5 default to `medium` and would
+/// otherwise think at length over one sentence per finding.
 #[test]
-fn effort_is_low_whenever_the_fix_model_is_haiku_and_never_otherwise() {
+fn effort_is_low_for_the_fix_stage_on_every_model() {
     assert_eq!(FIX_STAGE_EFFORT, "low");
-    assert_eq!(
-        fix_effort(Some(FIX_STAGE_HAIKU_MODEL)),
-        Some(FIX_STAGE_EFFORT)
-    );
-    assert_eq!(fix_effort(Some("claude-sonnet-5")), None);
-    assert_eq!(fix_effort(None), None);
-
-    // Through the resolver, for every way Haiku can be the fix model.
-    let effort_for = |explicit: Option<&str>, switch: bool| {
-        fix_effort(resolve_fix_model(
-            explicit,
-            switch,
-            Some("claude-sonnet-5"),
-            None,
-        ))
-    };
-    assert_eq!(effort_for(None, true), Some("low"), "default Haiku");
-    assert_eq!(
-        effort_for(Some(FIX_STAGE_HAIKU_MODEL), true),
-        Some("low"),
-        "explicit Haiku, switch on"
-    );
-    assert_eq!(
-        effort_for(Some(FIX_STAGE_HAIKU_MODEL), false),
-        Some("low"),
-        "explicit Haiku, switch off"
-    );
-    assert_eq!(
-        effort_for(None, false),
-        None,
-        "switch off follows the scan model"
-    );
-    assert_eq!(
-        effort_for(Some("claude-opus-5"), true),
-        None,
-        "explicit non-Haiku"
-    );
+    assert_eq!(fix_effort(), "low");
+    assert_eq!(stage_effort(Stage::FixGeneration), Some("low"));
 }
 
 /// Records the model and effort of every request; answers with no fix (so every finding sent
@@ -191,7 +156,11 @@ async fn the_chosen_model_and_effort_reach_the_completer_on_every_round() {
             Some(FIX_STAGE_HAIKU_MODEL),
             Some(FIX_STAGE_EFFORT),
         ),
-        (switch_off(), Some("claude-sonnet-5"), None),
+        (
+            switch_off(),
+            Some("claude-sonnet-5"),
+            Some(FIX_STAGE_EFFORT),
+        ),
     ] {
         let (f, files) = finding_with_code();
         let llm = Recorder::default();

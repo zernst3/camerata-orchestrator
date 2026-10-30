@@ -458,7 +458,7 @@ async fn a_truncated_batch_item_gets_the_shared_real_time_truncation_retry() {
     assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         *api.realtime.max_tokens.lock().unwrap(),
-        vec![16_384],
+        vec![2 * scan_max_tokens(1)],
         "the same doubled cap the real-time retry asks for"
     );
     assert!(

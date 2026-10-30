@@ -98,12 +98,62 @@ pub const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
 /// The ceiling of `max_tokens` for one aggregate call.
 pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
 
-/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding budget,
-/// clamped to the aggregate floor and ceiling, exactly as the server sizes the request.
-pub fn regen_call_max_tokens(findings: usize) -> u32 {
-    (findings as u32)
-        .saturating_mul(REGEN_TOKENS_PER_FINDING)
+/// The effort the scan stage asks for (`output_config.effort`). The scan's judgment is the
+/// product, so it keeps `high` on every model: never lowered without an answer-key comparison.
+pub const SCAN_EFFORT: &str = "high";
+
+/// The effort the detail-regeneration stage asks for. It rewrites a sentence the scan already
+/// wrote, so `medium` is enough.
+pub const DETAIL_EFFORT: &str = "medium";
+
+/// The effort the calibration stage asks for: one verdict per finding from the finding's own
+/// text, so `medium`.
+pub const CALIBRATION_EFFORT: &str = "medium";
+
+/// The effort the alternatives stage asks for: pick one documented option per rule from the
+/// evidence shown, so `medium`.
+pub const ALTERNATIVES_EFFORT: &str = "medium";
+
+/// The effort the fix stage asks for: one concrete sentence per finding, so `low`.
+pub const FIX_EFFORT: &str = "low";
+
+/// How many output tokens a model may spend THINKING before it writes, per effort, on top of the
+/// reply's text. The 5.x models think adaptively and thinking counts against `max_tokens`, so a
+/// cap sized for the visible text alone cuts the reply off with nothing in it. Measured from the
+/// stored replies of the two efficiency runs on the supabase-portal fixture (output tokens
+/// billed minus the reply text, by stage, Haiku 5.5 at its forced `high`): scan replies thought
+/// 5,154 tokens on average, 7,218 at the 90th percentile and 14,864 at most; detail 865 on
+/// average and 2,402 at most; the fix stage, which already ran at `low`, 382 on average, 492 at
+/// the 90th percentile and 2,973 at most. Sonnet 5.5 thought far less (scan 703 on average,
+/// calibration 80, detail 41). So `high` gets 12,000 (above the 90th percentile with room for
+/// the long tail the headroom factor and the ceiling then cover), `medium` 4,000 (above the
+/// largest detail reply) and `low` 2,000 (above the fix stage's 90th percentile by a wide
+/// margin). An effort this table does not know gets the `high` figure.
+pub fn thinking_allowance_tokens(effort: &str) -> u32 {
+    match effort {
+        "low" => 2_000,
+        "medium" => 4_000,
+        _ => 12_000,
+    }
+}
+
+/// The `max_tokens` for a reply whose visible text is `text_tokens` and which runs at `effort`:
+/// the text plus the thinking allowance ([`thinking_allowance_tokens`]), within the aggregate
+/// floor and ceiling.
+pub fn output_cap_tokens(text_tokens: u32, effort: &str) -> u32 {
+    text_tokens
+        .saturating_add(thinking_allowance_tokens(effort))
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
+/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding text
+/// budget plus the thinking allowance of the stage's effort ([`DETAIL_EFFORT`]), within the
+/// aggregate floor and ceiling, exactly as the server sizes the request.
+pub fn regen_call_max_tokens(findings: usize) -> u32 {
+    output_cap_tokens(
+        (findings as u32).saturating_mul(REGEN_TOKENS_PER_FINDING),
+        DETAIL_EFFORT,
+    )
 }
 
 /// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
@@ -2402,15 +2452,16 @@ mod tests {
                 "never below the old per-finding figure"
             );
         }
-        // 86 findings (the size of a real run), exactly: round 1 is 8 full calls of 10 findings
-        // (4,500 tokens each) and one of 6 (the 4,096 floor); round 2 is 17 calls of 5 and one of
-        // 1 (the floor each); rounds 3 and 4 are 86 single-finding calls at the floor.
+        // 86 findings (the size of a real run), exactly, each call at its text budget plus the
+        // 4,000-token thinking allowance of the stage's medium effort: round 1 is 8 full calls of
+        // 10 findings (8,500 tokens each) and one of 6 (6,700); round 2 is 17 calls of 5 (6,250)
+        // and one of 1 (4,450); rounds 3 and 4 are 86 single-finding calls each (4,450).
         let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
         assert_eq!(r.findings, 86.0);
         assert_eq!(r.calls, 9 + 18 + 86 + 86);
         assert_eq!(
             r.output_tokens,
-            f64::from(8 * 4_500 + 4_096 + 18 * 4_096 + 2 * 86 * 4_096)
+            f64::from(8 * 8_500 + 6_700 + 17 * 6_250 + 4_450 + 2 * 86 * 4_450)
         );
         let none = regeneration_estimate(0.0);
         assert_eq!(
@@ -2424,21 +2475,48 @@ mod tests {
         );
     }
 
-    /// The request size the estimate prices is the one the stage sends: a one-finding call is
-    /// asked for the 4,096 floor, not for 450.
+    /// The request size the estimate prices is the one the stage sends: the per-finding text
+    /// budget plus the detail stage's (medium effort) thinking allowance of 4,000 tokens.
     #[test]
     fn a_regeneration_call_is_priced_at_the_max_tokens_it_is_sent_with() {
-        assert_eq!(regen_call_max_tokens(1), AGGREGATE_MAX_TOKENS_FLOOR);
-        assert_eq!(regen_call_max_tokens(5), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(thinking_allowance_tokens(DETAIL_EFFORT), 4_000);
+        assert_eq!(regen_call_max_tokens(1), REGEN_TOKENS_PER_FINDING + 4_000);
+        assert_eq!(
+            regen_call_max_tokens(5),
+            5 * REGEN_TOKENS_PER_FINDING + 4_000
+        );
         assert_eq!(
             regen_call_max_tokens(REGEN_BATCH_SIZE),
-            (REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING).max(AGGREGATE_MAX_TOKENS_FLOOR)
+            REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING + 4_000
         );
+        assert!(regen_call_max_tokens(1) >= AGGREGATE_MAX_TOKENS_FLOOR);
         assert_eq!(regen_round_batch_size(0), REGEN_BATCH_SIZE);
         assert_eq!(regen_round_batch_size(1), REGEN_BATCH_SIZE.div_ceil(2));
         assert_eq!(regen_round_batch_size(2), 1);
     }
 
+    /// The thinking allowance per effort is the measured one, an unknown effort gets the largest,
+    /// and a cap never leaves the floor and ceiling.
+    #[test]
+    fn the_thinking_allowance_follows_the_effort_and_the_cap_stays_within_its_bounds() {
+        assert_eq!(thinking_allowance_tokens("low"), 2_000);
+        assert_eq!(thinking_allowance_tokens("medium"), 4_000);
+        assert_eq!(thinking_allowance_tokens("high"), 12_000);
+        assert_eq!(thinking_allowance_tokens("xhigh"), 12_000);
+        assert_eq!(output_cap_tokens(0, "low"), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(output_cap_tokens(9_600, "high"), 21_600);
+        assert_eq!(
+            output_cap_tokens(u32::MAX, "high"),
+            AGGREGATE_MAX_TOKENS_CEILING
+        );
+        // The stages' efforts: the scan keeps high, the fix stage runs at low.
+        assert_eq!(SCAN_EFFORT, "high");
+        assert_eq!(
+            (DETAIL_EFFORT, CALIBRATION_EFFORT, ALTERNATIVES_EFFORT),
+            ("medium", "medium", "medium")
+        );
+        assert_eq!(FIX_EFFORT, "low");
+    }
     /// Two figures, not one: the expected cost (the usual run, where every finding comes back in
     /// the first round, priced at the per-finding budget) is what the operator reads and what the
     /// spend-limit gate refuses on; the ceiling (every round on every finding at the request cap)
