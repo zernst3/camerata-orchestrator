@@ -183,31 +183,29 @@ pub(crate) fn calibration_reply_schema(n: usize) -> Value {
 }
 
 /// The detail regeneration reply for a batch whose findings carry the opaque `ids`: an entry per
-/// finding, its `id` one of the batch's.
+/// finding, its `id` one of the batch's. The finding's path and line are not echoed: Camerata
+/// knows them and attaches them.
 pub(crate) fn detail_reply_schema(ids: &[String]) -> Value {
     let entry = object(
         &[
             ("id", json!({ "type": "string", "enum": ids })),
-            ("path", string()),
-            ("line", integer()),
             ("detail", string()),
         ],
-        &["id", "path", "line", "detail"],
+        &["id", "detail"],
     );
     object(&[("details", array(entry))], &["details"])
 }
 
-/// The fix reply for a batch of `n` findings: a fix per finding it could ground, addressed by
-/// `index` (0 to `n - 1`). An omitted index is allowed: the prompt asks the model to leave out a
-/// fix it cannot ground rather than invent one.
-pub(crate) fn fix_reply_schema(n: usize) -> Value {
-    let indices: Vec<usize> = (0..n.max(1)).collect();
+/// The fix reply for a batch whose findings carry the opaque `ids`: a fix per finding it could
+/// ground, addressed by `id` (one of the batch's). An omitted id is allowed: the prompt asks the
+/// model to leave out a fix it cannot ground rather than invent one.
+pub(crate) fn fix_reply_schema(ids: &[String]) -> Value {
     let entry = object(
         &[
-            ("index", json!({ "type": "integer", "enum": indices })),
+            ("id", json!({ "type": "string", "enum": ids })),
             ("fix", string()),
         ],
-        &["index", "fix"],
+        &["id", "fix"],
     );
     object(&[("fixes", array(entry))], &["fixes"])
 }
@@ -219,6 +217,37 @@ pub(crate) mod check {
     //! is the shape the stage's reader expects, and that every schema is one the API accepts.
 
     use serde_json::Value;
+
+    /// The opaque ids a detail or fix prompt addresses its findings by, in order: the id in the
+    /// square brackets that opens each finding's block (`[a1b2c3] rule ...`).
+    pub(crate) fn prompt_ids(prompt: &str) -> Vec<String> {
+        prompt
+            .lines()
+            .filter(|l| l.starts_with('[') && l.contains("] rule "))
+            .filter_map(|l| l.find(']').map(|end| l[1..end].to_string()))
+            .collect()
+    }
+
+    /// A scripted fix reply written by batch POSITION (`{"fixes":[{"index":0,"fix":"..."}]}`)
+    /// addressed by the ids `prompt` actually carries, as the model is asked to. Scripted stubs
+    /// know positions, not the opaque ids Camerata draws per batch. A reply that is not a fix
+    /// reply (a verdicts reply keeps its `index`) is returned as it was, and so is one whose
+    /// position the prompt does not have (it matches no finding, as a stray id would).
+    pub(crate) fn address_by_id(prompt: &str, reply: &str) -> String {
+        if !reply.contains("\"fixes\"") {
+            return reply.to_string();
+        }
+        let ids = prompt_ids(prompt);
+        let re = regex::Regex::new(r#""index"\s*:\s*(\d+)"#).expect("static regex");
+        re.replace_all(reply, |caps: &regex::Captures| {
+            let pos: usize = caps[1].parse().unwrap_or(usize::MAX);
+            format!(
+                r#""id":"{}""#,
+                ids.get(pos).map_or("ffffff", String::as_str)
+            )
+        })
+        .into_owned()
+    }
 
     /// Why `value` does not satisfy `schema`, or `None` when it does.
     pub(crate) fn violation(schema: &Value, value: &Value) -> Option<String> {

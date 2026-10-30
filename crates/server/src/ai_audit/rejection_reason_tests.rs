@@ -116,7 +116,10 @@ impl LlmPort for FixStub {
         } else {
             r#"{"fixes":[{"index":0,"fix":"Validate `raw` before it reaches `query`."},{"index":1,"fix":"Call `neverInEvidence` first."}]}"#
         };
-        Ok(response(text, false))
+        Ok(response(
+            &super::reply_schemas::check::address_by_id(&req.prompt, text),
+            false,
+        ))
     }
     async fn complete_streaming(
         &self,
@@ -300,9 +303,12 @@ async fn a_fix_give_up_records_the_reason_per_finding_in_its_attempts_and_in_fai
     struct AlwaysInvents;
     #[async_trait::async_trait]
     impl LlmPort for AlwaysInvents {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(response(
-                r#"{"fixes":[{"index":0,"fix":"Call `neverInEvidence` first."}]}"#,
+                &super::reply_schemas::check::address_by_id(
+                    &req.prompt,
+                    r#"{"fixes":[{"index":0,"fix":"Call `neverInEvidence` first."}]}"#,
+                ),
                 false,
             ))
         }

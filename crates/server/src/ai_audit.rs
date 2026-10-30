@@ -1518,7 +1518,13 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
 /// a dot be written as its parts when a part is itself a name (a plain member access such as
 /// supabase.from stays as written).
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 3;
+///
+/// 4: retry fixes F3. The detail-regeneration reply is addressed by the opaque id alone (the
+/// finding's path and line are attached by Camerata, not echoed), splits the explanation from
+/// the fix direction, and the prompt lists the names the text must keep; the fix reply is
+/// addressed by the same kind of opaque id instead of a batch position, and its prompt lists
+/// the names the evidence lets the fix use.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 4;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
@@ -5224,9 +5230,10 @@ Rules, every fix:
   omit it from your response entirely rather than guessing.
 
 Return ONLY JSON, no prose:
-{"fixes":[{"index":0,"fix":"..."}]}
-One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
-could not confidently ground — an omitted fix is far better than an invented one."#
+{"fixes":[{"id":"<the finding's id, copied exactly>","fix":"..."}]}
+One entry per finding you could ground a fix for, addressed by the id in square brackets that
+opens its block. Omit any id you could not confidently ground — an omitted fix is far better
+than an invented one."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -5292,11 +5299,13 @@ fn captured_objects_line(f: &Finding) -> String {
 }
 
 /// Build the per-finding prompt body for a fix-generation round. `findings` are the
-/// findings THIS round is asking about (batch-local order); `feedback`, when present for a
+/// findings THIS round is asking about (batch-local order) and `ids` their opaque ids, parallel
+/// to it (the reply addresses a fix by id, never by position); `feedback`, when present for a
 /// batch-local position, is a one-line note on why that finding's PRIOR attempt was
 /// rejected, appended so the model corrects the specific problem instead of guessing again.
 fn build_fix_specific_block(
     findings: &[&Finding],
+    ids: &[String],
     files: &[(String, String)],
     corpus: Option<&camerata_rules::RuleSet>,
     feedback: &std::collections::HashMap<usize, String>,
@@ -5304,8 +5313,9 @@ fn build_fix_specific_block(
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
+        let id = &ids[i];
         out.push_str(&format!(
-            "[{i}] rule {} — severity {}\n",
+            "[{id}] rule {} — severity {}\n",
             f.rule_id, f.severity
         ));
         // Everything that derives from the client's files (location, quoted code, detail,
@@ -5328,7 +5338,7 @@ fn build_fix_specific_block(
         }
         out.push_str(&crate::prompt_frame::frame_untrusted(
             nonce,
-            &format!("finding {i}"),
+            &format!("finding {id}"),
             &evidence,
         ));
         if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
@@ -5352,12 +5362,12 @@ fn build_fix_specific_block(
     out
 }
 
-/// Parse the `{"fixes":[{"index":N,"fix":"..."}]}` response into batch-local index -> fix
-/// text. Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix`
-/// string for an entry all simply leave that index absent from the map — the caller treats
-/// an absent index exactly like "the model couldn't ground this one" (never a panic, never a
-/// fabricated empty string).
-fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
+/// Parse the `{"fixes":[{"id":"...","fix":"..."}]}` response into opaque id -> fix text.
+/// Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix` string for an
+/// entry all simply leave that id absent from the map — the caller treats an absent id exactly
+/// like "the model couldn't ground this one" (never a panic, never a fabricated empty string).
+/// An id that is not one of the batch's matches nothing: the caller looks up its own ids.
+fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let Some(json) = extract_json_object(raw) else {
         return out;
@@ -5369,7 +5379,11 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         return out;
     };
     for entry in arr {
-        let Some(idx) = entry["index"].as_u64() else {
+        let Some(id) = entry["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let Some(text) = entry["fix"].as_str() else {
@@ -5379,7 +5393,7 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         if text.is_empty() {
             continue;
         }
-        out.insert(idx as usize, text.to_string());
+        out.insert(id.to_string(), text.to_string());
     }
     out
 }
@@ -5880,6 +5894,12 @@ async fn run_fix_specifics_round(
             }
             Ok(permit) => permit,
         };
+        // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
+        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
+        for &i in batch {
+            let id = detail_regen::opaque_id(repo, i, &findings[i], &ids);
+            ids.push(id);
+        }
         let prompt = {
             let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
             let local_feedback: std::collections::HashMap<usize, String> = batch
@@ -5889,14 +5909,14 @@ async fn run_fix_specifics_round(
                 .collect();
             format!(
                 "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, files, corpus, &local_feedback, nonce)
+                build_fix_specific_block(&refs, &ids, files, corpus, &local_feedback, nonce)
             )
         };
         let req = with_stage_effort(
             LlmRequest::new(prompt)
                 .with_system(system.to_string())
                 .with_max_tokens(fix_max_tokens(batch.len()))
-                .with_response_schema(reply_schemas::fix_reply_schema(batch.len()))
+                .with_response_schema(reply_schemas::fix_reply_schema(&ids))
                 .with_model(stage_model(fix_model)),
             Stage::FixGeneration,
         );
@@ -5936,7 +5956,7 @@ async fn run_fix_specifics_round(
         let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
-            let Some(text) = parsed.get(&pos) else {
+            let Some(text) = parsed.get(&ids[pos]) else {
                 feedback
                     .entry(orig_idx)
                     .or_insert_with(|| "you did not return a fix for this finding".to_string());
@@ -13080,6 +13100,9 @@ mod output_caps_tests;
 mod structured_output_tests;
 
 #[cfg(test)]
+mod opaque_id_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -14461,14 +14484,15 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             self.streaming_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            on_delta(&self.text);
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
+            on_delta(&text);
             Ok(LlmResponse {
-                text: self.text.clone(),
+                text,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,
@@ -14695,7 +14719,7 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             let call = self
@@ -14718,6 +14742,7 @@ mod tests {
                     .collect();
                 format!(r#"{{"fixes":[{}]}}"#, entries.join(","))
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             on_delta(&text);
             Ok(LlmResponse {
                 text,
@@ -22197,19 +22222,20 @@ mod tests {
 
     #[test]
     fn parse_fix_specifics_reads_a_well_formed_response() {
-        let raw =
-            r#"{"fixes":[{"index":0,"fix":"Do the thing."},{"index":2,"fix":"Do another."}]}"#;
+        let raw = r#"{"fixes":[{"id":"a1b2c3","fix":"Do the thing."},{"id":"d4e5f6","fix":"Do another."}]}"#;
         let out = parse_fix_specifics(raw);
-        assert_eq!(out.get(&0).map(String::as_str), Some("Do the thing."));
-        assert_eq!(out.get(&2).map(String::as_str), Some("Do another."));
+        assert_eq!(out.get("a1b2c3").map(String::as_str), Some("Do the thing."));
+        assert_eq!(out.get("d4e5f6").map(String::as_str), Some("Do another."));
         assert_eq!(out.len(), 2);
+        // A position is no address any more: an entry with only an `index` matches nothing.
+        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":"Do it."}]}"#).is_empty());
     }
 
     #[test]
     fn parse_fix_specifics_is_empty_on_garbage_input() {
         assert!(parse_fix_specifics("not json at all").is_empty());
         assert!(parse_fix_specifics(r#"{"nope":true}"#).is_empty());
-        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":""}]}"#).is_empty());
+        assert!(parse_fix_specifics(r#"{"fixes":[{"id":"a1b2c3","fix":""}]}"#).is_empty());
     }
 
     // ── generate_fix_specifics (async, stubbed LlmPort — no real model calls) ──────────
@@ -22233,7 +22259,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for SequencedCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut q = self.responses.lock().unwrap();
@@ -22242,6 +22268,7 @@ mod tests {
             } else {
                 q.front().cloned().unwrap_or_default()
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             Ok(LlmResponse {
                 text,
                 model: "stub".to_string(),
@@ -22858,11 +22885,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for CountingFixCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(LlmResponse {
-                text: self.canned.clone(),
+                text: super::reply_schemas::check::address_by_id(&req.prompt, &self.canned),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,

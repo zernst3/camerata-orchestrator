@@ -17,7 +17,7 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::run_store::journal::{CallFile, JournalLlm};
 use crate::run_store::{ModelsRecord, NewRun, RunOrigin, RunStore};
 
-fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
+pub(super) fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
     LlmResponse {
         text: text.to_string(),
         model: model.to_string(),
@@ -33,7 +33,7 @@ fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
 }
 
 /// Records every request and answers each stage with an empty (valid) reply.
-struct Recorder {
+pub(super) struct Recorder {
     log: Mutex<Vec<LlmRequest>>,
     backend: &'static str,
     model: &'static str,
@@ -42,7 +42,7 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::on("api", "claude-sonnet-5-5")
     }
 
@@ -56,18 +56,18 @@ impl Recorder {
         }
     }
 
-    fn replying(mut self, text: &str) -> Self {
+    pub(super) fn replying(mut self, text: &str) -> Self {
         self.reply = Some(text.to_string());
         self
     }
 
-    fn requests(&self) -> Vec<LlmRequest> {
+    pub(super) fn requests(&self) -> Vec<LlmRequest> {
         self.log.lock().unwrap().clone()
     }
 }
 
 /// Which stage a request belongs to, by its system prompt.
-fn stage_of(req: &LlmRequest) -> &'static str {
+pub(super) fn stage_of(req: &LlmRequest) -> &'static str {
     let system = req.system.as_deref().unwrap_or("");
     if system.starts_with("You write the full explanation") {
         "detail"
@@ -113,7 +113,7 @@ impl LlmPort for Recorder {
     }
 }
 
-fn finding(path: &str, line: usize, detail: &str, snippet: &str) -> Finding {
+pub(super) fn finding(path: &str, line: usize, detail: &str, snippet: &str) -> Finding {
     Finding {
         repo: "o/r".to_string(),
         path: path.to_string(),
@@ -126,7 +126,7 @@ fn finding(path: &str, line: usize, detail: &str, snippet: &str) -> Finding {
     }
 }
 
-fn files() -> Vec<(String, String)> {
+pub(super) fn files() -> Vec<(String, String)> {
     vec![(
         "src/work.ts".to_string(),
         "export function runWork(raw: string) {\n  return doWork(raw);\n}\n".to_string(),
@@ -191,7 +191,7 @@ fn every_reply_schema_respects_the_apis_limits() {
         ("alternatives", alternatives_reply_schema()),
         ("calibration", calibration_reply_schema(40)),
         ("detail", detail_reply_schema(&ids)),
-        ("fix", fix_reply_schema(25)),
+        ("fix", fix_reply_schema(&ids)),
     ] {
         let broken = limit_violations(&schema);
         assert!(broken.is_empty(), "{name}: {broken:?}");
@@ -258,26 +258,27 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
 
     // Detail.
     let ids = vec!["a1b2c3".to_string(), "d4e5f6".to_string()];
-    let detail = serde_json::json!({"details": [{
-        "id": "a1b2c3", "path": "src/a.ts", "line": 12, "detail": "Because."
-    }]});
+    let detail = serde_json::json!({"details": [{"id": "a1b2c3", "detail": "Because."}]});
     assert_eq!(violation(&detail_reply_schema(&ids), &detail), None);
     let parsed = detail_regen::parse_detail_reply(&detail.to_string(), false);
     assert_eq!(parsed.entries.len(), 1);
-    let foreign = serde_json::json!({"details": [{
-        "id": "ffffff", "path": "src/a.ts", "line": 12, "detail": "Because."
+    let foreign = serde_json::json!({"details": [{"id": "ffffff", "detail": "Because."}]});
+    // The finding's location is not part of the reply; an echo is not a reply the schema allows.
+    let echoing = serde_json::json!({"details": [{
+        "id": "a1b2c3", "path": "src/a.ts", "line": 12, "detail": "Because."
     }]});
+    assert!(violation(&detail_reply_schema(&ids), &echoing).is_some());
     assert!(violation(&detail_reply_schema(&ids), &foreign).is_some());
 
     // Fix.
-    let fix = serde_json::json!({"fixes": [{"index": 1, "fix": "Validate `raw`."}]});
-    assert_eq!(violation(&fix_reply_schema(2), &fix), None);
+    let fix = serde_json::json!({"fixes": [{"id": "d4e5f6", "fix": "Validate `raw`."}]});
+    assert_eq!(violation(&fix_reply_schema(&ids), &fix), None);
     assert_eq!(parse_fix_specifics(&fix.to_string()).len(), 1);
-    let past_the_end = serde_json::json!({"fixes": [{"index": 2, "fix": "x"}]});
-    assert!(violation(&fix_reply_schema(2), &past_the_end).is_some());
+    let foreign = serde_json::json!({"fixes": [{"id": "ffffff", "fix": "x"}]});
+    assert!(violation(&fix_reply_schema(&ids), &foreign).is_some());
     // The fix stage may leave a finding out.
     assert_eq!(
-        violation(&fix_reply_schema(2), &serde_json::json!({"fixes": []})),
+        violation(&fix_reply_schema(&ids), &serde_json::json!({"fixes": []})),
         None
     );
 }
@@ -406,9 +407,9 @@ async fn the_detail_schemas_id_enum_is_exactly_the_batch_ids() {
     assert_eq!(prompt_ids(&reqs[0].prompt).len(), 3);
 }
 
-/// The fix request's `index` enum is the batch's positions.
+/// The fix request's `id` enum is the batch's ids, the ones in its prompt.
 #[tokio::test]
-async fn the_fix_request_carries_the_batch_size_in_its_schema() {
+async fn the_fix_request_carries_the_batch_ids_in_its_schema() {
     let llm = Recorder::new();
     let findings = vec![
         finding(
@@ -425,7 +426,9 @@ async fn the_fix_request_carries_the_batch_size_in_its_schema() {
         .into_iter()
         .find(|r| stage_of(r) == "fix")
         .expect("a fix request");
-    assert_eq!(first.response_schema, Some(fix_reply_schema(2)));
+    let ids = super::reply_schemas::check::prompt_ids(&first.prompt);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(first.response_schema, Some(fix_reply_schema(&ids)));
 }
 
 // ── the wire ─────────────────────────────────────────────────────────────────────────────────
@@ -440,7 +443,9 @@ fn the_schema_is_part_of_the_request_key() {
         &base.clone().with_response_schema(scan_reply_schema()),
     );
     let with_fix = crate::run_store::journal::request_key(
-        &base.clone().with_response_schema(fix_reply_schema(2)),
+        &base
+            .clone()
+            .with_response_schema(fix_reply_schema(&["a1b2c3".to_string()])),
     );
     assert_ne!(plain, with_scan);
     assert_ne!(with_scan, with_fix);
@@ -552,6 +557,6 @@ fn the_tolerant_parsers_still_read_replies_the_schema_would_not_allow() {
             .len(),
         1
     );
-    let fixes = "Sure.\n{\"fixes\":[{\"index\":0,\"fix\":\"Do it.\"}]}";
+    let fixes = "Sure.\n{\"fixes\":[{\"id\":\"a1b2c3\",\"fix\":\"Do it.\"}]}";
     assert_eq!(parse_fix_specifics(fixes).len(), 1);
 }

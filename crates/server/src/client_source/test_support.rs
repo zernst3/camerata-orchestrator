@@ -217,8 +217,24 @@ pub(crate) fn install_fake_claude(
     std::fs::write(dir.join("empty.json"), result_line(&empty)).unwrap();
     std::fs::write(dir.join("with-finding.json"), result_line(finding)).unwrap();
     std::fs::write(dir.join("fix.json"), result_line(fix)).unwrap();
+    // The fix stage addresses a fix by the opaque id its prompt gives each finding, which a canned
+    // answer cannot know: `fix` is written by batch position (`index`) and this filter swaps each
+    // position for the id the prompt carries at it.
+    std::fs::write(
+        dir.join("fix.py"),
+        "import json, re, sys\n\
+         line = json.loads(open(sys.argv[1]).read())\n\
+         ids = re.findall(r'^\\[([0-9a-f]{6})\\] rule ', '\\n'.join(sys.argv[2:]), re.M)\n\
+         answer = json.loads(line['result'])\n\
+         for f in answer.get('fixes', []):\n\
+         \x20   i = f.pop('index', 0)\n\
+         \x20   f['id'] = ids[i] if i < len(ids) else 'ffffff'\n\
+         line['result'] = json.dumps(answer)\n\
+         print(json.dumps(line))\n",
+    )
+    .unwrap();
     let script = format!(
-        "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) cat \"$D/fix.json\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
+        "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) python3 \"$D/fix.py\" \"$D/fix.json\" \"$@\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
     );
     let bin = dir.join("claude");
     std::fs::write(&bin, script).unwrap();

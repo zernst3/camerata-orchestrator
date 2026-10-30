@@ -3046,6 +3046,17 @@ schema for every request of a run; calibration, detail and fix, which send no ca
 name the ids of their batch in the schema. A schema cannot make a reply cover every id (the
 API allows `minItems` of 0 or 1 only), so a finding the reply leaves out is handled as before.
 
+*Ids Camerata knows are never echoed.* The detail reply is `{"details":[{"id","detail"}]}`:
+the finding's path and line are attached by Camerata from the finding, so the reply no
+longer echoes them (an echo from a backend that never saw the schema is ignored, and the
+old "wrong place" rejection is gone; `DetailRejections::mismatch` stays in the ledger as a
+zero so older ledgers read). The fix stage moved from the batch position to the same kind
+of opaque id: each fix block opens `[a1b2c3] rule ...`, the reply is
+`{"fixes":[{"id","fix"}]}`, and the schema's `id` is an enum of the batch's ids. A finding
+keeps its id across rounds (it hashes the finding's place in the run, not its place in the
+batch), and a position is no address, so a reply numbered from 0 or 1 lands on no finding.
+Prompt schema version 4.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its

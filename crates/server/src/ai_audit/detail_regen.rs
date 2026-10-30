@@ -19,9 +19,10 @@
 //! # The reply is not trusted
 //!
 //! The regenerated text feeds severity decisions, so a reply is accepted per finding, and only
-//! when it passes four checks (see [`accept_entry`]). It is addressed by an opaque id and echoes
-//! the finding's path and line (a reply numbered from 1, or reordered, cannot land on a
-//! neighbour); it must keep every path or identifier the short statement named; it must not add
+//! when it passes the checks of [`accept_entry`]. It is addressed by an opaque id alone, one of
+//! the batch's (a reply numbered from 1, or reordered, cannot land on a neighbour), and echoes
+//! nothing Camerata already knows: the finding's path and line are attached from the finding. It
+//! must keep every path or identifier the short statement named; it must not add
 //! an exploit precondition that neither the statement nor the code shown makes (the same phrase
 //! list calibration's raise-block uses, [`mentions_exploit_precondition`]); and a borderline
 //! statement stays borderline. An entry that fails is simply not written, exactly like one the
@@ -88,8 +89,8 @@ Rules, every finding:
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
 
 Return ONLY JSON, no prose:
-{"details":[{"id":"<the finding's id, copied exactly>","path":"<its path, copied exactly>","line":<its line number>,"detail":"..."}]}
-One entry per finding. An entry whose id, path or line does not match its finding is discarded."#
+{"details":[{"id":"<the finding's id, copied exactly>","detail":"..."}]}
+One entry per finding, addressed by its id alone: its location is already known, do not repeat it. An entry whose id is not one of the findings' ids is discarded."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -481,12 +482,12 @@ fn build_block(
 
 // ── the reply ───────────────────────────────────────────────────────────────────────────────
 
-/// One entry of the reply, before any check.
+/// One entry of the reply, before any check. Addressed by the opaque id alone: Camerata knows the
+/// finding's path and line, so a model that still echoes them (a reply from a backend that never
+/// saw the schema) has them ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub id: String,
-    pub path: Option<String>,
-    pub line: Option<u64>,
     pub detail: String,
 }
 
@@ -504,15 +505,10 @@ fn entry_of(value: &serde_json::Value) -> Option<Entry> {
     if id.is_empty() || detail.is_empty() {
         return None;
     }
-    Some(Entry {
-        id,
-        path: value["path"].as_str().map(|p| p.trim().to_string()),
-        line: value["line"].as_u64(),
-        detail,
-    })
+    Some(Entry { id, detail })
 }
 
-/// Parse `{"details":[{"id","path","line","detail"}]}`. Malformed output, a missing array or an
+/// Parse `{"details":[{"id","detail"}]}`. Malformed output, a missing array or an
 /// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
 /// written", never as an empty explanation.
 ///
@@ -550,8 +546,6 @@ pub(super) fn parse_detail_reply(raw: &str, cut_off: bool) -> ParsedReply {
 /// Why a reply entry was not written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Reject {
-    /// The echoed path or line is not the finding's.
-    Mismatch,
     /// A path or identifier the statement named is missing from the text.
     DropsNamedToken(String),
     /// The text makes an exploit precondition that neither the statement nor the code shown makes.
@@ -562,9 +556,6 @@ impl Reject {
     /// The reason in words, for the saved reply and the failure report.
     pub(super) fn reason(&self) -> String {
         match self {
-            Self::Mismatch => {
-                "the entry echoed another path or line than the finding's".to_string()
-            }
             Self::DropsNamedToken(token) => {
                 format!("dropped `{token}`, which the one-sentence statement named")
             }
@@ -574,16 +565,6 @@ impl Reject {
             }
         }
     }
-}
-
-/// `path` without a leading `./` or `/` (repeated), so `./src/a.rs` and `/src/a.rs` read as
-/// `src/a.rs`.
-fn normalized_path(path: &str) -> &str {
-    let mut p = path.trim();
-    while let Some(rest) = p.strip_prefix("./").or_else(|| p.strip_prefix('/')) {
-        p = rest;
-    }
-    p
 }
 
 /// Whether a statement is marked borderline (`Borderline: ...`, any case).
@@ -738,7 +719,8 @@ pub(super) fn precondition_scope(text: &str) -> String {
 }
 
 /// The checks one entry must pass to be written (the id match is done by the caller, which
-/// knows the batch). Returns the text to write: the model's, with `Borderline: ` put back at the
+/// knows the batch; the entry carries no location, because Camerata attaches the finding's).
+/// Returns the text to write: the model's, with `Borderline: ` put back at the
 /// front when the statement was borderline and the text lost it. `files` is the file set a
 /// named path is looked up in (see [`named_tokens`]).
 pub(super) fn accept_entry(
@@ -747,13 +729,6 @@ pub(super) fn accept_entry(
     code_shown: &str,
     files: &[(String, String)],
 ) -> Result<String, Reject> {
-    // The path is read forgivingly (a leading "./" or "/" is not a different file); the line is
-    // not: any other line is another place.
-    if entry.path.as_deref().map(normalized_path) != Some(normalized_path(&f.path))
-        || entry.line != Some(f.line as u64)
-    {
-        return Err(Reject::Mismatch);
-    }
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
     // Every path or identifier the statement named stays; a compound name stays as its parts.
@@ -793,7 +768,7 @@ pub(super) fn accept_entry(
 /// An opaque per-finding id for one batch: not its position, so a reply numbered from 1 or
 /// reordered cannot land on a neighbour. Six hex digits of a hash of the finding's place in the
 /// run, re-hashed on the rare collision within the batch.
-fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
+pub(super) fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
     let mut salt = 0u32;
     loop {
         let h = crate::suppression::fnv1a(&format!(
@@ -938,7 +913,6 @@ async fn run_detail_round(
                 }
                 Err(reject) => {
                     match &reject {
-                        Reject::Mismatch => rejections.mismatch += 1,
                         Reject::DropsNamedToken(_) => rejections.drops_named_token += 1,
                         Reject::InventedPrecondition => rejections.invented_precondition += 1,
                     }

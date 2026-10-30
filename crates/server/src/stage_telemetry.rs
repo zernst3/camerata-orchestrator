@@ -324,7 +324,8 @@ impl CandidateTelemetry {
 /// [`Self::total`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailRejections {
-    /// The entry echoed a path or line that is not the finding's.
+    /// The entry echoed a path or line that is not the finding's. Always 0 since the reply stopped
+    /// echoing them (Camerata attaches the finding's own); kept so a ledger written before reads.
     pub mismatch: u64,
     /// The text dropped a path or identifier the short statement named.
     pub drops_named_token: u64,

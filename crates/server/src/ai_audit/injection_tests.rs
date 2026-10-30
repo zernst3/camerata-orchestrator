@@ -27,9 +27,10 @@ impl Recorder {
 #[async_trait::async_trait]
 impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let reply = super::reply_schemas::check::address_by_id(&req.prompt, &self.reply);
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
-            text: self.reply.clone(),
+            text: reply,
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -281,10 +282,12 @@ async fn fix_generation_and_its_regeneration_rounds_frame_the_evidence_under_one
     let token = one_token(&reqs);
     for r in &reqs {
         assert_balanced(&r.prompt, &token);
-        assert!(r.prompt.contains(&opening(&token, "finding 0")));
+        let id = super::reply_schemas::check::prompt_ids(&r.prompt)[0].clone();
+        let label = format!("finding {id}");
+        assert!(r.prompt.contains(&opening(&token, &label)));
         let framed = r
             .prompt
-            .split(&opening(&token, "finding 0"))
+            .split(&opening(&token, &label))
             .nth(1)
             .unwrap_or_default();
         assert!(

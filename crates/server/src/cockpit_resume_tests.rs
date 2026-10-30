@@ -53,9 +53,8 @@ elif "calibrating an automated audit" in system:
                                         "reason": "checked", "effort": "low"} for i in range(n)]})
 elif "ONE concrete, codebase-specific fix" in system:
     note("fix")
-    n = len([l for l in labels if l.startswith("finding ")])
-    out = json.dumps({"fixes": [{"index": i, "fix": "Check the input before it is used."}
-                                for i in range(n)]})
+    out = json.dumps({"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
+                                for l in labels if l.startswith("finding ")]})
 else:
     note("other")
     out = json.dumps({"findings": [], "proposed_rules": [], "needs_files": [], "verdicts": [],
