@@ -5328,6 +5328,9 @@ struct FixLedger {
     answered: std::collections::HashSet<usize>,
     /// For a finding that missed its latest attempt without an answer: why.
     last_miss: std::collections::HashMap<usize, FixMiss>,
+    /// Findings whose latest attempt failed in transport (see [`second_try_allowed`]): the only
+    /// ones the end-of-run second try sends again.
+    retry_at_end: std::collections::HashSet<usize>,
 }
 
 impl FixLedger {
@@ -5337,9 +5340,25 @@ impl FixLedger {
         }
     }
 
-    /// A call is about to be made for `batch`.
+    /// A call is about to be made for `batch`: how each of its findings last failed starts afresh.
     fn sent(&mut self, batch: &[usize]) {
         self.sent.extend(batch.iter().copied());
+        for i in batch {
+            self.retry_at_end.remove(i);
+        }
+    }
+
+    /// The call for `batch` failed in transport and the run may still send it again at the end.
+    fn retryable_at_end(&mut self, batch: &[usize]) {
+        self.retry_at_end.extend(batch.iter().copied());
+    }
+
+    /// The members of `pending` the end-of-run second try covers (transport failures only).
+    fn split_for_second_try(&self, pending: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        pending
+            .iter()
+            .copied()
+            .partition(|i| self.retry_at_end.contains(i))
     }
 
     /// A call for `batch` returned a response.
@@ -5453,6 +5472,9 @@ async fn run_fix_specifics_round(
             Err(e) => {
                 meter_failed(meter, Stage::FixGeneration, &e);
                 trail.note_error(&e, second_try);
+                if second_try_allowed(&e, meter) {
+                    ledger.retryable_at_end(batch);
+                }
                 ledger.miss(batch, FixMiss::TransportFailed);
                 still_pending.extend(batch.iter().copied());
                 continue;
@@ -5722,16 +5744,20 @@ pub async fn generate_fix_specifics(
         .await;
     }
 
-    // END-OF-RUN SECOND TRY. What is still pending after every round gets one more solo try, when
-    // the provider has had the whole stage to recover, through the same admission and spend
-    // checks. A run that has stopped sends nothing. Only a part that fails this too is a
-    // give-up (and so a failed part, which locks a client export).
-    if !pending.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+    // END-OF-RUN SECOND TRY, for transport trouble only. A finding whose last attempt could not
+    // reach the provider gets one more solo try, when the provider has had the whole stage to
+    // recover, through the same admission and spend checks. A finding the model answered and the
+    // self-check turned down is not sent again: the rounds already changed the request for it
+    // (a feedback line, then a batch of one), and the same solo request a second time pays twice
+    // for the same answer. A run that has stopped sends nothing. Only a part that is still
+    // without a fix after this is a give-up (and so a failed part, which locks a client export).
+    let (retry, left_alone) = ledger.split_for_second_try(&pending);
+    if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
         trail.note_unusable(
             "no usable fix was returned after the stage's own rounds",
             false,
         );
-        pending = run_fix_specifics_round(
+        let still = run_fix_specifics_round(
             llm,
             repo,
             &system,
@@ -5742,16 +5768,19 @@ pub async fn generate_fix_specifics(
             files,
             &mut findings,
             &mut feedback,
-            &pending,
+            &retry,
             1,
             &mut ledger,
             &mut trail,
             true,
         )
         .await;
-        if !pending.is_empty() {
+        if !still.is_empty() {
             trail.note_unusable("no usable fix was returned on the second try", true);
         }
+        pending = left_alone;
+        pending.extend(still);
+        pending.sort_unstable();
     } else if !pending.is_empty() {
         trail.note_unusable("no usable fix was returned", false);
     }
@@ -7245,20 +7274,22 @@ async fn run_passes_batch(
                     }
                     continue;
                 }
-                let again = match retry.results.remove(&w.custom_id) {
+                // A second failure that was a model refusal (billed) is a content failure: the
+                // real-time second try does not send the item a third time.
+                let (again, second_tryable) = match retry.results.remove(&w.custom_id) {
                     Some(Ok(resp)) => {
                         round.results.insert(w.custom_id.clone(), Ok(resp));
                         continue;
                     }
-                    Some(Err(again)) => again.reason,
-                    None => "missing from the batch results again".to_string(),
+                    Some(Err(again)) => (again.reason, again.second_tryable),
+                    None => ("missing from the batch results again".to_string(), true),
                 };
                 round.results.insert(
                     w.custom_id.clone(),
                     Err(ItemFailure {
                         reason: format!("{first}; resubmitted once and failed again: {again}"),
                         resubmittable: false,
-                        second_tryable: true,
+                        second_tryable,
                     }),
                 );
             }
@@ -21966,9 +21997,9 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
-        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4), plus the
-        // end-of-run second try.
-        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 3);
+        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4). A rejected
+        // fix is a content failure and gets no end-of-run second try.
+        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
         assert_eq!(
             failed_passes.len(),
             1,

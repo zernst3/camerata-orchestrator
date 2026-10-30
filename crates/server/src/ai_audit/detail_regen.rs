@@ -787,7 +787,8 @@ fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
 /// One round: the `pending` findings in batches of `batch_size`. Writes the regenerated detail
 /// into `findings` and returns the indices still without one. `last_error` keeps the text of the
 /// most recent failed call, for the failed pass's reason; `rejections` counts why entries were
-/// turned down.
+/// turned down; `transport_failed` holds the findings whose latest attempt failed in transport
+/// (the only ones the end-of-run second try sends again).
 #[allow(clippy::too_many_arguments)]
 async fn run_detail_round(
     llm: &dyn LlmPort,
@@ -804,6 +805,7 @@ async fn run_detail_round(
     last_error: &mut Option<String>,
     rejections: &mut DetailRejections,
     trail: &mut super::StageTrail,
+    transport_failed: &mut std::collections::HashSet<usize>,
     second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
@@ -817,6 +819,10 @@ async fn run_detail_round(
             }
             Ok(permit) => permit,
         };
+        // This attempt decides how each finding of the batch last failed.
+        for idx in batch {
+            transport_failed.remove(idx);
+        }
         let mut ids: Vec<String> = Vec::with_capacity(batch.len());
         let mut blocks: Vec<Block> = Vec::with_capacity(batch.len());
         for &idx in batch {
@@ -843,6 +849,9 @@ async fn run_detail_round(
                 meter_failed(meter, Stage::DetailRegeneration, &e);
                 trail.note_error(&e, second_try);
                 *last_error = Some(format!("{e:#}"));
+                if super::second_try_allowed(&e, meter) {
+                    transport_failed.extend(batch.iter().copied());
+                }
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
@@ -952,6 +961,8 @@ pub(crate) async fn regenerate_full_details(
     let mut last_error: Option<String> = None;
     let mut rejections = DetailRejections::default();
     let mut trail = super::StageTrail::default();
+    // Findings whose latest attempt failed in transport: the only ones the second try re-sends.
+    let mut transport_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -977,19 +988,33 @@ pub(crate) async fn regenerate_full_details(
                 &mut last_error,
                 &mut rejections,
                 &mut trail,
+                &mut transport_failed,
                 false,
             )
             .await;
         }
-        // END-OF-RUN SECOND TRY: what the rounds could not write gets one more try, one finding
-        // at a time (the smallest prompt), through the same admission and spend checks. A stopped
-        // run sends nothing.
-        if !pending.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        // END-OF-RUN SECOND TRY, for transport trouble only: a finding whose last attempt could
+        // not reach the provider gets one more try, one at a time (the smallest prompt), through
+        // the same admission and spend checks. A finding the model answered and a check turned
+        // down is not sent again: the rounds already changed the request (a smaller batch) for
+        // it, and the same request a third time pays twice for the same answer. A stopped run
+        // sends nothing.
+        let retry: Vec<usize> = pending
+            .iter()
+            .copied()
+            .filter(|i| transport_failed.contains(i))
+            .collect();
+        if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
             trail.note_unusable(
                 "no usable explanation was written after the stage's own rounds",
                 false,
             );
-            pending = run_detail_round(
+            let left_alone: Vec<usize> = pending
+                .iter()
+                .copied()
+                .filter(|i| !transport_failed.contains(i))
+                .collect();
+            let still = run_detail_round(
                 llm,
                 repo,
                 &system,
@@ -999,17 +1024,21 @@ pub(crate) async fn regenerate_full_details(
                 files,
                 &directives,
                 &mut findings,
-                &pending,
+                &retry,
                 1,
                 &mut last_error,
                 &mut rejections,
                 &mut trail,
+                &mut transport_failed,
                 true,
             )
             .await;
-            if !pending.is_empty() {
+            if !still.is_empty() {
                 trail.note_unusable("no usable explanation was written on the second try", true);
             }
+            pending = left_alone;
+            pending.extend(still);
+            pending.sort_unstable();
         }
     }
     if rejections.total() > 0 {

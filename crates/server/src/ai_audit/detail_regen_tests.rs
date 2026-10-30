@@ -723,8 +723,9 @@ async fn a_failed_regeneration_keeps_the_finding_marked_and_reports_a_failed_pas
         assert!(pass.reason.contains("2 of 2"), "{}", pass.reason);
         assert!(pass.reason.contains(DETAIL_INCOMPLETE_MARKER));
         // Three rounds were attempted before giving up: both findings in one call, again in
-        // one, then one call each; then the second try, one call each again.
-        assert_eq!(llm.prompts(Role::Regen).len(), 6);
+        // one, then one call each. Neither failure is a transport failure, so there is no
+        // second try: the same solo request a second time would pay twice for the same answer.
+        assert_eq!(llm.prompts(Role::Regen).len(), 4);
         // Calibration still ran: the failure does not stop the pipeline.
         assert!(llm.roles().contains(&Role::Calibrate));
     }
@@ -1376,9 +1377,10 @@ async fn each_round_is_smaller_and_the_last_is_one_finding_at_a_time() {
         None,
     )
     .await;
-    // Round 3 is twelve calls of one, and the end-of-run second try is twelve more.
+    // Round 3 is twelve calls of one. The replies were answered (not a transport failure), so
+    // the end-of-run second try sends nothing.
     let mut expected = vec![10, 2, 5, 5, 2];
-    expected.extend([1; 24]);
+    expected.extend([1; 12]);
     assert_eq!(call_sizes(&llm), expected);
     assert_eq!(out.len(), 12, "none dropped");
     assert!(out
@@ -1551,38 +1553,39 @@ fn rejections(meter: &UsageMeter) -> crate::stage_telemetry::DetailRejections {
 
 #[tokio::test]
 async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
-    // A wrong line is turned down once per attempt: 3 rounds and the second try, 1 finding.
+    // A wrong line is turned down once per attempt: 3 rounds, 1 finding (an answered reply gets
+    // no second try).
     let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.mismatch, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.mismatch, r.total()), (3, 3), "{r:?}");
 
     let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.invented_precondition, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
 
     // An id that is not the batch's is a missing id, charged to the finding the entry was meant
-    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 and
-    // the second try's 1, 1 are eight attempts, so eight counts, not sixteen.
+    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 are
+    // six attempts, so six counts, not twelve.
     let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
-    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1, 1, 1]);
+    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1]);
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.left_out, r.total()), (8, 0, 8), "{r:?}");
+    assert_eq!((r.missing_id, r.left_out, r.total()), (6, 0, 6), "{r:?}");
 
-    // A finding the reply simply left out: once per attempt, the second try's included (the last of a batch is dropped, and a
-    // batch of one is dropped whole).
+    // A finding the reply simply left out: once per attempt (the last of a batch is dropped, and
+    // a batch of one is dropped whole).
     let llm = RoleLlm::new(&terse_scan(2), Regen::DropsLast);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.left_out, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.left_out, r.total()), (3, 3), "{r:?}");
     let table = meter.stage_telemetry(0).render_table();
-    assert!(table.contains("4 left out"), "{table}");
+    assert!(table.contains("3 left out"), "{table}");
 }
 
 #[tokio::test]
@@ -1632,9 +1635,9 @@ async fn an_id_used_twice_counts_once_for_the_finding_it_names() {
     .await;
     assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER), "{out:?}");
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.missing_id, r.total()), (3, 3), "{r:?}");
     assert!(
-        failed[0].reason.contains("fell short 4 times"),
+        failed[0].reason.contains("fell short 3 times"),
         "{}",
         failed[0].reason
     );
@@ -1685,11 +1688,11 @@ async fn a_dropped_named_token_is_counted_under_its_own_reason() {
     )
     .await;
     let r = rejections(&meter);
-    assert_eq!((r.drops_named_token, r.total()), (4, 4), "{r:?}");
+    assert_eq!((r.drops_named_token, r.total()), (3, 3), "{r:?}");
     // The failed pass (which can reach a client) carries the total in plain words and none of
     // the breakdown.
     let reason = &failed[0].reason;
-    assert!(reason.contains("fell short 4 times"), "{reason}");
+    assert!(reason.contains("fell short 3 times"), "{reason}");
     assert!(
         !reason.to_ascii_lowercase().contains("mismatch"),
         "{reason}"

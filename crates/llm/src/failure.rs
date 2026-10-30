@@ -22,7 +22,10 @@ pub enum FailureClass {
     /// credit or quota. Waiting does not fix it, so one of these stops the run.
     AuthOrBilling,
     /// The provider answered but the answer was unusable after the in-call retries: cut off,
-    /// malformed, or refused. Retried once at the end of the run; never counts toward an outage.
+    /// malformed, or refused. NOT retried at the end of the run: sending the same request again
+    /// pays twice for the same answer. A part that retries after a content failure changes the
+    /// request (a higher cap, a smaller batch, a feedback line) inside its own rounds. Never
+    /// counts toward an outage.
     #[default]
     Content,
     /// The spend limit stopped the part. Not a fault; raising the limit and resuming runs it.
@@ -53,9 +56,11 @@ impl FailureClass {
         }
     }
 
-    /// True for the classes the end-of-run second try covers.
+    /// True for the classes the end-of-run second try covers: transport trouble only (a dropped
+    /// connection, a timeout, a 429, a 5xx). The second try re-sends the SAME request, which is
+    /// right when the provider could not be reached and wrong when it answered.
     pub fn is_retried_at_end(self) -> bool {
-        matches!(self, Self::Transport | Self::Content)
+        self == Self::Transport
     }
 
     /// True for the one class that counts toward the outage stop's streak.
@@ -427,9 +432,12 @@ mod tests {
         assert!(FailureClass::AuthOrBilling.stops_run());
         assert!(!FailureClass::Transport.stops_run());
         assert!(FailureClass::Transport.is_retried_at_end());
-        assert!(FailureClass::Content.is_retried_at_end());
+        // A content failure is not sent again unchanged: the provider answered.
+        assert!(!FailureClass::Content.is_retried_at_end());
         assert!(!FailureClass::AuthOrBilling.is_retried_at_end());
         assert!(!FailureClass::SpendLimit.is_retried_at_end());
+        assert!(!FailureClass::OutageStop.is_retried_at_end());
+        assert!(!FailureClass::Io.is_retried_at_end());
     }
 
     #[test]

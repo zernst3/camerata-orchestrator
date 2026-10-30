@@ -396,7 +396,9 @@ pub(crate) async fn submit_round(
                             ..
                         }) => {
                             // A failed item that was still billed (a model refusal) counts toward
-                            // the spend limit before its failure is reported.
+                            // the spend limit before its failure is reported. The model answered,
+                            // so it is a content failure: the same item is not sent again.
+                            let refused = billed.is_some();
                             if let (Some(m), Some(mut billed)) = (ctx.meter, billed) {
                                 reprice(&mut billed);
                                 m.record_stage(Stage::ScanPass, &billed);
@@ -405,8 +407,8 @@ pub(crate) async fn submit_round(
                                 w.custom_id.clone(),
                                 Err(ItemFailure {
                                     reason: error,
-                                    resubmittable: true,
-                                    second_tryable: true,
+                                    resubmittable: !refused,
+                                    second_tryable: !refused,
                                 }),
                             );
                         }

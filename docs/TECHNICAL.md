@@ -6156,6 +6156,14 @@ resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for a
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
 attempts as history: a part that a later attempt completed stays with a `resolved_at` time.
 
+**End-of-run second try.** A part that failed gets one more try at the end of its stage only when the
+failure was transport trouble (a dropped connection, a timeout, a 429, a 5xx), the one case where the
+same request can succeed. A reply the model gave and that was unusable (cut off, malformed, refused, or
+turned down by a check) is a content failure: a retry of it must change the request, which the stages'
+own rounds do (a doubled output cap, a smaller batch, a feedback line naming the problem), and the
+same request is never sent a further time. `FailureClass::is_retried_at_end` is the one rule; the
+detail and fix stages re-send only the findings whose last attempt failed in transport.
+
 **Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
 
 **Estimates.** Two figures. `regeneration_expected` (ui-core) is the usual run: every finding

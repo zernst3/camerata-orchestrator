@@ -291,8 +291,10 @@ async fn a_pass_that_fails_both_tries_records_both_attempts_with_times() {
 }
 
 #[tokio::test]
-async fn a_content_failure_gets_the_second_try_too() {
-    // Chunk 0's three sends are malformed; its second try (after chunks 1 and 2) is good.
+async fn a_content_failure_is_not_sent_again_unchanged_at_the_end() {
+    // Chunk 0's three sends are malformed. The provider answered, so the pass is a failed part
+    // and is not tried a fourth time at the end of the round: that would be the same request
+    // paid for again. Chunks 1 and 2 are good.
     let llm = Scripted::new(&[
         Step::Reply(MALFORMED),
         Step::Reply(MALFORMED),
@@ -300,8 +302,14 @@ async fn a_content_failure_gets_the_second_try_too() {
         Step::Reply(GOOD),
     ]);
     let (_f, _p, _r, ok, failures) = scan(&llm, 3, None).await;
-    assert!(failures.is_empty(), "{failures:?}");
-    assert_eq!(ok, 3);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].class, FailureClass::Content);
+    assert_eq!(ok, 2);
+    assert_eq!(
+        llm.calls(),
+        5,
+        "three sends for chunk 0 and one each for the others"
+    );
 }
 
 #[tokio::test]
@@ -368,7 +376,10 @@ async fn a_malformed_reply_on_one_part_does_not_stop_the_run() {
     let meter = UsageMeter::default();
     let (_f, _p, _r, ok, _failures) = scan(&llm, 3, Some(&meter)).await;
     assert!(!meter.outage_stopped());
-    assert_eq!(ok, 3);
+    assert_eq!(
+        ok, 2,
+        "the other two parts ran; the malformed one is a failed part"
+    );
 }
 
 #[tokio::test]

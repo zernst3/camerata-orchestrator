@@ -199,8 +199,9 @@ async fn the_chosen_model_and_effort_reach_the_completer_on_every_round() {
         let _ =
             generate_fix_specifics(&llm, "o/r", vec![f], &files, model, Some(&meter), None).await;
         let requests = llm.requests.lock().unwrap().clone();
-        // Every batched retry, the solo retry and the second try: the parameter reaches each one.
-        assert_eq!(requests.len(), MAX_FIX_REGENERATIONS + 3, "{requests:?}");
+        // Every batched retry and the solo retry (a rejected fix gets no second try): the
+        // parameter reaches each one.
+        assert_eq!(requests.len(), MAX_FIX_REGENERATIONS + 2, "{requests:?}");
         for (m, effort) in &requests {
             assert_eq!(Some(m.as_str()), model, "{requests:?}");
             assert_eq!(effort.as_deref(), expected_effort, "{requests:?}");
