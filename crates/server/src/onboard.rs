@@ -3048,7 +3048,7 @@ pub async fn audit_repos_with_llm_controlled(
                                         pipeline_ledger.note_partial_rule(
                                             rid,
                                             spec,
-                                            &format!(
+                                            format!(
                                                 "checked on part of the code only: {} before \
                                                  the rest was checked",
                                                 cap_record

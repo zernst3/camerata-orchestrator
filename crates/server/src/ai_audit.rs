@@ -1024,7 +1024,7 @@ impl UsageMeter {
     /// names its stage, so the per-stage table can never drift from the aggregate.
     pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         self.stages.record(stage, r);
-        self.record(r);
+        self.record(stage, r);
         // A reply came back: the provider is reachable, so the outage streak starts over.
         self.health.note_success();
     }
@@ -1085,8 +1085,9 @@ impl UsageMeter {
     }
 
     /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
-    /// counted. Private: callers go through [`Self::record_stage`].
-    fn record(&self, r: &crate::llm::LlmResponse) {
+    /// counted. Private: callers go through [`Self::record_stage`]. `stage` names the call in
+    /// the note written when its cost cannot be determined.
+    fn record(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
@@ -1111,7 +1112,7 @@ impl UsageMeter {
                     crate::llm::PriceBasis::for_response(r),
                 );
                 if derived.is_none() {
-                    self.mark_cost_unknown(&r.model);
+                    self.mark_cost_unknown(stage, r);
                 }
                 derived
             }
@@ -1138,18 +1139,26 @@ impl UsageMeter {
     }
 
     /// A call's cost could not be determined while a cap is set: remember that the cap is no
-    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record.
-    fn mark_cost_unknown(&self, model: &str) {
+    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record,
+    /// naming the model, the stage and the token counts of the call, so the operator can find it
+    /// in the transcript and price it by hand.
+    fn mark_cost_unknown(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         {
             let mut budget = self.budget();
             if budget.cost_unknown {
                 return;
             }
             budget.cost_unknown = true;
+            let tokens = match (r.input_tokens, r.output_tokens) {
+                (Some(i), Some(o)) => format!("{i} input and {o} output tokens"),
+                _ => "no token counts".to_string(),
+            };
             budget.notes.push(format!(
-                "The spend limit could not be enforced past this point: a call to `{model}` \
-                 reported no cost and its tokens could not be priced, so what it cost is unknown. \
-                 No further passes were started (NOT RUN)."
+                "The spend limit could not be enforced past this point: a call to `{}` in the {} \
+                 stage reported no cost and its tokens could not be priced ({tokens}), so what \
+                 it cost is unknown. No further passes were started (NOT RUN).",
+                r.model,
+                stage.label()
             ));
         }
         self.admission.notify_waiters();
@@ -1162,7 +1171,7 @@ impl UsageMeter {
     pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
         if let Some(billed) = crate::llm::refusal_billed(error) {
             self.stages.record(stage, billed);
-            self.record(billed);
+            self.record(stage, billed);
         }
         // The outage stop watches every failed call, after the transport's own retries.
         self.health
@@ -16581,8 +16590,9 @@ mod tests {
             record
                 .notes
                 .iter()
-                .any(|n| n.contains("`claude-sonnet-4-6`")),
-            "the ledger names the model: {:?}",
+                .any(|n| n.contains("`claude-sonnet-4-6`")
+                    && n.contains(&format!("{} stage", Stage::Alternatives.label()))),
+            "the ledger names the model and the call: {:?}",
             record.notes
         );
     }
