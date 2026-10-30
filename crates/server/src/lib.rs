@@ -18928,6 +18928,11 @@ pub struct ManifestProvenance {
     /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
     /// operator-only). What was not run is listed in the report's failed-pass section.
     pub cost_cap_reached: bool,
+    /// True when the spend limit stopped work because a call's cost could not be determined (the
+    /// limit could not be enforced), not because it was reached. Meaningful only with
+    /// [`Self::cost_cap_reached`]; it selects the README line ([`COST_CAP_UNENFORCED_README_LINE`]
+    /// instead of [`COST_CAP_README_LINE`]).
+    pub cost_cap_unenforced: bool,
     /// "Vulnerability data as of": per feed (CISA KEV, FIRST EPSS, OSV), the date the data
     /// behind the dependency findings was current as of, or plainly that the feed was not
     /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
@@ -19027,6 +19032,7 @@ impl ManifestProvenance {
             }),
             "client_engagement": self.model.as_ref().map(|m| m.client_engagement),
             "cost_cap_reached": self.cost_cap_reached,
+            "cost_cap_unenforced": self.cost_cap_reached && self.cost_cap_unenforced,
             "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
             "client_name": self.client_name,
             "corpus_rules_applied": self.corpus_rules_applied,
@@ -19112,7 +19118,12 @@ impl ManifestProvenance {
             ));
         }
         if self.cost_cap_reached {
-            out.push_str(&format!("{COST_CAP_README_LINE}\n"));
+            let line = if self.cost_cap_unenforced {
+                COST_CAP_UNENFORCED_README_LINE
+            } else {
+                COST_CAP_README_LINE
+            };
+            out.push_str(&format!("{line}\n"));
         }
         if !self.incomplete.is_empty() {
             out.push_str(&format!("{INTERNAL_INCOMPLETE_README_LINE}\n"));
@@ -19145,6 +19156,12 @@ pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this ins
 /// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.
 pub const COST_CAP_README_LINE: &str = "Spend limit: reached. This inspection is INCOMPLETE; the \
      report lists the passes that were not run.";
+
+/// The README line when the spend limit stopped work because a call's cost could not be
+/// determined, so the limit could not be enforced (it was not reached). Printed instead of
+/// [`COST_CAP_README_LINE`]; the release gate parses both.
+pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enforced. This \
+     inspection is INCOMPLETE; the report lists the passes that were not run.";
 
 /// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
 /// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).

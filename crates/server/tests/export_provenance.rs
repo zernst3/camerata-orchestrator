@@ -601,3 +601,94 @@ fn the_gate_catches_a_readme_that_disagrees_on_a_22c_value() {
         );
     }
 }
+
+// ---- the spend limit's cause: "reached" or "could not be enforced" ----
+
+/// A provenance made the way the export makes it, from a report whose spend limit stopped work
+/// (`cost_unknown` says whether the stop was an unknown cost).
+fn provenance_stopped_by_the_limit(cost_unknown: bool) -> camerata_server::ManifestProvenance {
+    let mut report = default_report();
+    report
+        .ledger
+        .record_cost_cap(camerata_server::cost_cap::CostCapRecord {
+            cap_usd: 10.0,
+            spent_usd: if cost_unknown { 0.02 } else { 10.0 },
+            repos_not_finished: vec!["acme/portal".to_string()],
+            cost_unknown,
+            ..Default::default()
+        });
+    let json = cover_of(&report);
+    export_provenance_with(&report, &json.cover, None, None)
+}
+
+#[test]
+fn a_stop_caused_by_an_unknown_cost_says_the_limit_could_not_be_enforced() {
+    let provenance = provenance_stopped_by_the_limit(true);
+    assert!(provenance.cost_cap_reached && provenance.cost_cap_unenforced);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], true);
+    assert_eq!(manifest["inspection"]["cost_cap_unenforced"], true);
+    assert!(
+        readme.contains("Spend limit: could not be enforced"),
+        "{readme}"
+    );
+    assert!(!readme.contains("Spend limit: reached"), "{readme}");
+    assert!(readme.contains("INCOMPLETE"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+    assert!(!manifest.to_string().contains("usd") && !readme.contains('$'));
+}
+
+#[test]
+fn a_stop_caused_by_reaching_the_limit_still_says_reached() {
+    let provenance = provenance_stopped_by_the_limit(false);
+    assert!(provenance.cost_cap_reached && !provenance.cost_cap_unenforced);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_unenforced"], false);
+    assert!(readme.contains("Spend limit: reached"), "{readme}");
+    assert!(!readme.contains("could not be enforced"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+/// The gate reads both lines and catches a README whose line names the other cause than the
+/// manifest records.
+#[test]
+fn the_gate_parses_both_spend_limit_lines_and_catches_the_wrong_one() {
+    let (manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(true));
+    let wrong = readme.replace(
+        camerata_server::COST_CAP_UNENFORCED_README_LINE,
+        camerata_server::COST_CAP_README_LINE,
+    );
+    assert_ne!(wrong, readme, "the unenforced line was in the README");
+    let problems = camerata_server::release_gate::verify_readme_provenance(&wrong, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+
+    let (manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(false));
+    let wrong = readme.replace(
+        camerata_server::COST_CAP_README_LINE,
+        camerata_server::COST_CAP_UNENFORCED_README_LINE,
+    );
+    let problems = camerata_server::release_gate::verify_readme_provenance(&wrong, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+}
+
+/// A package built before the cause was recorded has no `cost_cap_unenforced` key; with the
+/// "reached" line it still verifies.
+#[test]
+fn a_package_without_the_cause_key_still_verifies_as_reached() {
+    let (mut manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(false));
+    manifest["inspection"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cost_cap_unenforced");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
