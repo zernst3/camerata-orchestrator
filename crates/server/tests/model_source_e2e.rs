@@ -282,6 +282,12 @@ fn the_env_template_has_no_model_lines() {
             !(name.starts_with("CAMERATA_") && name.contains("MODEL") && assignment.contains('=')),
             "the template still offers a model variable: {line}"
         );
+        // The backend is a per-project setting in the app (and `--backend` on the command
+        // line); nothing reads this variable, so the template must not offer it.
+        assert_ne!(
+            name, "CAMERATA_LLM_BACKEND",
+            "the template still offers the removed backend variable: {line}"
+        );
     }
     assert!(
         text.contains("Models are NOT chosen here"),
