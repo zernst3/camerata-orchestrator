@@ -5673,6 +5673,7 @@ fn is_chosen_name(tok: &str) -> bool {
 /// model a concrete, specific correction ("you named X, which isn't in the evidence") rather
 /// than a vague rejection. Returns `None` when every named identifier is grounded (including
 /// a fix that names none at all — pure prose is never rejected on this axis).
+#[cfg(test)]
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
     find_ungrounded_identifier_in(fix, evidence, None)
 }
