@@ -106,15 +106,14 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     };
     // The fix stage's model and the clone judge's, when the run uses them. A model with no list
     // price leaves its stage out of the figure (the figure says when a price is missing).
-    let priced = |id: &'_ str| price_of(id).map(|(i, o)| (i, o));
     let fix_price = inputs
         .fix_model
         .as_deref()
-        .and_then(|id| priced(id).map(|(price_in, price_out)| (id, price_in, price_out)));
+        .and_then(|id| price_of(id).map(|(price_in, price_out)| (id, price_in, price_out)));
     let judge_price = inputs
         .clone_judge_model
         .as_deref()
-        .and_then(|id| priced(id).map(|(price_in, price_out)| (id, price_in, price_out)));
+        .and_then(|id| price_of(id).map(|(price_in, price_out)| (id, price_in, price_out)));
     let estimate = prices.map(|((a_in, a_out), (c_in, c_out))| {
         let piece = |id, price_in, price_out| PricedModel {
             id,

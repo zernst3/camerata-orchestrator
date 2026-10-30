@@ -223,7 +223,9 @@ fn a_cap_is_the_work_with_headroom_plus_thinking_within_the_runaway_ceiling() {
     }
     assert_eq!(scan_max_tokens(10_000), s::AGGREGATE_MAX_TOKENS_CEILING);
     // The ceiling follows the model's own limit on the wire: nothing above it is sent.
-    assert!(s::AGGREGATE_MAX_TOKENS_CEILING <= 128_000);
+    const {
+        assert!(s::AGGREGATE_MAX_TOKENS_CEILING <= 128_000);
+    }
 }
 
 /// P10 / P4: the truncation retry stays for a true runaway and CHANGES the request: the second

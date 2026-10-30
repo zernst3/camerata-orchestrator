@@ -191,7 +191,7 @@ async fn a_stream_that_dies_late_keeps_the_text_that_arrived() {
 /// schedule, and the retry's reply is the one returned.
 #[tokio::test]
 async fn a_stream_that_breaks_before_any_text_is_retried() {
-    let broken = format!("{}", start(300));
+    let broken = start(300);
     let good = format!(
         "{}{}{}",
         start(300),

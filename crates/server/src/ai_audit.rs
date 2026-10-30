@@ -6286,8 +6286,9 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
-/// Coarse total-time backstop for NON-streaming calls only (the calibration pass and the
-/// no-feedback path), which have no per-token progress signal to watch. Streaming calls do
+/// Coarse total-time backstop for the deep tier's no-feedback calls (a bounded 8,192-token
+/// reply). The scan, calibration, alternatives, detail and fix stages do not use it: they
+/// stream, which shows progress, so only silence fails them. Streaming calls do
 /// NOT use this — they self-bound on an idle/stall timeout inside the transport, which
 /// scales with repo size (a big scan keeps streaming and never trips it; only a true hang
 /// does). Set high so it never kills legitimate work. `CAMERATA_LLM_MAX_SECS` (default 600).

@@ -2966,16 +2966,57 @@ call sets `output_config.effort` explicitly: `FIX_STAGE_EFFORT` = `low`. The tas
 narrow and bounded by the evidence in the prompt, and the self-check plus the
 bounded retries catch a weak answer, so the lowest effort is the starting point; raise
 it only if the live sweep's give-up rate or fix-quality sample says the fixes need
-more. One rule (`ai_audit::fix_effort`): the fix call uses `low` whenever the fix
-model is `FIX_STAGE_HAIKU_MODEL`, whether it got there by default or by an explicit
-pick, with `fix_on_haiku` on or off; any other fix model gets no effort, because the
-setting is a property of Haiku 5.5 and not every model accepts it. `LlmRequest::effort`
+more. One rule (`ai_audit::fix_effort`): the fix call uses `low` on every fix model,
+because the effort belongs to the stage and not to the model (see "Effort per stage"
+below). `LlmRequest::effort`
 is written into `output_config.effort` by `apply_request_effort` BEFORE
 `conform_messages_body`, which keeps a caller-chosen effort and only fills the model's
-default (`high` on Haiku 5.5) when none is present. Both the real-time body
+default (`high` on Opus 5.5 and Haiku 5.5) when none is present. The setting reaches the
+wire only for a model that takes one (`model_registry::accepts_effort`: the 5.x line).
+Both the real-time body
 (`messages_request_body`) and the Message Batches item (`build_batch_item`) take it
 through that one helper; the CLI backend does not send it. The no-code pre-filter
 (`fix_prefilter`) and the scan's truncation retry are unchanged on the Haiku path.
+
+**Effort per stage, output caps, streaming and the spend limit's reserve** (retry fixes
+F2, `docs/audits/2026-10-29_retry-diagnosis.md` in camerata-internal). Four rules, each
+with its tests in `crates/server/src/ai_audit/output_caps_tests.rs`:
+
+1. *Effort belongs to the stage.* The scan keeps `high` (its judgment is the product and
+   is never lowered without an answer-key comparison); detail regeneration, calibration
+   and alternatives ask for `medium`; the fix stage asks for `low`. The registry's
+   per-model default (`EffortPolicy::SetHigh` on Opus 5.5 and Haiku 5.5) only fills a
+   request that names no effort, so the choice holds on every model.
+2. *A cap covers the work plus the thinking.* The 5.x models think before they write and
+   the thinking counts against `max_tokens`. `camerata_ui_core::scan::output_cap_tokens`
+   is `2 x the stage's text budget + thinking allowance`, within a floor of 4,096 and a
+   runaway ceiling of 64,000 (the transport clamps again to the model's own limit). The
+   allowance is 12,000 tokens at `high`, 4,000 at `medium` and 2,000 at `low`, measured
+   from the stored replies of the two efficiency runs (output tokens billed minus the
+   reply text: Haiku 5.5's scan replies thought 5,154 tokens on average and 7,218 at the
+   90th percentile; its detail replies 865 and at most 2,402; its fix replies, already at
+   `low`, 382 and at most 2,973). The API bills what a reply generates, so a generous cap
+   costs nothing on a reply that finishes; a tight one turns a long reply into a cut-off
+   and a second payment.
+3. *The API leg streams.* `Llm::complete_api_streaming` sends `stream: true` and reads
+   the server-sent events under the idle window (`CAMERATA_LLM_IDLE_SECS`, 120 seconds)
+   instead of a fixed 600-second total. Text that arrived before a late failure is kept as
+   a reply cut off at the limit (billed at the request's cap, the most it could have
+   generated); a stall with nothing delivered is a Transport failure retried once. The
+   truncation retry stays for a true runaway, raises the cap, and is not sent when the cap
+   is already at the ceiling.
+4. *The spend limit reserves what a request may cost.* Admission uses
+   `spent + in_flight x reserve < limit` where the reserve is the larger of the most any
+   call has cost and the most any request built so far could cost (its input at the full
+   rate plus `max_tokens` at the output rate, `ai_audit::request_ceiling_usd`). The
+   overshoot is therefore at most one request's ceiling, whatever the cap. With no limit
+   set nothing is reserved or refused, and a real inspection runs with no limit unless the
+   operator sets one (the command line has no default, and the cockpit's field opens blank).
+
+A calibration reply cut off at its cap is salvaged: the verdicts written out in full are
+kept and only the unanswered findings are asked again, once. The pre-flight estimate counts
+the fix stage, the clone judge, the routing groups, the alternatives digest re-send and a
+per-model output scale (`camerata_ui_core::scan::estimate_run_cost_bounds`).
 
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.

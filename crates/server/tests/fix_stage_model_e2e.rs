@@ -333,7 +333,11 @@ async fn switch_off_reproduces_the_pre_rank_10_fix_model_exactly() {
                 call.model, expected,
                 "model {model:?}, calibration {calibration_model:?}: {calls:?}"
             );
-            assert_eq!(call.effort, None, "{calls:?}");
+            assert_eq!(
+                call.effort.as_deref(),
+                Some(FIX_STAGE_EFFORT),
+                "the fix stage asks for its effort on every model: {calls:?}"
+            );
         }
     }
 }
