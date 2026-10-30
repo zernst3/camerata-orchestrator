@@ -961,6 +961,21 @@ async fn run_detail_round(
                 still_pending.push(idx);
             }
         }
+        // The share of this reply that bought nothing: the findings of the batch with no
+        // written explanation. A cut-off reply was counted whole above, so it is not counted
+        // again for the entries it lost.
+        if !resp.truncated {
+            let unwritten = written.iter().filter(|w| !**w).count();
+            if unwritten > 0 {
+                if let Some(m) = meter {
+                    m.record_wasted_share(
+                        Stage::DetailRegeneration,
+                        &resp,
+                        unwritten as f64 / batch.len() as f64,
+                    );
+                }
+            }
+        }
         // The reply is set aside with the reasons, and only this reply: one in which every entry
         // was written stays good.
         if !turned_down.is_empty() {

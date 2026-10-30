@@ -3466,6 +3466,11 @@ pub async fn verify_findings(
             } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
+                    // A reply cut off at the output limit holds no verdict worth reading: the
+                    // call bought nothing, and the telemetry says so.
+                    if resp.truncated {
+                        m.record_wasted(Stage::Calibration, &resp);
+                    }
                 }
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
@@ -3541,6 +3546,9 @@ pub async fn verify_findings(
             Ok(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
+                    if resp.truncated {
+                        m.record_wasted(Stage::Calibration, &resp);
+                    }
                 }
                 let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
                 chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);

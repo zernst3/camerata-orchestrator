@@ -3169,7 +3169,7 @@ repeat round runs it again in a batch of half the size (5), a third round sends 
 still pending one finding to a call, and what is still unwritten then gets the marker. Every
 call passes the spend-limit check first. The output budget is 450 tokens a finding (a full
 detail with its JSON wrapping was measured at about 280, and 160 cut off 4 of 10 calls on a
-real run). A reply cut off at the output limit is still counted as waste in the telemetry,
+real run). A reply cut off at the output limit is still counted as waste in the telemetry (whole; a reply that was not cut off counts the share of its entries that were rejected, so the stage's waste figure is no longer zero when checks turned entries down),
 but its complete entries are kept: the entries are read one by one with the same walker the
 scan uses to salvage a cut-off reply (`complete_array_objects`), and only the findings the
 cut-off lost go to the next round. The echoed path is compared after dropping a leading `./`

@@ -2266,3 +2266,91 @@ async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
     assert_eq!(listed.len(), 1, "{:?}", failed[0].attempts);
     assert!(listed[0].contains("exploit precondition"), "{}", listed[0]);
 }
+
+// ── P7: a detail reply counts as wasted by the share of its entries rejected ────────────────
+
+#[tokio::test]
+async fn a_detail_reply_is_wasted_by_the_share_of_its_entries_rejected() {
+    // Round one answers 1 of 2 findings (the other is left out): half of that call is waste.
+    // Round two asks for the one left and gets it: no waste.
+    let llm = RoleLlm::new("{}", Regen::FirstOnly);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (_out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let usage = meter
+        .stage_telemetry(0)
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .expect("the stage was recorded")
+        .usage
+        .clone();
+    assert_eq!(usage.calls, 2);
+    assert_eq!(
+        usage.wasted_calls, 1,
+        "only the half-rejected call: {usage:?}"
+    );
+    assert_eq!(usage.wasted_input_tokens, 500, "half of 1,000: {usage:?}");
+    assert_eq!(usage.wasted_output_tokens, 50, "half of 100: {usage:?}");
+}
+
+#[tokio::test]
+async fn a_detail_reply_with_every_entry_written_is_not_waste() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::Writes);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let stages = meter.stage_telemetry(0).stages;
+    let usage = &stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.wasted_calls, 0, "{usage:?}");
+}
+
+#[tokio::test]
+async fn a_cut_off_detail_reply_stays_counted_whole_and_is_not_counted_twice() {
+    // Cut off after one complete entry: the call is wasted once (as before), not once for the
+    // cut-off and again for the entry it lost.
+    let llm = RoleLlm::new("{}", Regen::CutAfter(1));
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(2),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let stages = meter.stage_telemetry(0).stages;
+    let usage = &stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.wasted_calls, 1, "{usage:?}");
+    assert_eq!(usage.wasted_input_tokens, 1_000, "{usage:?}");
+}
