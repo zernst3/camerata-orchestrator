@@ -4787,6 +4787,8 @@ async fn recommend_alternatives(
                 repo,
                 repo_map: &repo_map,
                 digest,
+                n_rule_batches: n_chunks,
+                n_digests: digests.len(),
                 nonce,
                 audit_model,
                 feedback,
@@ -5001,6 +5003,10 @@ struct AlternativesAsk<'a> {
     repo: &'a str,
     repo_map: &'a str,
     digest: &'a str,
+    /// How many rule batches the stage sends in all: every one of them re-sends `digest`.
+    n_rule_batches: usize,
+    /// How many file-chunk digests the stage asks about: every one re-sends `repo_map`.
+    n_digests: usize,
     nonce: &'a crate::prompt_frame::FrameNonce,
     audit_model: Option<&'a str>,
     feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
@@ -5022,15 +5028,24 @@ impl AlternativesAsk<'_> {
             repo,
             repo_map,
             digest,
+            n_rule_batches,
+            n_digests,
             nonce,
             audit_model,
             feedback,
             meter,
         } = *self;
-        let prompt = format!(
-            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-            build_alternatives_block(rules)
+        // The shared prefix (repo map, then digest) leads and the rules, which differ per batch,
+        // trail, so the digest the stage re-sends with every rule batch is one cached prefix.
+        let map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+        let static_prefix = format!("{map_prefix}{digest}\n\n");
+        let cache_breakpoints = alternatives_cache_breakpoints(
+            map_prefix.len(),
+            static_prefix.len(),
+            n_rule_batches,
+            n_digests,
         );
+        let prompt = format!("{static_prefix}{}", build_alternatives_block(rules));
         if let Some((store, key)) = feedback {
             store.register(
                 key,
@@ -5052,6 +5067,7 @@ impl AlternativesAsk<'_> {
                 .with_max_tokens(alternatives_max_tokens(rules.len()))
                 .with_temperature(AUDIT_TEMPERATURE)
                 .with_response_schema(reply_schemas::alternatives_reply_schema())
+                .with_cache_breakpoints(cache_breakpoints)
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
@@ -5090,6 +5106,31 @@ impl AlternativesAsk<'_> {
         }
         Ok(resp)
     }
+}
+
+/// The cache breakpoints of an alternatives request: byte offsets into its prompt, each the end
+/// of a prefix a later request of the stage repeats exactly. The repo map is repeated by every
+/// request over another file-chunk digest (`n_digests > 1`); the digest after it is repeated by
+/// every further rule batch (`n_rule_batches > 1`), which is the saving: the stage re-sent the
+/// whole digest, 25k to 40k input tokens, uncached with each rule batch. A stage that sends one
+/// request over one digest repeats nothing (a cache write costs more than the plain input and
+/// nothing would read it), so it carries none. The same placement as the scan's
+/// ([`cache_breakpoints_for_pass`]); the schema and the system prompt are the same on every
+/// request of the stage, so the prefix is one cache entry.
+fn alternatives_cache_breakpoints(
+    map_prefix_len: usize,
+    static_prefix_len: usize,
+    n_rule_batches: usize,
+    n_digests: usize,
+) -> Vec<usize> {
+    let mut breakpoints = Vec::new();
+    if n_digests > 1 {
+        breakpoints.push(map_prefix_len);
+    }
+    if n_rule_batches > 1 {
+        breakpoints.push(static_prefix_len);
+    }
+    breakpoints
 }
 
 /// What a cut-off recommendation reply still answers: the recommendations for the rules in
@@ -13163,6 +13204,9 @@ mod check_prompt_tests;
 
 #[cfg(test)]
 mod why_fix_direction_tests;
+
+#[cfg(test)]
+mod alternatives_cache_tests;
 
 #[cfg(test)]
 mod tests {

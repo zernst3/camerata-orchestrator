@@ -3074,6 +3074,15 @@ a condition on the problem. A reply with a single `detail` field (a backend that
 the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
 direction as part of the finding's `Detail:` in its evidence; it has no separate input.
 
+*The alternatives digest is a cached prefix.* The stage re-sent the whole file digest (25k
+to 40k input tokens) uncached with every rule batch. Its prompt is now the repo map and the
+digest, then the batch's rules, with cache breakpoints (`alternatives_cache_breakpoints`):
+after the digest when the stage sends more than one rule batch, after the repo map when it
+asks about more than one file-chunk digest, none when one request over one digest repeats
+nothing. The system prompt and the response schema are the same on every request of the
+stage, so the prefix is one cache entry. The pre-flight estimate still prices the digest
+re-send at the full input rate, so it is an upper bound for a run with several rule batches.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its
