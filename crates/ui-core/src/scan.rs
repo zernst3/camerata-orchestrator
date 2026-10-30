@@ -869,6 +869,34 @@ pub fn estimate_run_cost_by_repo(
     }
 }
 
+/// The cockpit's pre-audit estimate: [`estimate_run_cost_by_repo`] over the repos the cockpit
+/// knows, at the scan and calibration models it shows, with the fix stage priced at `fix` when
+/// the cockpit's model list prices it. The cockpit has no file list, so it cannot run the rule
+/// router: each repo counts as ONE routing group (the command line's pre-flight, which has the
+/// files, counts the real groups), and the clone judge (two small calls) is not priced. Both make
+/// the cockpit's figure a little under the command line's for the same run; the arithmetic is
+/// the same.
+pub fn cockpit_run_estimate(
+    repos: &[RunRepoInput],
+    mode: &str,
+    scan: PricedModel<'_>,
+    calibration: PricedModel<'_>,
+    fix: Option<PricedModel<'_>>,
+    flags: RunFlags,
+) -> AuditEstimate {
+    estimate_run_cost_by_repo(
+        repos,
+        mode,
+        &RunModels {
+            scan,
+            calibration,
+            fix,
+            clone_judge: None,
+        },
+        flags,
+    )
+}
+
 /// The arithmetic of [`estimate_run_cost_bounds`], with the regeneration stage priced by
 /// `regen_of` (the expected figure or the ceiling).
 fn estimate_run_with_regeneration(
@@ -3131,6 +3159,12 @@ mod tests {
         );
         let (_, sonnet_usd, sonnet_calls) = sonnet.expected;
         let (_, haiku_usd, haiku_calls) = haiku.expected;
+        eprintln!(
+            "run estimate for the fixture: Sonnet 5.5 ${sonnet_usd:.3} ({sonnet_calls} calls, \
+             ceiling ${:.2}) against $1.543 spent; Haiku 5.5 ${haiku_usd:.3} ({haiku_calls} calls, \
+             ceiling ${:.2}) against $0.414 spent",
+            sonnet.ceiling_usd, haiku.ceiling_usd
+        );
         assert!(
             within(sonnet_usd, 1.543, 0.25),
             "Sonnet 5.5: estimated ${sonnet_usd:.3} against $1.543 spent"
@@ -3271,6 +3305,56 @@ mod tests {
             ..flags()
         };
         assert!(usd("parallel", deep) > usd("parallel", flags()));
+    }
+
+    /// The cockpit shows the SAME estimate the command line prints, from the inputs the cockpit
+    /// has: the fix stage at its default model when the model list prices it, each repo as one
+    /// routing group (the cockpit has no file list to route) and no clone judge. For the fixture
+    /// on Sonnet 5.5 the figure is within 25 percent of the recorded run; the older cockpit
+    /// arithmetic said $2.60.
+    #[test]
+    fn the_cockpit_estimate_is_the_run_estimate_over_the_inputs_the_cockpit_has() {
+        let unrouted = RunRepoInput {
+            routing_groups: 1,
+            ..fixture()
+        };
+        let est = cockpit_run_estimate(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            SONNET,
+            SONNET,
+            Some(HAIKU),
+            flags(),
+        );
+        let same = estimate_run_cost_by_repo(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            &RunModels {
+                scan: SONNET,
+                calibration: SONNET,
+                fix: Some(HAIKU),
+                clone_judge: None,
+            },
+            flags(),
+        );
+        assert_eq!(est.rows.len(), 1);
+        assert!((est.dollars - same.dollars).abs() < 1e-9);
+        assert_eq!(est.passes, same.passes);
+        assert!(
+            within(est.dollars, 1.543, 0.25),
+            "cockpit: ${:.3} against $1.543 spent",
+            est.dollars
+        );
+        // With no priced fix model the stage is left out, as the command line leaves it out.
+        let bare = cockpit_run_estimate(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            SONNET,
+            SONNET,
+            None,
+            flags(),
+        );
+        assert!(bare.dollars < est.dollars);
     }
 
     /// A multi-repo run is the sum of its repos, as for the older estimate.

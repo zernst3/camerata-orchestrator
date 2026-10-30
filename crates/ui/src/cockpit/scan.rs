@@ -588,11 +588,11 @@ pub(super) fn findings_csv(findings: &[FindingView]) -> String {
     out
 }
 
-// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status, estimate_audit_cost)
+// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status)
 // now live in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit
 // call sites are unchanged. `default_finding_status` is re-exported via the triage block below
 // (FindingView moved to core::triage), so it's not repeated here.
-pub(super) use camerata_ui_core::scan::{det_tool_label, estimate_audit_cost, human_tokens};
+pub(super) use camerata_ui_core::scan::{det_tool_label, human_tokens};
 
 // The onboarding-triage state machine + its data shapes now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1): FindingView, Disposition (+ its Default), TriageState, TechDebtBucket,
@@ -9317,11 +9317,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let ai_on = run_ai_review();
                         let (a_in, a_out) = if ai_on { price(&audit_model(), (3.0, 15.0)) } else { (0.0, 0.0) };
                         let (c_in, c_out) = if ai_on { price(&calibration_model(), (a_in, a_out)) } else { (0.0, 0.0) };
+                        // The fix stage runs on its default model (the server's `fix_on_haiku`
+                        // switch is on by default); priced when the model list prices it.
+                        let fix_model_id = camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
+                        let fix_price = if ai_on {
+                            models.as_ref().and_then(|m| m.models.iter().find(|o| o.id == fix_model_id).map(|o| (o.price_in, o.price_out)))
+                        } else {
+                            None
+                        };
+                        let scan_id = audit_model();
+                        let calibration_id = calibration_model();
                         let sel = selected_count();
-                        // Mirror the request flags the audit will actually send: incremental
-                        // scope (only changed files cost tokens unless Full scan is ticked) and
-                        // the deep SOC-2/security tier (three extra whole-repo passes).
-                        let incremental = !audit_full_scan();
+                        // Mirror the request flags the audit will actually send: the deep
+                        // SOC-2/security tier (three extra whole-repo passes). The estimate
+                        // prices a full scan; a re-scan that reuses the cache costs less.
                         // Deep tier only runs with AI; force it off in the estimate when AI is off.
                         let deep = audit_deep() && ai_on;
                         // The project's AI backend (docs/design/2026-09-22_per-project-backend.md)
@@ -9335,6 +9344,27 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
                         let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend).to_string();
+                        // THE run estimate (`camerata_ui_core::scan::cockpit_run_estimate`): the
+                        // same arithmetic the command line's pre-flight prints, over the inputs
+                        // the cockpit has (each repo as one routing group: the cockpit has no
+                        // file list to route, so its figure sits a little under the pre-flight's).
+                        let priced = |id: &str, price_in: f64, price_out: f64| camerata_ui_core::scan::PricedModel { id, price_in, price_out };
+                        let flags = camerata_ui_core::scan::RunFlags {
+                            thorough: audit_thorough(),
+                            deep,
+                            backend,
+                            terse_output: true,
+                        };
+                        let run_estimate = |inputs: &[camerata_ui_core::scan::RunRepoInput]| {
+                            camerata_ui_core::scan::cockpit_run_estimate(
+                                inputs,
+                                &est_mode,
+                                priced(&scan_id, a_in, a_out),
+                                priced(&calibration_id, c_in, c_out),
+                                fix_price.map(|(i, o)| priced(fix_model_id, i, o)),
+                                flags,
+                            )
+                        };
                         // Several repos: one estimate per repo, summed (the scan chunks and
                         // calibrates each repo on its own). Single repo, or sizes not back yet:
                         // the one-stream estimate, unchanged.
@@ -9345,20 +9375,21 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let selection = repo_selection.read().clone();
                                 // A repo is priced only when its rule choice is known: a guessed
                                 // rule count would put a made-up figure in front of a spend decision.
-                                let inputs: Vec<camerata_ui_core::scan::RepoEstimateInput> = sizes
+                                let inputs: Vec<camerata_ui_core::scan::RunRepoInput> = sizes
                                     .iter()
                                     .filter(|z| z.error.is_none())
                                     .filter_map(|z| {
                                         let ids = selection.get(&z.repo)?;
-                                        Some(camerata_ui_core::scan::RepoEstimateInput {
+                                        Some(camerata_ui_core::scan::RunRepoInput {
                                             repo: z.repo.clone(),
                                             code_chars: z.code_chars,
                                             selected: ids.len(),
                                             multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
+                                            routing_groups: 1,
                                         })
                                     })
                                     .collect();
-                                let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
+                                let est = run_estimate(&inputs);
                                 for z in sizes.iter() {
                                     match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
                                         (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
@@ -9368,7 +9399,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 }
                                 (est.tokens, est.dollars, est.passes)
                             }
-                            None => estimate_audit_cost(report.code_chars, sel, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true),
+                            None => {
+                                let est = run_estimate(&[camerata_ui_core::scan::RunRepoInput {
+                                    repo: report.repos.first().cloned().unwrap_or_default(),
+                                    code_chars: report.code_chars,
+                                    selected: sel,
+                                    multi_option_selected,
+                                    routing_groups: 1,
+                                }]);
+                                (est.tokens, est.dollars, est.passes)
+                            }
                         };
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };

@@ -1070,15 +1070,21 @@ pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
 
-/// The shared estimator's whole-run dollars for a batch scan over `chunks` and `batches`, priced
-/// at `model` (scan and calibration alike). The fallback projection for the batch spend-cap gate
-/// when the exact token count is unavailable; `None` when the model has no list price.
+/// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
+/// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the
+/// same arithmetic the pre-flight prints and the cockpit shows). The fallback projection for the
+/// batch spend-cap gate when the exact token count is unavailable; `None` when the model has no
+/// list price. The batches given are the work as routed, so they count as one group; the fix
+/// stage and the clone judge run after the submission and are not part of what it commits.
 fn batch_estimate_usd(
     model: &str,
     chunks: &[&[(String, String)]],
     batches: &[&[(String, String)]],
     terse_output: bool,
 ) -> Option<f64> {
+    use camerata_ui_core::scan::{
+        estimate_run_cost_bounds, PricedModel, RunFlags, RunModels, RunRepoInput,
+    };
     let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
     let code_chars: usize = chunks
         .iter()
@@ -1086,22 +1092,34 @@ fn batch_estimate_usd(
         .map(|(_, content)| content.len())
         .sum();
     let rules: usize = batches.iter().map(|b| b.len()).sum();
-    let (_tokens, dollars, _passes) = camerata_ui_core::scan::estimate_audit_cost(
-        code_chars,
-        rules,
+    let priced = PricedModel {
+        id: model,
+        price_in: price.price_in,
+        price_out: price.price_out,
+    };
+    let bounds = estimate_run_cost_bounds(
+        &RunRepoInput {
+            repo: "batch".to_string(),
+            code_chars,
+            selected: rules,
+            multi_option_selected: 0,
+            routing_groups: 1,
+        },
         "batch",
-        price.price_in,
-        price.price_out,
-        price.price_in,
-        price.price_out,
-        false,
-        false,
-        false,
-        crate::llm::ProjectBackend::Api,
-        0,
-        terse_output,
+        &RunModels {
+            scan: priced,
+            calibration: priced,
+            fix: None,
+            clone_judge: None,
+        },
+        RunFlags {
+            thorough: false,
+            deep: false,
+            backend: crate::llm::ProjectBackend::Api,
+            terse_output,
+        },
     );
-    Some(dollars)
+    Some(bounds.expected.1)
 }
 
 /// Whether the `terse_output` measure applies to a call site that may have no meter.

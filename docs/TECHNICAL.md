@@ -3000,11 +3000,16 @@ with its tests in `crates/server/src/ai_audit/output_caps_tests.rs`:
    and a second payment.
 3. *The API leg streams.* `Llm::complete_api_streaming` sends `stream: true` and reads
    the server-sent events under the idle window (`CAMERATA_LLM_IDLE_SECS`, 120 seconds)
-   instead of a fixed 600-second total. Text that arrived before a late failure is kept as
-   a reply cut off at the limit (billed at the request's cap, the most it could have
-   generated); a stall with nothing delivered is a Transport failure retried once. The
-   truncation retry stays for a true runaway, raises the cap, and is not sent when the cap
-   is already at the ceiling.
+   instead of a fixed 600-second total; the same window bounds the wait for the response
+   headers. Text that arrived before a late failure is kept as a reply cut off at the limit
+   (billed at the request's cap, the most it could have generated); a stall with nothing
+   delivered is a Transport failure retried once. Because a 5.x model's thinking phase
+   sends nothing down the stream under the API's default display, the streamed body asks
+   for `thinking: {type: "adaptive", display: "summarized"}`: the summary deltas are
+   progress the idle window sees (they are never stored or shown; only text deltas are
+   kept), so a long think is not mistaken for a stall and paid for twice. The truncation
+   retry stays for a true runaway, raises the cap, and is not sent when the cap is already
+   at the ceiling.
 4. *The spend limit reserves what a request may cost.* Admission uses
    `spent + in_flight x reserve < limit` where the reserve is the larger of the most any
    call has cost and the most any request built so far could cost (its input at the full
@@ -3014,9 +3019,13 @@ with its tests in `crates/server/src/ai_audit/output_caps_tests.rs`:
    operator sets one (the command line has no default, and the cockpit's field opens blank).
 
 A calibration reply cut off at its cap is salvaged: the verdicts written out in full are
-kept and only the unanswered findings are asked again, once. The pre-flight estimate counts
-the fix stage, the clone judge, the routing groups, the alternatives digest re-send and a
-per-model output scale (`camerata_ui_core::scan::estimate_run_cost_bounds`).
+kept and only the unanswered findings are asked again, once. ONE run estimate exists
+(`camerata_ui_core::scan::estimate_run_cost_bounds`): it counts the fix stage, the clone
+judge, the routing groups, the alternatives digest re-send and a per-model output scale.
+The command line's pre-flight, the cockpit's cost readout
+(`cockpit_run_estimate`, with each repo as one routing group because the cockpit has no
+file list to route, and without the clone judge) and the batch gate's fallback projection
+(`ai_audit::batch_estimate_usd`) all price from it.
 
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
