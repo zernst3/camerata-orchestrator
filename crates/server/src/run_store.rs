@@ -212,6 +212,11 @@ pub struct RepoRecord {
 }
 
 /// The models and mode a run used.
+///
+/// `audit`, `calibration` and `fix` are the RESOLVED model ids (what each stage calls), so a
+/// resume can tell that a default changed since the run was saved. Runs saved before that stored
+/// the raw picks (possibly empty); they read back with [`Self::resolved`] false and are compared
+/// by [`Self::matches_for_resume`] on what they did record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelsRecord {
     pub audit: String,
@@ -219,6 +224,53 @@ pub struct ModelsRecord {
     pub fix: String,
     pub backend: String,
     pub mode: String,
+    /// True when `calibration` and `fix` hold resolved ids. False (the serde default) for a run
+    /// saved before they did.
+    #[serde(default)]
+    pub resolved: bool,
+}
+
+impl ModelsRecord {
+    /// The record for a run whose operator (or project) picked `model`, `calibration_model` and
+    /// the fix model in `controls`: every id resolved exactly as the stages resolve it, so what
+    /// is stored is what is called.
+    pub fn from_picks(
+        model: Option<&str>,
+        calibration_model: Option<&str>,
+        controls: &crate::cost_cap::RunControls,
+        backend: &str,
+        mode: &str,
+    ) -> Self {
+        let audit = crate::ai_audit::resolve_audit_model(model);
+        let calibration = crate::ai_audit::resolve_calibration_model(calibration_model, &audit);
+        let fix = controls
+            .fix_model_for(Some(&audit), Some(&calibration))
+            .map_or_else(|| calibration.clone(), str::to_string);
+        Self {
+            audit,
+            calibration,
+            fix,
+            backend: backend.to_string(),
+            mode: mode.to_string(),
+            resolved: true,
+        }
+    }
+
+    /// Whether a resume with `now` may reuse a run saved with `self`. A resolved record must be
+    /// equal. A record from before ids were resolved is compared on the audit model, the backend
+    /// and the mode it recorded, and on a calibration or fix pick only when it recorded one (an
+    /// empty raw pick said nothing about what ran).
+    pub fn matches_for_resume(&self, now: &ModelsRecord) -> bool {
+        if self.resolved {
+            return self == now;
+        }
+        let same_or_unrecorded = |saved: &str, now: &str| saved.is_empty() || saved == now;
+        self.audit == now.audit
+            && self.backend == now.backend
+            && self.mode == now.mode
+            && same_or_unrecorded(&self.calibration, &now.calibration)
+            && same_or_unrecorded(&self.fix, &now.fix)
+    }
 }
 
 /// Where a run was started, which decides where it can be resumed: the arguments saved with a run
@@ -1306,7 +1358,7 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
             ));
         }
     }
-    if check.models != &record.models {
+    if !record.models.matches_for_resume(check.models) {
         return refuse(format!(
             "run {} used different models or mode ({} / {} / {}, {}); the stored replies came \
              from those, so resume it with the same ones",

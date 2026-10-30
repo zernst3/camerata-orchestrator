@@ -8121,16 +8121,17 @@ pub(crate) async fn start_audit_job(
                 calibration_model.as_deref(),
                 &selected,
             );
-            let models_record = rs::ModelsRecord {
-                audit: audit_model,
-                calibration: calibration_model.clone().unwrap_or_default(),
-                fix: run_controls.fix_model.clone().unwrap_or_default(),
-                backend: match &backend_resolution {
-                    crate::llm::BackendResolution::Api => "api".to_string(),
-                    _ => "cli".to_string(),
+            // The resolved ids (what each stage calls), so a resume notices a changed default.
+            let models_record = rs::ModelsRecord::from_picks(
+                model.as_deref(),
+                calibration_model.as_deref(),
+                &run_controls,
+                match &backend_resolution {
+                    crate::llm::BackendResolution::Api => "api",
+                    _ => "cli",
                 },
-                mode: format!("{mode:?}").to_ascii_lowercase(),
-            };
+                &format!("{mode:?}").to_ascii_lowercase(),
+            );
             let mut prior = prior;
             let run_store = match &resume_run {
                 Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {

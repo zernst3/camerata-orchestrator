@@ -950,13 +950,14 @@ pub async fn run_inspect_pipeline_with(
         calibration_model,
         &selected,
     );
-    let models_record = camerata_server::run_store::ModelsRecord {
-        audit: audit_model_resolved.clone(),
-        calibration: calibration_model.unwrap_or_default().to_string(),
-        fix: args.fix_model.clone().unwrap_or_default(),
-        backend: format!("{:?}", args.backend).to_ascii_lowercase(),
-        mode: format!("{mode:?}").to_ascii_lowercase(),
-    };
+    // The resolved ids (what each stage calls), so a resume notices a changed default.
+    let models_record = camerata_server::run_store::ModelsRecord::from_picks(
+        model,
+        calibration_model,
+        &controls,
+        &format!("{:?}", args.backend).to_ascii_lowercase(),
+        &format!("{mode:?}").to_ascii_lowercase(),
+    );
     let project_key = if args.repo_dirs().len() == 1 {
         camerata_server::scan_cache::state_dir::repo_state_key(&args.repo)
     } else {

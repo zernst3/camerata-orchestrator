@@ -109,6 +109,7 @@ fn models() -> ModelsRecord {
         fix: "claude-a".to_string(),
         backend: "api".to_string(),
         mode: "parallel".to_string(),
+        resolved: true,
     }
 }
 
@@ -1217,4 +1218,103 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
     });
     assert_eq!(mine.len(), 1);
     assert_eq!(mine[0].repos, vec!["acme/api".to_string()]);
+}
+
+// ---- the saved models are the resolved ids, so a changed default is noticed on resume ----
+
+/// Nothing picked anywhere: the record names what each stage will call (the built-in default for
+/// the scan and calibration, Haiku 5.5 for the fix stage), not an empty pick.
+#[test]
+fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
+    let controls = crate::cost_cap::RunControls::default();
+    let none = ModelsRecord::from_picks(None, None, &controls, "api", "parallel");
+    assert!(none.resolved);
+    assert_eq!(none.audit, crate::llm::DEFAULT_MODEL);
+    assert_eq!(none.calibration, crate::llm::DEFAULT_MODEL);
+    assert_eq!(none.fix, camerata_api_types::project::FIX_STAGE_HAIKU_MODEL);
+
+    // Picks are kept; a blank pick is no pick; an explicit fix model wins.
+    let controls = crate::cost_cap::RunControls {
+        fix_model: Some("claude-opus-5".to_string()),
+        ..crate::cost_cap::RunControls::default()
+    };
+    let picked = ModelsRecord::from_picks(
+        Some("claude-opus-5-5"),
+        Some("  "),
+        &controls,
+        "cli",
+        "batch",
+    );
+    assert_eq!(picked.audit, "claude-opus-5-5");
+    assert_eq!(
+        picked.calibration, "claude-opus-5-5",
+        "blank follows the scan"
+    );
+    assert_eq!(picked.fix, "claude-opus-5");
+    assert_eq!(
+        (picked.backend.as_str(), picked.mode.as_str()),
+        ("cli", "batch")
+    );
+}
+
+/// A run saved under one default is refused when the default has moved, which a raw empty pick
+/// could not show.
+#[test]
+fn a_changed_default_is_noticed_on_resume() {
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    drop(store);
+    let record = read_record(&id).unwrap();
+    let trees = || vec![("acme/api".to_string(), tree_state(repo.path()))];
+    let check = |now: &ModelsRecord| {
+        check_resume(&ResumeCheck {
+            record: &record,
+            ai_scan_key: &key(),
+            models: now,
+            trees: trees(),
+        })
+    };
+    assert_eq!(check(&models()), Ok(()));
+    let mut moved = models();
+    moved.calibration = "claude-newer-default".to_string();
+    assert!(matches!(
+        check(&moved),
+        Err(RunStoreError::Refused(m)) if m.contains("different models")
+    ));
+    let mut moved_fix = models();
+    moved_fix.fix = "claude-newer-default".to_string();
+    assert!(matches!(
+        check(&moved_fix),
+        Err(RunStoreError::Refused(m)) if m.contains("different models")
+    ));
+}
+
+/// A run saved before ids were resolved has no `resolved` field and raw (possibly empty) picks:
+/// it still reads back, and resumes on what it recorded.
+#[test]
+fn a_run_saved_with_raw_picks_reads_back_and_resumes() {
+    let old: ModelsRecord = serde_json::from_str(
+        r#"{"audit":"claude-a","calibration":"","fix":"","backend":"api","mode":"parallel"}"#,
+    )
+    .unwrap();
+    assert!(!old.resolved, "an old record is not marked resolved");
+    // Now resolved: the empty raw picks said nothing, so they do not block the resume.
+    assert!(old.matches_for_resume(&models()));
+    // What the old record did record still has to match.
+    let mut other_audit = models();
+    other_audit.audit = "claude-b".to_string();
+    assert!(!old.matches_for_resume(&other_audit));
+    let mut other_mode = models();
+    other_mode.mode = "batch".to_string();
+    assert!(!old.matches_for_resume(&other_mode));
+    // An explicit raw pick is compared.
+    let old_picked = ModelsRecord {
+        calibration: "claude-cal".to_string(),
+        ..old.clone()
+    };
+    let mut now = models();
+    assert!(!old_picked.matches_for_resume(&now));
+    now.calibration = "claude-cal".to_string();
+    assert!(old_picked.matches_for_resume(&now));
 }

@@ -1085,6 +1085,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
                 fix: String::new(),
                 backend: "cli".to_string(),
                 mode: "parallel".to_string(),
+                resolved: true,
             },
             ai_scan_key: camerata_server::scan_cache::AiScanKey::new("m", Some("m"), &[]),
             // The cockpit's scan request, not the command line's flags.
