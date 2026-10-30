@@ -138,6 +138,58 @@ fn the_precondition_check_reads_why_and_not_the_fix_direction() {
     );
 }
 
+/// Retry fixes F3, item 7: the check names exploit preconditions (who must be logged in, what must
+/// be enabled for an attacker), not every "depends on". The two shapes that turned down good
+/// Sonnet explanations in the efficiency run pass; the real ones are still turned down.
+#[test]
+fn only_an_exploit_precondition_in_why_is_turned_down() {
+    let f = statement();
+    let with_why = |why: &str| Entry {
+        id: "x".to_string(),
+        detail: format!("{why} {DIRECTION}"),
+        why: Some(why.to_string()),
+    };
+    for harmless in [
+        "How the sort order looks depends on the runtime's locale, and doWork formats it with no check.",
+        "The retention of these rows depends on your audit obligations, and doWork keeps them forever.",
+        "The helper requires a trailing slash, and doWork builds the path without one.",
+        "doWork reads the value, which depends on the order the files are loaded.",
+    ] {
+        assert!(
+            accept_entry(&f, &with_why(harmless), "", &files()).is_ok(),
+            "{harmless}"
+        );
+    }
+    for exploit in [
+        "Exploitation requires a valid session cookie, and doWork runs with no check.",
+        "An attacker must be logged in first, and doWork then runs with no check.",
+        "This is reachable only if the admin feature is enabled for the caller, and doWork skips the check.",
+        "It depends on whether the attacker holds a valid token, and doWork never looks.",
+        "Assuming the user is signed in, doWork runs with no check.",
+    ] {
+        assert_eq!(
+            accept_entry(&f, &with_why(exploit), "", &files()),
+            Err(Reject::InventedPrecondition),
+            "{exploit}"
+        );
+    }
+}
+
+/// The calibration guard reads the shared phrase list, which is unchanged: a written explanation
+/// with a bare phrase still blocks an upward calibration there.
+#[test]
+fn the_calibration_guard_still_reads_the_whole_phrase_list() {
+    for text in [
+        "It depends on the runtime's locale.",
+        "The helper requires a trailing slash.",
+    ] {
+        assert!(mentions_exploit_precondition(text), "{text}");
+    }
+    assert!(!mentions_exploit_precondition(
+        "The endpoint requires no authentication."
+    ));
+}
+
 /// The reader takes both shapes: split fields, one `detail`, and a reply with a `why` only.
 #[test]
 fn the_reader_takes_the_split_the_single_and_the_partial_shape() {

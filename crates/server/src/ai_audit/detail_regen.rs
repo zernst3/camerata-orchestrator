@@ -81,7 +81,7 @@ Each finding below starts with an opaque id in square brackets, then its rule an
 Rules, every finding:
 - Keep every fact the short statement already makes. Never contradict it. Each finding's block has a `Names to keep:` line: the exact names (files, symbols, flags) your explanation must contain, spelled as listed. An explanation missing one of them is discarded; no other name is required, so write everything else in your own words.
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
-- Do not add conditions the statement does not make. In `why`, do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. `fix_direction` may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
+- Do not add conditions the statement does not make. In `why`, do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so; the rule is about exploitation (who must be logged in, what must be enabled, what an attacker must do), and saying in ordinary terms what a value or behaviour depends on is fine. `fix_direction` may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
 - If the statement says the case is borderline, start `why` with "Borderline:", keep saying so, and say what would settle it.
 - A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) is listed as its separate parts when a part is itself a name (snake_case or camelCase): write each listed part. A plain member access such as supabase.from is listed whole and stays as written.
 - Do not repeat the statement word for word and do not restate the rule's text.
@@ -692,6 +692,55 @@ const FIX_DIRECTION_LEADS: &[&str] = &[
     "create",
 ];
 
+/// Words and phrases that put a precondition sentence about EXPLOITING the problem: who must be
+/// logged in or hold what, what must be enabled, what the attacker must do. A "depends on" with
+/// none of them ("depends on the runtime's locale") is an ordinary explanation, not a condition
+/// on whether the problem can be exploited.
+const EXPLOIT_CONTEXT: &[&str] = &[
+    "attacker",
+    "adversar",
+    "malicious",
+    "exploit",
+    "abus",
+    "logged in",
+    "logged-in",
+    "signed in",
+    "signed-in",
+    "authenticated",
+    "valid session",
+    "valid token",
+    "valid credential",
+    "session cookie",
+    "privileged",
+    "the caller",
+    "a caller",
+    "any user",
+    "a user",
+    "an admin",
+    "enabled",
+    "turned on",
+];
+
+/// Whether the explanation (`why`) makes an EXPLOIT precondition: a sentence that carries one of
+/// [`EXPLOIT_PRECONDITION_PHRASES`] ("requires", "depends on", "only if", "assuming", ...) and is
+/// about who must be logged in, what must be enabled or what an attacker must do
+/// ([`EXPLOIT_CONTEXT`]). The shared predicate calibration's raise-block uses
+/// ([`mentions_exploit_precondition`]) fires on the bare phrase anywhere, which turned down
+/// "depends on the runtime's locale" and "requires confirming the defaults" as invented
+/// conditions; this one is for the acceptance of a regenerated explanation only, and the text
+/// that is written still goes through calibration's own guard, which is unchanged.
+pub(super) fn why_makes_exploit_precondition(why: &str) -> bool {
+    sentences(why).into_iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        let phrase = contains_non_negated_requires(&lower)
+            || EXPLOIT_PRECONDITION_PHRASES
+                .iter()
+                .filter(|p| **p != "requires ")
+                .any(|p| lower.contains(*p));
+        phrase && EXPLOIT_CONTEXT.iter().any(|c| lower.contains(c))
+    })
+}
+
 /// The sentences of `text`, split at a full stop, `!` or `?` followed by white space, and at a
 /// line break.
 fn sentences(text: &str) -> Vec<&str> {
@@ -822,7 +871,7 @@ pub(super) fn accept_entry(
         None => precondition_scope(&text),
     };
     if !is_borderline(short)
-        && mentions_exploit_precondition(&explanation)
+        && why_makes_exploit_precondition(&explanation)
         && !mentions_exploit_precondition(short)
         && !mentions_exploit_precondition(code_shown)
     {

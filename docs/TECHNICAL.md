@@ -3074,6 +3074,16 @@ a condition on the problem. A reply with a single `detail` field (a backend that
 the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
 direction as part of the finding's `Detail:` in its evidence; it has no separate input.
 
+*The precondition check names exploit preconditions.* With `why` its own field, the detail
+acceptance check no longer fires on every bare "depends on" or "requires": a sentence of
+`why` is an invented precondition when it carries one of the shared phrases AND is about
+exploitation (`detail_regen::why_makes_exploit_precondition`: an attacker, who must be logged
+in or hold a valid session or token, what must be enabled). "Depends on the runtime's
+locale" and "requires a trailing slash" now pass; "exploitation requires a valid session
+cookie" and "an attacker must be logged in" are still turned down. Calibration's own guard
+(`mentions_exploit_precondition`, which blocks an upward move when the written text holds
+any of the phrases) is unchanged and still reads the written text.
+
 *The fix checker knows the repository.* A fix's names were grounded only in the finding's
 own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
 outside it (`actor_id`, `bucket_id`, `tsconfig.json`, `.env.example`) were rejected, about 28

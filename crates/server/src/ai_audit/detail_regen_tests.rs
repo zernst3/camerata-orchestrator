@@ -2116,8 +2116,13 @@ fn a_borderline_statement_may_say_what_would_settle_it() {
                 REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
     let kept = accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).unwrap();
     assert!(kept.starts_with("Borderline: "));
-    // The same words on a confident statement are an invented precondition.
+    // On a confident statement, hedging the problem is not an exploit precondition (retry fixes
+    // F3 narrowed the check to who must be logged in and what must be enabled)...
     let confident = statement("Profile edits are not gated for verified members in src/config.rs.");
+    assert!(accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]).is_ok());
+    // ...but a condition on the attacker still is.
+    let text = "It is a problem only if the attacker is logged in as a verified member, as \
+                REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
     assert_eq!(
         accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
@@ -2148,8 +2153,13 @@ fn a_requires_whose_object_is_a_backticked_construct_is_not_a_precondition() {
     let text = "The policy requires a `to authenticated` clause and does not have one, in \
                 src/config.rs, so every row is readable.";
     assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
-    // A bare "requires" is still one.
+    // A bare "requires" about the code is an ordinary explanation, not a condition on who can
+    // exploit it (retry fixes F3 narrowed the check)...
     let text = "The policy requires a role clause and does not have one, in src/config.rs.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // ...one about the attacker or the session still is.
+    let text = "Reading a row requires a valid session, and the policy has no role clause, in \
+                src/config.rs.";
     assert_eq!(
         accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
