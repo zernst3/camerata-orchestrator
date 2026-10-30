@@ -308,6 +308,28 @@ pub fn classify(req: &LlmRequest) -> (PartKind, String, Vec<String>) {
     (kind, repo, files)
 }
 
+/// Whether a stored entry of a call over a `kind` stage is answered from the store on a resume.
+///
+/// A good reply always is. The fix and detail stages are the two whose own rounds change the
+/// request after a reply they turned down (the next round carries the feedback line, or a smaller
+/// batch), so for them a reply every entry of which was turned down ([`EntryStatus::Rejected`]),
+/// and one that was cut off or held no JSON ([`EntryStatus::Unusable`]), is replayed too: the stage
+/// judges it again, turns it down for the same reason and sends the next round's changed request,
+/// which the live run stored under its own key. Asking the rejected request again, identically,
+/// would pay a second time for an answer already judged wrong. Every other stage (scan,
+/// calibration, alternatives) keeps its policy: a rejected or unusable reply is asked again, for
+/// those stages set a whole stage aside ([`quarantine_rejected`]) and have no rounds of their own
+/// that change the request after a reply they turned down. A failed call has no reply to replay.
+pub(crate) fn replays_on_resume(status: EntryStatus, kind: PartKind) -> bool {
+    match status {
+        EntryStatus::Done => true,
+        EntryStatus::Rejected | EntryStatus::Unusable => {
+            matches!(kind, PartKind::Fix | PartKind::Detail)
+        }
+        EntryStatus::Failed => false,
+    }
+}
+
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
 fn reply_is_good(resp: &LlmResponse) -> bool {
     !resp.truncated
@@ -361,16 +383,17 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
             })
         });
         // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
+        let file_kind = file.kind;
         let good = file
             .entries
             .values()
-            .filter(|e| e.status == EntryStatus::Done)
+            .filter(|e| replays_on_resume(e.status, file_kind))
             .filter_map(|e| e.response.as_ref())
             .nth(idx);
         let good_slot = file
             .entries
             .iter()
-            .filter(|(_, e)| e.status == EntryStatus::Done && e.response.is_some())
+            .filter(|(_, e)| replays_on_resume(e.status, file_kind) && e.response.is_some())
             .map(|(slot, _)| *slot)
             .nth(idx);
         match good {
@@ -929,7 +952,7 @@ pub(crate) fn count_calls(store: &RunStore) {
                     p.kind == file.kind
                         && (p.repo == file.repo || (file.repo.is_empty() && single_repo))
                 }) {
-                    if entry.status == EntryStatus::Done {
+                    if replays_on_resume(entry.status, file.kind) {
                         part.calls_done += 1;
                     } else {
                         part.calls_not_done += 1;
@@ -952,7 +975,7 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
             .filter_map(|e| read_json::<CallFile>(&e.path()))
         {
             for entry in file.entries.values() {
-                if entry.status == EntryStatus::Done {
+                if replays_on_resume(entry.status, file.kind) {
                     stored += 1;
                     spent += entry.cost_usd;
                 } else {

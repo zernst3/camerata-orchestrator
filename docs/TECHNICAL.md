@@ -3084,6 +3084,18 @@ cookie" and "an attacker must be logged in" are still turned down. Calibration's
 (`mentions_exploit_precondition`, which blocks an upward move when the written text holds
 any of the phrases) is unchanged and still reads the written text.
 
+*A resume does not pay again for an answer already judged wrong.* The run store used to
+re-ask, identically, a fix or detail reply every entry of which the stage had turned down (or
+that was cut off or held no JSON), because only a good reply was replayed. The live run had
+already moved on to the changed request (the feedback line, the smaller batch), so a resume
+paid twice for the first request and then replayed the rest. For these two stages
+(`journal::replays_on_resume`, the only ones whose own rounds change the request after a reply
+they turned down) the stored reply is now replayed: the stage judges it again, turns it down
+for the same reason, and its next round is the changed request the live run stored. A give-up
+replays to the same give-up at no cost. Scan, calibration and alternatives keep their policy
+(a rejected stage is set aside whole and asked again). `calls_done` and the resume estimate
+count a replayable reply as stored.
+
 *The fix checker knows the repository.* A fix's names were grounded only in the finding's
 own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
 outside it (`actor_id`, `bucket_id`, `tsconfig.json`, `.env.example`) were rejected, about 28

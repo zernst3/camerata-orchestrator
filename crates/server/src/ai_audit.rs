@@ -13290,6 +13290,9 @@ mod repo_grounding_tests;
 mod stored_replay_tests;
 
 #[cfg(test)]
+mod resume_rejected_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
