@@ -3472,6 +3472,12 @@ fn answered_verdicts(raw: &str, n: usize) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The first calibration call over a chunk: its reply and the `max_tokens` it was sent with.
+struct CalibrationCall<'a> {
+    reply: &'a crate::llm::LlmResponse,
+    cap: u32,
+}
+
 /// A calibration reply cut off at the output limit, made whole: the verdicts it wrote out in full,
 /// then ONE re-ask of just the findings it did not reach (the same prompt over those findings
 /// alone, a smaller request with its own cap), merged back under the original indices as
@@ -3491,10 +3497,13 @@ async fn reask_unanswered_verdicts(
     calibration_model: Option<&str>,
     system: &str,
     chunk: &[Finding],
-    first: &crate::llm::LlmResponse,
-    first_cap: u32,
+    first: CalibrationCall<'_>,
     prompt_for: &(dyn Fn(&[&Finding]) -> String + Sync),
 ) -> String {
+    let CalibrationCall {
+        reply: first,
+        cap: first_cap,
+    } = first;
     if !first.truncated {
         return first.text.clone();
     }
@@ -3772,8 +3781,10 @@ pub async fn verify_findings(
                     calibration_model,
                     &system,
                     &chunk,
-                    &resp,
-                    calibration_max_tokens(chunk_len),
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk_len),
+                    },
                     &calibration_prompt,
                 )
                 .await;
@@ -3860,8 +3871,10 @@ pub async fn verify_findings(
                     calibration_model,
                     &system,
                     &chunk,
-                    &resp,
-                    calibration_max_tokens(chunk.len()),
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk.len()),
+                    },
                     &calibration_prompt,
                 )
                 .await;

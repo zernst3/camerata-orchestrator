@@ -9328,9 +9328,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let scan_id = audit_model();
                         let calibration_id = calibration_model();
                         let sel = selected_count();
-                        // Mirror the request flags the audit will actually send: the deep
-                        // SOC-2/security tier (three extra whole-repo passes). The estimate
-                        // prices a full scan; a re-scan that reuses the cache costs less.
+                        // Mirror the request flags the audit will actually send: incremental
+                        // scope (only changed files cost tokens unless Full scan is ticked; the
+                        // estimate prices a full scan and the note below says so) and the deep
+                        // SOC-2/security tier (three extra whole-repo passes).
+                        let incremental = !audit_full_scan();
                         // Deep tier only runs with AI; force it off in the estimate when AI is off.
                         let deep = audit_deep() && ai_on;
                         // The project's AI backend (docs/design/2026-09-22_per-project-backend.md)
@@ -9348,7 +9350,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // same arithmetic the command line's pre-flight prints, over the inputs
                         // the cockpit has (each repo as one routing group: the cockpit has no
                         // file list to route, so its figure sits a little under the pre-flight's).
-                        let priced = |id: &str, price_in: f64, price_out: f64| camerata_ui_core::scan::PricedModel { id, price_in, price_out };
+                        fn priced(id: &str, price_in: f64, price_out: f64) -> camerata_ui_core::scan::PricedModel<'_> {
+                            camerata_ui_core::scan::PricedModel { id, price_in, price_out }
+                        }
                         let flags = camerata_ui_core::scan::RunFlags {
                             thorough: audit_thorough(),
                             deep,
