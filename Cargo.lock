@@ -892,8 +892,10 @@ dependencies = [
  "async-trait",
  "camerata-api-types",
  "camerata-core",
+ "camerata-test-env",
  "serde",
  "serde_json",
+ "serial_test",
  "thiserror 2.0.18",
  "tokio",
 ]

@@ -188,32 +188,23 @@ const ENV_NAME: &str = "CAMERATA_CLONE_JUDGE_MODEL";
 
 #[test]
 #[serial_test::serial(process_env)]
-fn judge_model_is_the_fast_tier_unless_overridden() {
-    {
-        let _env = camerata_test_env::EnvGuard::remove(ENV_NAME);
-        // Default: the fast tier's primary, never the audit model.
-        assert_eq!(
-            resolve_clone_judge_model(None),
-            camerata_fleet::tier::default_fast_model()
-        );
-        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
-        assert_ne!(resolve_clone_judge_model(None), crate::llm::DEFAULT_MODEL);
-        // A blank pick is no pick.
-        assert_eq!(resolve_clone_judge_model(Some("  ")), "claude-haiku-5-5");
-    }
-    {
-        // The environment overrides the default; an explicit pick overrides the environment.
-        let _env = camerata_test_env::EnvGuard::set(ENV_NAME, "env-judge");
-        assert_eq!(resolve_clone_judge_model(None), "env-judge");
-        assert_eq!(
-            resolve_clone_judge_model(Some("explicit-judge")),
-            "explicit-judge"
-        );
-    }
-    {
-        let _env = camerata_test_env::EnvGuard::set(ENV_NAME, "  ");
-        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
-    }
+fn judge_model_is_the_fast_tier_unless_picked_and_never_the_environment() {
+    // Default: the fast tier's primary, never the audit model.
+    assert_eq!(
+        resolve_clone_judge_model(None),
+        camerata_fleet::tier::default_fast_model()
+    );
+    assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
+    assert_ne!(resolve_clone_judge_model(None), crate::llm::DEFAULT_MODEL);
+    // A blank pick is no pick.
+    assert_eq!(resolve_clone_judge_model(Some("  ")), "claude-haiku-5-5");
+    // The variable that used to override the default is ignored; an explicit pick still wins.
+    let _env = camerata_test_env::EnvGuard::set(ENV_NAME, "env-judge");
+    assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
+    assert_eq!(
+        resolve_clone_judge_model(Some("explicit-judge")),
+        "explicit-judge"
+    );
 }
 
 #[tokio::test]

@@ -417,8 +417,8 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
         failures.push(IntegrityFailure {
             code: "model_unrecorded".to_string(),
             detail: "the audit model was not recorded. `None` means UNRECORDED, not \
-                     'no model ran' — resolution falls through to `CAMERATA_AUDIT_MODEL` and \
-                     then the client default, so the run used something and did not say what. \
+                     'no model ran' — resolution falls through to the built-in default, \
+                     so the run used something and did not say what. \
                      That is disqualifying before a graded run: the 2026-10-16 sweep recorded \
                      `claude-sonnet-5` on its baseline and nothing on either later run, which \
                      left 'did the engine regress' neither confirmable nor refutable."
@@ -1232,8 +1232,7 @@ mod tests {
     /// W19 — an unrecorded model is disqualifying before a graded run.
     ///
     /// `None` means UNRECORDED, not "no model ran": resolution falls through to
-    /// `CAMERATA_AUDIT_MODEL` and then the client default, so the run used something and did
-    /// not say what. The 2026-10-16 sweep recorded `claude-sonnet-5` on its baseline and
+    /// the built-in default, so the run used something and did not say what. The 2026-10-16 sweep recorded `claude-sonnet-5` on its baseline and
     /// nothing on either later run, which left "did the engine regress" neither confirmable
     /// nor refutable — a week of reasoning about a regression that did not exist.
     ///

@@ -1195,15 +1195,16 @@ impl UsageMeter {
     }
 }
 
-/// Resolve the model the audit pass will actually use: the caller's explicit pick, else
-/// `CAMERATA_AUDIT_MODEL`, else the client's compiled-in default.
+/// Resolve the model the audit pass will actually use: the caller's explicit pick (the open
+/// project's setting in the cockpit, `--model` on the command line), else the built-in default
+/// ([`crate::llm::DEFAULT_MODEL`], Sonnet 5.5). Never the environment.
 ///
 /// # Why this is a function and not three copies of four lines
 ///
 /// It was three copies. `audit_repo` picked a model one way, `generate_fix_specifics`
 /// re-derived it with a comment reading "Resolve the model the same way `audit_pass` does",
 /// and what reached `ScanProvenance.audit_model` was neither — it was the caller's RAW pick,
-/// so a run driven by `CAMERATA_AUDIT_MODEL` or by the default recorded `None`.
+/// so a run driven by the default recorded `None`.
 ///
 /// That is not a tidiness problem. `None` in provenance was read for months as "no model
 /// ran", when it actually meant "nobody wrote down which model ran", and the 2026-10-16
@@ -1218,27 +1219,16 @@ pub fn resolve_audit_model(caller_pick: Option<&str>) -> String {
     caller_pick
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_AUDIT_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
 }
 
-/// The model the calibration stage runs on: the caller's calibration pick, else
-/// `CAMERATA_CALIBRATION_MODEL`, else the SCAN model (so an audit is end to end on one model by
+/// The model the calibration stage runs on: the caller's calibration pick, else the SCAN model (so an audit is end to end on one model by
 /// default). The one resolution the pre-flight ([`crate::cost_cap::models_the_run_will_use`])
 /// and the stage share, so the model the run names and prices is the model it calls.
 pub fn resolve_calibration_model(calibration_pick: Option<&str>, scan_model: &str) -> String {
     calibration_pick
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_CALIBRATION_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
         .unwrap_or_else(|| scan_model.to_string())
 }
 
@@ -1246,7 +1236,7 @@ pub fn resolve_calibration_model(calibration_pick: Option<&str>, scan_model: &st
 /// audit model ([`resolve_audit_model`]). Never empty.
 ///
 /// A request with an empty model is not "the default": the transport fills it with the PROCESS
-/// default (`CAMERATA_LLM_MODEL`, whatever an operator's `.env` says), a model the pre-flight
+/// default (an environment variable, whatever an operator's `.env` said; it is gone), a model the pre-flight
 /// never named, the ledger never recorded and the spend limit's price check never saw. On
 /// 2026-10-29 that sent the alternatives stage to an unpriced id; its cost was unknown, so the
 /// limit refused every later pass with about $9.99 of a $10 limit unspent. Every audit-stage
@@ -10754,17 +10744,15 @@ pub async fn audit_repo(
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
         selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
-    // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else the
-    // registry default. ALWAYS resolved here, to the same id the pre-flight priced and the
+    // Model selection: the USER's per-audit choice wins; else the built-in default. ALWAYS resolved here, to the same id the pre-flight priced and the
     // ledger records (`resolve_audit_model`). It used to stay `None` when nothing was pinned, on
     // the theory that the transport's own default would then serve both scan and calibration;
-    // but that default is the PROCESS default (`CAMERATA_LLM_MODEL`), which the pre-flight, the
+    // but that default was the PROCESS default (an environment variable, now removed), which the pre-flight, the
     // ledger key, the batch path and the spend limit's price check never consult. A run then
     // reported one model and called another, and when the other was unpriced the spend limit
     // could not count its calls and refused the rest of the run (2026-10-29).
     let audit_model: Option<String> = Some(resolve_audit_model(model));
-    // Calibration model: the user's calibration pick wins; else CAMERATA_CALIBRATION_MODEL;
-    // else the SCAN model, so the audit is end to end on one model by default (no silent
+    // Calibration model: the user's calibration pick wins; else the SCAN model, so the audit is end to end on one model by default (no silent
     // default-model calibration). The UI exposes this as its own picker. The same resolution
     // the pre-flight lists the calibration model by.
     let calib_model: Option<String> = Some(resolve_calibration_model(
@@ -12270,9 +12258,8 @@ pub async fn run_deep_tier(
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
     let digest = build_digest(files, &nonce);
 
-    // Resolve the model the same way the standard audit does: explicit pick wins, else
-    // CAMERATA_AUDIT_MODEL, else the registry default (never the transport's process default:
-    // see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
+    // Resolve the model the same way the standard audit does: explicit pick wins, else the
+    // built-in default (the transport has no default of its own: see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
     // passes that through `audit_model`.
     let model = Some(resolve_audit_model(audit_model));
 
@@ -16517,7 +16504,6 @@ mod tests {
     /// end to end on ONE model that the run can name and price.
     #[test]
     fn bug_ai3_calibration_follows_the_resolved_scan_model_when_nothing_is_pinned() {
-        // In the test environment CAMERATA_CALIBRATION_MODEL is not set.
         let scan = resolve_audit_model(None);
         assert!(!scan.trim().is_empty(), "the scan model is never empty");
         assert!(

@@ -284,8 +284,8 @@ impl RefinementReviewer for StubRefinementReviewer {
 /// manually. Behind the seam: only this concrete type names a model.
 ///
 /// Callers that want a different model should use
-/// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
-/// environment variable overrides this at runtime for CLI / one-off invocations.
+/// [`ClaudeRefinementReviewer::with_model`] (the open project's setting). The environment is
+/// never consulted.
 pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
@@ -320,17 +320,12 @@ impl Default for ClaudeRefinementReviewer {
 }
 
 impl ClaudeRefinementReviewer {
-    /// Construct with the configured model: reads `CAMERATA_REVIEWER_MODEL`
-    /// first, then falls back to [`DEFAULT_REVIEWER_MODEL`]. Use
+    /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from a per-project config or the server's `/api/models` catalog).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_REVIEWER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_REVIEWER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_REVIEWER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -680,6 +675,25 @@ mod tests {
 
     fn form_with_owner() -> IntakeForm {
         IntakeForm::sample_app()
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The reviewer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_REVIEWER_MODEL", "env-model");
+        assert_eq!(
+            ClaudeRefinementReviewer::new().model,
+            DEFAULT_REVIEWER_MODEL
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model("picked").model,
+            "picked"
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model(" ").model,
+            DEFAULT_REVIEWER_MODEL
+        );
     }
 
     #[test]

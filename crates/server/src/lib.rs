@@ -11284,14 +11284,20 @@ async fn draft_routine_prompt(
     let Ok(llm) = state.step_llm() else {
         return scaffold();
     };
+    // The model the form picked, else the open project's setting (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::ResearchChat,
+        Some(&req.model),
+    );
     // A client engagement never sends client context to a non-Anthropic model: the form gets
     // the scaffold and no model is called.
-    if state.client_lock_step_model_refusal(&req.model).is_some() {
+    if state.client_lock_step_model_refusal(&model).is_some() {
         return scaffold();
     }
     let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         llm.clone(),
@@ -11302,7 +11308,7 @@ async fn draft_routine_prompt(
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await
@@ -11464,11 +11470,17 @@ async fn chat_escalation(
     // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
     // refuses rather than downgrading.
     let chat_llm = state.step_llm().map_err(backend_refused)?;
-    if let Some(why) = state.client_lock_step_model_refusal(&req.model) {
+    // The model the chat picked, else the open project's escalation model (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::Escalation,
+        Some(&req.model),
+    );
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
         return Err(backend_refused(why));
     }
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(chat_llm.clone()),
@@ -11479,7 +11491,7 @@ async fn chat_escalation(
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await

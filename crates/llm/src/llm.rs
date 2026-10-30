@@ -25,7 +25,9 @@
 //!   fallback). [`Llm::from_env`] remains only as a keyless Cli-default construction
 //!   convenience for hermetic tests and any caller that will never make an `api` call.
 //!
-//! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
+//! A model is NEVER read from the environment. Every request names its model (the open
+//! project's setting, a CLI flag, or the built-in [`DEFAULT_MODEL`] the caller resolved);
+//! a request that names none is refused, not filled in.
 
 use serde::{Deserialize, Serialize};
 
@@ -96,8 +98,8 @@ impl Vendor {
     }
 }
 
-/// The default model when none is configured / requested. Capable by default; override
-/// per call or via `CAMERATA_LLM_MODEL`.
+/// The default model when none is configured / requested. Capable by default; a project
+/// or a call names another one explicitly (never the environment).
 ///
 /// The const was RELOCATED to `camerata_api_types::project` (Phase A of the DTO
 /// extraction; `camerata_app_core::project` re-exports it from there). Re-exported here
@@ -1589,7 +1591,6 @@ pub fn resolve_backend(backend: ProjectBackend, has_api_key: bool) -> BackendRes
 pub struct Llm {
     vendor: Vendor,
     backend: Backend,
-    default_model: String,
     api_key: Option<String>,
     /// Process-global cumulative usage meter, threaded so the chokepoint records every call.
     /// `None` in tests / standalone construction (recording is then simply skipped).
@@ -1607,7 +1608,6 @@ impl std::fmt::Debug for Llm {
         f.debug_struct("Llm")
             .field("vendor", &self.vendor)
             .field("backend", &self.backend)
-            .field("default_model", &self.default_model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("ledger", &self.ledger.as_ref().map(|_| "<set>"))
             .finish()
@@ -1620,8 +1620,8 @@ impl Llm {
     /// [`crate::credentials::anthropic_api_key`] (credential store first, `ANTHROPIC_API_KEY`
     /// env only as the fallback) at the moment it builds the client, so a key saved or replaced
     /// in the app takes effect on the next call with no restart. Only the vendor
-    /// (`CAMERATA_LLM_VENDOR`, default anthropic) and the default model (`CAMERATA_LLM_MODEL`)
-    /// still come from env.
+    /// (`CAMERATA_LLM_VENDOR`, default anthropic) still comes from env. The model never does:
+    /// every request names its own (see [`Llm::complete`]).
     ///
     /// This is the constructor every project-scoped or chat-scoped call site uses
     /// (`docs/design/2026-09-22_per-project-backend.md`): the caller resolves `Cli`/`Api`
@@ -1631,14 +1631,9 @@ impl Llm {
     pub fn for_backend(backend: Backend, api_key: Option<String>) -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
         let api_key = api_key.filter(|k| !k.trim().is_empty());
-        let default_model = std::env::var("CAMERATA_LLM_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         Self {
             vendor,
             backend,
-            default_model,
             api_key,
             ledger: None,
             sessions: None,
@@ -1700,16 +1695,12 @@ impl Llm {
         self
     }
 
-    /// Fold one completed response into the ledger (model id resolved from the response,
-    /// falling back to the configured default). No-op when no ledger is attached.
+    /// Fold one completed response into the ledger (the model id the response carries; every
+    /// response names the model the request named when the provider did not echo one). No-op
+    /// when no ledger is attached.
     fn ledger_record(&self, resp: &LlmResponse) {
         if let Some(l) = &self.ledger {
-            let model = if resp.model.trim().is_empty() {
-                self.default_model.as_str()
-            } else {
-                resp.model.as_str()
-            };
-            l.record(model, resp);
+            l.record(resp.model.as_str(), resp);
         }
     }
 
@@ -1730,12 +1721,22 @@ impl Llm {
         format!("{}/{t}", self.vendor.label())
     }
 
-    fn model_for(&self, req: &LlmRequest) -> String {
-        if req.model.trim().is_empty() {
-            self.default_model.clone()
-        } else {
-            req.model.clone()
+    /// The model a request runs on: the one it names. A request that names none is REFUSED,
+    /// never filled in from the environment or a process default: the pre-flight prices, the
+    /// ledger records and the spend limit checks the model the request names, so a model chosen
+    /// here would be one none of them saw (a paid run stopped on 2026-10-29 because a stage sent
+    /// no model and the transport filled in an unpriced id from a local `.env`). The call site
+    /// that sent no model is the bug; the error says so.
+    fn model_for(&self, req: &LlmRequest) -> anyhow::Result<String> {
+        let model = req.model.trim();
+        if model.is_empty() {
+            anyhow::bail!(
+                "this request names no model: every model call must carry the model the \
+                 project's settings or the command's flags chose (a bug in the caller; no \
+                 model is filled in from the environment)"
+            );
         }
+        Ok(req.model.clone())
     }
 
     /// Run a completion, STREAMING text deltas to `on_delta` as they arrive (so the UI can
@@ -1746,7 +1747,7 @@ impl Llm {
         req: LlmRequest,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let model = self.model_for(&req);
+        let model = self.model_for(&req)?;
         // CHOKEPOINT: every streaming call records into the cumulative ledger (success folds
         // usage + clears the rate-limit flag; failure runs the rate-limit detector). The `_`
         // arm delegates to `complete`, which records there — so guard against double-counting
@@ -1784,7 +1785,7 @@ impl Llm {
     /// match arm here plus its [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] entries; the
     /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
-        let model = self.model_for(&req);
+        let model = self.model_for(&req)?;
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
@@ -3300,22 +3301,50 @@ mod tests {
     }
 
     #[test]
-    fn model_defaulting() {
+    fn the_request_model_is_the_only_model() {
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
             sleeper: None,
         };
-        // Empty request model -> default.
-        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
-        // Explicit model wins.
+        // A request that names no model is refused, never filled in.
+        let err = llm
+            .model_for(&LlmRequest::new("hi"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no model"), "{err}");
+        assert!(llm
+            .model_for(&LlmRequest::new("hi").with_model("  "))
+            .is_err());
+        // The model it names is the one that runs.
         assert_eq!(
-            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5")),
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5"))
+                .unwrap(),
             "claude-opus-5"
+        );
+    }
+
+    /// `CAMERATA_LLM_MODEL` used to fill in a request that named no model (a local `.env` line
+    /// sent a paid run to an unpriced id). It is ignored now: set to anything, a request with no
+    /// model is still refused and one that names a model runs on exactly that model.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn camerata_llm_model_in_the_environment_is_ignored() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_MODEL", "env-picked-model");
+        let llm = Llm::for_backend(Backend::Cli, None);
+        let err = llm
+            .model_for(&LlmRequest::new("hi"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no model"), "{err}");
+        assert!(!err.contains("env-picked-model"), "{err}");
+        assert_eq!(
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-sonnet-5-5"))
+                .unwrap(),
+            "claude-sonnet-5-5"
         );
     }
 
@@ -3830,13 +3859,15 @@ mod tests {
         let llm = Llm {
             vendor: Vendor::OpenAi,
             backend: Backend::Api,
-            default_model: "gpt".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
             sleeper: None,
         };
-        let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
+        let err = llm
+            .complete(LlmRequest::new("hi").with_model("claude-sonnet-5-5"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
     }
 
@@ -4297,7 +4328,6 @@ malformed line, not json
         std::sync::Arc::new(Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
@@ -4914,7 +4944,6 @@ exit 1
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Api,
-            default_model: "claude-opus-5-5".to_string(),
             api_key: Some("k".to_string()),
             ledger: Some(ledger.clone()),
             sessions: None,
@@ -5268,7 +5297,6 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
         Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-haiku-4-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
@@ -5332,9 +5360,11 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        llm.complete(LlmRequest::new("a prompt carrying client source"))
-            .await
-            .expect("fake claude answers");
+        llm.complete(
+            LlmRequest::new("a prompt carrying client source").with_model("claude-sonnet-5-5"),
+        )
+        .await
+        .expect("fake claude answers");
 
         let recorded = sink.snapshot();
         assert_eq!(recorded.len(), 1, "one spawn, one recorded session");
@@ -5367,7 +5397,9 @@ exit 1
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        let result = llm.complete(LlmRequest::new("prompt")).await;
+        let result = llm
+            .complete(LlmRequest::new("prompt").with_model("claude-sonnet-5-5"))
+            .await;
 
         assert!(result.is_err(), "the fake reports an error");
         assert_eq!(
@@ -5394,9 +5426,13 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        llm.complete(LlmRequest::new("p").with_repo_read(repo.clone()))
-            .await
-            .expect("fake claude answers");
+        llm.complete(
+            LlmRequest::new("p")
+                .with_model("claude-sonnet-5-5")
+                .with_repo_read(repo.clone()),
+        )
+        .await
+        .expect("fake claude answers");
 
         assert_eq!(sink.snapshot()[0].cwd, repo.to_string_lossy());
         let _ = std::fs::remove_dir_all(&repo);
@@ -5409,7 +5445,6 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Api,
-            default_model: "claude-haiku-4-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
@@ -5417,7 +5452,9 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         }
         .with_session_sink(sink.clone());
         // No key: the call fails before any network, and must not have recorded a session.
-        let _ = llm.complete(LlmRequest::new("p")).await;
+        let _ = llm
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await;
         assert!(sink.snapshot().is_empty());
     }
 
@@ -5449,7 +5486,9 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
 
         let started = std::time::Instant::now();
         let resp = cli_llm()
-            .complete(LlmRequest::new("a legitimately long audit pass"))
+            .complete(
+                LlmRequest::new("a legitimately long audit pass").with_model("claude-sonnet-5-5"),
+            )
             .await;
         let elapsed = started.elapsed();
 
@@ -5488,7 +5527,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let started = std::time::Instant::now();
         let err = cli_llm()
             .with_sleeper(sleeper.clone())
-            .complete(LlmRequest::new("this one wedges"))
+            .complete(LlmRequest::new("this one wedges").with_model("claude-sonnet-5-5"))
             .await
             .expect_err("a silent process must still time out");
         let elapsed = started.elapsed();
@@ -5565,7 +5604,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let resp = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect("the second run answers");
 
@@ -5593,7 +5632,7 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let resp = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect("the third run answers");
 
@@ -5612,7 +5651,7 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let resp = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect("the second run answers");
 
@@ -5638,7 +5677,10 @@ exit 1"#,
 
         let mut seen = String::new();
         let resp = llm_with(&sleeper)
-            .complete_streaming(LlmRequest::new("p"), &mut |d| seen.push_str(d))
+            .complete_streaming(
+                LlmRequest::new("p").with_model("claude-sonnet-5-5"),
+                &mut |d| seen.push_str(d),
+            )
             .await
             .expect("the second run answers");
 
@@ -5660,7 +5702,10 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
         let mut seen = String::new();
         llm_with(&sleeper)
-            .complete_streaming(LlmRequest::new("p"), &mut |d| seen.push_str(d))
+            .complete_streaming(
+                LlmRequest::new("p").with_model("claude-sonnet-5-5"),
+                &mut |d| seen.push_str(d),
+            )
             .await
             .expect("the second run answers");
         assert!(!seen.contains(CLI_ATTEMPT_SUPERSEDED), "{seen:?}");
@@ -5680,7 +5725,7 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let err = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect_err("auth failure surfaces");
 
@@ -5702,7 +5747,7 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let err = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect_err("no claude on PATH");
 
@@ -5729,7 +5774,7 @@ exit 1"#,
         let sleeper = std::sync::Arc::new(RecordingSleeper::default());
 
         let err = llm_with(&sleeper)
-            .complete(LlmRequest::new("p"))
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
             .await
             .expect_err("every run fails");
 

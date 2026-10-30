@@ -53,8 +53,8 @@
 //! A cost. With a cap set, every model the run will call is checked for a list price before
 //! anything runs ([`RunControls::refuse_if_cap_unenforceable`]), and every stage's request names
 //! its model explicitly ([`crate::ai_audit::stage_model`]) so the model that was checked is the
-//! model that is called. A request sent with no model would be filled in by the transport's
-//! process default (`CAMERATA_LLM_MODEL`), which no check saw. Should a call's cost still be
+//! model that is called. A request sent with no model is refused by the transport (it has no
+//! default of its own), so a model no check saw can never run. Should a call's cost still be
 //! unknowable, the cap is no longer enforceable and admits nothing more; the disclosures then
 //! say the cap could not be enforced, not that it was reached
 //! ([`CostCapRecord::cause`]).

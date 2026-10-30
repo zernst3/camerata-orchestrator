@@ -623,7 +623,7 @@ pub struct ScanInputFacts {
     /// The model the audit pass actually used, as resolved rather than as requested.
     ///
     /// `None` means NOT RECORDED, which is not the same as "no model ran" — the resolution
-    /// chain falls through to `CAMERATA_AUDIT_MODEL` and then the client default, and only an
+    /// chain falls through to the built-in default, and only an
     /// explicit caller pick used to be written down. That gap made every before/after
     /// comparison in the 2026-10-16 sweep unfalsifiable: the baseline recorded
     /// `claude-sonnet-5` and both later runs recorded nothing, so "the engine regressed" could

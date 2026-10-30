@@ -481,9 +481,8 @@ impl LeadEngineer for StubLeadEngineer {
 /// name the same id so the server default and the CLI fallback agree. Behind
 /// the seam: only this concrete type names a model.
 ///
-/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
-/// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
-/// runtime for CLI / one-off invocations.
+/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`]
+/// (the open project's setting). The environment is never consulted.
 pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
@@ -563,17 +562,13 @@ struct ModelOutput {
 }
 
 impl ClaudeLeadEngineer {
-    /// Construct with the configured model: reads `CAMERATA_LEAD_ENGINEER_MODEL`
-    /// first, then falls back to [`DEFAULT_LEAD_ENGINEER_MODEL`]. Use
+    /// Construct on the built-in [`DEFAULT_LEAD_ENGINEER_MODEL`]; the environment is never
+    /// read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from the server's `/api/models` catalog or a per-project config).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_LEAD_ENGINEER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_LEAD_ENGINEER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_LEAD_ENGINEER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -1327,14 +1322,18 @@ mod tests {
     }
 
     #[test]
-    fn new_without_env_var_uses_constant() {
-        // When CAMERATA_LEAD_ENGINEER_MODEL is absent, new() must fall back to
-        // DEFAULT_LEAD_ENGINEER_MODEL. We can only test this reliably when the env
-        // var is NOT set in the current process. The test is guarded so CI noise
-        // does not override a legitimately set var.
-        if std::env::var("CAMERATA_LEAD_ENGINEER_MODEL").is_err() {
-            let le = ClaudeLeadEngineer::new();
-            assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
-        }
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The lead engineer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LEAD_ENGINEER_MODEL", "env-model");
+        let le = ClaudeLeadEngineer::new();
+        assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
+        // An explicit model (the project's setting) is the only way to change it.
+        assert_eq!(ClaudeLeadEngineer::with_model("picked").model, "picked");
+        // A blank pick is the built-in default, not the environment.
+        assert_eq!(
+            ClaudeLeadEngineer::with_model("  ").model,
+            DEFAULT_LEAD_ENGINEER_MODEL
+        );
     }
 }

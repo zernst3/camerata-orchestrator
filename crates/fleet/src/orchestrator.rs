@@ -86,7 +86,7 @@ pub type SharedOrchestratorDriverFactory = Arc<dyn OrchestratorDriverFactory>;
 /// it never reads them. A divergence is caught by the live-run integration, and
 /// the names are asserted in this module's tests.
 pub const DELEGATE_ENABLED_ENV: &str = "CAMERATA_DELEGATE_ENABLED";
-pub const DELEGATE_MODELS_ENV: &str = "CAMERATA_DELEGATE_MODELS";
+pub const DELEGATE_MODELS_ARG: &str = "--delegate-models";
 pub const GATEWAY_BIN_ENV: &str = "CAMERATA_GATEWAY_BIN";
 pub const DELEGATE_DEPTH_ENV: &str = "CAMERATA_DELEGATE_DEPTH";
 
@@ -156,10 +156,6 @@ pub fn render_orchestrator_mcp_config(
     }
     env.insert(DELEGATE_ENABLED_ENV.to_string(), "1".to_string());
     env.insert(
-        DELEGATE_MODELS_ENV.to_string(),
-        delegate_models_json(tier_map, vision_enabled)?,
-    );
-    env.insert(
         GATEWAY_BIN_ENV.to_string(),
         gateway_bin.display().to_string(),
     );
@@ -167,7 +163,9 @@ pub fn render_orchestrator_mcp_config(
 
     let server = serde_json::json!({
         "command": gateway_bin.display().to_string(),
-        "args": [],
+        // The per-tier models travel as an argument (from the project's tier map), never as an
+        // environment variable.
+        "args": [DELEGATE_MODELS_ARG, delegate_models_json(tier_map, vision_enabled)?],
         "env": env,
     });
     let config = serde_json::json!({ "mcpServers": { MCP_SERVER_KEY: server } });
@@ -397,16 +395,18 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
         let env = &v["mcpServers"][MCP_SERVER_KEY]["env"];
         assert_eq!(env[GATE_EVENTS_FILE_ENV], "/runs/run-xyz/gate-events.jsonl");
-        // The models env is a JSON object string with all three tiers.
-        let models: serde_json::Value =
-            serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
+        // The models argument is a JSON object string with all three tiers.
+        let args = &v["mcpServers"][MCP_SERVER_KEY]["args"];
+        assert_eq!(args[0], DELEGATE_MODELS_ARG);
+        assert!(env.get("CAMERATA_DELEGATE_MODELS").is_none());
+        let models: serde_json::Value = serde_json::from_str(args[1].as_str().unwrap()).unwrap();
         assert_eq!(models["balanced"], "claude-sonnet-5-5");
     }
 
     #[test]
     fn orchestrator_mcp_config_includes_vision_model_when_enabled() {
         // With vision enabled + a configured vision model, the orchestrator's delegate
-        // models env carries the vision key, making the Designer band reachable.
+        // models argument carries the vision key, making the Designer band reachable.
         let m = TierMap {
             vision: vec!["claude-vision-model".to_string()],
             ..TierMap::default()
@@ -421,9 +421,8 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
-        let env = &v["mcpServers"][MCP_SERVER_KEY]["env"];
-        let models: serde_json::Value =
-            serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
+        let args = &v["mcpServers"][MCP_SERVER_KEY]["args"];
+        let models: serde_json::Value = serde_json::from_str(args[1].as_str().unwrap()).unwrap();
         assert_eq!(models["vision"], "claude-vision-model");
     }
 
