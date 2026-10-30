@@ -364,12 +364,25 @@ pub(crate) async fn submit_round(
             Ok(rows) => {
                 let mut by_id: std::collections::HashMap<String, BatchResultRow> =
                     rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
+                // A row is priced by the model id the API echoes in it. One the registry does
+                // not price is priced as the model the request named (the one the pre-flight
+                // checked), so the spend limit stays enforceable; the echoed ids are noted once
+                // each per sub-batch, with their count.
+                let basis = crate::llm::PriceBasis::batch(ttl);
+                let mut repriced: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                let mut reprice = |resp: &mut crate::llm::LlmResponse| {
+                    if let Some(echoed) = crate::llm::price_as_requested(resp, ctx.model, basis) {
+                        *repriced.entry(echoed).or_insert(0) += 1;
+                    }
+                };
                 for w in sub {
                     match by_id.remove(&w.custom_id) {
                         Some(BatchResultRow {
-                            response: Some(resp),
+                            response: Some(mut resp),
                             ..
                         }) => {
+                            reprice(&mut resp);
                             // Recorded as it arrives, so the spend gate of the next submission
                             // (a resubmission included) counts it.
                             if let Some(m) = ctx.meter {
@@ -384,7 +397,8 @@ pub(crate) async fn submit_round(
                         }) => {
                             // A failed item that was still billed (a model refusal) counts toward
                             // the spend limit before its failure is reported.
-                            if let (Some(m), Some(billed)) = (ctx.meter, billed) {
+                            if let (Some(m), Some(mut billed)) = (ctx.meter, billed) {
+                                reprice(&mut billed);
                                 m.record_stage(Stage::ScanPass, &billed);
                             }
                             out.results.insert(
@@ -399,6 +413,18 @@ pub(crate) async fn submit_round(
                         // No reply and no reason, or no row at all: left out of `results`, which
                         // the caller reports as missing from the batch results.
                         Some(_) | None => {}
+                    }
+                }
+                for (echoed, n) in repriced {
+                    let note = format!(
+                        "{n} batch result row(s) came back as model `{echoed}`, an id the model \
+                         registry does not price; each was priced as the model the request \
+                         named, `{}`, so the spend limit could count it.",
+                        ctx.model
+                    );
+                    eprintln!("[camerata-server] {note}");
+                    if let Some(m) = ctx.meter {
+                        m.record_note(note);
                     }
                 }
             }
