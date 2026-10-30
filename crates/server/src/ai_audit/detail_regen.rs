@@ -47,10 +47,6 @@ pub(crate) const DETAIL_INCOMPLETE_MARKER: &str = "[detail incomplete]";
 // (batched, not one call per finding: see "Cost arithmetic" in `docs/TECHNICAL.md` and
 // `batching_beats_one_call_per_finding`); the rounds' sizes come from `regen_round_batch_size`.
 
-/// Output budget per finding. Measured on a real run: a full detail with its JSON wrapping is
-/// about 280 output tokens, so 160 cut off 4 of 10 calls. 450 leaves headroom for a long one.
-const DETAIL_TOKENS_PER_FINDING: u32 = camerata_ui_core::scan::REGEN_TOKENS_PER_FINDING;
-
 /// Lines of code either side of the finding the regeneration shows. Smaller than the fix prompt's
 /// 8: this call is paid for on every survivor, and the window is its main input.
 const DETAIL_CONTEXT_RADIUS: usize = 6;
@@ -864,14 +860,18 @@ async fn run_detail_round(
             "Repository: {repo}\n\nWrite the full detail for each finding below:\n\n{}",
             blocks.iter().map(|b| b.prompt.as_str()).collect::<String>()
         );
-        let req = LlmRequest::new(prompt)
-            .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), DETAIL_TOKENS_PER_FINDING))
-            .with_model(super::stage_model(model));
+        let req = super::with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.to_string())
+                .with_max_tokens(camerata_ui_core::scan::regen_call_max_tokens(batch.len()))
+                .with_model(super::stage_model(model)),
+            Stage::DetailRegeneration,
+        );
         let request_key = crate::run_store::journal::request_key(&req);
         // Streaming transport, as the other aggregate stages: the CLI leg's heartbeat and
         // partial-output salvage apply, and a flat deadline does not.
         let mut on_delta = |_: &str| {};
+        super::note_request(meter, &req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             Err(e) => {

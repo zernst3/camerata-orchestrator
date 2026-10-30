@@ -596,6 +596,11 @@ pub struct UsageMeter {
     /// The largest dollar cost any single call has had so far, in micro-dollars. The cap's
     /// per-pass reserve (see [`crate::cost_cap`]).
     max_call_micro_usd: AtomicU64,
+    /// The largest price any REQUEST this run has built could cost, in micro-dollars: its input at
+    /// the full input rate plus its `max_tokens` at the output rate ([`request_ceiling_usd`]). The
+    /// other half of the cap's per-pass reserve, so the reserve tracks what a call is allowed to
+    /// cost and not only what past calls happened to cost (see [`crate::cost_cap`]).
+    max_request_micro_usd: AtomicU64,
     /// How this run executes: efficiency switches and the spend cap. Set once, before the first
     /// call, by [`Self::with_controls`]; the default is every measure on and no cap.
     controls: crate::cost_cap::RunControls,
@@ -706,8 +711,41 @@ impl UsageMeter {
         if budget.cost_unknown {
             return true;
         }
-        let reserve = self.max_call_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
         self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+    }
+
+    /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
+    /// the most any single call has cost so far and the most any request built so far could
+    /// cost. Taking the request's ceiling into account means the first pass of a run is no
+    /// longer admitted against a zero reserve, and that a generous `max_tokens` (a 128,000-token
+    /// ceiling on Opus is $2.56 of output alone) tightens admission instead of widening the
+    /// overshoot the cap can reach.
+    fn reserve_micro_usd(&self) -> u64 {
+        self.max_call_micro_usd
+            .load(Ordering::Relaxed)
+            .max(self.max_request_micro_usd.load(Ordering::Relaxed))
+    }
+
+    /// Tell the cap about a request about to be sent: the most it could cost joins the reserve
+    /// ([`request_ceiling_usd`]). Call it for every request, before it is sent; with no cap set
+    /// it does nothing. A request whose model has no list price adds nothing here (a call that
+    /// cannot be priced already makes a cap unenforceable, and the pre-flight refuses it).
+    pub fn note_request(&self, req: &LlmRequest) {
+        if self.controls.max_cost_usd.is_none() {
+            return;
+        }
+        let Some(ceiling) = request_ceiling_usd(req) else {
+            return;
+        };
+        let micro = crate::llm::usd_to_micro_ceil(ceiling);
+        let before = self
+            .max_request_micro_usd
+            .fetch_max(micro, Ordering::Relaxed);
+        if before == 0 && micro > 0 {
+            // Passes waiting for a first figure to reserve against can go on.
+            self.admission.notify_waiters();
+        }
     }
 
     fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
@@ -731,20 +769,20 @@ impl UsageMeter {
             if budget.cost_unknown {
                 return Admission::CapReached;
             }
-            let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
-            // Until one call has reported a cost there is nothing to reserve against, so only
-            // ONE pass may be in flight: a cap must never be a number that concurrent passes
-            // can all slip under at once (warm_schedule off, a free first call, ...).
-            if reserve_micro == 0 && budget.in_flight >= 1 {
-                return if self.spent_usd() >= cap {
-                    Admission::CapReached
-                } else {
-                    Admission::Wait
-                };
-            }
+            let reserve_micro = self.reserve_micro_usd();
             let reserve = reserve_micro as f64 / 1_000_000.0;
+            // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
+            // a pass whose request alone reaches the limit closes admission at once, whether or
+            // not any call has reported a cost yet.
             if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
                 return Admission::CapReached;
+            }
+            // Until one call has reported a cost the run has not seen what a call really costs
+            // (a request's ceiling is an upper bound, usually far above it), so only ONE pass may
+            // be in flight: a cap must never be a number that concurrent passes can all slip
+            // under at once (warm_schedule off, a free first call, ...).
+            if self.max_call_micro_usd.load(Ordering::Relaxed) == 0 && budget.in_flight >= 1 {
+                return Admission::Wait;
             }
         }
         budget.in_flight += 1;
@@ -971,6 +1009,38 @@ fn meter_failed(meter: Option<&UsageMeter>, stage: Stage, error: &anyhow::Error)
     }
 }
 
+/// The most one request can cost, in dollars: its whole prompt (system and user text, at a
+/// conservative three characters a token) at the full input rate, no cache discount, plus its
+/// `max_tokens` (never above what the model can write) at the output rate. `None` for a model
+/// the registry has no price for. The figure a spend limit reserves per call
+/// ([`UsageMeter::note_request`]).
+pub fn request_ceiling_usd(req: &LlmRequest) -> Option<f64> {
+    let chars = req.prompt.len() + req.system.as_ref().map_or(0, String::len);
+    let input = (chars as u64).div_ceil(3).max(1);
+    let output = match camerata_llm::model_registry::max_output_for(&req.model) {
+        Some(limit) => req.max_tokens.min(limit),
+        None => req.max_tokens,
+    };
+    crate::llm::usage_cost_usd(
+        &req.model,
+        &crate::llm::CallUsage {
+            input: Some(input),
+            output: Some(u64::from(output)),
+            cache_read: 0,
+            cache_creation: 0,
+            cache_creation_1h: None,
+        },
+        crate::llm::PriceBasis::realtime(),
+    )
+}
+
+/// [`UsageMeter::note_request`] for a call site that may have no meter.
+pub(crate) fn note_request(meter: Option<&UsageMeter>, req: &LlmRequest) {
+    if let Some(m) = meter {
+        m.note_request(req);
+    }
+}
+
 /// [`UsageMeter::admit`] for a call site that may have no meter (no meter: always admitted, no
 /// permit).
 async fn admit_pass(meter: Option<&UsageMeter>) -> Result<Option<PassPermit<'_>>, CapReached> {
@@ -1000,15 +1070,21 @@ pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
 
-/// The shared estimator's whole-run dollars for a batch scan over `chunks` and `batches`, priced
-/// at `model` (scan and calibration alike). The fallback projection for the batch spend-cap gate
-/// when the exact token count is unavailable; `None` when the model has no list price.
+/// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
+/// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the
+/// same arithmetic the pre-flight prints and the cockpit shows). The fallback projection for the
+/// batch spend-cap gate when the exact token count is unavailable; `None` when the model has no
+/// list price. The batches given are the work as routed, so they count as one group; the fix
+/// stage and the clone judge run after the submission and are not part of what it commits.
 fn batch_estimate_usd(
     model: &str,
     chunks: &[&[(String, String)]],
     batches: &[&[(String, String)]],
     terse_output: bool,
 ) -> Option<f64> {
+    use camerata_ui_core::scan::{
+        estimate_run_cost_bounds, PricedModel, RunFlags, RunModels, RunRepoInput,
+    };
     let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
     let code_chars: usize = chunks
         .iter()
@@ -1016,22 +1092,34 @@ fn batch_estimate_usd(
         .map(|(_, content)| content.len())
         .sum();
     let rules: usize = batches.iter().map(|b| b.len()).sum();
-    let (_tokens, dollars, _passes) = camerata_ui_core::scan::estimate_audit_cost(
-        code_chars,
-        rules,
+    let priced = PricedModel {
+        id: model,
+        price_in: price.price_in,
+        price_out: price.price_out,
+    };
+    let bounds = estimate_run_cost_bounds(
+        &RunRepoInput {
+            repo: "batch".to_string(),
+            code_chars,
+            selected: rules,
+            multi_option_selected: 0,
+            routing_groups: 1,
+        },
         "batch",
-        price.price_in,
-        price.price_out,
-        price.price_in,
-        price.price_out,
-        false,
-        false,
-        false,
-        crate::llm::ProjectBackend::Api,
-        0,
-        terse_output,
+        &RunModels {
+            scan: priced,
+            calibration: priced,
+            fix: None,
+            clone_judge: None,
+        },
+        RunFlags {
+            thorough: false,
+            deep: false,
+            backend: crate::llm::ProjectBackend::Api,
+            terse_output,
+        },
     );
-    Some(dollars)
+    Some(bounds.expected.1)
 }
 
 /// Whether the `terse_output` measure applies to a call site that may have no meter.
@@ -2232,11 +2320,21 @@ pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
 /// never lowers a severity below what it already was (an explicit downgrade verdict with no
 /// bearing on this guardrail continues to apply exactly as before).
 pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
-    let Some(json) = extract_json_object(raw) else {
-        return findings;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return findings;
+    // A reply that parses whole is read whole. One that does not (cut off at the output limit
+    // mid-verdict) still holds every verdict that was written out in full: those are read one by
+    // one ([`answered_verdicts`]) and the findings it never reached keep what they had.
+    let whole = extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .filter(|v| v["verdicts"].is_array());
+    let v = match whole {
+        Some(v) => v,
+        None => {
+            let salvaged = answered_verdicts(raw, findings.len());
+            if salvaged.is_empty() {
+                return findings;
+            }
+            serde_json::json!({ "verdicts": salvaged })
+        }
     };
     let Some(arr) = v["verdicts"].as_array() else {
         return findings;
@@ -3232,24 +3330,66 @@ pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
 }
 
+/// `max_tokens` for a call describing `n_items` things whose reply runs at `effort`: the
+/// per-item text budget PLUS the effort's thinking allowance
+/// ([`camerata_ui_core::scan::output_cap_tokens`]), within the floor and the ceiling. The 5.x
+/// models think before they write and the thinking counts against `max_tokens`; a cap that
+/// covers only the text cuts the reply off with nothing in it.
+pub(crate) fn staged_max_tokens(n_items: usize, per_item_tokens: u32, effort: &str) -> u32 {
+    camerata_ui_core::scan::output_cap_tokens(
+        (n_items as u32).saturating_mul(per_item_tokens),
+        effort,
+    )
+}
+
+/// The effort each stage asks for (`output_config.effort`), or `None` for a stage that keeps the
+/// model's own default (the deep tier and the clone judge). Per STAGE, never per model: the
+/// registry's per-model default (Opus 5.5 and Haiku 5.5 default to `medium` and were forced to
+/// `high` for every call) is only the fallback for a request that names none.
+pub(crate) fn stage_effort(stage: Stage) -> Option<&'static str> {
+    use camerata_ui_core::scan as s;
+    match stage {
+        Stage::ScanPass => Some(s::SCAN_EFFORT),
+        Stage::DetailRegeneration => Some(s::DETAIL_EFFORT),
+        Stage::Calibration => Some(s::CALIBRATION_EFFORT),
+        Stage::Alternatives => Some(s::ALTERNATIVES_EFFORT),
+        Stage::FixGeneration => Some(s::FIX_EFFORT),
+        Stage::DeepTier | Stage::CloneJudge => None,
+    }
+}
+
+/// `req` with `stage`'s effort set ([`stage_effort`]).
+pub(crate) fn with_stage_effort(req: LlmRequest, stage: Stage) -> LlmRequest {
+    match stage_effort(stage) {
+        Some(effort) => req.with_effort(effort),
+        None => req,
+    }
+}
+
 /// `max_tokens` for one scan request holding `n_rules` rules: the measured per-rule output budget
 /// ([`camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE`], the figure the pre-flight estimate
-/// prices the scan's output from) through [`scaled_max_tokens`], never below the flat cap the scan
-/// used before it scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the
-/// shared ceiling. A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
+/// prices the scan's output from) plus the scan's thinking allowance ([`staged_max_tokens`] at
+/// [`camerata_ui_core::scan::SCAN_EFFORT`]), never below the flat cap the scan used before it
+/// scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the shared ceiling.
+/// A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
 pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
-    scaled_max_tokens(n_rules, camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE)
-        .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
+    staged_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::SCAN_EFFORT,
+    )
+    .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
 }
 
 /// `max_tokens` for one alternatives request asking about `n_rules` rules: the measured per-rule
 /// budget ([`camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE`], the figure the
-/// pre-flight estimate prices the stage from) through [`scaled_max_tokens`], so never below the
-/// flat 4096 the stage used before it scaled and never above the shared ceiling.
+/// pre-flight estimate prices the stage from) plus the stage's thinking allowance, so never below
+/// the flat 4096 the stage used before it scaled and never above the shared ceiling.
 pub(crate) fn alternatives_max_tokens(n_rules: usize) -> u32 {
-    scaled_max_tokens(
+    staged_max_tokens(
         n_rules,
         camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::ALTERNATIVES_EFFORT,
     )
 }
 
@@ -3272,6 +3412,26 @@ const CALIBRATION_BATCH_SIZE: usize = 40;
 /// than a calibration verdict.
 const FIX_TOKENS_PER_FINDING: u32 = 250;
 
+/// `max_tokens` for one calibration call over `n_findings` findings: the per-verdict text budget
+/// plus the calibration stage's thinking allowance.
+pub(crate) fn calibration_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        VERIFY_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::CALIBRATION_EFFORT,
+    )
+}
+
+/// `max_tokens` for one fix call over `n_findings` findings: the per-fix text budget plus the
+/// fix stage's thinking allowance.
+pub(crate) fn fix_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        FIX_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::FIX_EFFORT,
+    )
+}
+
 /// How many findings fit in ONE fix-generation call. Same rationale as
 /// `CALIBRATION_BATCH_SIZE` (a full chunk already exceeds the old flat floor); smaller
 /// than the calibration batch because each response entry is longer prose.
@@ -3293,6 +3453,132 @@ fn finding_evidence_texts(findings: &[Finding]) -> Vec<String> {
                 .chain(f.captures.iter().flat_map(|(k, v)| [k.clone(), v.clone()]))
         })
         .collect()
+}
+
+/// The verdict objects a calibration reply holds IN FULL, one per finding index below `n` (the
+/// first of a repeated index wins), read one by one with [`complete_array_objects`]. The last,
+/// unfinished object of a reply cut off at the output limit is not guessed at. Empty for a reply
+/// that holds no `verdicts` array.
+fn answered_verdicts(raw: &str, n: usize) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    complete_array_objects(raw, "verdicts")
+        .into_iter()
+        .filter_map(|object| serde_json::from_str::<serde_json::Value>(object).ok())
+        .filter(|v| {
+            v["index"]
+                .as_u64()
+                .is_some_and(|i| (i as usize) < n && seen.insert(i))
+        })
+        .collect()
+}
+
+/// The first calibration call over a chunk: its reply and the `max_tokens` it was sent with.
+struct CalibrationCall<'a> {
+    reply: &'a crate::llm::LlmResponse,
+    cap: u32,
+}
+
+/// A calibration reply cut off at the output limit, made whole: the verdicts it wrote out in full,
+/// then ONE re-ask of just the findings it did not reach (the same prompt over those findings
+/// alone, a smaller request with its own cap), merged back under the original indices as
+/// `{"verdicts":[...]}`. A reply that is not cut off is `first.text` unchanged. The re-ask is never
+/// the same request again: when the reply answered NOTHING the findings are the same, so the
+/// re-ask raises the cap to twice `first_cap` (the cap the first call was sent with) within the
+/// runaway ceiling, as the scan's truncation retry does; a first cap already at the ceiling has
+/// nothing to change, and then no re-ask is sent.
+///
+/// The cut-off call is recorded as wasted by the share of the findings it left unanswered (all of
+/// it when it answered none). The re-ask goes through the spend limit like any retry, and a re-ask
+/// that fails or is itself cut off keeps what it did answer: the findings still unanswered pass
+/// through uncalibrated, as they always did, and the stage never drops one.
+async fn reask_unanswered_verdicts(
+    llm: &dyn LlmPort,
+    meter: Option<&UsageMeter>,
+    calibration_model: Option<&str>,
+    system: &str,
+    chunk: &[Finding],
+    first: CalibrationCall<'_>,
+    prompt_for: &(dyn Fn(&[&Finding]) -> String + Sync),
+) -> String {
+    let CalibrationCall {
+        reply: first,
+        cap: first_cap,
+    } = first;
+    if !first.truncated {
+        return first.text.clone();
+    }
+    let n = chunk.len();
+    let mut answered = answered_verdicts(&first.text, n);
+    let have: std::collections::BTreeSet<usize> = answered
+        .iter()
+        .filter_map(|v| v["index"].as_u64().map(|i| i as usize))
+        .collect();
+    let missing: Vec<usize> = (0..n).filter(|i| !have.contains(i)).collect();
+    if let Some(m) = meter {
+        if answered.is_empty() {
+            m.record_wasted(Stage::Calibration, first);
+        } else if !missing.is_empty() {
+            m.record_wasted_share(
+                Stage::Calibration,
+                first,
+                missing.len() as f64 / n.max(1) as f64,
+            );
+        }
+    }
+    // The re-ask's cap: sized for the findings left when some were answered (a smaller, different
+    // request); twice the first cap when none were (the same findings, so the cap is what changes).
+    let reask_cap = if answered.is_empty() {
+        let raised = first_cap
+            .saturating_mul(2)
+            .min(AGGREGATE_MAX_TOKENS_CEILING);
+        (raised > first_cap).then_some(raised)
+    } else {
+        Some(calibration_max_tokens(missing.len()))
+    };
+    let reask_cap =
+        reask_cap.filter(|_| !missing.is_empty() && !meter.is_some_and(UsageMeter::retry_blocked));
+    if let Some(cap) = reask_cap {
+        let items: Vec<&Finding> = missing.iter().map(|&i| &chunk[i]).collect();
+        let req = with_stage_effort(
+            LlmRequest::new(prompt_for(&items))
+                .with_system(system.to_string())
+                .with_max_tokens(cap)
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
+        note_request(meter, &req);
+        let mut on_delta = |_: &str| {};
+        match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(resp) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::Calibration, &resp);
+                }
+                let got = answered_verdicts(&resp.text, items.len());
+                if resp.truncated {
+                    if let Some(m) = meter {
+                        if got.is_empty() {
+                            m.record_wasted(Stage::Calibration, &resp);
+                        } else if got.len() < items.len() {
+                            m.record_wasted_share(
+                                Stage::Calibration,
+                                &resp,
+                                (items.len() - got.len()) as f64 / items.len() as f64,
+                            );
+                        }
+                    }
+                }
+                for mut verdict in got {
+                    // The re-ask numbered its findings from 0: put back the originals' indices.
+                    let local = verdict["index"].as_u64().unwrap_or(0) as usize;
+                    verdict["index"] = serde_json::json!(missing[local]);
+                    answered.push(verdict);
+                }
+            }
+            Err(e) => meter_failed(meter, Stage::Calibration, &e),
+        }
+    }
+    serde_json::json!({ "verdicts": answered }).to_string()
 }
 
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
@@ -3348,6 +3634,38 @@ pub async fn verify_findings(
         &evidence.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     let system = crate::prompt_frame::with_untrusted_clause(verify_system_prompt(), &nonce);
+    // The calibration prompt for `items`, labelled `[0]`, `[1]`, ... in the order given. The whole
+    // chunk is sent with its own indices; a re-ask of the findings a cut-off reply did not
+    // answer ([`reask_unanswered_verdicts`]) is the same prompt over just those findings.
+    let calibration_prompt = |items: &[&Finding]| -> String {
+        let mut prompt = format!("Repository: {repo}\n");
+        // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
+        // small/young codebase must not be held to the architecture of a large one, and this
+        // feeds the informational bucketing of stance/YAGNI notes downstream. Over-engineering
+        // / YAGNI notes auto-hedge to low confidence + capped severity.
+        prompt.push_str(&format!(
+            "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: \
+             an 'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a \
+             debatable preference (low confidence, capped severity), not a violation.\n"
+        ));
+        prompt.push_str("\nScrutinize these findings:\n");
+        for (i, f) in items.iter().enumerate() {
+            // The location, the quoted code and the detail all derive from the client's files.
+            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &nonce,
+                &format!("finding {i}"),
+                &format!(
+                    "{}:{} — {} :: {}",
+                    f.path,
+                    f.line,
+                    camerata_secrets::redact_str(&f.snippet),
+                    camerata_secrets::redact_str(&f.detail)
+                ),
+            ));
+        }
+        prompt
+    };
     // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
     // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
     // chunk never touches another's verdicts. The common case (findings.len() <=
@@ -3381,40 +3699,18 @@ pub async fn verify_findings(
             Ok(permit) => permit,
         };
         let chunk_len = chunk.len();
-        let mut prompt = format!("Repository: {repo}\n");
-        // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
-        // small/young codebase must not be held to the architecture of a large one, and this
-        // feeds the informational bucketing of stance/YAGNI notes downstream. Over-engineering
-        // / YAGNI notes auto-hedge to low confidence + capped severity.
-        prompt.push_str(&format!(
-            "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: \
-             an 'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a \
-             debatable preference (low confidence, capped severity), not a violation.\n"
-        ));
-        prompt.push_str("\nScrutinize these findings:\n");
-        for (i, f) in chunk.iter().enumerate() {
-            // The location, the quoted code and the detail all derive from the client's files.
-            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
-            prompt.push_str(&crate::prompt_frame::frame_untrusted(
-                &nonce,
-                &format!("finding {i}"),
-                &format!(
-                    "{}:{} — {} :: {}",
-                    f.path,
-                    f.line,
-                    camerata_secrets::redact_str(&f.snippet),
-                    camerata_secrets::redact_str(&f.detail)
-                ),
-            ));
-        }
+        let prompt = calibration_prompt(&chunk.iter().collect::<Vec<_>>());
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
         // request per pass (LlmRequest is consumed by complete_streaming).
         let build_req = || {
-            LlmRequest::new(prompt.clone())
-                .with_system(system.clone())
-                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING))
-                .with_temperature(AUDIT_TEMPERATURE)
-                .with_model(stage_model(calibration_model))
+            with_stage_effort(
+                LlmRequest::new(prompt.clone())
+                    .with_system(system.clone())
+                    .with_max_tokens(calibration_max_tokens(chunk_len))
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_model(stage_model(calibration_model)),
+                Stage::Calibration,
+            )
         };
 
         // Register (or replace) this pass's transcript entry with the REAL prompt before the
@@ -3464,7 +3760,9 @@ pub async fn verify_findings(
             // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
             // byte-for-byte identical to before this change.
             let mut on_delta = |_: &str| {};
-            let calibration = llm.complete_streaming(build_req(), &mut on_delta).await;
+            let req = build_req();
+            note_request(meter, &req);
+            let calibration = llm.complete_streaming(req, &mut on_delta).await;
             if let Err(e) = &calibration {
                 meter_failed(meter, Stage::Calibration, e);
             }
@@ -3473,12 +3771,23 @@ pub async fn verify_findings(
             } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
-                    // A reply cut off at the output limit holds no verdict worth reading: the
-                    // call bought nothing, and the telemetry says so.
-                    if resp.truncated {
-                        m.record_wasted(Stage::Calibration, &resp);
-                    }
                 }
+                // A reply cut off at the output limit still holds every verdict written out in
+                // full; the findings it never reached are asked again, alone (the telemetry counts
+                // the cut-off call as wasted by the share it left unanswered).
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk_len),
+                    },
+                    &calibration_prompt,
+                )
+                .await;
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
                     // transcript's output is exactly the model's text. THOROUGH mode's 3
@@ -3493,7 +3802,7 @@ pub async fn verify_findings(
                         store.append_output(key, &session, &resp.text);
                     }
                 }
-                votes.push(resp.text);
+                votes.push(text);
             }
         }
         let chunk_calibrated = match votes.len() {
@@ -3540,25 +3849,36 @@ pub async fn verify_findings(
             uncalibrated.remove(&chunk_idx);
             continue;
         };
-        let req = LlmRequest::new(prompt)
-            .with_system(system.clone())
-            .with_max_tokens(scaled_max_tokens(
-                chunk_results[chunk_idx].len(),
-                VERIFY_TOKENS_PER_FINDING,
-            ))
-            .with_temperature(AUDIT_TEMPERATURE)
-            .with_model(stage_model(calibration_model));
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.clone())
+                .with_max_tokens(calibration_max_tokens(chunk_results[chunk_idx].len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
         let mut on_delta = |_: &str| {};
+        note_request(meter, &req);
         match llm.complete_streaming(req, &mut on_delta).await {
             Ok(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
-                    if resp.truncated {
-                        m.record_wasted(Stage::Calibration, &resp);
-                    }
                 }
                 let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
-                chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk.len()),
+                    },
+                    &calibration_prompt,
+                )
+                .await;
+                chunk_results[chunk_idx] = apply_verdicts(&text, chunk);
                 uncalibrated.remove(&chunk_idx);
             }
             Err(e) => {
@@ -4712,14 +5032,18 @@ impl AlternativesAsk<'_> {
                 },
             );
         }
-        let req = LlmRequest::new(prompt)
-            .with_system(crate::prompt_frame::with_untrusted_clause(
-                alternatives_system_prompt(),
-                nonce,
-            ))
-            .with_max_tokens(alternatives_max_tokens(rules.len()))
-            .with_temperature(AUDIT_TEMPERATURE)
-            .with_model(stage_model(audit_model));
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(crate::prompt_frame::with_untrusted_clause(
+                    alternatives_system_prompt(),
+                    nonce,
+                ))
+                .with_max_tokens(alternatives_max_tokens(rules.len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(audit_model)),
+            Stage::Alternatives,
+        );
+        note_request(meter, &req);
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
         // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
@@ -4816,12 +5140,12 @@ const MAX_FIX_REGENERATIONS: usize = 2;
 /// [`DEFAULT_MODEL`] (the cockpit and the CLI print its name); re-exported here for the server.
 pub use camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
 
-/// Rank 10: the `output_config.effort` the fix call sends when it runs on
-/// [`FIX_STAGE_HAIKU_MODEL`]. That model thinks adaptively at `medium` unless told otherwise;
-/// the fix task is bounded by its evidence and re-checked, so `low` is the starting point (see
-/// `docs/TECHNICAL.md`, "Fix stage model and effort"). Raise it only when the give-up rate or a
-/// fix-quality sample says the fixes need more.
-pub const FIX_STAGE_EFFORT: &str = "low";
+/// Rank 10: the `output_config.effort` the fix call sends, on every model. The 5.x models think
+/// adaptively at `medium` unless told otherwise; the fix task is bounded by its evidence and
+/// re-checked, so `low` is the starting point (see `docs/TECHNICAL.md`, "Fix stage model and
+/// effort"). Raise it only when the give-up rate or a fix-quality sample says the fixes need
+/// more.
+pub const FIX_STAGE_EFFORT: &str = camerata_ui_core::scan::FIX_EFFORT;
 
 /// The model the fix stage runs on, in precedence order:
 ///
@@ -4849,14 +5173,14 @@ pub fn resolve_fix_model<'a>(
     calibration_model.or(model)
 }
 
-/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whenever the fix model is
-/// [`FIX_STAGE_HAIKU_MODEL`], whether it got there by default (`fix_on_haiku` on) or because
-/// the operator picked it explicitly (with the switch on or off); any other model gets none and
-/// keeps the request it always had. Gated on the model, not the switch, because the effort is a
-/// property of how Haiku 5.5 behaves (it thinks at `medium` unless told) and not every model
-/// accepts an effort setting, so an explicit non-Haiku pick must not receive it.
-pub fn fix_effort(fix_model: Option<&str>) -> Option<&'static str> {
-    (fix_model == Some(FIX_STAGE_HAIKU_MODEL)).then_some(FIX_STAGE_EFFORT)
+/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whatever the fix model is,
+/// because the effort belongs to the STAGE, not the model (Opus 5.5 and Haiku 5.5 both default
+/// to `medium`, Sonnet 5.5 to `high`; a fix is one bounded sentence per finding at any of
+/// them). The request carries it only to a model that accepts an effort setting
+/// (`camerata_llm::model_registry::accepts_effort`), so an explicit pick of an older model keeps
+/// the request it always had.
+pub fn fix_effort() -> &'static str {
+    FIX_STAGE_EFFORT
 }
 
 /// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
@@ -5562,13 +5886,13 @@ async fn run_fix_specifics_round(
                 build_fix_specific_block(&refs, files, corpus, &local_feedback, nonce)
             )
         };
-        let mut req = LlmRequest::new(prompt)
-            .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING))
-            .with_model(stage_model(fix_model));
-        if let Some(effort) = fix_effort(fix_model) {
-            req = req.with_effort(effort);
-        }
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.to_string())
+                .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_model(stage_model(fix_model)),
+            Stage::FixGeneration,
+        );
         // Routed through the STREAMING transport (not the flat `complete`) so a large
         // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
         // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
@@ -5576,6 +5900,7 @@ async fn run_fix_specifics_round(
         let mut on_delta = |_: &str| {};
         ledger.sent(batch);
         let request_key = crate::run_store::journal::request_key(&req);
+        note_request(meter, &req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
@@ -6011,8 +6336,9 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
-/// Coarse total-time backstop for NON-streaming calls only (the calibration pass and the
-/// no-feedback path), which have no per-token progress signal to watch. Streaming calls do
+/// Coarse total-time backstop for the deep tier's no-feedback calls (a bounded 8,192-token
+/// reply). The scan, calibration, alternatives, detail and fix stages do not use it: they
+/// stream, which shows progress, so only silence fails them. Streaming calls do
 /// NOT use this — they self-bound on an idle/stall timeout inside the transport, which
 /// scales with repo size (a big scan keeps streaming and never trips it; only a true hang
 /// does). Set high so it never kills legitimate work. `CAMERATA_LLM_MAX_SECS` (default 600).
@@ -6291,18 +6617,21 @@ async fn audit_pass(
     // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
     n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
-    let mut req = LlmRequest::new(prompt)
-        .with_system(crate::prompt_frame::with_untrusted_clause(
-            audit_system_prompt_with(terse_output_of(meter)),
-            nonce,
-        ))
-        .with_max_tokens(scan_max_tokens(n_rules))
-        .with_temperature(AUDIT_TEMPERATURE)
-        .with_model(stage_model(audit_model));
+    let mut req = with_stage_effort(
+        LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                audit_system_prompt_with(terse_output_of(meter)),
+                nonce,
+            ))
+            .with_max_tokens(scan_max_tokens(n_rules))
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_model(stage_model(audit_model)),
+        Stage::ScanPass,
+    );
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let resp = match send_audit_request(llm, req.clone(), feedback, session).await {
+    let resp = match send_audit_request(llm, req.clone(), feedback, session, meter).await {
         Ok(r) => r,
         Err(e) => {
             meter_failed(meter, Stage::ScanPass, &e);
@@ -6567,7 +6896,14 @@ async fn retry_unusable_scan_reply(
     let mut wasted_counted = false;
     let mut stopped_by_cap = false;
     let mut truncation_retried = false;
-    if resp.truncated && efficiency_of(meter).truncation_retry {
+    // The retry must CHANGE the request: it raises the cap. A reply already cut off at the runaway
+    // ceiling has no higher cap to ask for, and the same request again would be paid for twice
+    // and cut off the same way, so there it is not sent (the pass is reported as cut off).
+    let retry_cap = req
+        .max_tokens
+        .saturating_mul(2)
+        .min(AGGREGATE_MAX_TOKENS_CEILING);
+    if resp.truncated && efficiency_of(meter).truncation_retry && retry_cap > req.max_tokens {
         if cap_reached() {
             stopped_by_cap = true;
         } else {
@@ -6576,15 +6912,12 @@ async fn retry_unusable_scan_reply(
                 m.record_wasted(Stage::ScanPass, &resp);
             }
             wasted_counted = true;
-            let retry_cap = req
-                .max_tokens
-                .saturating_mul(2)
-                .min(AGGREGATE_MAX_TOKENS_CEILING);
             match send_audit_request(
                 llm,
                 req.clone().with_max_tokens(retry_cap),
                 feedback,
                 session,
+                meter,
             )
             .await
             {
@@ -6619,7 +6952,7 @@ async fn retry_unusable_scan_reply(
         let mut retry_req = req.clone();
         retry_req.prompt.push_str("\n\n");
         retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
-        match send_audit_request(llm, retry_req, feedback, session).await {
+        match send_audit_request(llm, retry_req, feedback, session, meter).await {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
@@ -6655,7 +6988,10 @@ async fn send_audit_request(
     req: LlmRequest,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
+    meter: Option<&UsageMeter>,
 ) -> anyhow::Result<crate::llm::LlmResponse> {
+    // What this request could cost joins the spend limit's reserve before it is sent.
+    note_request(meter, &req);
     if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
         // repo size and only a genuine hang (no output for the idle window) aborts. No
@@ -6663,11 +6999,11 @@ async fn send_audit_request(
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
         llm.complete_streaming(req, &mut on_delta).await
     } else {
-        // Non-streaming has no progress signal; bound it with the coarse total backstop.
-        let cap = total_backstop();
-        tokio::time::timeout(cap, llm.complete(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
+        // Streamed as well, with no listener: the idle window governs here too. A fixed total
+        // backstop around a reply that may legitimately run for minutes (a large `max_tokens`)
+        // would fail a healthy call and pay for it twice; only silence is a failure.
+        let mut on_delta = |_: &str| {};
+        llm.complete_streaming(req, &mut on_delta).await
     }
 }
 
@@ -7299,15 +7635,18 @@ async fn run_passes_batch(
                 &task_line,
                 &rb,
             );
-            let req = LlmRequest::new(prompt)
-                .with_system(crate::prompt_frame::with_untrusted_clause(
-                    audit_system_prompt_with(terse_output_of(meter)),
-                    nonce,
-                ))
-                .with_max_tokens(scan_max_tokens(batch.len()))
-                .with_model(model.clone())
-                .with_cache_breakpoints(cache_bps)
-                .with_temperature(AUDIT_TEMPERATURE);
+            let req = with_stage_effort(
+                LlmRequest::new(prompt)
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        audit_system_prompt_with(terse_output_of(meter)),
+                        nonce,
+                    ))
+                    .with_max_tokens(scan_max_tokens(batch.len()))
+                    .with_model(model.clone())
+                    .with_cache_breakpoints(cache_bps)
+                    .with_temperature(AUDIT_TEMPERATURE),
+                Stage::ScanPass,
+            );
             work.push(BatchWork {
                 custom_id: format!("c{ci}-b{bi}"),
                 ci,
@@ -7472,7 +7811,7 @@ async fn run_passes_batch(
                 continue;
             };
             let session = format!("audit-{repo}-batch-{}-second-try", w.custom_id);
-            match send_audit_request(realtime, w.req.clone(), None, &session).await {
+            match send_audit_request(realtime, w.req.clone(), None, &session, meter).await {
                 Ok(resp) => {
                     if let Some(m) = meter {
                         m.record_stage(Stage::ScanPass, &resp);
@@ -12274,6 +12613,8 @@ async fn run_prose_lens(
         // Whole-repo structured output can be sizable (many controls / many threats).
         .with_max_tokens(8192)
         .with_model(stage_model(audit_model));
+    // What this request may cost joins the spend limit's reserve, as for every other stage.
+    note_request(meter, &req);
     let resp = if let Some((store, key)) = feedback {
         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
         llm.complete_streaming(req, &mut on_delta).await
@@ -12476,6 +12817,8 @@ async fn run_security_passes(
                     .with_max_tokens(8192)
                     .with_temperature(AUDIT_TEMPERATURE)
                     .with_model(stage_model(audit_model));
+                // What this request may cost joins the spend limit's reserve.
+                note_request(meter, &req);
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
                     let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
@@ -12719,6 +13062,9 @@ mod smoke_findings_tests;
 
 #[cfg(test)]
 mod drift_tests;
+
+#[cfg(test)]
+mod output_caps_tests;
 
 #[cfg(test)]
 mod tests {
@@ -14276,12 +14622,21 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "a full single chunk makes exactly one call");
-        let expected = scaled_max_tokens(CALIBRATION_BATCH_SIZE, VERIFY_TOKENS_PER_FINDING);
+        let expected = calibration_max_tokens(CALIBRATION_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
         );
         assert_eq!(seen[0].max_tokens, expected);
+        assert_eq!(
+            seen[0].effort.as_deref(),
+            Some("medium"),
+            "calibration runs at medium effort"
+        );
+        assert!(
+            expected >= CALIBRATION_BATCH_SIZE as u32 * VERIFY_TOKENS_PER_FINDING + 4_000,
+            "the cap covers the verdicts' text plus the thinking allowance"
+        );
     }
 
     /// A SMALL finding set must see ZERO behavior change — it stays pinned at the original
@@ -14304,7 +14659,8 @@ mod tests {
         .await;
 
         let seen = completer.seen.lock().unwrap();
-        assert_eq!(seen[0].max_tokens, 4096);
+        assert_eq!(seen[0].max_tokens, calibration_max_tokens(1));
+        assert!(seen[0].max_tokens >= 4096, "never under the old flat floor");
     }
 
     /// A fake that streams a FEW tokens of real output and then returns `Ok` with only that
@@ -22371,7 +22727,7 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
-        let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
+        let expected = fix_max_tokens(FIX_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
@@ -22405,8 +22761,8 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         let batched_rounds = MAX_FIX_REGENERATIONS + 1;
-        let batched_max_tokens = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
-        let solo_max_tokens = scaled_max_tokens(1, FIX_TOKENS_PER_FINDING);
+        let batched_max_tokens = fix_max_tokens(FIX_BATCH_SIZE);
+        let solo_max_tokens = fix_max_tokens(1);
         assert!(
             seen.len() > batched_rounds,
             "expected solo-round calls after the batched rounds, got {} total calls",

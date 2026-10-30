@@ -953,3 +953,61 @@ fn the_batch_fallback_estimate_includes_detail_regeneration_only_with_terse_outp
         "the estimate that includes the regeneration step is the one that trips the limit"
     );
 }
+
+/// P9: ONE estimate exists. The batch gate's fallback projection is the run estimate the
+/// pre-flight prints and the cockpit shows (`estimate_run_cost_bounds`), priced at the batch
+/// mode, not the older text-only arithmetic that said $0.13 and $2.60 for runs that cost $0.41
+/// and $1.54.
+#[test]
+fn the_batch_fallback_estimate_is_the_run_estimate() {
+    use camerata_ui_core::scan::{
+        estimate_run_cost_bounds, PricedModel, RunFlags, RunModels, RunRepoInput,
+    };
+    let files = vec![
+        ("a.rs".to_string(), "fn a() {}\n".repeat(2_000)),
+        ("b.rs".to_string(), "fn b() {}\n".repeat(500)),
+    ];
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let rules: Vec<(String, String)> = (0..20)
+        .map(|i| (format!("R-{i}"), "d".to_string()))
+        .collect();
+    let batches: Vec<&[(String, String)]> = vec![&rules[..15], &rules[15..]];
+    let model = "claude-sonnet-5-5";
+    let price = crate::llm::models()
+        .into_iter()
+        .find(|m| m.id == model)
+        .unwrap();
+    let priced = PricedModel {
+        id: model,
+        price_in: price.price_in,
+        price_out: price.price_out,
+    };
+    for terse in [false, true] {
+        let got = batch_estimate_usd(model, &chunks, &batches, terse).unwrap();
+        let want = estimate_run_cost_bounds(
+            &RunRepoInput {
+                repo: "batch".to_string(),
+                code_chars: files.iter().map(|(_, c)| c.len()).sum(),
+                selected: 20,
+                multi_option_selected: 0,
+                routing_groups: 1,
+            },
+            "batch",
+            &RunModels {
+                scan: priced,
+                calibration: priced,
+                fix: None,
+                clone_judge: None,
+            },
+            RunFlags {
+                thorough: false,
+                deep: false,
+                backend: crate::llm::ProjectBackend::Api,
+                terse_output: terse,
+            },
+        )
+        .expected
+        .1;
+        assert!((got - want).abs() < 1e-9, "terse {terse}: {got} vs {want}");
+    }
+}

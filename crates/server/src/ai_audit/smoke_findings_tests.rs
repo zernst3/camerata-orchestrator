@@ -341,15 +341,20 @@ fn alternatives_caps(llm: &StageLlm) -> Vec<u32> {
 #[test]
 fn the_alternatives_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
     use camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE;
+    // The stage runs at medium effort: its thinking allowance rides on the text budget.
+    let thinking = camerata_ui_core::scan::thinking_allowance_tokens(
+        camerata_ui_core::scan::ALTERNATIVES_EFFORT,
+    );
+    assert_eq!(thinking, 4_000);
     assert_eq!(
         alternatives_max_tokens(1),
-        4_096,
-        "a small batch keeps today's cap"
+        2 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
+        "a small batch gets its text plus the thinking allowance"
     );
     assert_eq!(
         alternatives_max_tokens(25),
-        25 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
-        "a full batch of 25 rules gets its measured budget"
+        2 * 25 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + thinking,
+        "a full batch of 25 rules gets its measured budget plus the allowance"
     );
     assert!(alternatives_max_tokens(25) > 4_096);
     assert_eq!(
@@ -393,13 +398,17 @@ async fn a_small_alternatives_batch_keeps_the_floor() {
     let llm = StageLlm::new(&[(&reply(&["RULE-A", "RULE-B"]), false)]);
     let rules: Vec<RuleAlternatives> = ["RULE-A", "RULE-B"].iter().map(|r| alt(r)).collect();
     recommend(&llm, &rules).await;
-    assert_eq!(alternatives_caps(&llm), vec![4_096]);
+    assert_eq!(alternatives_caps(&llm), vec![alternatives_max_tokens(2)]);
+    assert!(
+        alternatives_caps(&llm)[0] >= 4_096,
+        "never under the old flat cap"
+    );
 }
 
 // ── 2. The scan's output cap scales with the rules in the batch ─────────────────────────────
 
-/// The `max_tokens` of every scan request a run of one chunk and one batch of `n_rules` rules sent.
-async fn scan_caps(n_rules: usize) -> Vec<u32> {
+/// Every scan request a run of one chunk and one batch of `n_rules` rules sent.
+async fn scan_requests(n_rules: usize) -> Vec<LlmRequest> {
     let llm = StageLlm::new(&[]);
     let files: Vec<(String, String)> = vec![("a.rs".to_string(), "fn a() {}".to_string())];
     let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
@@ -428,25 +437,70 @@ async fn scan_caps(n_rules: usize) -> Vec<u32> {
         false,
     )
     .await;
-    let caps: Vec<u32> = llm
-        .seen
-        .lock()
-        .unwrap()
+    let seen = llm.seen.lock().unwrap().clone();
+    seen
+}
+
+/// The `max_tokens` of every scan request of [`scan_requests`].
+async fn scan_caps(n_rules: usize) -> Vec<u32> {
+    scan_requests(n_rules)
+        .await
         .iter()
         .map(|r| r.max_tokens)
+        .collect()
+}
+
+/// P5: the scan keeps `high` effort on every model, and its cap covers the text of a full batch
+/// plus the 12,000-token thinking allowance of that effort. The alternatives stage asks for
+/// `medium` and its cap covers its text plus 4,000.
+#[tokio::test]
+async fn the_scan_and_alternatives_requests_carry_their_stage_effort_and_a_cap_with_thinking() {
+    let scan = scan_requests(15).await;
+    assert!(!scan.is_empty());
+    for req in &scan {
+        assert_eq!(req.effort.as_deref(), Some("high"), "scan keeps high");
+        assert!(
+            req.max_tokens >= 15 * camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE + 12_000,
+            "text plus thinking: {}",
+            req.max_tokens
+        );
+    }
+    let llm = StageLlm::new(&[(&reply(&["RULE-A", "RULE-B"]), false)]);
+    let rules: Vec<RuleAlternatives> = ["RULE-A", "RULE-B"].iter().map(|r| alt(r)).collect();
+    recommend(&llm, &rules).await;
+    let seen = llm.seen.lock().unwrap().clone();
+    let alternatives: Vec<&LlmRequest> = seen
+        .iter()
+        .filter(|r| r.prompt.contains("Rules to decide"))
         .collect();
-    caps
+    assert!(!alternatives.is_empty());
+    for req in alternatives {
+        assert_eq!(req.effort.as_deref(), Some("medium"));
+        assert!(
+            req.max_tokens
+                >= 2 * camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE + 4_000
+        );
+    }
 }
 
 #[test]
 fn the_scan_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
     use camerata_ui_core::scan::{SCAN_MAX_TOKENS_FLOOR, SCAN_OUTPUT_TOKENS_PER_RULE};
-    assert_eq!(scan_max_tokens(1), 8_192, "a small batch keeps today's cap");
-    assert_eq!(scan_max_tokens(12), SCAN_MAX_TOKENS_FLOOR);
+    // The scan keeps `high` effort on every model: its thinking allowance is 12,000 tokens.
+    let thinking =
+        camerata_ui_core::scan::thinking_allowance_tokens(camerata_ui_core::scan::SCAN_EFFORT);
+    assert_eq!(thinking, 12_000);
+    assert_eq!(
+        scan_max_tokens(1),
+        2 * SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
+        "a small batch gets its text plus the thinking allowance"
+    );
+    assert!(scan_max_tokens(1) >= SCAN_MAX_TOKENS_FLOOR);
+    assert!(scan_max_tokens(12) >= SCAN_MAX_TOKENS_FLOOR);
     assert_eq!(
         scan_max_tokens(15),
-        15 * SCAN_OUTPUT_TOKENS_PER_RULE,
-        "a full 15-rule batch gets its measured budget"
+        2 * 15 * SCAN_OUTPUT_TOKENS_PER_RULE + thinking,
+        "a full 15-rule batch gets its measured budget plus the allowance"
     );
     assert!(
         scan_max_tokens(15) >= 9_516,
@@ -468,7 +522,7 @@ fn the_scan_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
 #[tokio::test]
 async fn a_full_rule_batch_is_sent_with_its_scaled_cap_and_a_small_one_with_the_floor() {
     assert_eq!(scan_caps(15).await, vec![scan_max_tokens(15)]);
-    assert_eq!(scan_caps(2).await, vec![8_192]);
+    assert_eq!(scan_caps(2).await, vec![scan_max_tokens(2)]);
 }
 
 // ── 3. An example file's placeholder never outranks the real secret ─────────────────────────

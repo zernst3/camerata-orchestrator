@@ -31,13 +31,18 @@
 //!
 //! Passes run concurrently, so the money a pass will cost is not known when the next one is
 //! admitted. A pass (or a calibration or fix batch, or a deep-tier call) is admitted only while
-//! `spent + in_flight * reserve < cap`, where `reserve` is the most any single CALL has cost so
-//! far. Until one call has reported a cost there is nothing to reserve against, so exactly one
-//! pass is admitted and the others wait for it.
+//! `spent + in_flight * reserve < cap`, where `reserve` is the larger of the most any single CALL
+//! has cost so far and the most any REQUEST built so far could cost: its whole prompt at the full
+//! input rate plus its `max_tokens` (never above what the model can write) at the output rate
+//! ([`crate::ai_audit::request_ceiling_usd`], noted for every request before it is sent). The
+//! second half is what keeps the bound with generous output caps: a 128,000-token cap on Opus 5.5
+//! is $2.56 of output alone, and a reserve that only remembered past (cheap) calls would admit a
+//! dozen such passes at once. Until one call has reported a cost the run has not seen what a call
+//! really costs, so exactly one pass is admitted and the others wait for it.
 //!
-//! If every call costs about the same, the final total is at most **one pass's cost over the
-//! cap**: the pass that crosses the line. Three things make it larger, and they are the real
-//! bound, not a footnote:
+//! The final total is at most **one request's ceiling over the cap**: the pass that crosses the
+//! line, priced at what its request may cost and not at what an earlier call happened to cost.
+//! Three things make it larger, and they are the real bound, not a footnote:
 //!
 //! * the reserve is per CALL and a pass can be two calls (a reply cut off at the output limit
 //!   is retried once at a higher limit, inside the same admitted pass), so a retried pass can

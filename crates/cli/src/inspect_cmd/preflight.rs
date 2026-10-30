@@ -9,7 +9,8 @@
 use camerata_server::llm::ProjectBackend;
 use camerata_server::preflight::{ExactSample, RepoScanFacts};
 use camerata_ui_core::scan::{
-    estimate_audit_cost_by_repo, human_tokens, RepoEstimate, RepoEstimateInput,
+    estimate_run_cost_by_repo, human_tokens, PricedModel, RepoEstimate, RunFlags, RunModels,
+    RunRepoInput,
 };
 
 /// Everything the wording needs.
@@ -19,6 +20,10 @@ pub struct PreflightInputs<'a> {
     /// The resolved audit model and calibration model ids.
     pub model: String,
     pub calibration_model: String,
+    /// The model the fix stage will call (`None` when it does not run). Priced in the figure.
+    pub fix_model: Option<String>,
+    /// The clone judge's model, when a clone rule is selected (`None` otherwise). Priced too.
+    pub clone_judge_model: Option<String>,
     pub repos: &'a [RepoScanFacts],
     /// A previous scan's cache will be tried (the estimate prices a full scan; a rerun costs less).
     pub incremental: bool,
@@ -71,16 +76,26 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
 
     let prices = price_of(&inputs.model).zip(price_of(&inputs.calibration_model));
     // One estimate per repo, summed: the scan reads and chunks each repo on its own. A repo
-    // that could not be read counts nothing and is named in the output instead.
-    let est_inputs: Vec<RepoEstimateInput> = inputs
+    // that could not be read counts nothing and is named in the output instead. The rule router
+    // splits each repo into groups (the rules of one scope share one file subset), and each
+    // group has its own rule batches, so the pass count follows the group count.
+    let est_inputs: Vec<RunRepoInput> = inputs
         .repos
         .iter()
         .filter(|r| r.read_error.is_none())
-        .map(|r| RepoEstimateInput {
+        .map(|r| RunRepoInput {
             repo: r.repo.clone(),
             code_chars: r.code_chars,
             selected: r.semantic.len(),
             multi_option_selected: r.multi_option_rules,
+            routing_groups: camerata_server::scan_routing::plan_routes(
+                &camerata_server::scan_routing::rules_from_pairs(&r.semantic),
+                &r.files,
+                true,
+            )
+            .groups
+            .len()
+            .max(1),
         })
         .collect();
     // Consensus runs the whole AI audit several times over the same inputs.
@@ -89,19 +104,38 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     } else {
         1
     };
+    // The fix stage's model and the clone judge's, when the run uses them. A model with no list
+    // price leaves its stage out of the figure (the figure says when a price is missing).
+    let fix_price = inputs
+        .fix_model
+        .as_deref()
+        .and_then(|id| price_of(id).map(|(price_in, price_out)| (id, price_in, price_out)));
+    let judge_price = inputs
+        .clone_judge_model
+        .as_deref()
+        .and_then(|id| price_of(id).map(|(price_in, price_out)| (id, price_in, price_out)));
     let estimate = prices.map(|((a_in, a_out), (c_in, c_out))| {
-        let e = estimate_audit_cost_by_repo(
+        let piece = |id, price_in, price_out| PricedModel {
+            id,
+            price_in,
+            price_out,
+        };
+        let models = RunModels {
+            scan: piece(inputs.model.as_str(), a_in, a_out),
+            calibration: piece(inputs.calibration_model.as_str(), c_in, c_out),
+            fix: fix_price.map(|(id, i, o)| piece(id, i, o)),
+            clone_judge: judge_price.map(|(id, i, o)| piece(id, i, o)),
+        };
+        let e = estimate_run_cost_by_repo(
             &est_inputs,
             mode,
-            a_in,
-            a_out,
-            c_in,
-            c_out,
-            false,
-            inputs.incremental,
-            false,
-            inputs.backend,
-            inputs.terse_output,
+            &models,
+            RunFlags {
+                thorough: false,
+                deep: false,
+                backend: inputs.backend,
+                terse_output: inputs.terse_output,
+            },
         );
         let rows: Vec<RepoEstimate> = e
             .rows
@@ -334,6 +368,8 @@ mod tests {
             batch: false,
             model: "claude-sonnet-5".into(),
             calibration_model: "claude-sonnet-5".into(),
+            fix_model: None,
+            clone_judge_model: None,
             repos,
             incremental: false,
             cap_usd: cap,
@@ -537,5 +573,34 @@ mod tests {
             build(&inputs(&alone, None)).estimate_usd.unwrap(),
         );
         assert!((with - without).abs() < 1e-9, "{with} vs {without}");
+    }
+
+    /// The figure counts what the run does: the fix stage (on its own model) and the clone judge
+    /// are priced when the run uses them, and left out when it does not.
+    #[test]
+    fn the_fix_stage_and_the_clone_judge_are_in_the_figure_when_the_run_uses_them() {
+        let repos = [repo(26_544, 152)];
+        let mut bare = inputs(&repos, None);
+        bare.model = "claude-sonnet-5-5".into();
+        bare.calibration_model = "claude-sonnet-5-5".into();
+        bare.terse_output = true;
+        let without = build(&bare).estimate_usd.unwrap();
+
+        let mut full = inputs(&repos, None);
+        full.model = "claude-sonnet-5-5".into();
+        full.calibration_model = "claude-sonnet-5-5".into();
+        full.terse_output = true;
+        full.fix_model = Some("claude-haiku-5-5".into());
+        full.clone_judge_model = Some("claude-haiku-4-5-20251001".into());
+        let with = build(&full).estimate_usd.unwrap();
+        assert!(
+            with > without + 0.03,
+            "fix and judge are priced: {without} -> {with}"
+        );
+        // A fix model with no list price is left out of the figure, not guessed at.
+        full.fix_model = Some("some-model-without-a-price".into());
+        full.clone_judge_model = None;
+        let unpriced = build(&full).estimate_usd.unwrap();
+        assert!((unpriced - without).abs() < 1e-9, "{unpriced} vs {without}");
     }
 }

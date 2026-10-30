@@ -28,6 +28,12 @@ pub fn default_finding_status() -> String {
     "active".to_string()
 }
 
+/// What the cockpit's "Spend limit (USD)" field holds when it opens: blank, which is NO limit.
+/// A real inspection runs to completion whatever it costs; a limit is something the operator
+/// chooses to add (the pre-flight still prints the expected cost and the ceiling). The command
+/// line is the same: no `--max-cost-usd`, no limit.
+pub const DEFAULT_SPEND_LIMIT_TEXT: &str = "";
+
 /// Parse the scan settings' "spend limit" field (US dollars). Blank means no limit. A value
 /// that is not a positive number is an ERROR the caller must show, never silently "no limit":
 /// a typo must not remove the guard. A leading `$` and thousands commas are accepted.
@@ -95,15 +101,77 @@ pub fn regen_round_batch_size(round: usize) -> usize {
 /// many output tokens. The server's `scaled_max_tokens` clamps to it.
 pub const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
 
-/// The ceiling of `max_tokens` for one aggregate call.
-pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+/// The RUNAWAY CEILING of `max_tokens` for one call: a guard against a model stuck repeating
+/// itself, not a budget (a reply that finishes costs what it generated, whatever the cap). The
+/// API leg streams, so a long reply no longer races a total timeout and the ceiling can sit far
+/// above any real reply (a full 15-rule scan at high effort asks for 31,200); the transport
+/// clamps every request to its model's own output limit (128,000 for the 5.x models).
+pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 64_000;
 
-/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding budget,
-/// clamped to the aggregate floor and ceiling, exactly as the server sizes the request.
-pub fn regen_call_max_tokens(findings: usize) -> u32 {
-    (findings as u32)
-        .saturating_mul(REGEN_TOKENS_PER_FINDING)
+/// The effort the scan stage asks for (`output_config.effort`). The scan's judgment is the
+/// product, so it keeps `high` on every model: never lowered without an answer-key comparison.
+pub const SCAN_EFFORT: &str = "high";
+
+/// The effort the detail-regeneration stage asks for. It rewrites a sentence the scan already
+/// wrote, so `medium` is enough.
+pub const DETAIL_EFFORT: &str = "medium";
+
+/// The effort the calibration stage asks for: one verdict per finding from the finding's own
+/// text, so `medium`.
+pub const CALIBRATION_EFFORT: &str = "medium";
+
+/// The effort the alternatives stage asks for: pick one documented option per rule from the
+/// evidence shown, so `medium`.
+pub const ALTERNATIVES_EFFORT: &str = "medium";
+
+/// The effort the fix stage asks for: one concrete sentence per finding, so `low`.
+pub const FIX_EFFORT: &str = "low";
+
+/// How many output tokens a model may spend THINKING before it writes, per effort, on top of the
+/// reply's text. The 5.x models think adaptively and thinking counts against `max_tokens`, so a
+/// cap sized for the visible text alone cuts the reply off with nothing in it. Measured from the
+/// stored replies of the two efficiency runs on the supabase-portal fixture (output tokens
+/// billed minus the reply text, by stage, Haiku 5.5 at its forced `high`): scan replies thought
+/// 5,154 tokens on average, 7,218 at the 90th percentile and 14,864 at most; detail 865 on
+/// average and 2,402 at most; the fix stage, which already ran at `low`, 382 on average, 492 at
+/// the 90th percentile and 2,973 at most. Sonnet 5.5 thought far less (scan 703 on average,
+/// calibration 80, detail 41). So `high` gets 12,000 (above the 90th percentile with room for
+/// the long tail the headroom factor and the ceiling then cover), `medium` 4,000 (above the
+/// largest detail reply) and `low` 2,000 (above the fix stage's 90th percentile by a wide
+/// margin). An effort this table does not know gets the `high` figure.
+pub fn thinking_allowance_tokens(effort: &str) -> u32 {
+    match effort {
+        "low" => 2_000,
+        "medium" => 4_000,
+        _ => 12_000,
+    }
+}
+
+/// How many times the work's visible text a reply's cap allows. A cap is a runaway guard and not a
+/// budget: the API bills the tokens a reply actually generates, so a cap of twice the expected
+/// text costs exactly what a tight one does on every reply that finishes, and it is the tight cap
+/// that turns a slightly long reply into a cut-off, a retry and a second payment.
+pub const OUTPUT_HEADROOM_FACTOR: u32 = 2;
+
+/// The `max_tokens` for a reply whose expected visible text is `text_tokens` and which runs at
+/// `effort`: the work with headroom plus the thinking allowance,
+/// `OUTPUT_HEADROOM_FACTOR x text + thinking_allowance_tokens(effort)`, within the aggregate floor
+/// and the runaway ceiling.
+pub fn output_cap_tokens(text_tokens: u32, effort: &str) -> u32 {
+    text_tokens
+        .saturating_mul(OUTPUT_HEADROOM_FACTOR)
+        .saturating_add(thinking_allowance_tokens(effort))
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
+/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding text
+/// budget with headroom plus the thinking allowance of the stage's effort ([`DETAIL_EFFORT`]),
+/// within the aggregate floor and the runaway ceiling, exactly as the server sizes the request.
+pub fn regen_call_max_tokens(findings: usize) -> u32 {
+    output_cap_tokens(
+        (findings as u32).saturating_mul(REGEN_TOKENS_PER_FINDING),
+        DETAIL_EFFORT,
+    )
 }
 
 /// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
@@ -642,6 +710,377 @@ pub fn estimate_audit_cost_by_repo(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// THE RUN ESTIMATE: what the run actually does (retry fixes F2, P9)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// [`estimate_audit_cost`] priced the scan, one calibration call, one alternatives call, the
+// resolution round and the detail regeneration, all as TEXT, on one model. Against the two
+// recorded runs of `supabase-portal-fixture` (every efficiency switch on, real time, API backend:
+// Haiku 5.5 spent $0.414 and Sonnet 5.5 $1.543) it said $0.13 and $2.60: 68 percent low for Haiku
+// and 69 percent high for Sonnet. What broke, from the runs' stage telemetry:
+//
+// * the fix stage and the clone judge were not in it (27 percent of the Haiku run's dollars);
+// * rule routing split the repo into groups, each with its own rule batches;
+// * the alternatives stage re-sends the repo's digest with every batch, uncached;
+// * a pass's prompt is far more than the digest: the repo map and the rules block ride with it
+//   (about 16,000 input tokens a pass against the 2,500 overhead the estimate assumed);
+// * output was priced as the text the constants describe. Sonnet 5.5 writes about a third of
+//   them; Haiku 5.5 at its forced `high` effort wrote about twice them (thinking, and the cut-off
+//   replies the thinking caused). The model decides, so the model's scale is a number measured
+//   from the stage telemetry, per model.
+//
+// The functions below price all of it. They are the estimate the pre-flight prints and the
+// cockpit shows; the older functions above are kept for callers that have no model ids.
+
+/// The repo map and signatures that ride in every pass's cached prefix, as a share of the code
+/// digest. Measured: a pass of the fixture sent about 11,000 cached input tokens for a 6,636-token
+/// digest.
+const REPO_MAP_PER_CODE: f64 = 0.66;
+
+/// Input tokens of one scan pass that are not part of the cached prefix: the system prompt, the
+/// rules block and the task. Measured: a pass sent about 16,000 input tokens, 11,000 of them
+/// cached.
+const PASS_OVERHEAD_TOKENS: f64 = 5_000.0;
+
+/// Input tokens the alternatives stage adds per rule on top of the digest it re-sends with every
+/// batch (the rule's option set and rationale), and per call for its instructions.
+const ALTERNATIVES_INPUT_TOKENS_PER_RULE: f64 = 800.0;
+const ALTERNATIVES_INPUT_TOKENS_PER_CALL: f64 = 3_000.0;
+
+/// Findings per alternatives call, the server's `ALTERNATIVES_BATCH_SIZE`.
+const ALTERNATIVES_BATCH_RULES: usize = 25;
+
+/// The fix stage, per finding: input tokens (the finding's evidence window on the solo path plus
+/// the batched rounds that came first) and output tokens (the sentence, with its thinking at
+/// `low`). Measured on both runs: 3.2k and 4.2k input, 0.7k and 1.0k output per finding.
+const FIX_INPUT_TOKENS_PER_FINDING: f64 = 3_000.0;
+const FIX_OUTPUT_TOKENS_PER_FINDING: f64 = 800.0;
+
+/// The clone judge: two calls on a fast model (measured: $0.009 on Haiku 4.5).
+const CLONE_JUDGE_CALLS: f64 = 2.0;
+const CLONE_JUDGE_INPUT_TOKENS: f64 = 2_000.0;
+const CLONE_JUDGE_OUTPUT_TOKENS: f64 = 500.0;
+
+/// How much output a model writes against the text the estimate's constants describe, THINKING
+/// INCLUDED, measured from the stage telemetry of the two recorded runs of the fixture (actual
+/// output tokens over the older estimate's output tokens, the repeats and cut-off replies those
+/// runs paid for included):
+///
+/// * `claude-sonnet-5-5`: 0.35. It writes about a third of what the constants describe and
+///   thinks little (scan 703 tokens a call, calibration 80, detail 41).
+/// * `claude-haiku-5-5`: 2.2. The same text plus 5,000 tokens of thinking a scan call at the
+///   `high` effort it was forced to, and the cut-off replies that thinking caused. Measured
+///   before the per-stage efforts of retry fixes F2 (P5), which lower detail, calibration and
+///   alternatives to `medium`; re-measure after the next real run.
+///
+/// A model nobody has measured gets 1.0, the constants as written.
+pub fn output_scale(model_id: &str) -> f64 {
+    match model_id {
+        "claude-sonnet-5-5" => 0.35,
+        "claude-haiku-5-5" => 2.2,
+        _ => 1.0,
+    }
+}
+
+/// A model a stage calls, with its list prices in US dollars per million tokens.
+#[derive(Clone, Copy, Debug)]
+pub struct PricedModel<'a> {
+    pub id: &'a str,
+    pub price_in: f64,
+    pub price_out: f64,
+}
+
+/// Every model the run calls. `fix` is `None` when the fix stage does not run; `clone_judge` is
+/// `None` when no clone rule is selected.
+#[derive(Clone, Copy, Debug)]
+pub struct RunModels<'a> {
+    pub scan: PricedModel<'a>,
+    pub calibration: PricedModel<'a>,
+    pub fix: Option<PricedModel<'a>>,
+    pub clone_judge: Option<PricedModel<'a>>,
+}
+
+/// What one repo contributes to a run estimate: [`RepoEstimateInput`] plus the number of routing
+/// groups the scan splits it into (`scan_routing::plan_routes`; 1 when nothing is routed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunRepoInput {
+    pub repo: String,
+    pub code_chars: usize,
+    pub selected: usize,
+    pub multi_option_selected: usize,
+    pub routing_groups: usize,
+}
+
+/// The flags of the run that shape its cost, as for [`estimate_audit_cost`].
+#[derive(Clone, Copy, Debug)]
+pub struct RunFlags {
+    pub thorough: bool,
+    pub deep: bool,
+    pub backend: ProjectBackend,
+    pub terse_output: bool,
+}
+
+/// [`estimate_audit_cost_bounds`] for the run as it is executed: see the section comment above.
+/// `mode` is the scan mode string (`sequential`, `parallel`, `batch`).
+pub fn estimate_run_cost_bounds(
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+) -> AuditCostBounds {
+    let expected =
+        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_expected, true);
+    let (_, ceiling_usd, _) =
+        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_estimate, false);
+    AuditCostBounds {
+        expected,
+        ceiling_usd,
+    }
+}
+
+/// [`estimate_audit_cost_by_repo`] for the run as it is executed: one estimate per repo, summed.
+pub fn estimate_run_cost_by_repo(
+    repos: &[RunRepoInput],
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+) -> AuditEstimate {
+    let rows: Vec<RepoEstimate> = repos
+        .iter()
+        .map(|r| {
+            let bounds = estimate_run_cost_bounds(r, mode, models, flags);
+            let (tokens, dollars, passes) = bounds.expected;
+            RepoEstimate {
+                repo: r.repo.clone(),
+                tokens,
+                dollars,
+                passes,
+                ceiling_usd: bounds.ceiling_usd,
+            }
+        })
+        .collect();
+    AuditEstimate {
+        tokens: rows.iter().map(|r| r.tokens).sum(),
+        dollars: rows.iter().map(|r| r.dollars).sum(),
+        passes: rows.iter().map(|r| r.passes).sum(),
+        ceiling_usd: rows.iter().map(|r| r.ceiling_usd).sum(),
+        rows,
+    }
+}
+
+/// The cockpit's pre-audit estimate: [`estimate_run_cost_by_repo`] over the repos the cockpit
+/// knows, at the scan and calibration models it shows, with the fix stage priced at `fix` when
+/// the cockpit's model list prices it. The cockpit has no file list, so it cannot run the rule
+/// router: each repo counts as ONE routing group (the command line's pre-flight, which has the
+/// files, counts the real groups), and the clone judge (two small calls) is not priced. Both make
+/// the cockpit's figure a little under the command line's for the same run; the arithmetic is
+/// the same.
+pub fn cockpit_run_estimate(
+    repos: &[RunRepoInput],
+    mode: &str,
+    scan: PricedModel<'_>,
+    calibration: PricedModel<'_>,
+    fix: Option<PricedModel<'_>>,
+    flags: RunFlags,
+) -> AuditEstimate {
+    estimate_run_cost_by_repo(
+        repos,
+        mode,
+        &RunModels {
+            scan,
+            calibration,
+            fix,
+            clone_judge: None,
+        },
+        flags,
+    )
+}
+
+/// The arithmetic of [`estimate_run_cost_bounds`], with the regeneration stage priced by
+/// `regen_of` (the expected figure or the ceiling).
+fn estimate_run_with_regeneration(
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+    regen_of: fn(f64) -> RegenerationEstimate,
+    scale_regen_output: bool,
+) -> (u64, f64, usize) {
+    const CHUNK_DIGEST_CHARS: usize = 350_000;
+    const RULE_BATCH_SIZE: usize = 15;
+    const CHARS_PER_TOKEN: f64 = 4.0;
+    const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
+    const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
+    const CACHE_WRITE_MULT: f64 = 1.25;
+    const CACHE_READ_MULT: f64 = 0.10;
+    const DEEP_PASSES: f64 = 3.0;
+    const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
+    const FIX_BATCH_FINDINGS: usize = 25;
+
+    let selected = repo.selected;
+    let (scan_in_price, scan_out_price) = (models.scan.price_in, models.scan.price_out);
+    let (cal_in_price, cal_out_price) = (models.calibration.price_in, models.calibration.price_out);
+    let scan_scale = output_scale(models.scan.id);
+    let cal_scale = output_scale(models.calibration.id);
+    let batch_discount = if mode == "batch" { 0.5 } else { 1.0 };
+
+    // ── Passes: per chunk, per routing group, per rule batch of that group. ──
+    let chunks = repo.code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
+    let groups = repo.routing_groups.max(1);
+    let batches_per_group = if mode == "sequential" {
+        1
+    } else {
+        selected.div_ceil(groups * RULE_BATCH_SIZE).max(1)
+    };
+    let calls_per_chunk = groups * batches_per_group;
+    let passes = chunks * calls_per_chunk;
+    let code_tokens = repo.code_chars as f64 / CHARS_PER_TOKEN;
+    let chunk_code_tokens = code_tokens / chunks as f64;
+    // The cached prefix of a pass: the chunk's digest and the repo map.
+    let prefix_tokens = chunk_code_tokens * (1.0 + REPO_MAP_PER_CODE);
+
+    // The prefix as billed over `calls` calls that share it, in input-token equivalents.
+    let prefix_billed = |calls: usize| -> f64 {
+        if calls == 0 {
+            return 0.0;
+        }
+        match flags.backend {
+            ProjectBackend::Cli => prefix_tokens * CACHE_WRITE_MULT * calls as f64,
+            ProjectBackend::Api => {
+                prefix_tokens * CACHE_WRITE_MULT
+                    + prefix_tokens * CACHE_READ_MULT * (calls - 1) as f64
+            }
+        }
+    };
+
+    // ── Scan passes (batch discount applies) and the resolution round (it never does). ──
+    let scan_in = (prefix_billed(calls_per_chunk) + calls_per_chunk as f64 * PASS_OVERHEAD_TOKENS)
+        * chunks as f64;
+    let resolution_calls = if selected > 0 { passes } else { 0 };
+    let resolution_in =
+        resolution_calls as f64 * (prefix_tokens * CACHE_READ_MULT + PASS_OVERHEAD_TOKENS);
+    let scan_out = (f64::from(SCAN_OUTPUT_TOKENS_PER_RULE) * selected as f64
+        + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64)
+        * scan_scale;
+    let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64 * scan_scale;
+
+    // The findings the scan reports, from its output volume (text, before the model's scale).
+    let findings_out = OUT_TOKENS_PER_PASS * passes as f64
+        + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64;
+    let findings = (findings_out / REGEN_SCAN_TOKENS_PER_FINDING)
+        .ceil()
+        .max(0.0);
+
+    // ── Calibration: one pass over the findings (thorough: three). ──
+    let cal_passes = if flags.thorough { 3.0 } else { 1.0 };
+    let cal_in = findings_out * cal_passes;
+    let cal_out = findings_out * cal_passes * cal_scale;
+
+    // ── Alternatives: one call per batch of rules, each re-sending the digest and repo map
+    // (never cached) with that batch's option sets. ──
+    let multi = repo.multi_option_selected;
+    let alt_calls = multi.div_ceil(ALTERNATIVES_BATCH_RULES);
+    let alt_in = alt_calls as f64 * prefix_tokens
+        + if multi > 0 {
+            multi as f64 * ALTERNATIVES_INPUT_TOKENS_PER_RULE + ALTERNATIVES_INPUT_TOKENS_PER_CALL
+        } else {
+            0.0
+        };
+    let alt_out = f64::from(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE) * multi as f64 * scan_scale;
+
+    // ── Detail regeneration (terse_output): audit model, no batch discount. ──
+    let regen = if flags.terse_output {
+        regen_of(findings_out)
+    } else {
+        RegenerationEstimate {
+            findings: 0.0,
+            calls: 0,
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+        }
+    };
+    // The expected figure is the usual run's text; the model's scale applies to it. The ceiling
+    // (every repeat round at the request cap) is already an upper bound and is not scaled.
+    let regen_out = if scale_regen_output {
+        regen.output_tokens * scan_scale
+    } else {
+        regen.output_tokens
+    };
+
+    // ── Fix stage: one sentence per finding on the fix model. ──
+    let (fix_in, fix_out, fix_dollars, fix_calls) = match models.fix {
+        Some(m) if findings > 0.0 => {
+            let fin = findings * FIX_INPUT_TOKENS_PER_FINDING;
+            let fout = findings * FIX_OUTPUT_TOKENS_PER_FINDING;
+            (
+                fin,
+                fout,
+                (fin * m.price_in + fout * m.price_out) / 1_000_000.0,
+                (findings as usize).div_ceil(FIX_BATCH_FINDINGS),
+            )
+        }
+        _ => (0.0, 0.0, 0.0, 0),
+    };
+
+    // ── Clone judge: two small calls. ──
+    let (judge_tokens, judge_dollars, judge_calls) = match models.clone_judge {
+        Some(m) => {
+            let tin = CLONE_JUDGE_CALLS * CLONE_JUDGE_INPUT_TOKENS;
+            let tout = CLONE_JUDGE_CALLS * CLONE_JUDGE_OUTPUT_TOKENS;
+            (
+                tin + tout,
+                (tin * m.price_in + tout * m.price_out) / 1_000_000.0,
+                CLONE_JUDGE_CALLS as usize,
+            )
+        }
+        None => (0.0, 0.0, 0),
+    };
+
+    // ── Deep tier: three whole-repo prose passes at the audit model. ──
+    let (deep_in, deep_out) = if flags.deep {
+        (
+            code_tokens * DEEP_PASSES,
+            DEEP_OUT_TOKENS_PER_PASS * DEEP_PASSES,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    let dollars = ((scan_in * scan_in_price + scan_out * scan_out_price) * batch_discount
+        + (resolution_in * scan_in_price + resolution_out * scan_out_price)
+        + (cal_in * cal_in_price + cal_out * cal_out_price)
+        + (alt_in * scan_in_price + alt_out * scan_out_price)
+        + (deep_in * scan_in_price + deep_out * scan_out_price)
+        + (regen.input_tokens * scan_in_price + regen_out * scan_out_price))
+        / 1_000_000.0
+        + fix_dollars
+        + judge_dollars;
+    let total_tokens = (scan_in
+        + scan_out
+        + resolution_in
+        + resolution_out
+        + cal_in
+        + cal_out
+        + alt_in
+        + alt_out
+        + deep_in
+        + deep_out
+        + regen.input_tokens
+        + regen_out
+        + fix_in
+        + fix_out
+        + judge_tokens) as u64;
+    let total_passes = passes
+        + resolution_calls
+        + usize::from(alt_calls > 0) * alt_calls
+        + regen.calls
+        + fix_calls
+        + judge_calls
+        + usize::from(selected > 0 && findings > 0.0);
+    (total_tokens, dollars, total_passes)
+}
+
 /// One repo's line under the pre-audit estimate:
 /// `acme/api: 360,000 characters in 41 file(s), about $1.20 (4 model calls)`.
 pub fn repo_estimate_line(
@@ -842,6 +1281,15 @@ mod tests {
             let err = parse_spend_limit(bad).expect_err(bad);
             assert!(err.contains("positive dollar amount"), "{err}");
         }
+    }
+
+    /// Zach's decision (2026-10-29): "whatever it costs to get TRUE OUTPUT is just what it
+    /// costs". A real inspection runs with NO run-wide cost limit unless the operator sets one,
+    /// so the field the cockpit opens with parses to no limit.
+    #[test]
+    fn the_cockpits_spend_limit_field_opens_blank_which_is_no_limit() {
+        assert_eq!(DEFAULT_SPEND_LIMIT_TEXT, "");
+        assert_eq!(parse_spend_limit(DEFAULT_SPEND_LIMIT_TEXT), Ok(None));
     }
 
     #[test]
@@ -2402,15 +2850,17 @@ mod tests {
                 "never below the old per-finding figure"
             );
         }
-        // 86 findings (the size of a real run), exactly: round 1 is 8 full calls of 10 findings
-        // (4,500 tokens each) and one of 6 (the 4,096 floor); round 2 is 17 calls of 5 and one of
-        // 1 (the floor each); rounds 3 and 4 are 86 single-finding calls at the floor.
+        // 86 findings (the size of a real run), exactly, each call at twice its text budget plus
+        // the 4,000-token thinking allowance of the stage's medium effort: round 1 is 8 full
+        // calls of 10 findings (13,000 tokens each) and one of 6 (9,400); round 2 is 17 calls of
+        // 5 (8,500) and one of 1 (4,900); rounds 3 and 4 are 86 single-finding calls each
+        // (4,900).
         let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
         assert_eq!(r.findings, 86.0);
         assert_eq!(r.calls, 9 + 18 + 86 + 86);
         assert_eq!(
             r.output_tokens,
-            f64::from(8 * 4_500 + 4_096 + 18 * 4_096 + 2 * 86 * 4_096)
+            f64::from(8 * 13_000 + 9_400 + 17 * 8_500 + 4_900 + 2 * 86 * 4_900)
         );
         let none = regeneration_estimate(0.0);
         assert_eq!(
@@ -2424,21 +2874,51 @@ mod tests {
         );
     }
 
-    /// The request size the estimate prices is the one the stage sends: a one-finding call is
-    /// asked for the 4,096 floor, not for 450.
+    /// The request size the estimate prices is the one the stage sends: the per-finding text
+    /// budget plus the detail stage's (medium effort) thinking allowance of 4,000 tokens.
     #[test]
     fn a_regeneration_call_is_priced_at_the_max_tokens_it_is_sent_with() {
-        assert_eq!(regen_call_max_tokens(1), AGGREGATE_MAX_TOKENS_FLOOR);
-        assert_eq!(regen_call_max_tokens(5), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(thinking_allowance_tokens(DETAIL_EFFORT), 4_000);
+        assert_eq!(
+            regen_call_max_tokens(1),
+            2 * REGEN_TOKENS_PER_FINDING + 4_000
+        );
+        assert_eq!(
+            regen_call_max_tokens(5),
+            2 * 5 * REGEN_TOKENS_PER_FINDING + 4_000
+        );
         assert_eq!(
             regen_call_max_tokens(REGEN_BATCH_SIZE),
-            (REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING).max(AGGREGATE_MAX_TOKENS_FLOOR)
+            2 * REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING + 4_000
         );
+        assert!(regen_call_max_tokens(1) >= AGGREGATE_MAX_TOKENS_FLOOR);
         assert_eq!(regen_round_batch_size(0), REGEN_BATCH_SIZE);
         assert_eq!(regen_round_batch_size(1), REGEN_BATCH_SIZE.div_ceil(2));
         assert_eq!(regen_round_batch_size(2), 1);
     }
 
+    /// The thinking allowance per effort is the measured one, an unknown effort gets the largest,
+    /// and a cap never leaves the floor and ceiling.
+    #[test]
+    fn the_thinking_allowance_follows_the_effort_and_the_cap_stays_within_its_bounds() {
+        assert_eq!(thinking_allowance_tokens("low"), 2_000);
+        assert_eq!(thinking_allowance_tokens("medium"), 4_000);
+        assert_eq!(thinking_allowance_tokens("high"), 12_000);
+        assert_eq!(thinking_allowance_tokens("xhigh"), 12_000);
+        assert_eq!(output_cap_tokens(0, "low"), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(output_cap_tokens(9_600, "high"), 31_200);
+        assert_eq!(
+            output_cap_tokens(u32::MAX, "high"),
+            AGGREGATE_MAX_TOKENS_CEILING
+        );
+        // The stages' efforts: the scan keeps high, the fix stage runs at low.
+        assert_eq!(SCAN_EFFORT, "high");
+        assert_eq!(
+            (DETAIL_EFFORT, CALIBRATION_EFFORT, ALTERNATIVES_EFFORT),
+            ("medium", "medium", "medium")
+        );
+        assert_eq!(FIX_EFFORT, "low");
+    }
     /// Two figures, not one: the expected cost (the usual run, where every finding comes back in
     /// the first round, priced at the per-finding budget) is what the operator reads and what the
     /// spend-limit gate refuses on; the ceiling (every round on every finding at the request cap)
@@ -2602,5 +3082,304 @@ mod tests {
             assert!(SCAN_OUTPUT_TOKENS_PER_RULE * 15 >= 9_516);
             assert!(SCAN_MAX_TOKENS_FLOOR == 8_192);
         }
+    }
+
+    // ── The run estimate (retry fixes F2, P9) ────────────────────────────────────────────
+
+    /// `supabase-portal-fixture`: 26,544 characters of code in 36 files, 152 rules selected (34
+    /// with alternatives), one chunk, four routing groups. The two recorded runs of it (every
+    /// efficiency switch on, real time, API backend): Haiku 5.5 spent $0.414 and Sonnet 5.5
+    /// $1.543. Prices per million tokens: Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50, Haiku 4.5
+    /// (the clone judge) $1 / $5.
+    fn fixture() -> RunRepoInput {
+        RunRepoInput {
+            repo: "supabase-portal-fixture".into(),
+            code_chars: 26_544,
+            selected: 152,
+            multi_option_selected: 34,
+            routing_groups: 4,
+        }
+    }
+
+    const SONNET: PricedModel<'static> = PricedModel {
+        id: "claude-sonnet-5-5",
+        price_in: 2.0,
+        price_out: 10.0,
+    };
+    const HAIKU: PricedModel<'static> = PricedModel {
+        id: "claude-haiku-5-5",
+        price_in: 0.10,
+        price_out: 0.50,
+    };
+    const JUDGE: PricedModel<'static> = PricedModel {
+        id: "claude-haiku-4-5-20251001",
+        price_in: 1.0,
+        price_out: 5.0,
+    };
+
+    fn flags() -> RunFlags {
+        RunFlags {
+            thorough: false,
+            deep: false,
+            backend: ProjectBackend::Api,
+            terse_output: true,
+        }
+    }
+
+    fn within(estimate: f64, actual: f64, share: f64) -> bool {
+        (estimate - actual).abs() <= actual * share
+    }
+
+    /// The estimate lands within 25 percent of BOTH recorded actuals. The older estimate was 68
+    /// percent low for Haiku ($0.13) and 69 percent high for Sonnet ($2.60): neither could be
+    /// fixed by one constant, because the model decides how much a stage writes.
+    #[test]
+    fn the_estimate_for_the_fixture_lands_within_25_percent_of_both_recorded_runs() {
+        let sonnet = estimate_run_cost_bounds(
+            &fixture(),
+            "parallel",
+            &RunModels {
+                scan: SONNET,
+                calibration: SONNET,
+                fix: Some(HAIKU),
+                clone_judge: Some(JUDGE),
+            },
+            flags(),
+        );
+        let haiku = estimate_run_cost_bounds(
+            &fixture(),
+            "parallel",
+            &RunModels {
+                scan: HAIKU,
+                calibration: HAIKU,
+                fix: Some(HAIKU),
+                clone_judge: Some(JUDGE),
+            },
+            flags(),
+        );
+        let (_, sonnet_usd, sonnet_calls) = sonnet.expected;
+        let (_, haiku_usd, haiku_calls) = haiku.expected;
+        eprintln!(
+            "run estimate for the fixture: Sonnet 5.5 ${sonnet_usd:.3} ({sonnet_calls} calls, \
+             ceiling ${:.2}) against $1.543 spent; Haiku 5.5 ${haiku_usd:.3} ({haiku_calls} calls, \
+             ceiling ${:.2}) against $0.414 spent",
+            sonnet.ceiling_usd, haiku.ceiling_usd
+        );
+        assert!(
+            within(sonnet_usd, 1.543, 0.25),
+            "Sonnet 5.5: estimated ${sonnet_usd:.3} against $1.543 spent"
+        );
+        assert!(
+            within(haiku_usd, 0.414, 0.25),
+            "Haiku 5.5: estimated ${haiku_usd:.3} against $0.414 spent"
+        );
+        // The ceiling is never below the expected figure.
+        assert!(sonnet.ceiling_usd >= sonnet_usd);
+        assert!(haiku.ceiling_usd >= haiku_usd);
+        // The calls: the recorded Sonnet run made 119 (22 scan, 2 alternatives, 3 calibration,
+        // 30 detail, 60 fix, 2 judge), most of them the repeats retry fixes F1 removed; a clean
+        // run makes far fewer, and the estimate counts the stages, not the repeats.
+        assert!(sonnet_calls > 30 && sonnet_calls < 119, "{sonnet_calls}");
+        assert!(haiku_calls > 30, "{haiku_calls}");
+    }
+
+    /// What the older estimate left out is now in it: the fix stage and the clone judge cost
+    /// money, and so does each routing group's own rule batches.
+    #[test]
+    fn the_fix_stage_the_clone_judge_and_every_routing_group_are_priced() {
+        let models = |fix, judge| RunModels {
+            scan: SONNET,
+            calibration: SONNET,
+            fix,
+            clone_judge: judge,
+        };
+        let usd = |m: &RunModels<'_>, r: &RunRepoInput| {
+            estimate_run_cost_bounds(r, "parallel", m, flags())
+                .expected
+                .1
+        };
+        let base = usd(&models(None, None), &fixture());
+        let with_fix = usd(&models(Some(HAIKU), None), &fixture());
+        let with_judge = usd(&models(None, Some(JUDGE)), &fixture());
+        assert!(with_fix > base + 0.03, "fix: {base} -> {with_fix}");
+        assert!(
+            (with_judge - base - 0.009).abs() < 0.001,
+            "judge: {base} -> {with_judge}"
+        );
+        // The fix stage is priced at the FIX model: the same stage on Sonnet costs far more.
+        let fix_on_sonnet = usd(&models(Some(SONNET), None), &fixture());
+        assert!(
+            fix_on_sonnet > with_fix + 0.2,
+            "{with_fix} vs {fix_on_sonnet}"
+        );
+        // Routing: four groups of a 152-rule selection make 12 passes, not 11 (each group's
+        // last batch is partial), and the passes are priced.
+        let unrouted = RunRepoInput {
+            routing_groups: 1,
+            ..fixture()
+        };
+        let routed = estimate_run_cost_bounds(&fixture(), "parallel", &models(None, None), flags());
+        let plain = estimate_run_cost_bounds(&unrouted, "parallel", &models(None, None), flags());
+        assert!(routed.expected.2 > plain.expected.2, "{routed:?} {plain:?}");
+        assert!(routed.expected.1 > plain.expected.1);
+        // A repo with no multi-option rules makes no alternatives call, so the digest is not
+        // re-sent; with them it is, once per batch of 25 rules.
+        let none = RunRepoInput {
+            multi_option_selected: 0,
+            ..fixture()
+        };
+        let one_batch = RunRepoInput {
+            multi_option_selected: 25,
+            ..fixture()
+        };
+        let two_batches = RunRepoInput {
+            multi_option_selected: 26,
+            ..fixture()
+        };
+        let m = models(None, None);
+        let (a, b, c) = (usd(&m, &none), usd(&m, &one_batch), usd(&m, &two_batches));
+        assert!(a < b && b < c, "{a} {b} {c}");
+    }
+
+    /// The model's scale: Sonnet 5.5 writes about a third of the constants, Haiku 5.5 at its
+    /// forced `high` more than twice them, a model nobody has measured gets the constants as
+    /// written. Both measured figures come from the recorded runs' stage telemetry.
+    #[test]
+    fn each_model_has_its_own_measured_output_scale() {
+        assert_eq!(output_scale("claude-sonnet-5-5"), 0.35);
+        assert_eq!(output_scale("claude-haiku-5-5"), 2.2);
+        assert_eq!(output_scale("claude-opus-5-5"), 1.0);
+        assert_eq!(output_scale("anything-else"), 1.0);
+        // Same prices, different model: the scale alone moves the estimate.
+        let priced = |id: &'static str| PricedModel {
+            id,
+            price_in: 2.0,
+            price_out: 10.0,
+        };
+        let usd = |id| {
+            let m = priced(id);
+            estimate_run_cost_bounds(
+                &fixture(),
+                "parallel",
+                &RunModels {
+                    scan: m,
+                    calibration: m,
+                    fix: None,
+                    clone_judge: None,
+                },
+                flags(),
+            )
+            .expected
+            .1
+        };
+        assert!(usd("claude-haiku-5-5") > usd("claude-opus-5-5"));
+        assert!(usd("claude-opus-5-5") > usd("claude-sonnet-5-5"));
+    }
+
+    /// Batch mode halves the scan passes' price, thorough mode triples calibration, the CLI
+    /// backend pays the cache write on every call: the run estimate keeps all three behaviours
+    /// of the older one.
+    #[test]
+    fn batch_thorough_and_the_cli_backend_still_move_the_estimate() {
+        let m = RunModels {
+            scan: SONNET,
+            calibration: SONNET,
+            fix: None,
+            clone_judge: None,
+        };
+        let usd =
+            |mode: &str, f: RunFlags| estimate_run_cost_bounds(&fixture(), mode, &m, f).expected.1;
+        assert!(usd("batch", flags()) < usd("parallel", flags()));
+        let thorough = RunFlags {
+            thorough: true,
+            ..flags()
+        };
+        assert!(usd("parallel", thorough) > usd("parallel", flags()));
+        let cli = RunFlags {
+            backend: ProjectBackend::Cli,
+            ..flags()
+        };
+        assert!(usd("parallel", cli) > usd("parallel", flags()));
+        let deep = RunFlags {
+            deep: true,
+            ..flags()
+        };
+        assert!(usd("parallel", deep) > usd("parallel", flags()));
+    }
+
+    /// The cockpit shows the SAME estimate the command line prints, from the inputs the cockpit
+    /// has: the fix stage at its default model when the model list prices it, each repo as one
+    /// routing group (the cockpit has no file list to route) and no clone judge. For the fixture
+    /// on Sonnet 5.5 the figure is within 25 percent of the recorded run; the older cockpit
+    /// arithmetic said $2.60.
+    #[test]
+    fn the_cockpit_estimate_is_the_run_estimate_over_the_inputs_the_cockpit_has() {
+        let unrouted = RunRepoInput {
+            routing_groups: 1,
+            ..fixture()
+        };
+        let est = cockpit_run_estimate(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            SONNET,
+            SONNET,
+            Some(HAIKU),
+            flags(),
+        );
+        let same = estimate_run_cost_by_repo(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            &RunModels {
+                scan: SONNET,
+                calibration: SONNET,
+                fix: Some(HAIKU),
+                clone_judge: None,
+            },
+            flags(),
+        );
+        assert_eq!(est.rows.len(), 1);
+        assert!((est.dollars - same.dollars).abs() < 1e-9);
+        assert_eq!(est.passes, same.passes);
+        assert!(
+            within(est.dollars, 1.543, 0.25),
+            "cockpit: ${:.3} against $1.543 spent",
+            est.dollars
+        );
+        // With no priced fix model the stage is left out, as the command line leaves it out.
+        let bare = cockpit_run_estimate(
+            std::slice::from_ref(&unrouted),
+            "parallel",
+            SONNET,
+            SONNET,
+            None,
+            flags(),
+        );
+        assert!(bare.dollars < est.dollars);
+    }
+
+    /// A multi-repo run is the sum of its repos, as for the older estimate.
+    #[test]
+    fn a_multi_repo_run_estimate_is_the_sum_of_its_repos() {
+        let m = RunModels {
+            scan: SONNET,
+            calibration: SONNET,
+            fix: Some(HAIKU),
+            clone_judge: None,
+        };
+        let a = fixture();
+        let b = RunRepoInput {
+            repo: "acme/api".into(),
+            code_chars: 400_000,
+            selected: 30,
+            multi_option_selected: 0,
+            routing_groups: 2,
+        };
+        let both = estimate_run_cost_by_repo(&[a.clone(), b.clone()], "parallel", &m, flags());
+        let one = |r: &RunRepoInput| estimate_run_cost_bounds(r, "parallel", &m, flags());
+        assert_eq!(both.rows.len(), 2);
+        assert!((both.dollars - one(&a).expected.1 - one(&b).expected.1).abs() < 1e-9);
+        assert!((both.ceiling_usd - one(&a).ceiling_usd - one(&b).ceiling_usd).abs() < 1e-9);
+        // 400,000 characters is two chunks: more passes than one chunk of the same rules.
+        assert!(one(&b).expected.2 > 2 * 2);
     }
 }

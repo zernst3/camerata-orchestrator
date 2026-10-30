@@ -54,7 +54,7 @@ keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust", 
 [dev-dependencies]
 # Mock Anthropic /v1/models server for the pagination tests (same version as the other crates).
 wiremock = "0.6"
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 # Env-mutating tests (PATH / CAMERATA_* overrides) use EnvGuard (restore-on-drop) and the
 # workspace-wide `#[serial_test::serial(process_env)]` key; see crates/test-env.
 serial_test = "3"

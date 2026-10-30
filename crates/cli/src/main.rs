@@ -181,7 +181,9 @@ enum Command {
         /// summary.
         #[arg(long)]
         verbose: bool,
-        /// Stop the run, between passes, once actual spend reaches this many US dollars. A run
+        /// Optional. Without it there is NO limit: the inspection runs to completion whatever it
+        /// costs (the pre-flight still prints the expected cost and the ceiling). Given, it stops
+        /// the run, between passes, once actual spend reaches this many US dollars. A run
         /// that stops early lists every pass and stage it did not run, marks its export incomplete
         /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
         /// fix batch and deep-tier call starts; one that has started always finishes, and once
