@@ -5132,7 +5132,8 @@ fn is_file_like(word: &str, followed_by_call: bool) -> bool {
     })
 }
 
-/// The tokens of a code snippet worth grounding: any file name in it, and any word of 3 or
+/// The tokens of a code snippet worth grounding: any file name in it, any schema-qualified
+/// table or environment variable it names (see [`qualified_object`]), and any word of 3 or
 /// more characters shaped like a name somebody chose (see [`is_chosen_name`]). Ordinary
 /// words, language keywords, SQL keywords and single-word builtins (`err`, `catch`, `table`,
 /// `Promise`) are never asked for: the snippet is the fix's own new code.
@@ -5159,6 +5160,16 @@ fn snippet_names(span: &str) -> Vec<String> {
             out.push(word_trimmed.to_string());
             continue;
         }
+        // `public.documents`, `storage.objects`: a schema-qualified name is a table (or, when
+        // called, a function) somebody chose, even as one lowercase word; `process.env.SECRET`
+        // is an environment variable somebody chose, even with no underscore. Neither shape is
+        // caught by `is_chosen_name`, so the object name is asked for here. A qualified CALL
+        // (`auth.uid()`) is a builtin or an existing function, not a table.
+        if let Some(obj) = qualified_object(word_trimmed, followed_by_call) {
+            if obj.len() >= 3 {
+                out.push(obj.to_string());
+            }
+        }
         for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             if tok.len() >= 3 && is_chosen_name(tok) {
                 out.push(tok.to_string());
@@ -5166,6 +5177,27 @@ fn snippet_names(span: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Database schemas whose qualified names (`public.documents`) name a table or function.
+const SCHEMA_QUALIFIERS: &[&str] = &["public", "auth", "internal", "storage", "extensions"];
+
+/// The object a qualified word in a snippet names: the table of `schema.table` (not when the
+/// word is called, which makes it a function such as `auth.uid()`), or the variable of
+/// `process.env.NAME`. `None` for any other word.
+fn qualified_object(word: &str, followed_by_call: bool) -> Option<&str> {
+    if let Some(name) = word.strip_prefix("process.env.") {
+        return Some(name).filter(|n| !n.is_empty());
+    }
+    if followed_by_call {
+        return None;
+    }
+    let (schema, name) = word.split_once('.')?;
+    if SCHEMA_QUALIFIERS.contains(&schema) && !name.is_empty() && !name.contains('.') {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 /// Whether a token looks like a name its author chose (`snake_case`, `camelCase`, or a
@@ -21659,6 +21691,29 @@ mod tests {
             find_ungrounded_identifier(fix, evidence),
             Some("NextResponse".to_string())
         );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_table_or_env_var_inside_a_snippet() {
+        // A schema-qualified name (`public.documents`) names a table or function somebody chose,
+        // even when it is one lowercase word; an environment variable read (`process.env.SECRET`)
+        // is a chosen name even when it has no underscore. Neither is in this evidence.
+        let evidence =
+            "supabase/migrations/0004_contacts.sql: create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.documents enable row level security;` in the migration.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("documents".to_string())
+        );
+        let fix = "Read it as `const key = process.env.SECRET;` instead of hard-coding it.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("SECRET".to_string())
+        );
+        // The real table, and a schema-qualified CALL (`auth.uid()`), are fine.
+        let fix = "Run `alter table public.member_contacts enable row level security;` then add \
+                   `create policy p on public.member_contacts using (owner_id = auth.uid());`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
     }
 
     #[test]
