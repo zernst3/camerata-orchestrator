@@ -670,3 +670,37 @@ fn apply_verdicts_reads_the_complete_verdicts_of_a_reply_cut_off_mid_object() {
     assert_eq!(none.len(), 3);
     assert!(none.iter().all(|f| f.severity == "medium"));
 }
+
+/// Every request a run sends feeds the spend limit's reserve, the deep tier's included: its
+/// three whole-repo lenses are the largest prompts of a run, and a reserve that forgot them
+/// would admit them against a figure measured on the small calls that came before.
+#[tokio::test]
+async fn the_deep_tiers_requests_feed_the_spend_limits_reserve() {
+    let llm = Scripted::new(vec![("{}".to_string(), false)]);
+    let meter = capped_meter(100.0);
+    assert_eq!(meter.reserve_micro_usd(), 0, "nothing noted yet");
+    let files = vec![("a.rs".to_string(), "fn a() {}\n".to_string())];
+    let _ = run_deep_tier(
+        &llm,
+        REPO,
+        &files,
+        Some("claude-opus-5-5"),
+        ScanMode::Parallel,
+        None,
+        Some(&meter),
+        true,
+    )
+    .await;
+    let seen = llm.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "the deep tier sent its requests");
+    let largest = seen
+        .iter()
+        .filter_map(request_ceiling_usd)
+        .fold(0.0_f64, f64::max);
+    assert!(largest > 0.01, "a deep lens request is priced: {largest}");
+    assert_eq!(
+        meter.reserve_micro_usd(),
+        crate::llm::usd_to_micro_ceil(largest),
+        "the reserve is the largest deep-tier request's ceiling, not the stub's cent per call"
+    );
+}

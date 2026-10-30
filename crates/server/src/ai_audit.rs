@@ -12563,6 +12563,8 @@ async fn run_prose_lens(
         // Whole-repo structured output can be sizable (many controls / many threats).
         .with_max_tokens(8192)
         .with_model(stage_model(audit_model));
+    // What this request may cost joins the spend limit's reserve, as for every other stage.
+    note_request(meter, &req);
     let resp = if let Some((store, key)) = feedback {
         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
         llm.complete_streaming(req, &mut on_delta).await
@@ -12765,6 +12767,8 @@ async fn run_security_passes(
                     .with_max_tokens(8192)
                     .with_temperature(AUDIT_TEMPERATURE)
                     .with_model(stage_model(audit_model));
+                // What this request may cost joins the spend limit's reserve.
+                note_request(meter, &req);
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
                     let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
