@@ -320,7 +320,7 @@ impl LlmPort for CutOffCalibration {
 }
 
 #[tokio::test]
-async fn three_cut_off_calibration_replies_are_three_wasted_calls() {
+async fn cut_off_calibration_replies_that_answered_nothing_are_all_wasted_calls() {
     // Three chunks of findings, each answered with a reply cut off at the output limit: none
     // produced a verdict, so all three calls bought nothing.
     let findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE * 2 + 1)
@@ -344,8 +344,10 @@ async fn three_cut_off_calibration_replies_are_three_wasted_calls() {
     .await;
     assert_eq!(out.len(), findings.len(), "no finding is dropped");
     let usage = usage_of(&meter, Stage::Calibration);
-    assert_eq!(usage.calls, 3);
-    assert_eq!(usage.wasted_calls, 3, "{usage:?}");
+    // Each cut-off reply answered nothing, so its whole chunk is asked again once (P8) and that
+    // re-ask is cut off too: three chunks, six calls, and every one of them bought nothing.
+    assert_eq!(usage.calls, 6);
+    assert_eq!(usage.wasted_calls, 6, "{usage:?}");
     assert_eq!(usage.wasted_input_tokens, usage.input_tokens);
     assert_eq!(usage.wasted_output_tokens, usage.output_tokens);
 }

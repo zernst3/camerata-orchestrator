@@ -2302,11 +2302,21 @@ pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
 /// never lowers a severity below what it already was (an explicit downgrade verdict with no
 /// bearing on this guardrail continues to apply exactly as before).
 pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
-    let Some(json) = extract_json_object(raw) else {
-        return findings;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return findings;
+    // A reply that parses whole is read whole. One that does not (cut off at the output limit
+    // mid-verdict) still holds every verdict that was written out in full: those are read one by
+    // one ([`answered_verdicts`]) and the findings it never reached keep what they had.
+    let whole = extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .filter(|v| v["verdicts"].is_array());
+    let v = match whole {
+        Some(v) => v,
+        None => {
+            let salvaged = answered_verdicts(raw, findings.len());
+            if salvaged.is_empty() {
+                return findings;
+            }
+            serde_json::json!({ "verdicts": salvaged })
+        }
     };
     let Some(arr) = v["verdicts"].as_array() else {
         return findings;
@@ -3427,6 +3437,106 @@ fn finding_evidence_texts(findings: &[Finding]) -> Vec<String> {
         .collect()
 }
 
+/// The verdict objects a calibration reply holds IN FULL, one per finding index below `n` (the
+/// first of a repeated index wins), read one by one with [`complete_array_objects`]. The last,
+/// unfinished object of a reply cut off at the output limit is not guessed at. Empty for a reply
+/// that holds no `verdicts` array.
+fn answered_verdicts(raw: &str, n: usize) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    complete_array_objects(raw, "verdicts")
+        .into_iter()
+        .filter_map(|object| serde_json::from_str::<serde_json::Value>(object).ok())
+        .filter(|v| {
+            v["index"]
+                .as_u64()
+                .is_some_and(|i| (i as usize) < n && seen.insert(i))
+        })
+        .collect()
+}
+
+/// A calibration reply cut off at the output limit, made whole: the verdicts it wrote out in full,
+/// then ONE re-ask of just the findings it did not reach (the same prompt over those findings
+/// alone, a smaller request with its own cap, never the same request again), merged back under the
+/// original indices as `{"verdicts":[...]}`. A reply that is not cut off is `first.text` unchanged.
+///
+/// The cut-off call is recorded as wasted by the share of the findings it left unanswered (all of
+/// it when it answered none). The re-ask goes through the spend limit like any retry, and a re-ask
+/// that fails or is itself cut off keeps what it did answer: the findings still unanswered pass
+/// through uncalibrated, as they always did, and the stage never drops one.
+async fn reask_unanswered_verdicts(
+    llm: &dyn LlmPort,
+    meter: Option<&UsageMeter>,
+    calibration_model: Option<&str>,
+    system: &str,
+    chunk: &[Finding],
+    first: &crate::llm::LlmResponse,
+    prompt_for: &(dyn Fn(&[&Finding]) -> String + Sync),
+) -> String {
+    if !first.truncated {
+        return first.text.clone();
+    }
+    let n = chunk.len();
+    let mut answered = answered_verdicts(&first.text, n);
+    let have: std::collections::BTreeSet<usize> = answered
+        .iter()
+        .filter_map(|v| v["index"].as_u64().map(|i| i as usize))
+        .collect();
+    let missing: Vec<usize> = (0..n).filter(|i| !have.contains(i)).collect();
+    if let Some(m) = meter {
+        if answered.is_empty() {
+            m.record_wasted(Stage::Calibration, first);
+        } else if !missing.is_empty() {
+            m.record_wasted_share(
+                Stage::Calibration,
+                first,
+                missing.len() as f64 / n.max(1) as f64,
+            );
+        }
+    }
+    if !missing.is_empty() && !meter.is_some_and(UsageMeter::retry_blocked) {
+        let items: Vec<&Finding> = missing.iter().map(|&i| &chunk[i]).collect();
+        let req = with_stage_effort(
+            LlmRequest::new(prompt_for(&items))
+                .with_system(system.to_string())
+                .with_max_tokens(calibration_max_tokens(items.len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
+        note_request(meter, &req);
+        let mut on_delta = |_: &str| {};
+        match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(resp) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::Calibration, &resp);
+                }
+                let got = answered_verdicts(&resp.text, items.len());
+                if resp.truncated {
+                    if let Some(m) = meter {
+                        if got.is_empty() {
+                            m.record_wasted(Stage::Calibration, &resp);
+                        } else if got.len() < items.len() {
+                            m.record_wasted_share(
+                                Stage::Calibration,
+                                &resp,
+                                (items.len() - got.len()) as f64 / items.len() as f64,
+                            );
+                        }
+                    }
+                }
+                for mut verdict in got {
+                    // The re-ask numbered its findings from 0: put back the originals' indices.
+                    let local = verdict["index"].as_u64().unwrap_or(0) as usize;
+                    verdict["index"] = serde_json::json!(missing[local]);
+                    answered.push(verdict);
+                }
+            }
+            Err(e) => meter_failed(meter, Stage::Calibration, &e),
+        }
+    }
+    serde_json::json!({ "verdicts": answered }).to_string()
+}
+
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
@@ -3480,6 +3590,38 @@ pub async fn verify_findings(
         &evidence.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     let system = crate::prompt_frame::with_untrusted_clause(verify_system_prompt(), &nonce);
+    // The calibration prompt for `items`, labelled `[0]`, `[1]`, ... in the order given. The whole
+    // chunk is sent with its own indices; a re-ask of the findings a cut-off reply did not
+    // answer ([`reask_unanswered_verdicts`]) is the same prompt over just those findings.
+    let calibration_prompt = |items: &[&Finding]| -> String {
+        let mut prompt = format!("Repository: {repo}\n");
+        // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
+        // small/young codebase must not be held to the architecture of a large one, and this
+        // feeds the informational bucketing of stance/YAGNI notes downstream. Over-engineering
+        // / YAGNI notes auto-hedge to low confidence + capped severity.
+        prompt.push_str(&format!(
+            "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: \
+             an 'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a \
+             debatable preference (low confidence, capped severity), not a violation.\n"
+        ));
+        prompt.push_str("\nScrutinize these findings:\n");
+        for (i, f) in items.iter().enumerate() {
+            // The location, the quoted code and the detail all derive from the client's files.
+            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &nonce,
+                &format!("finding {i}"),
+                &format!(
+                    "{}:{} — {} :: {}",
+                    f.path,
+                    f.line,
+                    camerata_secrets::redact_str(&f.snippet),
+                    camerata_secrets::redact_str(&f.detail)
+                ),
+            ));
+        }
+        prompt
+    };
     // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
     // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
     // chunk never touches another's verdicts. The common case (findings.len() <=
@@ -3513,32 +3655,7 @@ pub async fn verify_findings(
             Ok(permit) => permit,
         };
         let chunk_len = chunk.len();
-        let mut prompt = format!("Repository: {repo}\n");
-        // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
-        // small/young codebase must not be held to the architecture of a large one, and this
-        // feeds the informational bucketing of stance/YAGNI notes downstream. Over-engineering
-        // / YAGNI notes auto-hedge to low confidence + capped severity.
-        prompt.push_str(&format!(
-            "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: \
-             an 'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a \
-             debatable preference (low confidence, capped severity), not a violation.\n"
-        ));
-        prompt.push_str("\nScrutinize these findings:\n");
-        for (i, f) in chunk.iter().enumerate() {
-            // The location, the quoted code and the detail all derive from the client's files.
-            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
-            prompt.push_str(&crate::prompt_frame::frame_untrusted(
-                &nonce,
-                &format!("finding {i}"),
-                &format!(
-                    "{}:{} — {} :: {}",
-                    f.path,
-                    f.line,
-                    camerata_secrets::redact_str(&f.snippet),
-                    camerata_secrets::redact_str(&f.detail)
-                ),
-            ));
-        }
+        let prompt = calibration_prompt(&chunk.iter().collect::<Vec<_>>());
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
         // request per pass (LlmRequest is consumed by complete_streaming).
         let build_req = || {
@@ -3610,12 +3727,20 @@ pub async fn verify_findings(
             } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
-                    // A reply cut off at the output limit holds no verdict worth reading: the
-                    // call bought nothing, and the telemetry says so.
-                    if resp.truncated {
-                        m.record_wasted(Stage::Calibration, &resp);
-                    }
                 }
+                // A reply cut off at the output limit still holds every verdict written out in
+                // full; the findings it never reached are asked again, alone (the telemetry counts
+                // the cut-off call as wasted by the share it left unanswered).
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    &resp,
+                    &calibration_prompt,
+                )
+                .await;
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
                     // transcript's output is exactly the model's text. THOROUGH mode's 3
@@ -3630,7 +3755,7 @@ pub async fn verify_findings(
                         store.append_output(key, &session, &resp.text);
                     }
                 }
-                votes.push(resp.text);
+                votes.push(text);
             }
         }
         let chunk_calibrated = match votes.len() {
@@ -3691,12 +3816,19 @@ pub async fn verify_findings(
             Ok(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
-                    if resp.truncated {
-                        m.record_wasted(Stage::Calibration, &resp);
-                    }
                 }
                 let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
-                chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    &resp,
+                    &calibration_prompt,
+                )
+                .await;
+                chunk_results[chunk_idx] = apply_verdicts(&text, chunk);
                 uncalibrated.remove(&chunk_idx);
             }
             Err(e) => {

@@ -409,3 +409,262 @@ async fn a_run_with_no_limit_is_never_refused_by_the_reserve() {
         None
     );
 }
+
+// ── P8: a calibration reply cut off at the cap is salvaged, and only the rest is asked again ──
+
+fn finding_n(n: usize) -> Finding {
+    Finding {
+        repo: REPO.to_string(),
+        path: format!("src/f{n}.rs"),
+        line: n + 1,
+        rule_id: "AI-CAL".to_string(),
+        severity: "medium".to_string(),
+        snippet: format!("let marker_{n} = {n};"),
+        detail: format!("DETAIL-MARKER-{n}"),
+        ..Finding::default()
+    }
+}
+
+fn verdict(index: usize, severity: &str) -> String {
+    format!(
+        r#"{{"index":{index},"severity":"{severity}","confidence":"high","reason":"checked","effort":"low"}}"#
+    )
+}
+
+/// Answers calibration calls from a script, in order, and records every request.
+struct Scripted {
+    replies: Mutex<Vec<(String, bool)>>,
+    seen: Mutex<Vec<LlmRequest>>,
+}
+
+impl Scripted {
+    fn new(replies: Vec<(String, bool)>) -> Self {
+        Self {
+            replies: Mutex::new(replies),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for Scripted {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let max = u64::from(req.max_tokens);
+        self.seen.lock().unwrap().push(req);
+        let mut replies = self.replies.lock().unwrap();
+        let (text, truncated) = if replies.len() > 1 {
+            replies.remove(0)
+        } else {
+            replies[0].clone()
+        };
+        Ok(LlmResponse {
+            text,
+            model: "claude-sonnet-5-5".to_string(),
+            backend: "api".to_string(),
+            cost_usd: Some(0.01),
+            input_tokens: Some(1_000),
+            output_tokens: Some(if truncated { max } else { 100 }),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+async fn calibrate(
+    llm: &Scripted,
+    n: usize,
+    meter: Option<&UsageMeter>,
+) -> (Vec<Finding>, Vec<FailedPass>) {
+    verify_findings(
+        llm,
+        REPO,
+        (0..n).map(finding_n).collect(),
+        None,
+        None,
+        meter,
+        false,
+        "This repository has many code files.",
+    )
+    .await
+}
+
+fn severity_of(findings: &[Finding], n: usize) -> String {
+    findings
+        .iter()
+        .find(|f| f.detail.contains(&format!("DETAIL-MARKER-{n}")))
+        .unwrap_or_else(|| panic!("finding {n} missing"))
+        .severity
+        .clone()
+}
+
+/// The reply holds verdicts 0 and 1 in full and stops in the middle of the third. Those two are
+/// kept; the second request carries ONLY findings 2, 3 and 4 (numbered 0 to 2), and its verdicts
+/// land on the right findings. Two calls in all, and the second is a different, smaller request.
+#[tokio::test]
+async fn a_cut_off_calibration_reply_keeps_its_complete_verdicts_and_only_the_rest_is_asked_again()
+{
+    let cut = format!(
+        r#"{{"verdicts":[{},{},{{"index":2,"severity":"hi"#,
+        verdict(0, "low"),
+        verdict(1, "high")
+    );
+    let rest = format!(
+        r#"{{"verdicts":[{},{},{}]}}"#,
+        verdict(0, "low"),
+        verdict(1, "critical"),
+        verdict(2, "high")
+    );
+    let llm = Scripted::new(vec![(cut, true), (rest, false)]);
+    let meter = UsageMeter::default();
+    let (out, failed) = calibrate(&llm, 5, Some(&meter)).await;
+
+    let seen = llm.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "the call and one re-ask");
+    // The re-ask is a different request: the unanswered findings alone, and a cap sized for 3.
+    for answered in [0, 1] {
+        assert!(
+            !seen[1]
+                .prompt
+                .contains(&format!("DETAIL-MARKER-{answered}")),
+            "finding {answered} was answered and is not asked again"
+        );
+    }
+    for unanswered in [2, 3, 4] {
+        assert!(
+            seen[1]
+                .prompt
+                .contains(&format!("DETAIL-MARKER-{unanswered}")),
+            "finding {unanswered} is asked again"
+        );
+    }
+    assert_ne!(seen[0].prompt, seen[1].prompt);
+    assert_eq!(seen[1].max_tokens, calibration_max_tokens(3));
+    assert_ne!(seen[0].max_tokens, seen[1].max_tokens);
+    // Every verdict reached its own finding: 0 and 1 from the cut-off reply, 2 to 4 from the
+    // re-ask (local 0, 1, 2 mapped back to 2, 3, 4).
+    assert_eq!(severity_of(&out, 0), "low");
+    assert_eq!(severity_of(&out, 1), "high");
+    assert_eq!(severity_of(&out, 2), "low");
+    assert_eq!(severity_of(&out, 3), "critical");
+    assert_eq!(severity_of(&out, 4), "high");
+    assert!(out.iter().all(|f| f.effort.as_deref() == Some("low")));
+    assert!(
+        failed.is_empty(),
+        "every finding has its estimate: {failed:?}"
+    );
+    // The cut-off call is wasted by the share it left unanswered: counted once.
+    let calibration = meter
+        .stage_telemetry(1_000)
+        .stages
+        .into_iter()
+        .find(|s| s.stage == Stage::Calibration)
+        .unwrap();
+    assert_eq!(calibration.usage.calls, 2);
+    assert_eq!(calibration.usage.wasted_calls, 1);
+}
+
+/// A reply cut off before the first verdict answered nothing: ALL findings are asked again, alone
+/// (a smaller request than a repeat of the same one would be only if the batch were smaller; the
+/// cap is the same sum, and the call is recorded as wasted whole).
+#[tokio::test]
+async fn a_reply_cut_off_before_any_verdict_is_wasted_whole_and_every_finding_is_asked_again() {
+    let cut = r#"{"verdicts":[{"index":0,"sever"#.to_string();
+    let all = format!(
+        r#"{{"verdicts":[{},{},{}]}}"#,
+        verdict(0, "low"),
+        verdict(1, "low"),
+        verdict(2, "low")
+    );
+    let llm = Scripted::new(vec![(cut, true), (all, false)]);
+    let meter = UsageMeter::default();
+    let (out, _) = calibrate(&llm, 3, Some(&meter)).await;
+    assert_eq!(llm.seen.lock().unwrap().len(), 2);
+    assert!((0..3).all(|n| severity_of(&out, n) == "low"));
+    let calibration = meter
+        .stage_telemetry(1_000)
+        .stages
+        .into_iter()
+        .find(|s| s.stage == Stage::Calibration)
+        .unwrap();
+    assert_eq!(calibration.usage.wasted_calls, 1);
+}
+
+/// The re-ask is itself one retry, not a loop: a second cut-off keeps the verdicts it did write
+/// and the findings still unanswered pass through as the scan left them. Three calls never happen.
+#[tokio::test]
+async fn a_second_cut_off_keeps_what_it_answered_and_does_not_ask_a_third_time() {
+    let first = format!(r#"{{"verdicts":[{},{{"index":1,"sev"#, verdict(0, "high"));
+    let second = format!(
+        r#"{{"verdicts":[{},{{"index":1,"sev"#,
+        verdict(0, "critical")
+    );
+    let llm = Scripted::new(vec![(first, true), (second, true)]);
+    let (out, _) = calibrate(&llm, 4, None).await;
+    assert_eq!(llm.seen.lock().unwrap().len(), 2, "one re-ask, never more");
+    assert_eq!(severity_of(&out, 0), "high");
+    assert_eq!(
+        severity_of(&out, 1),
+        "critical",
+        "the re-ask's first verdict"
+    );
+    assert_eq!(severity_of(&out, 2), "medium", "never reached: unchanged");
+    assert_eq!(severity_of(&out, 3), "medium", "never reached: unchanged");
+    assert_eq!(out.len(), 4, "none dropped");
+}
+
+/// The spend limit stops the re-ask like any retry: the verdicts that were written out in full
+/// still apply, the rest pass through, and no further call is sent.
+#[tokio::test]
+async fn the_re_ask_goes_through_the_spend_limit() {
+    let cut = format!(r#"{{"verdicts":[{},{{"index":1,"sev"#, verdict(0, "high"));
+    let llm = Scripted::new(vec![(cut, true)]);
+    // A limit the first call has already reached.
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(0.005),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let (out, _) = calibrate(&llm, 3, Some(&meter)).await;
+    assert_eq!(
+        llm.seen.lock().unwrap().len(),
+        1,
+        "no re-ask past the limit"
+    );
+    assert_eq!(severity_of(&out, 0), "high");
+    assert_eq!(severity_of(&out, 1), "medium");
+}
+
+/// `apply_verdicts` reads a cut-off reply on its own account too: complete verdicts apply, the
+/// unfinished one is not guessed at, and a reply with none leaves the findings as they were.
+#[test]
+fn apply_verdicts_reads_the_complete_verdicts_of_a_reply_cut_off_mid_object() {
+    let findings: Vec<Finding> = (0..3).map(finding_n).collect();
+    let raw = format!(
+        r#"{{"verdicts":[{},{},{{"index":2,"severity":"cri"#,
+        verdict(0, "low"),
+        verdict(1, "high")
+    );
+    let out = apply_verdicts(&raw, findings.clone());
+    assert_eq!(severity_of(&out, 0), "low");
+    assert_eq!(severity_of(&out, 1), "high");
+    assert_eq!(
+        severity_of(&out, 2),
+        "medium",
+        "the unfinished verdict is not guessed at"
+    );
+
+    let none = apply_verdicts(r#"{"verdicts":[{"index":0,"sev"#, findings.clone());
+    assert_eq!(none.len(), 3);
+    assert!(none.iter().all(|f| f.severity == "medium"));
+}
