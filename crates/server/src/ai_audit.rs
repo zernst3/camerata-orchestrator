@@ -7195,9 +7195,9 @@ async fn run_passes_batch(
                         if let Some(m) = meter {
                             m.record_wasted(Stage::ScanPass, &resp);
                             m.record_note(format!(
-                                "the truncation retry of batch item {} was not run: the spend \
-                             limit was reached",
-                                w.custom_id
+                                "the truncation retry of batch item {} was not run: {}",
+                                w.custom_id,
+                                crate::cost_cap::cause_for(m.cost_unknown())
                             ));
                         }
                         return (w, resp);

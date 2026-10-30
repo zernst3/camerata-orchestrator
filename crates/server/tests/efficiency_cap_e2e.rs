@@ -737,3 +737,166 @@ async fn a_capped_run_with_no_chosen_model_names_the_priced_default_on_every_cal
         report.failed_passes
     );
 }
+
+/// Every reply reports tokens on a model id the registry does not price, and no dollar figure:
+/// the cost of each call is unknown, so a spend limit cannot be enforced past the first call.
+struct UnpricedReplyStub {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmPort for UnpricedReplyStub {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(LlmResponse {
+            text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
+                .to_string(),
+            model: "claude-unlisted-9".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: Some(30_000),
+            output_tokens: Some(4_000),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// When a call's cost could not be determined, every disclosure of what did not run says the
+/// limit could not be enforced, never that it was reached: the repo the stop kept from starting,
+/// the ledger's record, and the client-visible failed-pass list. No dollar figure anywhere.
+#[tokio::test]
+async fn a_later_repo_stopped_by_an_unknown_cost_is_not_told_the_limit_was_reached() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    stage_repo(a.path());
+    stage_repo(b.path());
+    let sources = vec![
+        ("acme/one".to_string(), a.path().to_path_buf()),
+        ("acme/two".to_string(), b.path().to_path_buf()),
+    ];
+    let llm = UnpricedReplyStub {
+        calls: AtomicUsize::new(0),
+    };
+    let (report, _manifest) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &selected(),
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Sequential,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(10.0), EfficiencyConfig::default()),
+    )
+    .await;
+    // Repo one's first pass is admitted (nothing spent); its cost is unknown, so nothing more is.
+    assert_eq!(llm.calls(), 1, "one call, then nothing is admitted");
+    let cap = report.ledger.cost_cap().expect("a limit was set");
+    assert!(cap.cost_unknown, "{cap:?}");
+    assert!(cap.stopped_the_run());
+    assert_eq!(cap.repos_not_finished, vec!["acme/two".to_string()]);
+    let two: Vec<_> = report
+        .failed_passes
+        .iter()
+        .filter(|f| f.repo == "acme/two" && f.reason.contains("NOT RUN"))
+        .collect();
+    assert_eq!(two.len(), 1, "{:?}", report.failed_passes);
+    for f in &report.failed_passes {
+        assert!(
+            !f.reason.contains("was reached"),
+            "the limit was not reached: {}",
+            f.reason
+        );
+        assert!(!f.reason.contains('$'), "{}", f.reason);
+    }
+    assert!(
+        two[0].reason.contains("could not be enforced"),
+        "{}",
+        two[0].reason
+    );
+    if let Some(note) = &report
+        .ledger
+        .rule("ARCH-CAP-TEST-00-1")
+        .unwrap()
+        .skip_reason
+    {
+        assert!(!note.contains("was reached"), "{note}");
+    }
+}
+
+impl UnpricedReplyStub {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+/// A rule checked on one chunk of two before an unknown cost stopped the run is partial, and the
+/// ledger's partial note says the limit could not be enforced, not that it was reached.
+#[tokio::test]
+async fn a_partial_rule_after_an_unknown_cost_is_not_told_the_limit_was_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_two_chunk_repo(dir.path());
+    let sources = vec![("acme/shop".to_string(), dir.path().to_path_buf())];
+    let rules: Vec<SelectedRule> = selected().into_iter().take(15).collect();
+    let llm = UnpricedReplyStub {
+        calls: AtomicUsize::new(0),
+    };
+    let (report, _m) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &rules,
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(10.0), EfficiencyConfig::default()),
+    )
+    .await;
+    assert_eq!(llm.calls(), 1, "chunk 1 ran, chunk 2 was refused");
+    let cap = report.ledger.cost_cap().expect("a limit was set");
+    assert!(cap.cost_unknown, "{cap:?}");
+    let entry = report.ledger.rule("ARCH-CAP-TEST-00-1").unwrap();
+    let partial = entry
+        .partial_reason
+        .as_deref()
+        .expect("checked on one chunk of two");
+    assert!(partial.contains("could not be enforced"), "{partial}");
+    assert!(!partial.contains("was reached"), "{partial}");
+    assert!(!partial.contains('$'), "{partial}");
+}

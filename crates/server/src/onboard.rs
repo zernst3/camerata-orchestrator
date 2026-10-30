@@ -2656,8 +2656,10 @@ pub async fn audit_repos_with_llm_controlled(
                         let clone_blocked = run_ai_review
                             && meter.stage_blocked(spec, crate::ai_audit::STAGE_CLONE_JUDGE);
                         let unavailable = if clone_blocked {
-                            "the spend limit set for this run was reached before the judge ran"
-                                .to_string()
+                            format!(
+                                "{} before the judge ran",
+                                crate::cost_cap::cause_for(meter.cost_unknown())
+                            )
                         } else {
                             ai_blocked_reason
                                 .clone()
@@ -2850,11 +2852,14 @@ pub async fn audit_repos_with_llm_controlled(
                             "NOT RUN: the run stopped because the model provider could not be \
                              reached before this repository was reviewed. This inspection is \
                              incomplete."
+                                .to_string()
                         } else {
-                            "NOT RUN: the spend limit set for this run was reached before \
-                             this repository was reviewed. This inspection is incomplete."
-                        }
-                        .to_string(),
+                            format!(
+                                "NOT RUN: {} before this repository was reviewed. This \
+                                 inspection is incomplete.",
+                                crate::cost_cap::cause_for(meter.cost_unknown())
+                            )
+                        },
                         files_not_reviewed: files.len(),
                         class: if meter.outage_stopped() {
                             crate::ai_audit::FailureClass::OutageStop
@@ -3043,9 +3048,16 @@ pub async fn audit_repos_with_llm_controlled(
                                         pipeline_ledger.note_partial_rule(
                                             rid,
                                             spec,
-                                            "checked on part of the code only: the spend limit \
-                                             set for this run was reached before the rest was \
-                                             checked",
+                                            &format!(
+                                                "checked on part of the code only: {} before \
+                                                 the rest was checked",
+                                                cap_record
+                                                    .as_ref()
+                                                    .map(crate::cost_cap::CostCapRecord::cause)
+                                                    .unwrap_or(
+                                                        crate::cost_cap::CAUSE_LIMIT_REACHED
+                                                    )
+                                            ),
                                         );
                                     }
                                 }

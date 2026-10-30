@@ -10,7 +10,7 @@
 //! Pinned here:
 //!   1. precedence: an explicit fix model wins; else Haiku with `fix_on_haiku` on (the default);
 //!   2. `fix_on_haiku` off reproduces the pre-rank-10 choice exactly (`calibration_model.or(model)`,
-//!      and no model at all when neither is set);
+//!      and the run's default audit model when neither is set; a request never leaves unnamed);
 //!   3. the chosen model and effort reach the completer (effort only on the Haiku path);
 //!   4. the operator telemetry records the fix stage's model per call and the give-up rate.
 
