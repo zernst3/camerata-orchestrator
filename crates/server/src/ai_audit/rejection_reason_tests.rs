@@ -231,6 +231,12 @@ async fn a_fix_reply_with_every_fix_turned_down_is_set_aside() {
         // not in this finding's evidence, so the one fix of the reply is turned down.
         let (findings, files) = two_fix_findings();
         let findings = vec![findings[1].clone()];
+        // The other file is not in the repository this finding is judged against, so `query`
+        // (a name in it) is a name found nowhere in the repository.
+        let files: Vec<(String, String)> = files
+            .into_iter()
+            .filter(|(path, _)| path == "src/work.ts")
+            .collect();
         let (out, failed) =
             generate_fix_specifics(&journal, "o/r", findings, &files, None, None, None).await;
         assert!(failed.is_empty(), "{failed:?}");

@@ -5252,9 +5252,11 @@ Rules, every fix:
   in backticks must appear in that evidence, and so must every table, column, function, file
   or variable name inside a code snippet (ordinary words and universal names such as
   `Authorization`, `console.error` and try/catch/finally are fine). Each finding's block ends
-  with a `Names you may use:` line: the identifiers and file names in its evidence. Use only
-  those, ordinary words and the universal names as backticked names or inside a snippet. When
-  the fix needs a NEW name, describe it in plain words ("a new helper that returns the signed
+  with a `Names you may use:` line: the identifiers and file names in its evidence. As a
+  backticked name or inside a snippet, use only those, names you know exist elsewhere in this
+  repository (another file, a column in the schema), ordinary words and the universal names; a
+  name that exists nowhere in the repository is rejected. When the fix needs a NEW name, or you
+  are not sure a name exists, describe it in plain words ("a new helper that returns the signed
   URL") instead of naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
@@ -5672,6 +5674,70 @@ fn is_chosen_name(tok: &str) -> bool {
 /// than a vague rejection. Returns `None` when every named identifier is grounded (including
 /// a fix that names none at all — pure prose is never rejected on this axis).
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
+    find_ungrounded_identifier_in(fix, evidence, None)
+}
+
+/// The names a repository holds: the paths of its files and every identifier its files and paths
+/// spell. A name a fix uses that sits outside the finding's own evidence window but exists in the
+/// repository (`actor_id` two screens down, `tsconfig.json`, `.env.example`, a helper in another
+/// file) is a real name, not an invented one; a name found nowhere in the repository still is
+/// ([`find_ungrounded_identifier_in`]). Built once per repo from the file set the fix stage
+/// already holds.
+pub(crate) struct RepoNames<'a> {
+    files: &'a [(String, String)],
+    /// Every identifier-shaped word of a path or a file's content (`[A-Za-z0-9_]+`).
+    words: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> RepoNames<'a> {
+    pub(crate) fn new(files: &'a [(String, String)]) -> Self {
+        let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+        let mut words: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+        for (path, content) in files {
+            for text in [path.as_str(), content.as_str()] {
+                words.extend(word_re.find_iter(text).map(|m| m.as_str()));
+            }
+        }
+        Self { files, words }
+    }
+
+    /// Whether the repository holds `name`. A path-like name (a slash, or a file extension)
+    /// is a file or directory of the set (exact, a trailing part of a path, a directory on it,
+    /// or a file's base name), or is written in some file's content; any other name is known
+    /// when every identifier word in it is one the repository spells.
+    pub(crate) fn knows(&self, name: &str) -> bool {
+        let name = name.trim_start_matches("./").trim_end_matches('/');
+        if name.is_empty() {
+            return false;
+        }
+        if name.contains('/') || is_file_like(name, false) {
+            // `env.example` is how a fix trimmed of its dot names `.env.example`: a dotfile's
+            // base name is read with or without its leading dot.
+            let on_a_path = self.files.iter().any(|(p, _)| {
+                let base = p.rsplit('/').next().unwrap_or(p);
+                p == name
+                    || p.ends_with(&format!("/{name}"))
+                    || p.starts_with(&format!("{name}/"))
+                    || p.contains(&format!("/{name}/"))
+                    || base.strip_prefix('.') == Some(name)
+            });
+            return on_a_path || self.files.iter().any(|(_, c)| c.contains(name));
+        }
+        let mut parts = name
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|p| !p.is_empty())
+            .peekable();
+        parts.peek().is_some() && parts.all(|p| self.words.contains(p))
+    }
+}
+
+/// [`find_ungrounded_identifier`] with the repository to look a name up in when the finding's
+/// evidence does not hold it. `None` is the evidence alone.
+pub(crate) fn find_ungrounded_identifier_in(
+    fix: &str,
+    evidence: &str,
+    repo: Option<&RepoNames<'_>>,
+) -> Option<String> {
     let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
@@ -5703,7 +5769,7 @@ pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<St
         {
             continue;
         }
-        if !evidence.contains(trimmed) {
+        if !evidence.contains(trimmed) && !repo.is_some_and(|r| r.knows(trimmed)) {
             return Some(trimmed.to_string());
         }
     }
@@ -5965,6 +6031,7 @@ async fn run_fix_specifics_round(
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
     files: &[(String, String)],
+    repo_names: &RepoNames<'_>,
     findings: &mut [Finding],
     feedback: &mut std::collections::HashMap<usize, String>,
     pending: &[usize],
@@ -6069,17 +6136,20 @@ async fn run_fix_specifics_round(
             let redacted_text = camerata_secrets::redact_str(text).into_owned();
             let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
-            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+            if let Some(bad) = find_ungrounded_identifier_in(text, &evidence, Some(repo_names)) {
                 turned_down.push(place(
                     &findings[orig_idx],
-                    &format!("named `{bad}`, which is not in the finding's evidence"),
+                    &format!(
+                        "named `{bad}`, which is not in the finding's evidence or anywhere in \
+                         the repository"
+                    ),
                 ));
                 feedback.insert(
                     orig_idx,
                     format!(
-                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence; keep your fix and its code snippet, but use only names \
-                         from the evidence, or describe a new name in plain words"
+                        "you named `{bad}`, which appears neither in this finding's evidence \
+                         nor anywhere in the repository; keep your fix and its code snippet, \
+                         but use only names that exist, or describe a new name in plain words"
                     ),
                 );
                 still_pending.push(orig_idx);
@@ -6242,6 +6312,8 @@ pub async fn generate_fix_specifics(
     // The fix prompt carries eight raw lines either side of each finding: redact them.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
+    // The names the repository holds, for grounding a name the finding's own window lacks.
+    let repo_names = RepoNames::new(files);
 
     // PRE-FILTER (no model call). A finding with no surrounding code to read (line 0, or its file
     // is not among the scanned files) was the bulk of the fix retries that were paid for and
@@ -6299,6 +6371,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
@@ -6323,6 +6396,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
@@ -6359,6 +6433,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &retry,
@@ -13207,6 +13282,12 @@ mod why_fix_direction_tests;
 
 #[cfg(test)]
 mod alternatives_cache_tests;
+
+#[cfg(test)]
+mod repo_grounding_tests;
+
+#[cfg(test)]
+mod stored_replay_tests;
 
 #[cfg(test)]
 mod tests {

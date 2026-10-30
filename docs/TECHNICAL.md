@@ -3074,6 +3074,20 @@ a condition on the problem. A reply with a single `detail` field (a backend that
 the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
 direction as part of the finding's `Detail:` in its evidence; it has no separate input.
 
+*The fix checker knows the repository.* A fix's names were grounded only in the finding's
+own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
+outside it (`actor_id`, `bucket_id`, `tsconfig.json`, `.env.example`) were rejected, about 28
+of 185 fixes in the Sonnet run. `RepoNames` (built once per repo from the file set the stage
+holds) now backs the check: a path-like name is grounded when it is a file or directory of
+the set (exact, a trailing part of a path, a dotfile read with or without its dot) or is
+written in some file; any other name is grounded when every identifier word in it is one the
+repository spells. A name found nowhere in the repository (a constraint name nobody wrote,
+a proposed file) is still rejected, and the retry's feedback says the name is neither in the
+evidence nor anywhere in the repository. `stored_replay_tests` (ignored; set
+`CAMERATA_STORED_RUNS`) replays the stored fix replies of the two efficiency runs against a
+repository rebuilt from their scan calls' paths and quoted code, and asserts that
+`billing_accounts_user_id_fkey` and `app/api/charge/route.ts` are still flagged.
+
 *The alternatives digest is a cached prefix.* The stage re-sent the whole file digest (25k
 to 40k input tokens) uncached with every rule batch. Its prompt is now the repo map and the
 digest, then the batch's rules, with cache breakpoints (`alternatives_cache_breakpoints`):
