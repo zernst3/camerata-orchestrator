@@ -196,13 +196,10 @@ fn judge_model_is_the_fast_tier_unless_overridden() {
             resolve_clone_judge_model(None),
             camerata_fleet::tier::default_fast_model()
         );
-        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-4-5-20251001");
+        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
         assert_ne!(resolve_clone_judge_model(None), crate::llm::DEFAULT_MODEL);
         // A blank pick is no pick.
-        assert_eq!(
-            resolve_clone_judge_model(Some("  ")),
-            "claude-haiku-4-5-20251001"
-        );
+        assert_eq!(resolve_clone_judge_model(Some("  ")), "claude-haiku-5-5");
     }
     {
         // The environment overrides the default; an explicit pick overrides the environment.
@@ -215,7 +212,7 @@ fn judge_model_is_the_fast_tier_unless_overridden() {
     }
     {
         let _env = camerata_test_env::EnvGuard::set(ENV_NAME, "  ");
-        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-4-5-20251001");
+        assert_eq!(resolve_clone_judge_model(None), "claude-haiku-5-5");
     }
 }
 

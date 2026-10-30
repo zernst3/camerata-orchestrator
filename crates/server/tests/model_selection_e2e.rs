@@ -517,16 +517,13 @@ fn scope4_balanced_profile_overwrites_all_entries() {
 
     assert_eq!(p.model_profile, ModelProfile::Balanced);
     assert_eq!(p.tier_map.strongest, "claude-opus-5");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
-    assert_eq!(
-        p.tier_map.fast,
-        vec!["claude-haiku-4-5-20251001".to_string()]
-    );
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
+    assert_eq!(p.tier_map.fast, vec!["claude-haiku-5-5".to_string()]);
     // Every step model overwritten to Haiku, except the fix step, which a profile leaves unset.
     for (kind, _) in profile_steps() {
         assert_eq!(
             p.model_for_step(*kind),
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
             "Balanced overwrites {kind:?} to Haiku"
         );
     }
@@ -548,10 +545,10 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
 
     assert_eq!(p.model_profile, ModelProfile::MaxQuality);
     assert_eq!(p.tier_map.strongest, "claude-opus-5");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
-    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5".to_string()]);
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
+    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5-5".to_string()]);
     for (kind, _) in profile_steps() {
-        assert_eq!(p.model_for_step(*kind), "claude-sonnet-5");
+        assert_eq!(p.model_for_step(*kind), "claude-sonnet-5-5");
     }
     assert_eq!(
         p.model_for_step(StepKind::Fix),
@@ -559,7 +556,7 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
         "a profile never sets the fix model"
     );
     assert!(p.l3_review.enabled, "MaxQuality turns L3 on");
-    assert_eq!(p.l3_review.model, "claude-sonnet-5");
+    assert_eq!(p.l3_review.model, "claude-sonnet-5-5");
 }
 
 #[test]

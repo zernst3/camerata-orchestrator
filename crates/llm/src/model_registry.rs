@@ -81,7 +81,7 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         weight: 15,
         // Anthropic list price: $10 / $50 per million tokens (input / output). This is the
         // priciest, most-capable tier — an OPTION, never the default (see
-        // `camerata_api_types::project::DEFAULT_MODEL`, which stays `claude-sonnet-5`).
+        // `camerata_api_types::project::DEFAULT_MODEL`, which stays `claude-sonnet-5-5`).
         price_in: 10.0,
         price_out: 50.0,
         cache_read_price: None,

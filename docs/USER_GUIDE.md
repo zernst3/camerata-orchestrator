@@ -2477,7 +2477,7 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-All steps default to `claude-sonnet-5` when a project is created. A change to one project never
+All steps default to `claude-sonnet-5-5` (Sonnet 5.5) when a project is created. A change to one project never
 touches another project's step models.
 
 For steps where you also pick a model per run (audit, calibration, research chat), your per-run

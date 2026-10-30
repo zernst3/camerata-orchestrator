@@ -3313,9 +3313,10 @@ when the model's catalog request shape accepts sampling parameters
 (`camerata_llm::model_registry::accepts_sampling_params`, which presumes an
 unknown model strict), and `conform_messages_body` still runs last. Every
 current Claude model in the catalog is strict except one: Haiku 4.5
-(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is the default
-fast-tier model and the clone-judge model, accepts sampling parameters and so
-now gets temperature 0. Nothing is sent to the strict models, so the "a call
+(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is still
+selectable but is no longer a default (the fast tier and the clone judge now
+default to Haiku 5.5), accepts sampling parameters and so gets temperature 0
+when a project picks it. Nothing is sent to the strict models, so the "a call
 site sent something this model rejects" warning never fires; Haiku 4.5 and any
 future permissive model get the least random answer they offer. The passes that
 decide which findings exist ask for `ai_audit::AUDIT_TEMPERATURE` (0): the scan
@@ -5309,7 +5310,7 @@ non-orchestrator (it can never re-delegate).
 Every non-fleet AI step (audit, calibration, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
 `StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
-at project creation: `DEFAULT_MODEL` (`claude-sonnet-5`) for every slot.
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.

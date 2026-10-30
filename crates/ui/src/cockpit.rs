@@ -367,11 +367,11 @@ struct TierMapView {
 }
 
 fn default_fast_chain_str() -> Vec<String> {
-    vec!["claude-haiku-4-5-20251001".to_string()]
+    vec!["claude-haiku-5-5".to_string()]
 }
 
 fn default_balanced_chain_str() -> Vec<String> {
-    vec!["claude-sonnet-5".to_string()]
+    vec!["claude-sonnet-5-5".to_string()]
 }
 
 fn default_strongest_model_str() -> String {
