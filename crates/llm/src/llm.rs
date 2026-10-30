@@ -1445,17 +1445,30 @@ async fn stream_attempt(
     use crate::retry::{RawResponse, StreamAttempt};
     use crate::sse::{read_stream, SseAccumulator, StreamEnd};
 
-    let sent = shared_stream_client()
-        .post(url)
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await;
+    // The streaming client has no total timeout, so the wait for the response HEADERS is bounded
+    // by the same idle window as the body: a server that accepts the connection and never
+    // answers is a stall, not a hang for ever.
+    let sent = tokio::time::timeout(
+        idle,
+        shared_stream_client()
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(body)
+            .send(),
+    )
+    .await;
     let resp = match sent {
-        Ok(r) => r,
-        Err(e) => return StreamAttempt::Connect(e.to_string()),
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return StreamAttempt::Connect(e.to_string()),
+        Err(_) => {
+            return StreamAttempt::Stalled(format!(
+                "the reply stream went silent for {}s before any answer (set \
+                 CAMERATA_LLM_IDLE_SECS to tune)",
+                idle.as_secs()
+            ))
+        }
     };
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
@@ -2333,6 +2346,21 @@ fn apply_request_effort(req: &LlmRequest, model: &str, body: &mut serde_json::Va
     }
 }
 
+/// Ask a model that thinks before it writes to stream a SUMMARY of its thinking
+/// (`thinking: {type: "adaptive", display: "summarized"}`). With the API's default display the
+/// thinking phase sends nothing down the stream (the block opens, then one empty delta and a
+/// signature when it ends), so a long think is silence that an idle window cannot tell from a
+/// stall: the call would be killed, billed, and sent again. The summary deltas are progress and
+/// nothing else: the stream reader keeps only `text_delta`s, so no thinking text is stored or
+/// shown, and the display changes neither what the model thinks nor what it bills. Sent only to
+/// a model of the 5.x line ([`crate::model_registry::accepts_effort`]); the batch path, which is
+/// not streamed, does not ask for it. The real-time body only.
+fn apply_thinking_display(model: &str, body: &mut serde_json::Value) {
+    if crate::model_registry::accepts_effort(model) && body.get("thinking").is_none() {
+        body["thinking"] = serde_json::json!({ "type": "adaptive", "display": "summarized" });
+    }
+}
+
 /// The `max_tokens` a request is sent with: its own, never above what `model` can write in one
 /// reply (the registry's `max_output`; a model the registry lists without a figure keeps the
 /// request's own). The API answers a larger value with HTTP 400, and a stage's runaway ceiling
@@ -2361,6 +2389,7 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
         body["system"] = serde_json::json!(system);
     }
     apply_request_effort(req, model, &mut body);
+    apply_thinking_display(model, &mut body);
     if let Some(t) = req.temperature_for(model) {
         body["temperature"] = serde_json::json!(t);
     }
@@ -6014,10 +6043,20 @@ exit 1"#,
         "claude-haiku-5-5",
     ];
 
-    /// Every field the strict models answer with HTTP 400, asserted absent from a body.
+    /// Every field the strict models answer with HTTP 400, asserted absent from a body. The one
+    /// `thinking` shape every 5.x model accepts, `{type: "adaptive"}` with a display, is allowed
+    /// (the streamed leg asks for it so a thinking phase is not silence); a budget or a
+    /// `disabled` thinking is not.
     fn assert_no_rejected_fields(body: &serde_json::Value, what: &str) {
-        for key in ["thinking", "temperature", "top_p", "top_k"] {
+        for key in ["temperature", "top_p", "top_k"] {
             assert!(body.get(key).is_none(), "{what}: `{key}` must not be sent");
+        }
+        if let Some(thinking) = body.get("thinking") {
+            assert_eq!(thinking["type"], "adaptive", "{what}: {thinking}");
+            assert!(
+                thinking.get("budget_tokens").is_none(),
+                "{what}: a thinking budget is rejected"
+            );
         }
         let tc = body.get("tool_choice");
         assert!(

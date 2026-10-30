@@ -286,3 +286,75 @@ fn max_tokens_is_clamped_to_what_the_model_can_write() {
     let body = messages_request_body(&big, "claude-haiku-4-5-20251001", CacheTtl::FiveMinutes);
     assert_eq!(body["max_tokens"], 500_000);
 }
+
+/// A 5.x model thinks before it writes, and with the API's default display the thinking phase
+/// sends NOTHING down the stream (the thinking block opens, then one empty delta and a signature
+/// when it ends). Under an idle window that silence is indistinguishable from a stall, so a long
+/// think would be killed and paid for twice. The streamed leg therefore asks for the summarized
+/// display: the summary deltas are progress (and are never stored), and only true silence fails.
+/// A model that takes no thinking setting is sent none.
+#[test]
+fn the_streamed_request_asks_for_summarized_thinking_so_a_thinking_phase_is_not_silence() {
+    for model in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+    ] {
+        let body = messages_request_body(&request(4_096), model, CacheTtl::FiveMinutes);
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"}),
+            "{model}: {body}"
+        );
+    }
+    let body = messages_request_body(
+        &request(4_096),
+        "claude-haiku-4-5-20251001",
+        CacheTtl::FiveMinutes,
+    );
+    assert!(body.get("thinking").is_none(), "{body}");
+    // The batch item is not streamed and does not ask for a display.
+    let item = build_batch_item(
+        "c0-b0",
+        &request(4_096),
+        "claude-sonnet-5-5",
+        BATCH_CACHE_TTL,
+    );
+    assert!(serde_json::to_value(&item).unwrap()["params"]
+        .get("thinking")
+        .is_none());
+}
+
+/// The idle window bounds the wait for the response headers too: a server that accepts the
+/// connection and never answers is a stall (retried once, then a Transport failure), not a hang
+/// for ever. The streaming client has no total timeout by design, so this is the only guard.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_server_that_never_answers_within_the_idle_window_is_a_stall() {
+    let _idle = camerata_test_env::EnvGuard::set("CAMERATA_LLM_IDLE_SECS", "1");
+    let slow = || {
+        ResponseTemplate::new(200)
+            .set_delay(std::time::Duration::from_secs(4))
+            .set_body_raw(Vec::new(), "text/event-stream")
+    };
+    let server = server_with(vec![slow(), slow()]).await;
+    let waits = Arc::new(Waits::default());
+    let (llm, ledger) = llm_at(&server, &waits);
+
+    let started = std::time::Instant::now();
+    let err = llm
+        .complete_streaming(request(4_096), &mut |_| {})
+        .await
+        .expect_err("nothing ever arrived");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "the idle window governs the wait for headers: {:?}",
+        started.elapsed()
+    );
+    let failure = crate::failure::call_failure_of(&err).expect("typed");
+    assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+    assert!(err.to_string().contains("silent"), "{err}");
+    assert_eq!(*waits.0.lock().unwrap(), vec![2], "a stall is retried once");
+    assert_eq!(ledger.snapshot().calls, 0, "nothing was billed as a reply");
+}
