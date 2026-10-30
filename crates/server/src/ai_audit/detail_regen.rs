@@ -693,15 +693,25 @@ const FIX_DIRECTION_LEADS: &[&str] = &[
 ];
 
 /// Words and phrases that put a precondition sentence about EXPLOITING the problem: who must be
-/// logged in or hold what, what must be enabled, what the attacker must do. A "depends on" with
-/// none of them ("depends on the runtime's locale") is an ordinary explanation, not a condition
-/// on whether the problem can be exploited.
+/// logged in or hold what, what must be enabled, what the attacker must do, or the same told
+/// from the other side (the attack, the victim, a forged or stolen credential, a compromised
+/// account). A "depends on" with none of them ("depends on the runtime's locale") is an
+/// ordinary explanation, not a condition on whether the problem can be exploited. Word stems,
+/// matched as substrings of the lowercased sentence ("attack" covers "attacker").
 const EXPLOIT_CONTEXT: &[&str] = &[
-    "attacker",
+    "attack",
     "adversar",
     "malicious",
     "exploit",
     "abus",
+    "victim",
+    "forged",
+    "forging",
+    "stolen",
+    "steal",
+    "compromis",
+    "hijack",
+    "spoof",
     "logged in",
     "logged-in",
     "signed in",

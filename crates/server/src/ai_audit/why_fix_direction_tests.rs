@@ -166,6 +166,12 @@ fn only_an_exploit_precondition_in_why_is_turned_down() {
         "This is reachable only if the admin feature is enabled for the caller, and doWork skips the check.",
         "It depends on whether the attacker holds a valid token, and doWork never looks.",
         "Assuming the user is signed in, doWork runs with no check.",
+        // An exploit precondition told from the other side: the victim, the attack, a forged or
+        // stolen credential, a compromised account.
+        "The attack requires the victim to open a crafted link while doWork runs.",
+        "This depends on a forged cookie reaching doWork.",
+        "Reading the rows requires a stolen refresh token, and doWork never checks it.",
+        "It is a problem only if an account is already compromised, since doWork trusts it.",
     ] {
         assert_eq!(
             accept_entry(&f, &with_why(exploit), "", &files()),
