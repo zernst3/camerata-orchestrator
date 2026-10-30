@@ -114,6 +114,11 @@ pub struct AttemptRecord {
     /// True for an attempt made by the end-of-run second try.
     #[serde(default)]
     pub second_try: bool,
+    /// For a part whose replies came back and were turned down: why each one was (a fix that
+    /// named something not in the evidence, a detail that dropped a name, a reply cut off at the
+    /// output limit), scrubbed and capped, and never client code beyond the name that was wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejections: Vec<String>,
 }
 
 /// The longest message an attempt record keeps.

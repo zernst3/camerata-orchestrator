@@ -2146,3 +2146,123 @@ fn the_shared_precondition_phrase_check_is_unchanged() {
         "The endpoint requires no authentication."
     ));
 }
+
+// ── P6: why a detail reply was turned down ──────────────────────────────────────────────────
+
+#[test]
+fn a_rejection_names_what_was_wrong() {
+    assert!(Reject::DropsNamedToken("seed.sql".to_string())
+        .reason()
+        .contains("`seed.sql`"));
+    assert!(Reject::Mismatch.reason().contains("path or line"));
+    assert!(Reject::InventedPrecondition
+        .reason()
+        .contains("exploit precondition"));
+}
+
+/// Round one answers only the first of two findings; round two (one finding) answers it. The
+/// round-one reply is set aside with the finding it left out; the round-two reply stays good.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stays_done() {
+    use crate::run_store::journal::{CallFile, EntryStatus, JournalLlm};
+    crate::prompt_frame::with_seed(Some([5u8; crate::prompt_frame::NONCE_BYTES]), async {
+        let dir = tempfile::tempdir().unwrap();
+        let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", dir.path());
+        let repo = tempfile::tempdir().unwrap();
+        let store = crate::run_store::RunStore::create(crate::run_store::NewRun {
+            project_key: "p".to_string(),
+            repos: vec![(REPO.to_string(), repo.path().to_path_buf())],
+            models: crate::run_store::ModelsRecord {
+                audit: "claude-a".to_string(),
+                calibration: "claude-a".to_string(),
+                fix: "claude-a".to_string(),
+                backend: "api".to_string(),
+                mode: "parallel".to_string(),
+                resolved: true,
+            },
+            ai_scan_key: crate::scan_cache::AiScanKey {
+                audit_model: "claude-a".to_string(),
+                calibration_model: String::new(),
+                prompt_schema_version: AUDIT_PROMPT_SCHEMA_VERSION,
+                directives_fingerprint: "fp".to_string(),
+                terse_output: true,
+                applies_to_routing: false,
+            },
+            args: serde_json::json!({}),
+            estimate_usd: None,
+            include_alternatives: false,
+            origin: crate::run_store::RunOrigin::Cli,
+            project_id: None,
+        })
+        .unwrap();
+        let llm = RoleLlm::new("{}", Regen::FirstOnly);
+        let journal = JournalLlm::new(&llm, store.clone());
+        let (out, failed) = regenerate_full_details(
+            &journal,
+            REPO,
+            n_findings(2),
+            &files(),
+            &[],
+            &nonce(),
+            None,
+            None,
+        )
+        .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(out
+            .iter()
+            .all(|f| !f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+
+        let files: Vec<CallFile> = std::fs::read_dir(store.dir().join("calls"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).ok())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let with = |status: EntryStatus| {
+            let hits: Vec<_> = files
+                .iter()
+                .map(|f| &f.entries[&0])
+                .filter(|e| e.status == status)
+                .collect();
+            assert_eq!(hits.len(), 1, "exactly one entry is {status:?}");
+            hits[0].clone()
+        };
+        let first = with(EntryStatus::Rejected);
+        let reason = first.reason.as_deref().expect("the reply says why");
+        assert!(
+            reason.starts_with("1 of 2 detail(s) turned down"),
+            "{reason}"
+        );
+        assert!(reason.contains("left this finding out"), "{reason}");
+        let second = with(EntryStatus::Done);
+        assert_eq!(second.reason, None);
+    })
+    .await;
+}
+
+/// The failed part's last attempt lists, per finding, why its latest reply was turned down.
+#[tokio::test]
+async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
+    let (_out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(failed.len(), 1);
+    let listed: Vec<&String> = failed[0]
+        .attempts
+        .iter()
+        .flat_map(|a| a.rejections.iter())
+        .collect();
+    assert_eq!(listed.len(), 1, "{:?}", failed[0].attempts);
+    assert!(listed[0].contains("exploit precondition"), "{}", listed[0]);
+}

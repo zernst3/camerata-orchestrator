@@ -331,10 +331,19 @@ impl StageTrail {
 
     /// The stage's calls answered but the answer was unusable (no fix, no estimate): keep one
     /// record saying so, so the failed pass shows when each try ended without a result.
-    pub(crate) fn note_unusable(&mut self, message: &str, second_try: bool) {
+    ///
+    /// `rejections` says why each reply of the part was turned down (see
+    /// [`AttemptRecord::rejections`]); empty when the part never got a reply to turn down.
+    pub(crate) fn note_unusable(
+        &mut self,
+        message: &str,
+        second_try: bool,
+        rejections: Vec<String>,
+    ) {
         let mut record = Self::describe(FailureClass::Content, message);
         record.second_try = second_try;
         record.model = resolve_audit_model(None);
+        record.rejections = bounded_rejections(rejections);
         self.attempts.push(record);
         self.class.get_or_insert(FailureClass::Content);
     }
@@ -353,6 +362,29 @@ impl StageTrail {
     pub(crate) fn class(&self) -> FailureClass {
         self.class.unwrap_or(FailureClass::Content)
     }
+}
+
+/// The most rejection reasons one attempt record keeps.
+const MAX_RECORDED_REJECTIONS: usize = 40;
+
+/// Rejection reasons as an attempt record keeps them: each scrubbed of secrets and capped, the
+/// first [`MAX_RECORDED_REJECTIONS`] of them, and a last line counting the rest.
+pub(crate) fn bounded_rejections(reasons: Vec<String>) -> Vec<String> {
+    let total = reasons.len();
+    let mut out: Vec<String> = reasons
+        .into_iter()
+        .take(MAX_RECORDED_REJECTIONS)
+        .map(|r| {
+            camerata_llm::failure::scrub_message(
+                &r,
+                camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+            )
+        })
+        .collect();
+    if total > MAX_RECORDED_REJECTIONS {
+        out.push(format!("and {} more", total - MAX_RECORDED_REJECTIONS));
+    }
+    out
 }
 
 /// The error a stage returns when both its tries failed: the second failure with the whole
@@ -3538,6 +3570,7 @@ pub async fn verify_findings(
             trail.note_unusable(
                 "the calibration reply held no usable remediation-effort estimate",
                 false,
+                Vec::new(),
             );
         }
         estimation_failed_passes.push(FailedPass {
@@ -5305,6 +5338,38 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Why each of `pending` still has no fix, as the failed part records it: the place of the
+/// finding and the reason its latest reply was turned down. A finding with no reason on file
+/// never got a reply back (the call failed in transport, or the spend limit stopped it).
+fn fix_rejections(
+    findings: &[Finding],
+    pending: &[usize],
+    feedback: &std::collections::HashMap<usize, String>,
+    ledger: &FixLedger,
+) -> Vec<String> {
+    pending
+        .iter()
+        .map(|&i| {
+            let f = &findings[i];
+            let earlier = feedback.get(&i).map(String::as_str);
+            let why = match (ledger.last_miss.get(&i), earlier) {
+                (Some(FixMiss::TransportFailed), Some(e)) => {
+                    format!(
+                        "the last call failed in transport (an earlier reply was turned down: {e})"
+                    )
+                }
+                (Some(FixMiss::TransportFailed), None) => {
+                    "the last call failed in transport".to_string()
+                }
+                (Some(FixMiss::CapStopped), _) => "the spend limit stopped the call".to_string(),
+                (None, Some(e)) => e.to_string(),
+                (None, None) => "no reply came back for it".to_string(),
+            };
+            format!("{}:{} {}: {why}", f.path, f.line, f.rule_id)
+        })
+        .collect()
+}
+
 /// Why a finding never got a response from the fix model on its last attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FixMiss {
@@ -5463,6 +5528,7 @@ async fn run_fix_specifics_round(
         // transcript sink to feed.
         let mut on_delta = |_: &str| {};
         ledger.sent(batch);
+        let request_key = crate::run_store::journal::request_key(&req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
@@ -5486,12 +5552,19 @@ async fn run_fix_specifics_round(
         }
         let parsed = parse_fix_specifics(&resp.text);
         let rejected_before = still_pending.len();
+        // Why each fix of THIS reply was turned down, named by place; the reply carries them.
+        let mut turned_down: Vec<String> = Vec::new();
+        let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
             let Some(text) = parsed.get(&pos) else {
                 feedback
                     .entry(orig_idx)
                     .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    "the reply held no fix for this finding",
+                ));
                 still_pending.push(orig_idx);
                 continue;
             };
@@ -5501,6 +5574,10 @@ async fn run_fix_specifics_round(
             let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
             if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!("named `{bad}`, which is not in the finding's evidence"),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
@@ -5513,11 +5590,16 @@ async fn run_fix_specifics_round(
                 continue;
             }
             if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                turned_down.push(place(&findings[orig_idx], &reason));
                 feedback.insert(orig_idx, reason);
                 still_pending.push(orig_idx);
                 continue;
             }
             if let Some(leak) = fix_leaks_methodology(text) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!("described detection methodology (\"{leak}\")"),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
@@ -5529,6 +5611,17 @@ async fn run_fix_specifics_round(
                 continue;
             }
             findings[orig_idx].fix_specific = Some(text.clone());
+        }
+        // The reply is set aside with the reasons, and only this reply: one in which every fix
+        // was accepted stays good.
+        if !turned_down.is_empty() {
+            let why = format!(
+                "{} of {} fix(es) turned down: {}",
+                turned_down.len(),
+                batch.len(),
+                turned_down.join("; ")
+            );
+            llm.note_rejected_reply(&request_key, &why);
         }
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
@@ -5751,12 +5844,15 @@ pub async fn generate_fix_specifics(
     // (a feedback line, then a batch of one), and the same solo request a second time pays twice
     // for the same answer. A run that has stopped sends nothing. Only a part that is still
     // without a fix after this is a give-up (and so a failed part, which locks a client export).
-    let (retry, left_alone) = ledger.split_for_second_try(&pending);
-    if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+    if !pending.is_empty() {
         trail.note_unusable(
             "no usable fix was returned after the stage's own rounds",
             false,
+            fix_rejections(&findings, &pending, &feedback, &ledger),
         );
+    }
+    let (retry, left_alone) = ledger.split_for_second_try(&pending);
+    if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
         let still = run_fix_specifics_round(
             llm,
             repo,
@@ -5776,13 +5872,15 @@ pub async fn generate_fix_specifics(
         )
         .await;
         if !still.is_empty() {
-            trail.note_unusable("no usable fix was returned on the second try", true);
+            trail.note_unusable(
+                "no usable fix was returned on the second try",
+                true,
+                fix_rejections(&findings, &still, &feedback, &ledger),
+            );
         }
         pending = left_alone;
         pending.extend(still);
         pending.sort_unstable();
-    } else if !pending.is_empty() {
-        trail.note_unusable("no usable fix was returned", false);
     }
 
     // C6-B3: a give-up is never silent and never leaves the finding with no fix line when a
@@ -7434,7 +7532,7 @@ async fn run_passes_batch(
         let name = format!("{label} {}/{n_c} \u{b7} rules {}/{n_b}", w.ci + 1, w.bi + 1);
         if let Some(failure) = out.4.iter_mut().find(|f| f.pass == name) {
             let mut trail = StageTrail::default();
-            trail.note_unusable(&failure.error, false);
+            trail.note_unusable(&failure.error, false, Vec::new());
             trail.note_error(e, true);
             failure.class = trail.class();
             failure.attempts = trail.attempts;
@@ -12531,6 +12629,9 @@ mod run_completion_tests;
 
 #[cfg(test)]
 mod second_try_tests;
+
+#[cfg(test)]
+mod rejection_reason_tests;
 
 #[cfg(test)]
 mod injection_tests;

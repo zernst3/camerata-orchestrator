@@ -1083,6 +1083,9 @@ pub(super) struct AttemptView {
     pub stderr_tail: Option<String>,
     #[serde(default)]
     pub second_try: bool,
+    /// Why each reply of the part was turned down (empty when none came back to turn down).
+    #[serde(default)]
+    pub rejections: Vec<String>,
 }
 
 impl AttemptView {
@@ -7039,7 +7042,16 @@ pub(super) fn IncompletePassesBanner(
                                 }
                                 ol { class: "scan-failure-attempts",
                                     for (n , a) in f.attempts.iter().enumerate() {
-                                        li { key: "{n}", "{a.line()}" }
+                                        li { key: "{n}",
+                                            "{a.line()}"
+                                            if !a.rejections.is_empty() {
+                                                ul { class: "scan-failure-rejections",
+                                                    for (m , r) in a.rejections.iter().enumerate() {
+                                                        li { key: "{m}", "Turned down: {r}" }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 button {
@@ -12842,6 +12854,45 @@ mod render_tests {
         }
         // One banner, not two.
         assert_eq!(html.matches("scan-incomplete-banner").count(), 1, "{html}");
+    }
+
+    fn rejected_replies_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    reason: "gave up".to_string(),
+                    class: "content".to_string(),
+                    attempts: vec![AttemptView {
+                        at: "2026-10-30T10:00:00Z".to_string(),
+                        message: "no usable fix was returned".to_string(),
+                        rejections: vec![
+                            "src/db.ts:2 ARCH-1: named `rotateKey`, which is not in the finding's evidence"
+                                .to_string(),
+                        ],
+                        ..AttemptView::default()
+                    }],
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_failure_panel_shows_why_each_reply_was_turned_down() {
+        let mut vdom = VirtualDom::new(rejected_replies_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Turned down: src/db.ts:2 ARCH-1"), "{html}");
+        assert!(html.contains("rotateKey"), "{html}");
+        // A report written before the field existed still reads.
+        let old: AttemptView = serde_json::from_str(r#"{"at":"t","message":"m"}"#).unwrap();
+        assert!(old.rejections.is_empty());
+        let new: AttemptView =
+            serde_json::from_str(r#"{"at":"t","rejections":["a","b"]}"#).unwrap();
+        assert_eq!(new.rejections, vec!["a".to_string(), "b".to_string()]);
     }
 
     fn failure_with_run_harness() -> Element {

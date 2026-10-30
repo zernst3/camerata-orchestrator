@@ -149,7 +149,8 @@ pub enum EntryStatus {
     Failed,
     /// A reply came back but was cut off or held no JSON: asked again on a resume.
     Unusable,
-    /// A good reply that a later step rejected: asked again on a resume.
+    /// A good reply that a later step rejected: asked again on a resume. The reason is on the
+    /// entry ([`CallEntry::reason`]).
     Rejected,
 }
 
@@ -170,6 +171,11 @@ pub struct CallEntry {
     /// What the call cost when it was made.
     #[serde(default)]
     pub cost_usd: f64,
+    /// Why this reply was turned down or unusable, set at the point of rejection: a reply cut
+    /// off at the output limit, one holding no JSON, a fix that named something not in the
+    /// evidence, a detail that dropped a name. Only the reply that was rejected carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Everything stored for one request digest.
@@ -342,8 +348,20 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
             .filter(|e| e.status == EntryStatus::Done)
             .filter_map(|e| e.response.as_ref())
             .nth(idx);
+        let good_slot = file
+            .entries
+            .iter()
+            .filter(|(_, e)| e.status == EntryStatus::Done && e.response.is_some())
+            .map(|(slot, _)| *slot)
+            .nth(idx);
         match good {
-            Some(stored) => Planned::Replay(Box::new(stored.replayed())),
+            Some(stored) => {
+                let replay = stored.replayed();
+                if let Some(slot) = good_slot {
+                    st.last_served.insert(key.clone(), slot);
+                }
+                Planned::Replay(Box::new(replay))
+            }
             None => {
                 // A fresh call is stored in the next free slot of the file, never over an
                 // existing entry (a good one at a later slot must stay).
@@ -353,6 +371,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                     .or_insert_with(|| file.entries.keys().next_back().map_or(0, |k| k + 1));
                 let slot = *next;
                 *next += 1;
+                st.last_served.insert(key.clone(), slot);
                 Planned::Fresh(FreshCall {
                     key,
                     idx: slot,
@@ -418,6 +437,7 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
             error: None,
             class: None,
             cost_usd: resp.cost_usd.unwrap_or(0.0),
+            reason: unusable_reason(resp),
         },
         Err(e) => {
             let class = crate::failure::classify_error(e);
@@ -432,10 +452,62 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
                 )),
                 class: Some(class.as_str().to_string()),
                 cost_usd: 0.0,
+                reason: None,
             }
         }
     };
     record_entry(store, &call, entry);
+}
+
+/// Why a reply that came back is not a good one, or `None` for a good one: cut off at the output
+/// limit (with the tokens it was billed for), or holding no JSON object that parses.
+fn unusable_reason(resp: &LlmResponse) -> Option<String> {
+    if reply_is_good(resp) {
+        return None;
+    }
+    Some(if resp.truncated {
+        format!(
+            "the reply was cut off at the output limit after {} output token(s) and {} character(s) of text",
+            resp.output_tokens.unwrap_or(0),
+            resp.text.chars().count()
+        )
+    } else {
+        "the reply held no JSON object that parses".to_string()
+    })
+}
+
+/// The longest rejection reason a stored entry keeps.
+const MAX_REASON_CHARS: usize = 1_500;
+
+/// Record on the stored reply to `request_key` that the caller turned it down for `reason`: the
+/// reply handed back last for that key (a replay's stored reply or the fresh call just made). A
+/// good reply becomes [`EntryStatus::Rejected`] so a resume asks again; a reply that was already
+/// unusable keeps its status and gains the reason after the one it has. No reply is touched
+/// except that one.
+pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str) {
+    let reason = crate::failure::scrub_message(reason, MAX_REASON_CHARS);
+    let dir = store.dir().to_path_buf();
+    let mut st = store.lock_state();
+    let Some(&slot) = st.last_served.get(request_key) else {
+        return;
+    };
+    let Some(file) = st.calls.get_mut(request_key) else {
+        return;
+    };
+    let Some(entry) = file.entries.get_mut(&slot) else {
+        return;
+    };
+    if entry.status == EntryStatus::Done {
+        entry.status = EntryStatus::Rejected;
+    }
+    entry.reason = Some(match entry.reason.take() {
+        Some(earlier) if !earlier.contains(&reason) => format!("{earlier}; {reason}"),
+        Some(earlier) => earlier,
+        None => reason,
+    });
+    if let Ok(bytes) = serde_json::to_vec(file) {
+        let _ = write_atomic(&call_path(&dir, request_key), &bytes);
+    }
 }
 
 /// The model seam over a plain [`LlmPort`] (a scripted model in tests, or the real client for a
@@ -482,6 +554,10 @@ impl LlmPort for JournalLlm<'_> {
                 result
             }
         }
+    }
+
+    fn note_rejected_reply(&self, request_key: &str, reason: &str) {
+        reject_reply(&self.store, request_key, reason);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -532,6 +608,10 @@ impl LlmPort for JournalRealtime {
                 result
             }
         }
+    }
+
+    fn note_rejected_reply(&self, request_key: &str, reason: &str) {
+        reject_reply(&self.store, request_key, reason);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -751,7 +831,10 @@ fn all_call_files(store: &RunStore) -> Vec<CallFile> {
 /// Set aside the good replies of a stage that a later step rejected, so a resume asks again. A
 /// pass that failed for a CONTENT reason (the reply parsed but held nothing usable) is the case:
 /// its replies are marked rejected. A scan pass names the files it did not review, so only the
-/// calls over those files are set aside; every other stage is set aside as a whole for the repo.
+/// calls over those files are set aside; every other stage is set aside as a whole for the repo,
+/// with the failed part named as the reason. The fix and detail stages are NOT set aside here:
+/// each of their replies was marked at the point of rejection ([`reject_reply`]), with its
+/// reason, and a reply that was accepted stays good.
 pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) {
     let rejected: Vec<&FinishFailure> = failures
         .iter()
@@ -762,20 +845,30 @@ pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) 
     }
     let dir = store.dir().to_path_buf();
     for mut file in all_call_files(store) {
-        let hit = rejected.iter().any(|f| {
+        if matches!(file.kind, PartKind::Fix | PartKind::Detail) {
+            continue;
+        }
+        let hit = rejected.iter().find(|f| {
             PartKind::of_pass_name(&f.pass) == file.kind
                 && (f.repo.is_empty() || file.repo.is_empty() || f.repo == file.repo)
                 && (file.kind != PartKind::Scan
                     || f.files.is_empty()
                     || file.files.iter().any(|p| f.files.contains(p)))
         });
-        if !hit {
+        let Some(hit) = hit else {
             continue;
-        }
+        };
         let mut changed = false;
         for entry in file.entries.values_mut() {
             if entry.status == EntryStatus::Done {
                 entry.status = EntryStatus::Rejected;
+                entry.reason.get_or_insert_with(|| {
+                    format!(
+                        "set aside because the part \"{}\" failed on content: no usable result \
+                         came out of this stage's replies",
+                        hit.pass
+                    )
+                });
                 changed = true;
             }
         }

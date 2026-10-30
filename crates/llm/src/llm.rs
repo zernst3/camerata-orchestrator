@@ -750,6 +750,12 @@ pub trait LlmPort: Send + Sync {
         'life1: 'async_trait,
         Self: 'async_trait;
 
+    /// The caller turned down the reply to the request named by `request_key` (the digest the
+    /// run store names a request by), for `reason`. A completer that keeps its replies (the run
+    /// store's journal) records the reason on that reply and sets it aside so a resume asks
+    /// again; every other completer ignores it.
+    fn note_rejected_reply(&self, _request_key: &str, _reason: &str) {}
+
     /// Downcast hook for the concrete-only batch path. See the trait doc.
     fn as_any(&self) -> &dyn std::any::Any;
 }

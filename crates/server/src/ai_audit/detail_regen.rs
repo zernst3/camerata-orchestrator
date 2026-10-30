@@ -552,6 +552,24 @@ pub(super) enum Reject {
     InventedPrecondition,
 }
 
+impl Reject {
+    /// The reason in words, for the saved reply and the failure report.
+    pub(super) fn reason(&self) -> String {
+        match self {
+            Self::Mismatch => {
+                "the entry echoed another path or line than the finding's".to_string()
+            }
+            Self::DropsNamedToken(token) => {
+                format!("dropped `{token}`, which the one-sentence statement named")
+            }
+            Self::InventedPrecondition => {
+                "added an exploit precondition that neither the statement nor the code shown makes"
+                    .to_string()
+            }
+        }
+    }
+}
+
 /// `path` without a leading `./` or `/` (repeated), so `./src/a.rs` and `/src/a.rs` read as
 /// `src/a.rs`.
 fn normalized_path(path: &str) -> &str {
@@ -788,7 +806,8 @@ fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
 /// into `findings` and returns the indices still without one. `last_error` keeps the text of the
 /// most recent failed call, for the failed pass's reason; `rejections` counts why entries were
 /// turned down; `transport_failed` holds the findings whose latest attempt failed in transport
-/// (the only ones the end-of-run second try sends again).
+/// (the only ones the end-of-run second try sends again); `why` keeps, per finding, the reason
+/// its latest reply was turned down.
 #[allow(clippy::too_many_arguments)]
 async fn run_detail_round(
     llm: &dyn LlmPort,
@@ -806,6 +825,7 @@ async fn run_detail_round(
     rejections: &mut DetailRejections,
     trail: &mut super::StageTrail,
     transport_failed: &mut std::collections::HashSet<usize>,
+    why: &mut std::collections::HashMap<usize, String>,
     second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
@@ -838,6 +858,7 @@ async fn run_detail_round(
             .with_system(system.to_string())
             .with_max_tokens(scaled_max_tokens(batch.len(), DETAIL_TOKENS_PER_FINDING))
             .with_model(super::stage_model(model));
+        let request_key = crate::run_store::journal::request_key(&req);
         // Streaming transport, as the other aggregate stages: the CLI leg's heartbeat and
         // partial-output salvage apply, and a flat deadline does not.
         let mut on_delta = |_: &str| {};
@@ -879,6 +900,8 @@ async fn run_detail_round(
             .map(|e| e.id.as_str())
             .filter(|id| entries.iter().filter(|e| e.id == *id).count() > 1)
             .collect();
+        // Why each entry of THIS reply was turned down, by finding.
+        let mut turned_down: Vec<(usize, String)> = Vec::new();
         let mut written = vec![false; batch.len()];
         // A finding some entry of the reply was addressed to (whatever became of it).
         let mut answered = vec![false; batch.len()];
@@ -900,10 +923,16 @@ async fn run_detail_round(
                 Ok(text) => {
                     findings[idx].detail = compose_detail(&findings[idx].detail, &text);
                     written[pos] = true;
+                    why.remove(&idx);
                 }
-                Err(Reject::Mismatch) => rejections.mismatch += 1,
-                Err(Reject::DropsNamedToken(_)) => rejections.drops_named_token += 1,
-                Err(Reject::InventedPrecondition) => rejections.invented_precondition += 1,
+                Err(reject) => {
+                    match &reject {
+                        Reject::Mismatch => rejections.mismatch += 1,
+                        Reject::DropsNamedToken(_) => rejections.drops_named_token += 1,
+                        Reject::InventedPrecondition => rejections.invented_precondition += 1,
+                    }
+                    turned_down.push((idx, reject.reason()));
+                }
             }
         }
         for (pos, &idx) in batch.iter().enumerate() {
@@ -912,21 +941,75 @@ async fn run_detail_round(
                 // above under its reason; the rest are counted here.
                 if ambiguous[pos] {
                     rejections.missing_id += 1;
+                    turned_down.push((idx, "the reply used this finding's id twice".to_string()));
                 } else if !answered[pos] {
                     if stray > 0 {
                         stray -= 1;
                         rejections.missing_id += 1;
+                        turned_down.push((idx, "no entry carried this finding's id".to_string()));
                     } else if resp.truncated {
                         rejections.truncated += 1;
+                        turned_down.push((
+                            idx,
+                            "the reply was cut off before this finding's entry".to_string(),
+                        ));
                     } else {
                         rejections.left_out += 1;
+                        turned_down.push((idx, "the reply left this finding out".to_string()));
                     }
                 }
                 still_pending.push(idx);
             }
         }
+        // The reply is set aside with the reasons, and only this reply: one in which every entry
+        // was written stays good.
+        if !turned_down.is_empty() {
+            let lines: Vec<String> = turned_down
+                .iter()
+                .map(|(idx, reason)| {
+                    format!("{}:{} {reason}", findings[*idx].path, findings[*idx].line)
+                })
+                .collect();
+            llm.note_rejected_reply(
+                &request_key,
+                &format!(
+                    "{} of {} detail(s) turned down: {}",
+                    lines.len(),
+                    batch.len(),
+                    lines.join("; ")
+                ),
+            );
+            for (idx, reason) in turned_down {
+                why.insert(idx, reason);
+            }
+        }
     }
     still_pending
+}
+
+/// Why each of `pending` still has no explanation, as the failed part records it: the place of
+/// the finding and the reason its latest reply was turned down, or that its last call failed in
+/// transport.
+fn detail_rejections(
+    findings: &[Finding],
+    pending: &[usize],
+    why: &std::collections::HashMap<usize, String>,
+    transport_failed: &std::collections::HashSet<usize>,
+) -> Vec<String> {
+    pending
+        .iter()
+        .map(|&i| {
+            let f = &findings[i];
+            let reason = if transport_failed.contains(&i) {
+                "the last call failed in transport".to_string()
+            } else {
+                why.get(&i)
+                    .cloned()
+                    .unwrap_or_else(|| "no reply came back for it".to_string())
+            };
+            format!("{}:{} {reason}", f.path, f.line)
+        })
+        .collect()
 }
 
 /// Write the full `detail` of every finding in `findings`, which the scan wrote as one short
@@ -963,6 +1046,8 @@ pub(crate) async fn regenerate_full_details(
     let mut trail = super::StageTrail::default();
     // Findings whose latest attempt failed in transport: the only ones the second try re-sends.
     let mut transport_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Why each finding's latest reply was turned down, for the failed part's record.
+    let mut why: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -989,6 +1074,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut rejections,
                 &mut trail,
                 &mut transport_failed,
+                &mut why,
                 false,
             )
             .await;
@@ -999,16 +1085,19 @@ pub(crate) async fn regenerate_full_details(
         // down is not sent again: the rounds already changed the request (a smaller batch) for
         // it, and the same request a third time pays twice for the same answer. A stopped run
         // sends nothing.
+        if !pending.is_empty() {
+            trail.note_unusable(
+                "no usable explanation was written after the stage's own rounds",
+                false,
+                detail_rejections(&findings, &pending, &why, &transport_failed),
+            );
+        }
         let retry: Vec<usize> = pending
             .iter()
             .copied()
             .filter(|i| transport_failed.contains(i))
             .collect();
         if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
-            trail.note_unusable(
-                "no usable explanation was written after the stage's own rounds",
-                false,
-            );
             let left_alone: Vec<usize> = pending
                 .iter()
                 .copied()
@@ -1030,11 +1119,16 @@ pub(crate) async fn regenerate_full_details(
                 &mut rejections,
                 &mut trail,
                 &mut transport_failed,
+                &mut why,
                 true,
             )
             .await;
             if !still.is_empty() {
-                trail.note_unusable("no usable explanation was written on the second try", true);
+                trail.note_unusable(
+                    "no usable explanation was written on the second try",
+                    true,
+                    detail_rejections(&findings, &still, &why, &transport_failed),
+                );
             }
             pending = left_alone;
             pending.extend(still);

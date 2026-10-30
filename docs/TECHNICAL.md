@@ -6154,7 +6154,20 @@ production build and see the warning and the note instead.
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
 
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
-attempts as history: a part that a later attempt completed stays with a `resolved_at` time.
+attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An
+attempt of a part whose replies came back and were turned down lists why in `rejections`, one line
+per finding (its place, and the name the fix invented or the name the detail dropped); the
+cockpit's failure panel shows the same lines under the attempt.
+
+**Why a stored reply was set aside.** Each call entry in the run store (`calls/<key>.json`) has an
+optional `reason`, set at the point of rejection and only on the reply that was rejected: a reply
+cut off at the output limit or holding no JSON (status `unusable`), a fix reply with a fix that
+named something not in the evidence or that contradicted the detail, a detail reply with an entry
+that dropped a name or added a condition (status `rejected`). A reply every entry of which was
+accepted stays `done` with no reason, so a resume replays it. The stages reach the store through
+`LlmPort::note_rejected_reply(request_key, reason)`, a no-op on every completer but the journal.
+The stage-wide set-aside at the end of an attempt (`quarantine_rejected`) now applies to the other
+content-failed stages only, with the failed part named as the reason.
 
 **End-of-run second try.** A part that failed gets one more try at the end of its stage only when the
 failure was transport trouble (a dropped connection, a timeout, a 429, a 5xx), the one case where the

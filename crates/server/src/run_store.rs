@@ -702,6 +702,9 @@ pub(crate) struct StoreState {
     pub asked: std::collections::HashMap<String, usize>,
     /// The next free slot of each request's call file, for a fresh call to be stored in.
     pub next_slot: std::collections::HashMap<String, usize>,
+    /// The slot whose reply was last handed back for each request key (a replay's stored reply
+    /// or the fresh call just stored), so a caller that turns that reply down can name it.
+    pub last_served: std::collections::HashMap<String, usize>,
     /// Call files read or written in this attempt.
     pub calls: std::collections::HashMap<String, journal::CallFile>,
     /// How many times each batch submission key was made in this attempt.
@@ -824,6 +827,7 @@ impl RunStore {
                 record,
                 asked: Default::default(),
                 next_slot: Default::default(),
+                last_served: Default::default(),
                 calls: Default::default(),
                 submitted: Default::default(),
             }),
@@ -849,6 +853,7 @@ impl RunStore {
                 record,
                 asked: Default::default(),
                 next_slot: Default::default(),
+                last_served: Default::default(),
                 calls: Default::default(),
                 submitted: Default::default(),
             }),
