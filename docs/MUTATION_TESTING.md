@@ -8,15 +8,17 @@ tests would not catch a real bug.
 
 | Crate | Date | Result | What was done |
 |---|---|---|---|
-| camerata-checks | earlier | published rate (see README) | the crate the README's mutation figure refers to |
+| camerata-checks | 2026-10-22 to 23 | 6,380 mutants: 2,062 caught, 44 missed, 93 timeouts, 4,181 unviable; catch rate 97.9% (caught / caught + missed, timeouts left out) | the figure the README quotes; cargo-mutants 27.1.0, about six hours, the crate's own tests only. The 44 misses were ledgered for follow-up (26 in client-facing checkers, 18 minor) |
 | camerata-rules | 2026-10-28 | 64 survivors | `crates/rules/tests/mutation_kills.rs` kills the real ones |
 | camerata-secrets | 2026-10-28 | survivors in `detect.rs` and `firebase.rs` (count not recorded) | `crates/secrets/src/tests/` detector_edges.rs, firebase_spans.rs, twin_boundaries.rs and json_walk.rs |
 | report export | not yet run | | open item in the repo hardening work order |
 | integrity gate | not yet run | | open item in the repo hardening work order |
 
-The raw cargo-mutants output (`mutants.out/`) is not kept in the repository, so the camerata-secrets
-count and the caught, timeout and unviable totals for both 2026-10-28 runs were not recorded. The
-next run should copy those totals into this table.
+The raw cargo-mutants output (`mutants.out/`) is not kept in the repository. The camerata-checks
+totals above are the ones recorded from that run's summary when it finished; they cannot be
+re-derived without running it again. The camerata-secrets count and the caught, timeout and
+unviable totals for both 2026-10-28 runs were not recorded. The next run should copy its totals
+into this table.
 
 ## camerata-rules
 
