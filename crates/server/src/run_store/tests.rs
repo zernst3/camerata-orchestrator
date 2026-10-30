@@ -1260,7 +1260,12 @@ fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
 /// A run saved under one default is refused when the default has moved, which a raw empty pick
 /// could not show.
 #[test]
+#[serial_test::serial(process_env)]
 fn a_changed_default_is_noticed_on_resume() {
+    // Its own state dir under the shared key, like every other test here that saves a run: the
+    // state dir is process environment, and a sibling test moving it mid-run made this read the
+    // record from the wrong folder (CI, 2026-10-30).
+    let (_s, _g) = state_dir();
     let repo = git_repo();
     let store = new_run(&repo);
     let id = store.run_id();
