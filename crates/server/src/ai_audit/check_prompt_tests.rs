@@ -73,6 +73,7 @@ async fn the_detail_block_lists_exactly_the_names_the_check_requires() {
     let entry = |text: &str| Entry {
         id: "x".to_string(),
         detail: text.to_string(),
+        why: None,
     };
     let full = in_prompt.join(" and ");
     assert!(accept_entry(&f, &entry(&full), "", &files()).is_ok());

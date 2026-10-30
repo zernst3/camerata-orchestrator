@@ -13162,6 +13162,9 @@ mod opaque_id_tests;
 mod check_prompt_tests;
 
 #[cfg(test)]
+mod why_fix_direction_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -258,14 +258,18 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
 
     // Detail.
     let ids = vec!["a1b2c3".to_string(), "d4e5f6".to_string()];
-    let detail = serde_json::json!({"details": [{"id": "a1b2c3", "detail": "Because."}]});
+    let detail = serde_json::json!({"details": [{
+        "id": "a1b2c3", "why": "Because.", "fix_direction": "Guard it."
+    }]});
     assert_eq!(violation(&detail_reply_schema(&ids), &detail), None);
     let parsed = detail_regen::parse_detail_reply(&detail.to_string(), false);
     assert_eq!(parsed.entries.len(), 1);
-    let foreign = serde_json::json!({"details": [{"id": "ffffff", "detail": "Because."}]});
+    let foreign = serde_json::json!({"details": [{
+        "id": "ffffff", "why": "Because.", "fix_direction": "Guard it."
+    }]});
     // The finding's location is not part of the reply; an echo is not a reply the schema allows.
     let echoing = serde_json::json!({"details": [{
-        "id": "a1b2c3", "path": "src/a.ts", "line": 12, "detail": "Because."
+        "id": "a1b2c3", "path": "src/a.ts", "line": 12, "why": "Because.", "fix_direction": "x"
     }]});
     assert!(violation(&detail_reply_schema(&ids), &echoing).is_some());
     assert!(violation(&detail_reply_schema(&ids), &foreign).is_some());

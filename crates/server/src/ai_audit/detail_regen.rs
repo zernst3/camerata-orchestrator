@@ -76,20 +76,20 @@ fn round_batch_size(round: usize) -> usize {
 pub(crate) fn detail_regen_system_prompt() -> String {
     r#"You write the full explanation for audit findings that were reported in one short sentence. A human architect reads it to decide what to do, so it must be specific to the code shown.
 
-Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
+Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write two fields, two to four sentences in all: `why`, saying why THIS code is a problem (what is wrong, and nothing about the fix), and `fix_direction`, saying in a sentence or two which way the fix goes. The two are joined into the explanation the architect reads.
 
 Rules, every finding:
 - Keep every fact the short statement already makes. Never contradict it. Each finding's block has a `Names to keep:` line: the exact names (files, symbols, flags) your explanation must contain, spelled as listed. An explanation missing one of them is discarded; no other name is required, so write everything else in your own words.
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
-- Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. The fix direction may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
-- If the statement says the case is borderline, start your explanation with "Borderline:", keep saying so, and say what would settle it.
+- Do not add conditions the statement does not make. In `why`, do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. `fix_direction` may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
+- If the statement says the case is borderline, start `why` with "Borderline:", keep saying so, and say what would settle it.
 - A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) is listed as its separate parts when a part is itself a name (snake_case or camelCase): write each listed part. A plain member access such as supabase.from is listed whole and stays as written.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
 
 Return ONLY JSON, no prose:
-{"details":[{"id":"<the finding's id, copied exactly>","detail":"..."}]}
+{"details":[{"id":"<the finding's id, copied exactly>","why":"...","fix_direction":"..."}]}
 One entry per finding, addressed by its id alone: its location is already known, do not repeat it. An entry whose id is not one of the findings' ids is discarded."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
@@ -497,10 +497,17 @@ fn build_block(
 /// One entry of the reply, before any check. Addressed by the opaque id alone: Camerata knows the
 /// finding's path and line, so a model that still echoes them (a reply from a backend that never
 /// saw the schema) has them ignored.
+///
+/// The reply splits the explanation from the fix direction (`why`, `fix_direction`); `detail` is
+/// the two joined with a space, the text that is written, so a client reads exactly what a single
+/// `detail` field of the same words would have said. `why` is `Some` when the reply split them:
+/// the exploit-precondition check reads that part alone. A reply that gave one `detail` field (a
+/// backend that never saw the schema) has `why: None` and is read as it always was, by sentence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub id: String,
     pub detail: String,
+    pub why: Option<String>,
 }
 
 /// A reply read entry by entry: the usable entries, and how many array members were not one
@@ -513,14 +520,40 @@ pub(super) struct ParsedReply {
 
 fn entry_of(value: &serde_json::Value) -> Option<Entry> {
     let id = value["id"].as_str()?.trim().to_string();
-    let detail = value["detail"].as_str()?.trim().to_string();
-    if id.is_empty() || detail.is_empty() {
+    if id.is_empty() {
         return None;
     }
-    Some(Entry { id, detail })
+    let field = |name: &str| value[name].as_str().map(str::trim).unwrap_or_default();
+    let (why, direction) = (field("why"), field("fix_direction"));
+    if !why.is_empty() {
+        let detail = if direction.is_empty() {
+            why.to_string()
+        } else {
+            format!("{why} {direction}")
+        };
+        return Some(Entry {
+            id,
+            detail,
+            why: Some(why.to_string()),
+        });
+    }
+    // One `detail` field, or a fix direction with no explanation: read as the single text it is.
+    let detail = match field("detail") {
+        "" => direction,
+        detail => detail,
+    };
+    if detail.is_empty() {
+        return None;
+    }
+    Some(Entry {
+        id,
+        detail: detail.to_string(),
+        why: None,
+    })
 }
 
-/// Parse `{"details":[{"id","detail"}]}`. Malformed output, a missing array or an
+/// Parse `{"details":[{"id","why","fix_direction"}]}` (or the single `detail` field a backend that
+/// never saw the schema may still send). Malformed output, a missing array or an
 /// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
 /// written", never as an empty explanation.
 ///
@@ -781,10 +814,15 @@ pub(super) fn accept_entry(
     // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would
     // silently stop calibration raising a critical, on a claim nobody made. A borderline
     // statement is exempt (the prompt orders the model to say what would settle it, and
-    // calibration already reads borderline as low confidence); the check reads the explanation,
-    // not the fix direction ([`precondition_scope`]).
+    // calibration already reads borderline as low confidence). The check reads the explanation
+    // alone: the `why` field when the reply split it from the fix direction, else (a single
+    // `detail`) the sentences that are not a fix direction ([`precondition_scope`]).
+    let explanation = match &entry.why {
+        Some(why) => camerata_secrets::redact_str(why).into_owned(),
+        None => precondition_scope(&text),
+    };
     if !is_borderline(short)
-        && mentions_exploit_precondition(&precondition_scope(&text))
+        && mentions_exploit_precondition(&explanation)
         && !mentions_exploit_precondition(short)
         && !mentions_exploit_precondition(code_shown)
     {

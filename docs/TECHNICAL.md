@@ -3065,6 +3065,15 @@ the same function, so the sentence and the check cannot differ. Each fix block e
 identifiers of the evidence the grounding check looks a name up in); anything else is
 introduced as a new name in plain words.
 
+*`why` and `fix_direction`.* The detail reply is `{"id","why","fix_direction"}`. The text
+that is written is the two joined with a space (a test pins that a client reads exactly
+what one `detail` field of the same words gave), the named-token check reads the joined
+text, and the exploit-precondition check reads `why` alone, so a fix direction that says
+what the fix needs ("make sure the endpoint requires a session") is no longer mistaken for
+a condition on the problem. A reply with a single `detail` field (a backend that never saw
+the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
+direction as part of the finding's `Detail:` in its evidence; it has no separate input.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its

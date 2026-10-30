@@ -183,15 +183,17 @@ pub(crate) fn calibration_reply_schema(n: usize) -> Value {
 }
 
 /// The detail regeneration reply for a batch whose findings carry the opaque `ids`: an entry per
-/// finding, its `id` one of the batch's. The finding's path and line are not echoed: Camerata
-/// knows them and attaches them.
+/// finding, its `id` one of the batch's, the explanation (`why`) apart from the direction of the
+/// fix (`fix_direction`). The finding's path and line are not echoed: Camerata knows them and
+/// attaches them.
 pub(crate) fn detail_reply_schema(ids: &[String]) -> Value {
     let entry = object(
         &[
             ("id", json!({ "type": "string", "enum": ids })),
-            ("detail", string()),
+            ("why", string()),
+            ("fix_direction", string()),
         ],
-        &["id", "detail"],
+        &["id", "why", "fix_direction"],
     );
     object(&[("details", array(entry))], &["details"])
 }

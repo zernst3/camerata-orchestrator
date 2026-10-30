@@ -1129,7 +1129,8 @@ async fn the_request_does_not_ask_the_model_to_echo_the_path_or_line() {
     let props = schema["properties"]["details"]["items"]["properties"]
         .as_object()
         .unwrap();
-    assert!(props.contains_key("id") && props.contains_key("detail"));
+    assert!(props.contains_key("id") && props.contains_key("why"));
+    assert!(props.contains_key("fix_direction"));
     assert!(!props.contains_key("path") && !props.contains_key("line"));
 }
 
@@ -1155,6 +1156,7 @@ fn entry(_f: &Finding, detail: &str) -> Entry {
     Entry {
         id: "x".to_string(),
         detail: detail.to_string(),
+        why: None,
     }
 }
 
