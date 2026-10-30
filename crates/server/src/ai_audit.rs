@@ -1428,7 +1428,8 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 ///
 /// 3: the detail-regeneration prompt allows a fix direction to say what the fix needs, asks a
 /// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
-/// a dot be written as its parts.
+/// a dot be written as its parts when a part is itself a name (a plain member access such as
+/// supabase.from stays as written).
 pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 3;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the

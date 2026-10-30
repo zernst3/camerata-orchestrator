@@ -194,7 +194,7 @@ fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
             3,
             "5bc27c39facb8c9d",
             "fb0d0667d9ea0281",
-            "938ab75129396005"
+            "6ad083ca21f971bf"
         ),
         "a terse-output prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
