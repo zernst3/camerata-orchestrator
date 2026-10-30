@@ -47,6 +47,17 @@
 //!
 //! The first pass of a run is always admitted (nothing has been spent), so a cap smaller than
 //! one pass still lets that one pass finish.
+//!
+//! # What the cap needs from every call
+//!
+//! A cost. With a cap set, every model the run will call is checked for a list price before
+//! anything runs ([`RunControls::refuse_if_cap_unenforceable`]), and every stage's request names
+//! its model explicitly ([`crate::ai_audit::stage_model`]) so the model that was checked is the
+//! model that is called. A request sent with no model would be filled in by the transport's
+//! process default (`CAMERATA_LLM_MODEL`), which no check saw. Should a call's cost still be
+//! unknowable, the cap is no longer enforceable and admits nothing more; the disclosures then
+//! say the cap could not be enforced, not that it was reached
+//! ([`CostCapRecord::cause`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -125,16 +136,12 @@ pub fn models_the_run_will_use(
     selected_rule_ids: &[&str],
     controls: &RunControls,
 ) -> Vec<(String, String)> {
+    // The SAME resolutions the stages apply to their requests (`crate::ai_audit::stage_model`,
+    // `resolve_calibration_model`), so the models listed, priced and printed here are the models
+    // the run calls. The alternatives recommendation, the detail step and the truncation retries
+    // run on the scan model.
     let scan = crate::ai_audit::resolve_audit_model(model);
-    let calibration = calibration_model
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_CALIBRATION_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| scan.clone());
+    let calibration = crate::ai_audit::resolve_calibration_model(calibration_model, &scan);
     let fix =
         crate::ai_audit::resolve_audit_model(controls.fix_model_for(model, calibration_model));
     let mut roles: Vec<(&str, String)> = vec![
@@ -343,9 +350,45 @@ pub struct CostCapRecord {
     /// not finish without reading the pass list.
     #[serde(default)]
     pub repos_not_finished: Vec<String>,
+    /// True when a call's cost could not be determined (no reported figure, tokens that could
+    /// not be priced) while the limit was set. The limit could then no longer be enforced, so
+    /// everything after was refused; the limit was NOT reached. Every disclosure of what did not
+    /// run says which of the two happened (see [`Self::cause`]).
+    #[serde(default)]
+    pub cost_unknown: bool,
+}
+
+/// The cause the spend limit's disclosures name when a call's cost was unknown. No dollar
+/// figure: the text reaches the client report.
+pub const CAUSE_COST_UNKNOWN: &str = "the spend limit set for this run could not be enforced \
+                                     (a call's cost could not be determined, so the run stopped \
+                                     instead of running past the limit unseen)";
+
+/// The cause the spend limit's disclosures name when actual spend reached the limit.
+pub const CAUSE_LIMIT_REACHED: &str = "the spend limit set for this run was reached";
+
+/// [`CostCapRecord::cause`] for a call site that has the meter's flag rather than the record.
+pub fn cause_for(cost_unknown: bool) -> &'static str {
+    if cost_unknown {
+        CAUSE_COST_UNKNOWN
+    } else {
+        CAUSE_LIMIT_REACHED
+    }
 }
 
 impl CostCapRecord {
+    /// Why the limit stopped work, as every disclosure completes "NOT RUN: <cause> ...": the
+    /// limit was reached, or it could no longer be enforced because a call's cost was unknown.
+    /// Telling an operator the limit "was reached" when a few cents of a $10 limit were spent
+    /// sends them looking for a spend that never happened.
+    pub fn cause(&self) -> &'static str {
+        if self.cost_unknown {
+            CAUSE_COST_UNKNOWN
+        } else {
+            CAUSE_LIMIT_REACHED
+        }
+    }
+
     /// True when the cap actually stopped something. A cap that was set but never reached
     /// leaves the run complete.
     pub fn stopped_the_run(&self) -> bool {
@@ -375,11 +418,7 @@ impl CostCapRecord {
     /// The failed-pass disclosures for everything the cap stopped. The text carries NO dollar
     /// figure (it reaches the client report); the amounts are in the ledger and the CLI output.
     pub fn failed_passes(&self) -> Vec<crate::ai_audit::FailedPass> {
-        not_run_failed_passes(
-            &self.not_run_passes,
-            &self.not_run_stages,
-            "the spend limit set for this run was reached",
-        )
+        not_run_failed_passes(&self.not_run_passes, &self.not_run_stages, self.cause())
     }
 
     /// How much of `rule_id`'s checking on `repo` the cap left undone. A rule is `NotRun` only
@@ -581,6 +620,7 @@ mod tests {
     fn failed_passes_name_every_pair_once_per_chunk_and_carry_no_dollars() {
         let record = CostCapRecord {
             repos_not_finished: Vec::new(),
+            cost_unknown: false,
             cap_usd: 12.34,
             spent_usd: 13.57,
             not_run_passes: vec![
@@ -679,6 +719,50 @@ mod tests {
             record.rule_coverage("acme/api", "C-1"),
             RuleCoverage::Partial
         );
+    }
+
+    /// A pass refused because a call's cost could not be priced was not refused because the
+    /// limit was REACHED (the run may have spent cents against a $10 limit). The disclosure
+    /// says what actually happened, so an operator reading the failed-pass list does not go
+    /// looking for a spend that never occurred; it still names no dollar figure.
+    #[test]
+    fn a_pass_refused_because_a_cost_was_unknown_does_not_say_the_limit_was_reached() {
+        let record = CostCapRecord {
+            cap_usd: 10.0,
+            spent_usd: 0.0095,
+            not_run_passes: vec![pass(1, 1, &["A-1"])],
+            not_run_stages: vec![NotRunStage {
+                repo: "acme/shop".into(),
+                stage: "fix-specific generation".into(),
+                partial: false,
+                class: FailureClass::SpendLimit,
+            }],
+            notes: Vec::new(),
+            repos_not_finished: Vec::new(),
+            cost_unknown: true,
+        };
+        assert!(record.stopped_the_run());
+        let failed = record.failed_passes();
+        assert_eq!(failed.len(), 2);
+        for f in &failed {
+            assert!(
+                !f.reason.contains("was reached"),
+                "the limit was not reached: {}",
+                f.reason
+            );
+            assert!(
+                f.reason.contains("could not be enforced") && f.reason.contains("cost"),
+                "{}",
+                f.reason
+            );
+            assert!(!f.reason.contains('$'), "{}", f.reason);
+        }
+        // The plain reached case is unchanged.
+        let reached = CostCapRecord {
+            cost_unknown: false,
+            ..record
+        };
+        assert!(reached.failed_passes()[0].reason.contains("was reached"));
     }
 
     #[test]

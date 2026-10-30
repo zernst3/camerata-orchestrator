@@ -10,7 +10,7 @@
 //! Pinned here:
 //!   1. precedence: an explicit fix model wins; else Haiku with `fix_on_haiku` on (the default);
 //!   2. `fix_on_haiku` off reproduces the pre-rank-10 choice exactly (`calibration_model.or(model)`,
-//!      and no model at all when neither is set);
+//!      and the run's default audit model when neither is set; a request never leaves unnamed);
 //!   3. the chosen model and effort reach the completer (effort only on the Haiku path);
 //!   4. the operator telemetry records the fix stage's model per call and the give-up rate.
 
@@ -300,14 +300,21 @@ async fn a_blank_explicit_fix_model_counts_as_unset() {
     );
 }
 
-/// Switch off: exactly `calibration_model.or(model)`, and with neither set no model id at all
-/// (the transport picks its default), as before rank 10. No effort in any case.
+/// Switch off: exactly `calibration_model.or(model)`, as before rank 10, and with neither set the
+/// run's default audit model (`resolve_audit_model`), the id the pre-flight priced and the
+/// ledger records. No effort in any case.
+///
+/// Until 2026-10-29 the last case expected NO model id, "the transport picks its default". That
+/// default is the PROCESS default (`CAMERATA_LLM_MODEL`), which the pre-flight never priced; on
+/// an unpriced id the spend limit could not count the call and refused the rest of the run. A
+/// stage request never leaves without a model now.
 #[tokio::test]
 async fn switch_off_reproduces_the_pre_rank_10_fix_model_exactly() {
     let off = || RunControls {
         efficiency: switch_off(),
         ..RunControls::default()
     };
+    let run_default = camerata_server::ai_audit::resolve_audit_model(None);
     let cases: [(Option<&str>, Option<&str>, &str); 4] = [
         (
             Some("scan-model"),
@@ -316,7 +323,7 @@ async fn switch_off_reproduces_the_pre_rank_10_fix_model_exactly() {
         ),
         (Some("scan-model"), None, "scan-model"),
         (None, Some("calibration-model"), "calibration-model"),
-        (None, None, ""),
+        (None, None, run_default.as_str()),
     ];
     for (model, calibration_model, expected) in cases {
         let (calls, _) = fix_calls_for(model, calibration_model, off()).await;

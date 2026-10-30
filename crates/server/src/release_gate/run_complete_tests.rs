@@ -256,6 +256,7 @@ fn a_spend_limit_stop_is_flagged_in_the_refusal() {
         .record_cost_cap(crate::cost_cap::CostCapRecord {
             cap_usd: 1.0,
             spent_usd: 1.0,
+            cost_unknown: false,
             not_run_passes: Vec::new(),
             not_run_stages: vec![crate::cost_cap::NotRunStage {
                 repo: "acme/portal".to_string(),

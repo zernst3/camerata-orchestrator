@@ -602,3 +602,301 @@ async fn a_spend_limit_with_an_unpriced_model_refuses_to_start_before_any_model_
     assert!(uncapped.calls() > 0, "an uncapped run is unchanged");
     assert!(!report.blocked);
 }
+
+/// The real transport as the spend limit meets it: a request that names no model is sent to the
+/// PROCESS default (`CAMERATA_LLM_MODEL`, which an operator's `.env` may set to any id), and the
+/// response carries a dollar figure only when the model registry can price that id. Tokens are
+/// one real-time scan pass of the benchmark fixture at Sonnet prices.
+struct ProcessDefaultStub {
+    process_default: &'static str,
+    requested: std::sync::Mutex<Vec<String>>,
+}
+
+impl ProcessDefaultStub {
+    fn new(process_default: &'static str) -> Self {
+        Self {
+            process_default,
+            requested: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+    fn requested(&self) -> Vec<String> {
+        self.requested.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LlmPort for ProcessDefaultStub {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.requested.lock().unwrap().push(req.model.clone());
+        let model = if req.model.trim().is_empty() {
+            self.process_default.to_string()
+        } else {
+            req.model.clone()
+        };
+        let (input, output) = (24_340u64, 4_000u64);
+        let cost_usd = camerata_server::llm::usage_cost_usd(
+            &model,
+            &camerata_server::llm::CallUsage {
+                input: Some(input),
+                output: Some(output),
+                cache_read: 0,
+                cache_creation: 0,
+                cache_creation_1h: None,
+            },
+            camerata_server::llm::PriceBasis::realtime(),
+        );
+        Ok(LlmResponse {
+            text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
+                .to_string(),
+            model,
+            backend: "api".to_string(),
+            cost_usd,
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The 2026-10-29 efficiency run: `camerata inspect --max-cost-usd 10` with no `--model`, the
+/// pre-flight estimating about $2.61 on `claude-sonnet-5`, and `.env` setting
+/// `CAMERATA_LLM_MODEL=claude-sonnet-4-6` (an id the registry does not price). Every stage's
+/// request must name the model the pre-flight priced, so each call is costed and the run
+/// completes well under its limit; a request sent with no model would reach the process default
+/// instead, its cost would be unknown, and the limit would refuse the whole run with $9.99 of
+/// headroom.
+#[tokio::test]
+async fn a_capped_run_with_no_chosen_model_names_the_priced_default_on_every_call_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(dir.path());
+    let llm = ProcessDefaultStub::new("claude-sonnet-4-6");
+    let (report, _) = scan(
+        &llm,
+        dir.path(),
+        None,
+        controls(Some(10.0), EfficiencyConfig::default()),
+    )
+    .await;
+
+    let expected = camerata_server::ai_audit::resolve_audit_model(None);
+    assert!(
+        camerata_server::llm::is_priced(&expected),
+        "the run's default audit model `{expected}` is priced"
+    );
+    let requested = llm.requested();
+    assert!(!requested.is_empty(), "the scan ran");
+    let unnamed: Vec<&String> = requested.iter().filter(|m| m.trim().is_empty()).collect();
+    assert!(
+        unnamed.is_empty(),
+        "{} of {} requests named no model and so went to the process default the pre-flight \
+         never priced",
+        unnamed.len(),
+        requested.len()
+    );
+    let other: Vec<&String> = requested
+        .iter()
+        .filter(|m| !camerata_server::llm::is_priced(m))
+        .collect();
+    assert!(
+        other.is_empty(),
+        "every request names a priced model: {other:?}"
+    );
+
+    let cap = report.ledger.cost_cap().expect("a limit was set");
+    assert!(
+        !report.ledger.is_cost_capped(),
+        "nothing was refused: {} passes, stages {:?}, notes {:?}",
+        cap.not_run_passes.len(),
+        cap.not_run_stages,
+        cap.notes
+    );
+    assert!(cap.notes.is_empty(), "no enforcement note: {:?}", cap.notes);
+    assert!(
+        cap.spent_usd > 0.0 && cap.spent_usd < 10.0,
+        "every call was costed and the run stayed under its limit: spent {}",
+        cap.spent_usd
+    );
+    assert!(
+        report.failed_passes.is_empty(),
+        "no NOT RUN pass: {:?}",
+        report.failed_passes
+    );
+}
+
+/// Every reply reports tokens on a model id the registry does not price, and no dollar figure:
+/// the cost of each call is unknown, so a spend limit cannot be enforced past the first call.
+struct UnpricedReplyStub {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmPort for UnpricedReplyStub {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(LlmResponse {
+            text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
+                .to_string(),
+            model: "claude-unlisted-9".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: Some(30_000),
+            output_tokens: Some(4_000),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        })
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let r = self.complete(req).await?;
+        on_delta(&r.text);
+        Ok(r)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// When a call's cost could not be determined, every disclosure of what did not run says the
+/// limit could not be enforced, never that it was reached: the repo the stop kept from starting,
+/// the ledger's record, and the client-visible failed-pass list. No dollar figure anywhere.
+#[tokio::test]
+async fn a_later_repo_stopped_by_an_unknown_cost_is_not_told_the_limit_was_reached() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    stage_repo(a.path());
+    stage_repo(b.path());
+    let sources = vec![
+        ("acme/one".to_string(), a.path().to_path_buf()),
+        ("acme/two".to_string(), b.path().to_path_buf()),
+    ];
+    let llm = UnpricedReplyStub {
+        calls: AtomicUsize::new(0),
+    };
+    let (report, _manifest) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &selected(),
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Sequential,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(10.0), EfficiencyConfig::default()),
+    )
+    .await;
+    // Repo one's first pass is admitted (nothing spent); its cost is unknown, so nothing more is.
+    assert_eq!(llm.calls(), 1, "one call, then nothing is admitted");
+    let cap = report.ledger.cost_cap().expect("a limit was set");
+    assert!(cap.cost_unknown, "{cap:?}");
+    assert!(cap.stopped_the_run());
+    assert_eq!(cap.repos_not_finished, vec!["acme/two".to_string()]);
+    let two: Vec<_> = report
+        .failed_passes
+        .iter()
+        .filter(|f| f.repo == "acme/two" && f.reason.contains("NOT RUN"))
+        .collect();
+    assert_eq!(two.len(), 1, "{:?}", report.failed_passes);
+    for f in &report.failed_passes {
+        assert!(
+            !f.reason.contains("was reached"),
+            "the limit was not reached: {}",
+            f.reason
+        );
+        assert!(!f.reason.contains('$'), "{}", f.reason);
+    }
+    assert!(
+        two[0].reason.contains("could not be enforced"),
+        "{}",
+        two[0].reason
+    );
+    if let Some(note) = &report
+        .ledger
+        .rule("ARCH-CAP-TEST-00-1")
+        .unwrap()
+        .skip_reason
+    {
+        assert!(!note.contains("was reached"), "{note}");
+    }
+}
+
+impl UnpricedReplyStub {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+/// A rule checked on one chunk of two before an unknown cost stopped the run is partial, and the
+/// ledger's partial note says the limit could not be enforced, not that it was reached.
+#[tokio::test]
+async fn a_partial_rule_after_an_unknown_cost_is_not_told_the_limit_was_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_two_chunk_repo(dir.path());
+    let sources = vec![("acme/shop".to_string(), dir.path().to_path_buf())];
+    let rules: Vec<SelectedRule> = selected().into_iter().take(15).collect();
+    let llm = UnpricedReplyStub {
+        calls: AtomicUsize::new(0),
+    };
+    let (report, _m) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &rules,
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(10.0), EfficiencyConfig::default()),
+    )
+    .await;
+    assert_eq!(llm.calls(), 1, "chunk 1 ran, chunk 2 was refused");
+    let cap = report.ledger.cost_cap().expect("a limit was set");
+    assert!(cap.cost_unknown, "{cap:?}");
+    let entry = report.ledger.rule("ARCH-CAP-TEST-00-1").unwrap();
+    let partial = entry
+        .partial_reason
+        .as_deref()
+        .expect("checked on one chunk of two");
+    assert!(partial.contains("could not be enforced"), "{partial}");
+    assert!(!partial.contains("was reached"), "{partial}");
+    assert!(!partial.contains('$'), "{partial}");
+}

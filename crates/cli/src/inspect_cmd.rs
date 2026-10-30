@@ -1778,9 +1778,18 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
         cap.cap_usd, cap.spent_usd
     );
     if cap.stopped_the_run() {
+        // The limit was reached, or it could not be enforced because a call's cost could not be
+        // determined: two different things, and the operator is told which (the note that
+        // follows names the model and the call).
+        let how = if cap.cost_unknown {
+            "COULD NOT BE ENFORCED (a call's cost could not be determined, so the run stopped \
+             instead of running past the limit unseen)."
+        } else {
+            "REACHED."
+        };
         write!(
             out,
-            " -- REACHED. This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT RUN \
+            " -- {how} This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT RUN \
              (listed under FAILED PASSES). Passes already started finish, so a run can end about one pass \
              over the limit.",
             cap.not_run_passes.len(),
@@ -1906,6 +1915,7 @@ mod tests {
             efficiency,
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
+                cost_unknown: false,
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {
@@ -1948,6 +1958,57 @@ mod tests {
             "a cap that stopped nothing is not a capped run"
         );
         assert!(format_outcome_report(&outcome).contains("(not reached)"));
+    }
+
+    /// A run stopped because a call's cost could not be determined did not reach its limit: the
+    /// operator's summary line says the limit could not be enforced, with the amounts, never
+    /// "REACHED" (the 2026-10-29 run had spent under a cent of $10 when it was told that).
+    #[test]
+    fn the_spend_limit_line_says_could_not_be_enforced_when_a_cost_was_unknown() {
+        use camerata_server::cost_cap::{CostCapRecord, NotRunPass};
+        let record = CostCapRecord {
+            repos_not_finished: Vec::new(),
+            cost_unknown: true,
+            cap_usd: 10.0,
+            spent_usd: 0.0095,
+            not_run_passes: vec![NotRunPass {
+                files: Vec::new(),
+                repo: "r".into(),
+                group: "pass[all]".into(),
+                chunk: 1,
+                n_chunks: 1,
+                rule_batch: 2,
+                n_rule_batches: 2,
+                rule_ids: vec!["A-1".into()],
+                class: camerata_server::cost_cap::FailureClass::SpendLimit,
+            }],
+            not_run_stages: Vec::new(),
+            notes: vec![
+                "The spend limit could not be enforced past this point: a call to \
+                         `claude-unlisted-9` reported no cost."
+                    .to_string(),
+            ],
+        };
+        let text = render_cost_cap(&record);
+        assert!(text.contains("spend limit: $10.00, spent $0.01"), "{text}");
+        assert!(text.contains("COULD NOT BE ENFORCED"), "{text}");
+        assert!(text.contains("could not be determined"), "{text}");
+        assert!(!text.contains("REACHED"), "{text}");
+        assert!(
+            text.contains("INCOMPLETE") && text.contains("NOT RUN"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`claude-unlisted-9`"),
+            "the note follows: {text}"
+        );
+        // The plain reached case is unchanged.
+        let reached = CostCapRecord {
+            cost_unknown: false,
+            spent_usd: 10.4,
+            ..record
+        };
+        assert!(render_cost_cap(&reached).contains("-- REACHED."));
     }
 
     // ── validate_args ────────────────────────────────────────────────────────────────

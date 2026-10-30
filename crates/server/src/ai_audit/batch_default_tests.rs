@@ -112,6 +112,9 @@ pub(super) struct FakeBatch {
     /// Every fetch fails (the batch ended, but its results cannot be read).
     fetch_fails: bool,
     polls: AtomicUsize,
+    /// The model id every result row reports, with NO dollar figure (as the real parser leaves a
+    /// row whose id the registry cannot price). `None`: the stub id with the scripted cost.
+    echo_model: Option<String>,
 }
 
 impl FakeBatch {
@@ -133,7 +136,23 @@ impl FakeBatch {
             poll_fails: false,
             fetch_fails: false,
             polls: AtomicUsize::new(0),
+            echo_model: None,
         }
+    }
+    /// Every result row comes back as model `id` with no dollar figure, as the real parser
+    /// leaves a row whose echoed id the model registry cannot price.
+    pub(super) fn echoing_model(mut self, id: &str) -> Self {
+        self.echo_model = Some(id.to_string());
+        self
+    }
+    /// One result row's reply: the scripted cost on the stub id, or the echoed id unpriced.
+    fn reply(&self, text: &str, truncated: bool) -> LlmResponse {
+        let mut r = response(text, truncated, self.cost);
+        if let Some(id) = &self.echo_model {
+            r.model = id.clone();
+            r.cost_usd = None;
+        }
+        r
     }
     /// Real-time calls (the end-of-run second try) fail on the transport too.
     pub(super) fn with_realtime_failing(mut self) -> Self {
@@ -244,33 +263,24 @@ impl BatchApi for FakeBatch {
                 };
                 match (self.script)(round, &id) {
                     Reply::Ok => Some(row(
-                        Some(response(
-                            &finding_json(&format!("R{round}")),
-                            false,
-                            self.cost,
-                        )),
+                        Some(self.reply(&finding_json(&format!("R{round}")), false)),
                         None,
                     )),
                     Reply::Empty => Some(row(
-                        Some(response(
-                            r#"{"findings":[],"needs_files":[]}"#,
-                            false,
-                            self.cost,
-                        )),
+                        Some(self.reply(r#"{"findings":[],"needs_files":[]}"#, false)),
                         None,
                     )),
                     Reply::Truncated => Some(row(
-                        Some(response(r#"{"findings":[{"path":"#, true, self.cost)),
+                        Some(self.reply(r#"{"findings":[{"path":"#, true)),
                         None,
                     )),
-                    Reply::Malformed => Some(row(
-                        Some(response("prose, not JSON at all", false, self.cost)),
-                        None,
-                    )),
+                    Reply::Malformed => {
+                        Some(row(Some(self.reply("prose, not JSON at all", false)), None))
+                    }
                     Reply::Errored => Some(row(None, Some("overloaded"))),
                     Reply::Missing => None,
                     Reply::Refused => Some(BatchResultRow {
-                        billed: Some(response("", false, self.cost)),
+                        billed: Some(self.reply("", false)),
                         ..row(None, Some("the model refused this request (refusal)"))
                     }),
                 }
@@ -1125,4 +1135,55 @@ async fn an_accepted_batch_is_not_given_a_real_time_second_try() {
     let (_f, _ok, failures) = run(&api, &m).await;
     assert_eq!(failures.len(), 4);
     assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 0);
+}
+
+/// A batch result row is priced by the model id the API echoes in it. Should that id be one the
+/// model registry does not price (a snapshot or variant name the catalog has no entry for), the
+/// row is priced as the model the request NAMED, which the pre-flight checked for a price: the
+/// spend limit stays enforceable, every item is used, and the ledger names both ids. Before this,
+/// such a row's cost was unknown and the limit refused the rest of the run.
+#[tokio::test(start_paused = true)]
+async fn a_row_echoing_an_unpriced_model_id_is_priced_as_the_requested_model() {
+    let echoed = "claude-sonnet-5-experimental";
+    assert!(!crate::llm::is_priced(echoed), "the fixture id is unpriced");
+    let api = FakeBatch::new(|_round, _id| Reply::Ok).echoing_model(echoed);
+    let m = meter(eff(true), Some(50.0));
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 4, "every item was used: {failures:?}");
+    assert!(
+        !m.cost_unknown(),
+        "the limit stays enforceable: {:?}",
+        m.cost_cap_record()
+    );
+    let requested = resolve_audit_model(None);
+    assert!(crate::llm::is_priced(&requested));
+    let per_item = crate::llm::usage_cost_usd(
+        &requested,
+        &crate::llm::CallUsage {
+            input: Some(1_000),
+            output: Some(100),
+            cache_read: 0,
+            cache_creation: 0,
+            cache_creation_1h: None,
+        },
+        crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+    )
+    .expect("the requested model is priced");
+    assert!(
+        (m.spent_usd() - 4.0 * per_item).abs() < 1e-5,
+        "four items at the requested model's batch price: spent {} expected {}",
+        m.spent_usd(),
+        4.0 * per_item
+    );
+    let notes = m.cost_cap_record().map(|r| r.notes).unwrap_or_default();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&format!("`{echoed}`")) && n.contains(&format!("`{requested}`"))),
+        "the ledger names the echoed id and the id it was priced as: {notes:?}"
+    );
+    assert!(
+        notes.iter().all(|n| !n.contains("could not be enforced")),
+        "{notes:?}"
+    );
 }

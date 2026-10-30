@@ -892,7 +892,15 @@ impl UsageMeter {
                 .collect(),
             notes: budget.notes.clone(),
             repos_not_finished: budget.repos_not_finished.clone(),
+            cost_unknown: budget.cost_unknown,
         })
+    }
+
+    /// True once a call's cost could not be determined while a limit was set: the limit can no
+    /// longer be enforced, so nothing further is admitted (see [`Self::try_admit`]). What the
+    /// refusals that follow are reported as depends on this: the limit was NOT reached.
+    pub fn cost_unknown(&self) -> bool {
+        self.budget().cost_unknown
     }
 
     /// What the outage stop left undone; `None` when the run never stopped.
@@ -1016,7 +1024,7 @@ impl UsageMeter {
     /// names its stage, so the per-stage table can never drift from the aggregate.
     pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         self.stages.record(stage, r);
-        self.record(r);
+        self.record(stage, r);
         // A reply came back: the provider is reachable, so the outage streak starts over.
         self.health.note_success();
     }
@@ -1077,8 +1085,9 @@ impl UsageMeter {
     }
 
     /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
-    /// counted. Private: callers go through [`Self::record_stage`].
-    fn record(&self, r: &crate::llm::LlmResponse) {
+    /// counted. Private: callers go through [`Self::record_stage`]. `stage` names the call in
+    /// the note written when its cost cannot be determined.
+    fn record(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
@@ -1103,7 +1112,7 @@ impl UsageMeter {
                     crate::llm::PriceBasis::for_response(r),
                 );
                 if derived.is_none() {
-                    self.mark_cost_unknown(&r.model);
+                    self.mark_cost_unknown(stage, r);
                 }
                 derived
             }
@@ -1130,18 +1139,26 @@ impl UsageMeter {
     }
 
     /// A call's cost could not be determined while a cap is set: remember that the cap is no
-    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record.
-    fn mark_cost_unknown(&self, model: &str) {
+    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record,
+    /// naming the model, the stage and the token counts of the call, so the operator can find it
+    /// in the transcript and price it by hand.
+    fn mark_cost_unknown(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         {
             let mut budget = self.budget();
             if budget.cost_unknown {
                 return;
             }
             budget.cost_unknown = true;
+            let tokens = match (r.input_tokens, r.output_tokens) {
+                (Some(i), Some(o)) => format!("{i} input and {o} output tokens"),
+                _ => "no token counts".to_string(),
+            };
             budget.notes.push(format!(
-                "The spend limit could not be enforced past this point: a call to `{model}` \
-                 reported no cost and its tokens could not be priced, so what it cost is unknown. \
-                 No further passes were started (NOT RUN)."
+                "The spend limit could not be enforced past this point: a call to `{}` in the {} \
+                 stage reported no cost and its tokens could not be priced ({tokens}), so what \
+                 it cost is unknown. No further passes were started (NOT RUN).",
+                r.model,
+                stage.label()
             ));
         }
         self.admission.notify_waiters();
@@ -1154,7 +1171,7 @@ impl UsageMeter {
     pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
         if let Some(billed) = crate::llm::refusal_billed(error) {
             self.stages.record(stage, billed);
-            self.record(billed);
+            self.record(stage, billed);
         }
         // The outage stop watches every failed call, after the transport's own retries.
         self.health
@@ -1207,6 +1224,35 @@ pub fn resolve_audit_model(caller_pick: Option<&str>) -> String {
                 .filter(|s| !s.trim().is_empty())
         })
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
+/// The model the calibration stage runs on: the caller's calibration pick, else
+/// `CAMERATA_CALIBRATION_MODEL`, else the SCAN model (so an audit is end to end on one model by
+/// default). The one resolution the pre-flight ([`crate::cost_cap::models_the_run_will_use`])
+/// and the stage share, so the model the run names and prices is the model it calls.
+pub fn resolve_calibration_model(calibration_pick: Option<&str>, scan_model: &str) -> String {
+    calibration_pick
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CAMERATA_CALIBRATION_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| scan_model.to_string())
+}
+
+/// The model a stage's request NAMES: the stage's pick when it has one, else the run's default
+/// audit model ([`resolve_audit_model`]). Never empty.
+///
+/// A request with an empty model is not "the default": the transport fills it with the PROCESS
+/// default (`CAMERATA_LLM_MODEL`, whatever an operator's `.env` says), a model the pre-flight
+/// never named, the ledger never recorded and the spend limit's price check never saw. On
+/// 2026-10-29 that sent the alternatives stage to an unpriced id; its cost was unknown, so the
+/// limit refused every later pass with about $9.99 of a $10 limit unspent. Every audit-stage
+/// request goes through here so that cannot recur.
+pub fn stage_model(pick: Option<&str>) -> String {
+    resolve_audit_model(pick)
 }
 
 /// A snapshot of real audit usage, serialized onto the scan report for the UI's
@@ -3331,14 +3377,11 @@ pub async fn verify_findings(
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
         // request per pass (LlmRequest is consumed by complete_streaming).
         let build_req = || {
-            let mut req = LlmRequest::new(prompt.clone())
+            LlmRequest::new(prompt.clone())
                 .with_system(system.clone())
                 .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING))
-                .with_temperature(AUDIT_TEMPERATURE);
-            if let Some(m) = calibration_model {
-                req = req.with_model(m.to_string());
-            }
-            req
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_model(stage_model(calibration_model))
         };
 
         // Register (or replace) this pass's transcript entry with the REAL prompt before the
@@ -3459,16 +3502,14 @@ pub async fn verify_findings(
             uncalibrated.remove(&chunk_idx);
             continue;
         };
-        let mut req = LlmRequest::new(prompt)
+        let req = LlmRequest::new(prompt)
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(
                 chunk_results[chunk_idx].len(),
                 VERIFY_TOKENS_PER_FINDING,
             ))
-            .with_temperature(AUDIT_TEMPERATURE);
-        if let Some(m) = calibration_model {
-            req = req.with_model(m.to_string());
-        }
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_model(stage_model(calibration_model));
         let mut on_delta = |_: &str| {};
         match llm.complete_streaming(req, &mut on_delta).await {
             Ok(resp) => {
@@ -4629,16 +4670,14 @@ impl AlternativesAsk<'_> {
                 },
             );
         }
-        let mut req = LlmRequest::new(prompt)
+        let req = LlmRequest::new(prompt)
             .with_system(crate::prompt_frame::with_untrusted_clause(
                 alternatives_system_prompt(),
                 nonce,
             ))
             .with_max_tokens(alternatives_max_tokens(rules.len()))
-            .with_temperature(AUDIT_TEMPERATURE);
-        if let Some(m) = audit_model {
-            req = req.with_model(m.to_string());
-        }
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_model(stage_model(audit_model));
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
         // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
@@ -5252,10 +5291,8 @@ async fn run_fix_specifics_round(
         };
         let mut req = LlmRequest::new(prompt)
             .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING));
-        if let Some(m) = fix_model {
-            req = req.with_model(m.to_string());
-        }
+            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING))
+            .with_model(stage_model(fix_model));
         if let Some(effort) = fix_effort(fix_model) {
             req = req.with_effort(effort);
         }
@@ -5942,10 +5979,8 @@ async fn audit_pass(
             nonce,
         ))
         .with_max_tokens(scan_max_tokens(n_rules))
-        .with_temperature(AUDIT_TEMPERATURE);
-    if let Some(m) = audit_model {
-        req = req.with_model(m.to_string());
-    }
+        .with_temperature(AUDIT_TEMPERATURE)
+        .with_model(stage_model(audit_model));
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
@@ -7169,9 +7204,9 @@ async fn run_passes_batch(
                         if let Some(m) = meter {
                             m.record_wasted(Stage::ScanPass, &resp);
                             m.record_note(format!(
-                                "the truncation retry of batch item {} was not run: the spend \
-                             limit was reached",
-                                w.custom_id
+                                "the truncation retry of batch item {} was not run: {}",
+                                w.custom_id,
+                                crate::cost_cap::cause_for(m.cost_unknown())
                             ));
                         }
                         return (w, resp);
@@ -10719,32 +10754,23 @@ pub async fn audit_repo(
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
         selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
-    // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
-    let audit_model = model.map(str::to_string).or_else(|| {
-        std::env::var("CAMERATA_AUDIT_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    });
+    // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else the
+    // registry default. ALWAYS resolved here, to the same id the pre-flight priced and the
+    // ledger records (`resolve_audit_model`). It used to stay `None` when nothing was pinned, on
+    // the theory that the transport's own default would then serve both scan and calibration;
+    // but that default is the PROCESS default (`CAMERATA_LLM_MODEL`), which the pre-flight, the
+    // ledger key, the batch path and the spend limit's price check never consult. A run then
+    // reported one model and called another, and when the other was unpriced the spend limit
+    // could not count its calls and refused the rest of the run (2026-10-29).
+    let audit_model: Option<String> = Some(resolve_audit_model(model));
     // Calibration model: the user's calibration pick wins; else CAMERATA_CALIBRATION_MODEL;
-    // else fall back to the SCAN model so the audit is end-to-end on one model by default
-    // (no silent default-model calibration). The UI exposes this as its own picker.
-    //
-    // BUG-AI-3: when `calibration_model` is None, CAMERATA_CALIBRATION_MODEL is unset,
-    // AND `audit_model` is also None (both model param and CAMERATA_AUDIT_MODEL absent),
-    // `calib_model` is None — which means `verify_findings` passes None to `build_req` and
-    // the LLM client uses its compiled-in default model. This is correct: if neither scan
-    // nor calibration model is pinned, both default to the same LLM default, so the audit
-    // IS end-to-end on one model. The comment above was slightly misleading ("fall back to
-    // the SCAN model") when scan_model is itself None — the accurate statement is "fall
-    // back to the same source as the scan, which may itself be the LLM default."
-    let calib_model = calibration_model
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("CAMERATA_CALIBRATION_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or_else(|| audit_model.clone());
+    // else the SCAN model, so the audit is end to end on one model by default (no silent
+    // default-model calibration). The UI exposes this as its own picker. The same resolution
+    // the pre-flight lists the calibration model by.
+    let calib_model: Option<String> = Some(resolve_calibration_model(
+        calibration_model,
+        audit_model.as_deref().unwrap_or_default(),
+    ));
 
     // ── Multi-option semantic rules: decide (or accept the operator's forced choice of) ONE
     // option per rule, then REWRITE that rule's entry in `effective_selected` to the decided
@@ -11918,13 +11944,11 @@ async fn run_prose_lens(
             },
         );
     }
-    let mut req = LlmRequest::new(prompt)
+    let req = LlmRequest::new(prompt)
         .with_system(system)
         // Whole-repo structured output can be sizable (many controls / many threats).
-        .with_max_tokens(8192);
-    if let Some(m) = audit_model {
-        req = req.with_model(m.to_string());
-    }
+        .with_max_tokens(8192)
+        .with_model(stage_model(audit_model));
     let resp = if let Some((store, key)) = feedback {
         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
         llm.complete_streaming(req, &mut on_delta).await
@@ -12119,16 +12143,14 @@ async fn run_security_passes(
                 }
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
-                let mut req = LlmRequest::new(prompt)
+                let req = LlmRequest::new(prompt)
                     .with_system(crate::prompt_frame::with_untrusted_clause(
                         deep_security_system_prompt_with(terse_output_of(meter)),
                         nonce,
                     ))
                     .with_max_tokens(8192)
-                    .with_temperature(AUDIT_TEMPERATURE);
-                if let Some(m) = audit_model {
-                    req = req.with_model(m.to_string());
-                }
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_model(stage_model(audit_model));
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
                     let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
@@ -12249,13 +12271,10 @@ pub async fn run_deep_tier(
     let digest = build_digest(files, &nonce);
 
     // Resolve the model the same way the standard audit does: explicit pick wins, else
-    // CAMERATA_AUDIT_MODEL, else provider default. The deep tier is meant to run on the strong
-    // (Opus) model; the caller passes that through `audit_model`.
-    let model = audit_model.map(str::to_string).or_else(|| {
-        std::env::var("CAMERATA_AUDIT_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    });
+    // CAMERATA_AUDIT_MODEL, else the registry default (never the transport's process default:
+    // see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
+    // passes that through `audit_model`.
+    let model = Some(resolve_audit_model(audit_model));
 
     let threat = run_prose_lens(
         llm,
@@ -16486,36 +16505,95 @@ mod tests {
         );
     }
 
-    // ── BUG-AI-3 regression: calibration-model fallback when audit_model is None ─────
+    // ── BUG-AI-3 regression: calibration-model fallback when nothing is pinned ──────────
 
-    /// BUG-AI-3: when calibration_model, CAMERATA_CALIBRATION_MODEL, and audit_model are
-    /// all None/absent, calib_model resolves to None. This is CORRECT — the LLM uses its
-    /// default for both scan and calibration, keeping the audit end-to-end on one model.
-    /// The test documents the expected None behavior so any future refactor that changes
-    /// the fallback chain is caught explicitly.
+    /// BUG-AI-3, corrected 2026-10-29. The earlier form of this test pinned `calib_model` to
+    /// `None` when no model was chosen anywhere, on the theory that the transport's default would
+    /// then serve scan and calibration alike. That default is the PROCESS default
+    /// (`CAMERATA_LLM_MODEL`), not the model the pre-flight prices, the ledger records or the
+    /// batch path sends (`resolve_audit_model`); a run reported one model and called another, and
+    /// with an unpriced process default the spend limit refused the whole run. With nothing
+    /// pinned, scan and calibration now both resolve to the registry default, and the audit is
+    /// end to end on ONE model that the run can name and price.
     #[test]
-    fn bug_ai3_calib_model_none_when_all_sources_absent() {
-        // Replicate the fallback chain from audit_repo (with no env vars set in this test).
-        // We cannot call audit_repo directly (it needs a live LLM), so we test the chain
-        // logic in isolation — same three-level or_else chain the function uses.
-        let calibration_model: Option<&str> = None;
-        let audit_model: Option<String> = None; // CAMERATA_AUDIT_MODEL not set
-
-        let calib_model = calibration_model
-            .map(str::to_string)
-            .or_else(|| {
-                // In the test environment CAMERATA_CALIBRATION_MODEL is not set.
-                std::env::var("CAMERATA_CALIBRATION_MODEL")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .or_else(|| audit_model.clone());
-
+    fn bug_ai3_calibration_follows_the_resolved_scan_model_when_nothing_is_pinned() {
+        // In the test environment CAMERATA_CALIBRATION_MODEL is not set.
+        let scan = resolve_audit_model(None);
+        assert!(!scan.trim().is_empty(), "the scan model is never empty");
         assert!(
-            calib_model.is_none(),
-            "BUG-AI-3: calib_model must be None when all three sources are absent; \
-             both scan and calibration will use the LLM default (correct end-to-end-on-one-model \
-             behavior). Got: {calib_model:?}"
+            crate::llm::is_priced(&scan),
+            "the registry default `{scan}` is priced"
+        );
+        assert_eq!(resolve_calibration_model(None, &scan), scan);
+        assert_eq!(resolve_calibration_model(Some(""), &scan), scan);
+        assert_eq!(
+            resolve_calibration_model(Some("claude-opus-5"), &scan),
+            "claude-opus-5"
+        );
+        // A stage request never leaves with an empty model.
+        assert_eq!(stage_model(None), scan);
+        assert_eq!(stage_model(Some(" ")), scan);
+        assert_eq!(stage_model(Some("claude-opus-5")), "claude-opus-5");
+    }
+
+    /// The meter's last line of defence, as the 2026-10-29 run met it: a capped run records a
+    /// call that reported tokens but no dollars on an id the registry cannot price. The limit can
+    /// no longer be enforced, so the next admission is refused, the record says the cost was
+    /// unknown, and the disclosure says the limit could not be enforced, never that it was
+    /// reached (two calls had cost under a cent of a $10 limit).
+    #[tokio::test]
+    async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unenforceable() {
+        let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+            max_cost_usd: Some(10.0),
+            ..crate::cost_cap::RunControls::default()
+        });
+        meter.record_stage(
+            Stage::Alternatives,
+            &LlmResponse {
+                text: String::new(),
+                model: "claude-sonnet-4-6".to_string(),
+                backend: "api".to_string(),
+                cost_usd: None,
+                input_tokens: Some(30_201),
+                output_tokens: Some(4_681),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            },
+        );
+        assert!(meter.cost_unknown());
+        assert!(meter.admit().await.is_err(), "nothing more is admitted");
+        assert!(meter.retry_blocked());
+        meter.record_not_run(crate::cost_cap::NotRunPass {
+            repo: "acme/shop".into(),
+            group: "pass[all]".into(),
+            chunk: 1,
+            n_chunks: 1,
+            rule_batch: 1,
+            n_rule_batches: 8,
+            rule_ids: vec!["A-1".into()],
+            files: vec!["src/a.ts".into()],
+            class: FailureClass::SpendLimit,
+        });
+        let record = meter.cost_cap_record().expect("a limit was set");
+        assert!(record.cost_unknown);
+        assert!(record.stopped_the_run());
+        assert_eq!(
+            record.spent_usd, 0.0,
+            "an uncosted call adds nothing to spend"
+        );
+        let reason = &record.failed_passes()[0].reason;
+        assert!(reason.contains("could not be enforced"), "{reason}");
+        assert!(!reason.contains("was reached"), "{reason}");
+        assert!(
+            record
+                .notes
+                .iter()
+                .any(|n| n.contains("`claude-sonnet-4-6`")
+                    && n.contains(&format!("{} stage", Stage::Alternatives.label()))),
+            "the ledger names the model and the call: {:?}",
+            record.notes
         );
     }
 

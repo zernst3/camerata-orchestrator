@@ -1062,6 +1062,48 @@ fn messages_response(
     }
 }
 
+/// Price a reply that carries no dollar figure at the model the request NAMED.
+///
+/// A Message Batches result row is priced by the model id the API echoes in it
+/// ([`parse_batch_results_jsonl`]), and the parser cannot know what was requested. Should the API
+/// echo an id the model registry does not price (a snapshot or variant name the catalog has no
+/// entry for), the row's cost would be unknown, and a spend limit that cannot cost a call admits
+/// nothing more: the run would stop with the limit unspent. The request named a model the
+/// pre-flight checked for a price, and the call was billed as that model, so its list price is
+/// the figure to use. Cache writes are priced at `basis`'s TTL (the row's own 1-hour split is
+/// not kept on the response).
+///
+/// Returns the echoed id when the fallback was applied; the response keeps it as `model` so the
+/// ledger records what the API said ran, and the caller notes both ids. `None` when the reply
+/// already carried a cost, named the requested model itself, lacks token counts, or the requested
+/// model is unpriced too (the cost stays unknown, and the limit stops the run as before).
+pub fn price_as_requested(
+    resp: &mut LlmResponse,
+    requested_model: &str,
+    basis: PriceBasis,
+) -> Option<String> {
+    if resp.cost_usd.is_some() {
+        return None;
+    }
+    let requested = requested_model.trim();
+    if requested.is_empty() || requested == resp.model {
+        return None;
+    }
+    let cost = usage_cost_usd(
+        requested,
+        &CallUsage {
+            input: resp.input_tokens,
+            output: resp.output_tokens,
+            cache_read: resp.cache_read_input_tokens,
+            cache_creation: resp.cache_creation_input_tokens,
+            cache_creation_1h: None,
+        },
+        basis,
+    )?;
+    resp.cost_usd = Some(cost);
+    Some(resp.model.clone())
+}
+
 /// The error for a Messages response that ended with `stop_reason: "refusal"`. These models
 /// can decline a request with HTTP 200 and no usable content; read as a normal response that
 /// is an empty answer, which a scan would take for "no findings" and report a clean pass.
@@ -3666,6 +3708,49 @@ mod tests {
         let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
         let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
         assert!((cost - 0.125).abs() < 1e-9, "$0.25 x 0.5, got {cost}");
+    }
+
+    /// A batch row whose echoed model id the registry cannot price is left uncosted by the parser
+    /// (it cannot know what was requested); priced as the requested model it carries that model's
+    /// batch price and keeps the echoed id. A row already priced, or one whose requested model is
+    /// unpriced too, is left alone.
+    #[test]
+    fn a_batch_row_echoing_an_unpriced_id_is_priced_as_the_requested_model() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-5-experimental","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let mut resp = rows[0].response.clone().unwrap();
+        assert!(
+            resp.cost_usd.is_none(),
+            "the parser cannot price the echoed id"
+        );
+        let basis = PriceBasis::batch(BATCH_CACHE_TTL);
+        assert_eq!(
+            price_as_requested(&mut resp, "claude-sonnet-5", basis).as_deref(),
+            Some("claude-sonnet-5-experimental")
+        );
+        let expected = usd(
+            "claude-sonnet-5",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                ..Default::default()
+            },
+            basis,
+        );
+        assert!((resp.cost_usd.unwrap() - expected).abs() < 1e-9);
+        assert_eq!(
+            resp.model, "claude-sonnet-5-experimental",
+            "what ran is kept"
+        );
+        // Already priced: untouched.
+        assert!(price_as_requested(&mut resp, "claude-opus-5", basis).is_none());
+        assert!((resp.cost_usd.unwrap() - expected).abs() < 1e-9);
+        // Requested model unpriced too: still unknown.
+        let mut again = rows[0].response.clone().unwrap();
+        assert!(price_as_requested(&mut again, "some/other:free", basis).is_none());
+        assert!(again.cost_usd.is_none());
+        // No request model to fall back to: unknown.
+        assert!(price_as_requested(&mut again, "  ", basis).is_none());
     }
 
     /// The usage ledger's fallback prices a response with no reported cost through the SAME
