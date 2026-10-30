@@ -163,9 +163,10 @@ pub fn default_balanced_model() -> String {
     "claude-sonnet-5-5".to_string()
 }
 
-/// The shipped default for [`TierMap::strongest`]: Claude Opus 5 (frontier-class).
+/// The shipped default for [`TierMap::strongest`]: Claude Opus 5.5 (frontier-class). The older
+/// Opus stays selectable and priced.
 pub fn default_strongest_model() -> String {
-    "claude-opus-5".to_string()
+    "claude-opus-5-5".to_string()
 }
 
 impl Default for TierMap {
@@ -353,7 +354,7 @@ mod tests {
         // fast/balanced are now Vec<String>; check the primary (first) element.
         assert_eq!(m.fast_primary(), "claude-haiku-5-5");
         assert_eq!(m.balanced_primary(), "claude-sonnet-5-5");
-        assert_eq!(m.strongest, "claude-opus-5");
+        assert_eq!(m.strongest, "claude-opus-5-5");
     }
 
     #[test]
@@ -361,7 +362,7 @@ mod tests {
         let m = TierMap::default();
         assert_eq!(m.model_for(CapabilityBand::Fast), "claude-haiku-5-5");
         assert_eq!(m.model_for(CapabilityBand::Balanced), "claude-sonnet-5-5");
-        assert_eq!(m.model_for(CapabilityBand::Strongest), "claude-opus-5");
+        assert_eq!(m.model_for(CapabilityBand::Strongest), "claude-opus-5-5");
     }
 
     #[test]
@@ -482,7 +483,7 @@ mod tests {
         let db = task(TaskKind::Database, "schema");
         let frontend = task(TaskKind::Frontend, "list view");
 
-        assert_eq!(m.model_for_task(&backend), "claude-opus-5");
+        assert_eq!(m.model_for_task(&backend), "claude-opus-5-5");
         assert_eq!(m.model_for_task(&test_t), "claude-haiku-5-5");
         assert_eq!(m.model_for_task(&db), "claude-sonnet-5-5");
         assert_eq!(m.model_for_task(&frontend), "claude-sonnet-5-5");
@@ -550,7 +551,7 @@ mod tests {
         let m = TierMap::default();
         let chain = m.chain_for(CapabilityBand::Strongest);
         assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0], "claude-opus-5");
+        assert_eq!(chain[0], "claude-opus-5-5");
     }
 
     #[test]

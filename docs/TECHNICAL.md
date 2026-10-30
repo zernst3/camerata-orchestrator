@@ -5326,10 +5326,12 @@ A model is never read from the environment or a `.env` file. The sources, in ord
 1. The open project's model configuration in the cockpit (`StepModels`, the tier map, the L3
    review model). A project file written before a setting existed loads with the built-in
    defaults (`#[serde(default)]`).
-2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`.
+2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`,
+   `--clone-judge-model`.
 3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5), with Haiku 5.5
-   (`claude-haiku-5-5`) for the fix stage and the clone judge. Older ids stay selectable and
-   priced.
+   (`claude-haiku-5-5`) for the fix stage and the clone judge and Opus 5.5 (`claude-opus-5-5`) for
+   the tier map's strongest band (`fleet::tier::default_strongest_model`). Older ids stay
+   selectable and priced.
 
 `ai_audit::resolve_audit_model`, `resolve_calibration_model`, `stage_model` and
 `clone_advisory::resolve_clone_judge_model` apply that order and are shared by the cockpit and the

@@ -1495,7 +1495,7 @@ mod tests {
 
         let expected = [
             (CapabilityBand::Balanced, "claude-sonnet-5-5"),
-            (CapabilityBand::Strongest, "claude-opus-5"),
+            (CapabilityBand::Strongest, "claude-opus-5-5"),
             (CapabilityBand::Balanced, "claude-sonnet-5-5"),
             (CapabilityBand::Fast, "claude-haiku-5-5"),
         ];

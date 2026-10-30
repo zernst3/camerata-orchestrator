@@ -516,7 +516,7 @@ fn scope4_balanced_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::Balanced);
 
     assert_eq!(p.model_profile, ModelProfile::Balanced);
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
     assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
     assert_eq!(p.tier_map.fast, vec!["claude-haiku-5-5".to_string()]);
     // Every step model overwritten to Haiku, except the fix step, which a profile leaves unset.
@@ -544,7 +544,7 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::MaxQuality);
 
     assert_eq!(p.model_profile, ModelProfile::MaxQuality);
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
     assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
     assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5-5".to_string()]);
     for (kind, _) in profile_steps() {
@@ -585,7 +585,7 @@ fn scope4_max_efficiency_profile_picks_free_models() {
 
     assert_eq!(p.model_profile, ModelProfile::MaxEfficiency);
     // Strongest stays Opus; balanced/fast chains lead with the free model.
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
     assert_eq!(p.tier_map.balanced[0], "qwen/qwen3-coder:free");
     // Step models use the free coder.
     assert_eq!(p.model_for_step(StepKind::Audit), "qwen/qwen3-coder:free");

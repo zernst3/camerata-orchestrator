@@ -347,7 +347,7 @@ pub struct Project {
     /// Serde default fills in [`TierMap::default()`] for projects persisted before this
     /// field existed, so no migration is required. The default Claude tier map is:
     /// `fast=claude-haiku-5-5`, `balanced=claude-sonnet-5-5`,
-    /// `strongest=claude-opus-5`.
+    /// `strongest=claude-opus-5-5`.
     #[serde(default)]
     pub tier_map: TierMap,
     /// VCS-action gate configuration: per-rule enabled flags and tunables for the

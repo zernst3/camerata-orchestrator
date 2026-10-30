@@ -1448,11 +1448,19 @@ mod tests {
 
     #[test]
     fn claude_entries_ids_match_fleet_tier_defaults() {
-        // These must stay in sync with fleet/src/tier.rs default_*_model().
+        // These must stay in sync with fleet/src/tier.rs default_*_model(): the defaults are
+        // Opus 5.5, Sonnet 5.5 and Haiku 5.5; the older ids stay listed and priced.
         let entries = claude_entries();
-        assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
-        assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
-        assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
+        for id in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            assert!(entries.iter().any(|e| e.id == id), "{id} must be listed");
+        }
     }
 
     // ── Claude static list prices ─────────────────────────────────────────────

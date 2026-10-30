@@ -375,7 +375,7 @@ fn default_balanced_chain_str() -> Vec<String> {
 }
 
 fn default_strongest_model_str() -> String {
-    "claude-opus-5".to_string()
+    "claude-opus-5-5".to_string()
 }
 
 impl Default for TierMapView {

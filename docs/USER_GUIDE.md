@@ -2485,9 +2485,9 @@ For steps where you also pick a model per run (audit, calibration, research chat
 choice wins over the project default for that run only.
 
 **Where a model comes from.** Models are chosen per project in the app (the settings above), and on
-the command line only by flags (`--model`, `--calibration-model`, `--fix-model`). When nothing is
-chosen, the built-in default is Sonnet 5.5 (`claude-sonnet-5-5`), and the cheap fix and clone-judge
-stages default to Haiku 5.5. Camerata never reads a model from the environment or from a `.env`
+the command line only by flags (`--model`, `--calibration-model`, `--fix-model`, `--clone-judge-model`). When nothing is
+chosen, the built-in default is Sonnet 5.5 (`claude-sonnet-5-5`), the cheap fix and clone-judge
+stages default to Haiku 5.5 and the fleet's strongest band defaults to Opus 5.5 (`claude-opus-5-5`). Camerata never reads a model from the environment or from a `.env`
 file, so a stray line in a local file cannot change which model a run uses or what it costs. A
 project saved before a model setting existed opens with these built-in defaults. In the app the
 duplicate-code checker (the clone judge) runs on the project's fast model band.
