@@ -5210,9 +5210,11 @@ Rules, every fix:
   isn't present anywhere in the evidence you were given for that finding: a name or file path
   in backticks must appear in that evidence, and so must every table, column, function, file
   or variable name inside a code snippet (ordinary words and universal names such as
-  `Authorization`, `console.error` and try/catch/finally are fine). When the fix needs a NEW
-  name, describe it in plain words ("a new helper that returns the signed URL") instead of
-  naming it in backticks or in a snippet.
+  `Authorization`, `console.error` and try/catch/finally are fine). Each finding's block ends
+  with a `Names you may use:` line: the identifiers and file names in its evidence. Use only
+  those, ordinary words and the universal names as backticked names or inside a snippet. When
+  the fix needs a NEW name, describe it in plain words ("a new helper that returns the signed
+  URL") instead of naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
   app/auth/signout/route.ts does") instead of describing the pattern generically.
@@ -5286,6 +5288,47 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     )
 }
 
+/// The most names a finding's `Names you may use:` line lists.
+const MAX_FIX_NAMES_LISTED: usize = 40;
+
+/// The identifiers and file names of a finding's fix evidence (`evidence`, the blob
+/// [`fix_evidence_blob`] builds, which is exactly what the grounding check looks a name up in):
+/// every file-like word and every word shaped like a name somebody chose (`snake_case`,
+/// `camelCase`, `PascalCase` with two capitals), in order of first appearance, without repeats.
+/// The prompt prints it under `Names you may use:` so the model is told which names the check
+/// will find; a name in backticks or in a snippet that is not in the evidence is rejected
+/// ([`find_ungrounded_identifier`]), whether or not it is listed here (a plain word that the
+/// evidence holds is as good as a listed one).
+fn fix_names_available(evidence: &str) -> Vec<String> {
+    let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
+    // Position of each candidate, so the list reads in the order the evidence does.
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for m in path_re.find_iter(evidence) {
+        let word = m.as_str().trim_matches(|c: char| matches!(c, '.' | ','));
+        if is_file_like(word, false) {
+            found.push((m.start(), word.to_string()));
+        }
+    }
+    let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+    for m in word_re.find_iter(evidence) {
+        let part = m.as_str();
+        if part.len() >= 3 && is_chosen_name(part) {
+            found.push((m.start(), part.to_string()));
+        }
+    }
+    found.sort_by_key(|(pos, _)| *pos);
+    let mut out: Vec<String> = Vec::new();
+    for (_, name) in found {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+        if out.len() >= MAX_FIX_NAMES_LISTED {
+            break;
+        }
+    }
+    out
+}
+
 /// The "Captured objects" line of a finding's block, or nothing when it captured none.
 fn captured_objects_line(f: &Finding) -> String {
     if object_captures(f).next().is_none() {
@@ -5335,6 +5378,19 @@ fn build_fix_specific_block(
         let context = fix_context_window(files, &f.path, f.line, 8);
         if !context.is_empty() {
             evidence.push_str(&format!("Surrounding code:\n{context}"));
+        }
+        // The names the grounding check will find, printed so the model is told what is checked.
+        let names =
+            fix_names_available(&camerata_secrets::redact_str(&fix_evidence_blob(f, files)));
+        if !names.is_empty() {
+            evidence.push_str(&format!(
+                "Names you may use: {}\n",
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         out.push_str(&crate::prompt_frame::frame_untrusted(
             nonce,
@@ -13101,6 +13157,9 @@ mod structured_output_tests;
 
 #[cfg(test)]
 mod opaque_id_tests;
+
+#[cfg(test)]
+mod check_prompt_tests;
 
 #[cfg(test)]
 mod tests {

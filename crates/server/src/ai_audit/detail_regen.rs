@@ -79,11 +79,11 @@ pub(crate) fn detail_regen_system_prompt() -> String {
 Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
 
 Rules, every finding:
-- Keep every fact the short statement already makes: each file name, symbol, flag and other file it names stays in your explanation, spelled exactly as given. Never contradict it.
+- Keep every fact the short statement already makes. Never contradict it. Each finding's block has a `Names to keep:` line: the exact names (files, symbols, flags) your explanation must contain, spelled as listed. An explanation missing one of them is discarded; no other name is required, so write everything else in your own words.
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
 - Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. The fix direction may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
 - If the statement says the case is borderline, start your explanation with "Borderline:", keep saying so, and say what would settle it.
-- A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) may be written as its separate parts, each spelled exactly as given, when a part is itself a name (snake_case or camelCase); a plain member access such as supabase.from stays as written.
+- A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) is listed as its separate parts when a part is itself a name (snake_case or camelCase): write each listed part. A plain member access such as supabase.from is listed whole and stays as written.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
@@ -457,6 +457,18 @@ fn build_block(
             camerata_secrets::redact_str(&f.snippet)
         ));
     }
+    // The names the check requires the explanation to keep, printed so the model is told what is
+    // checked ([`names_to_keep`] is also what the check reads).
+    let keep = names_to_keep(f, files);
+    if !keep.is_empty() {
+        evidence.push_str(&format!(
+            "Names to keep: {}\n",
+            keep.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     evidence.push_str(&captured_objects_line(f));
     let mut code_shown = f.snippet.clone();
     let window = fix_context_window(files, &f.path, f.line, DETAIL_CONTEXT_RADIUS);
@@ -718,6 +730,29 @@ pub(super) fn precondition_scope(text: &str) -> String {
     kept.join(" ")
 }
 
+/// The names a finding's regenerated explanation must contain: every path or identifier its
+/// one-sentence statement names (after the secret redaction both sides go through), a compound
+/// name (`audit_log.action`, `created_by/modified_by`) as its parts. ONE function for the prompt
+/// (each block lists these under `Names to keep:`) and for the check ([`accept_entry`]), so the
+/// model is told exactly what is checked.
+pub(super) fn names_to_keep(f: &Finding, files: &[(String, String)]) -> Vec<String> {
+    let redacted_short = camerata_secrets::redact_str(short_statement_of(&f.detail));
+    let mut out: Vec<String> = Vec::new();
+    for token in named_tokens(&redacted_short, files) {
+        let names = if token.parts.is_empty() {
+            vec![token.text]
+        } else {
+            token.parts
+        };
+        for name in names {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 /// The checks one entry must pass to be written (the id match is done by the caller, which
 /// knows the batch; the entry carries no location, because Camerata attaches the finding's).
 /// Returns the text to write: the model's, with `Borderline: ` put back at the
@@ -732,18 +767,15 @@ pub(super) fn accept_entry(
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
     // Every path or identifier the statement named stays; a compound name stays as its parts.
-    // Both sides go through the same secret redaction: the text is what would be written, and a
+    // The list is the one the prompt printed under `Names to keep:` ([`names_to_keep`]). Both
+    // sides go through the same secret redaction: the text is what would be written, and a
     // name the redactor rewrites in the statement is rewritten the same way in the text, so a
     // kept secret-shaped name is not mistaken for a dropped one.
-    let redacted_short = camerata_secrets::redact_str(short);
-    for token in named_tokens(&redacted_short, files) {
-        if token.parts.is_empty() {
-            if !text.contains(&token.text) {
-                return Err(Reject::DropsNamedToken(token.text));
-            }
-        } else if let Some(missing) = token.parts.iter().find(|p| !text.contains(p.as_str())) {
-            return Err(Reject::DropsNamedToken(missing.clone()));
-        }
+    if let Some(missing) = names_to_keep(f, files)
+        .into_iter()
+        .find(|name| !text.contains(name.as_str()))
+    {
+        return Err(Reject::DropsNamedToken(missing));
     }
     // No new exploit precondition. The same phrase list as calibration's raise-block and the D5
     // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would

@@ -3057,6 +3057,14 @@ keeps its id across rounds (it hashes the finding's place in the run, not its pl
 batch), and a position is no address, so a reply numbered from 0 or 1 lands on no finding.
 Prompt schema version 4.
 
+*The prompt says what the check requires.* Each detail block carries a `Names to keep:`
+line (`detail_regen::names_to_keep`: every path or identifier the one-sentence statement
+names, a compound such as `audit_log.action` as its parts) and the acceptance check reads
+the same function, so the sentence and the check cannot differ. Each fix block ends with a
+`Names you may use:` line (`fix_names_available`: the file-like words and chosen-shaped
+identifiers of the evidence the grounding check looks a name up in); anything else is
+introduced as a new name in plain words.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its
