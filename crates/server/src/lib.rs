@@ -128,10 +128,17 @@ pub use camerata_app_core::schedule;
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
+/// D3: the standard JavaScript, Web and Node API names and the ESLint rule names a fix may use
+/// without them being in the finding's evidence.
+pub(crate) mod fix_standard_names;
 /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE — turns the `scan_ledger` summary a human used to
 /// eyeball into a verdict with an exit code, so a silently degraded scan is caught before a
 /// graded run is paid for rather than after. See the module doc comment.
 pub mod integrity_gate;
+/// D1: the content test for a junk model finding (placeholder text, no evidence, a discard
+/// verdict in its own explanation), shared by scan parsing, the post-calibration filter and the
+/// release gate. See the module doc comment.
+pub mod junk_finding;
 /// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
 /// must resolve to a real wired detector. See the module doc comment.
 mod mechanical_gate;

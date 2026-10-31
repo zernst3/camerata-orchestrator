@@ -1524,7 +1524,11 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// the fix direction, and the prompt lists the names the text must keep; the fix reply is
 /// addressed by the same kind of opaque id instead of a batch position, and its prompt lists
 /// the names the evidence lets the fix use.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 4;
+///
+/// 5: defects D2 and D4. The detail-regeneration reply is one entry per finding keyed by its id
+/// (the schema requires every id), and the fix prompt says an omitted id is asked about once
+/// more and is never sent for a convention row.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 5;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
@@ -1904,6 +1908,7 @@ pub fn parse_ai_findings(
     };
 
     let mut findings = Vec::new();
+    let mut junk_dropped: Vec<String> = Vec::new();
     if let Some(arr) = v["findings"].as_array() {
         for f in arr {
             let rule = ["rule", "rule_id", "id"]
@@ -1940,6 +1945,21 @@ pub fn parse_ai_findings(
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
             if title.is_empty() && detail.is_empty() && code.is_empty() {
+                continue;
+            }
+            // D1: a row the model filled with placeholder text (title `placeholder`, code and
+            // detail `x`, a rule id naming a placeholder) never becomes a finding. Counted below.
+            if let Some(why) = crate::junk_finding::parse_gate_reason(
+                !adopted.contains(&rule_id),
+                &rule_id,
+                &title,
+                &code,
+                &detail,
+            ) {
+                junk_dropped.push(format!(
+                    "{rule_id} at {}: {why}",
+                    f["path"].as_str().unwrap_or("(repo)")
+                ));
                 continue;
             }
             // `snippet` holds the VERBATIM offending line when the model gave one (matches the
@@ -2011,6 +2031,15 @@ pub fn parse_ai_findings(
             crate::onboard::redact::redact_finding(&mut finding);
             findings.push(finding);
         }
+    }
+    if !junk_dropped.is_empty() {
+        // Operator side only: the client report never mentions a row the model should not have
+        // written.
+        eprintln!(
+            "[camerata-server] {repo}: dropped {} junk finding(s) at scan parsing: {}",
+            junk_dropped.len(),
+            junk_dropped.join("; ")
+        );
     }
 
     let mut proposed = Vec::new();
@@ -5278,7 +5307,9 @@ Return ONLY JSON, no prose:
 {"fixes":[{"id":"<the finding's id, copied exactly>","fix":"..."}]}
 One entry per finding you could ground a fix for, addressed by the id in square brackets that
 opens its block. Omit any id you could not confidently ground — an omitted fix is far better
-than an invented one."#
+than an invented one. Every finding you are sent is a fault with something to change (a
+statement that the code follows a convention is never sent to you), so an omitted id is asked
+about once more in a smaller request, and then gets the rule's own generic fix."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -5613,6 +5644,11 @@ fn snippet_names(span: &str) -> Vec<String> {
         let word = raw.trim_matches(|c: char| matches!(c, ':' | '-'));
         let followed_by_call = after.starts_with('(');
         let word_trimmed = word.trim_end_matches('.');
+        // D3: a standard JavaScript, Web or Node name (`Number.isSafeInteger`, `crypto.randomUUID`)
+        // is the platform's, not a name the repository chose.
+        if crate::fix_standard_names::is_standard_js_name(word_trimmed) {
+            continue;
+        }
         if is_file_like(word_trimmed, followed_by_call) {
             out.push(word_trimmed.to_string());
             continue;
@@ -5628,7 +5664,10 @@ fn snippet_names(span: &str) -> Vec<String> {
             }
         }
         for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if tok.len() >= 3 && is_chosen_name(tok) {
+            if tok.len() >= 3
+                && is_chosen_name(tok)
+                && !crate::fix_standard_names::is_standard_js_name(tok)
+            {
                 out.push(tok.to_string());
             }
         }
@@ -5780,6 +5819,8 @@ pub(crate) fn find_ungrounded_identifier_in(
         }
         if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str())
             || UNIVERSAL_FIX_NAMES.contains(&trimmed)
+            || crate::fix_standard_names::is_standard_js_name(trimmed)
+            || crate::fix_standard_names::is_known_eslint_rule(trimmed)
         {
             continue;
         }
@@ -6316,7 +6357,13 @@ pub async fn generate_fix_specifics(
         .iter()
         .enumerate()
         .filter(|(_, f)| {
-            f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID && f.fix_specific.is_none()
+            f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID
+                && f.fix_specific.is_none()
+                // D2: a row that states a convention or an assessment gap (an informational
+                // kind) has no defect to fix. The prompt tells the model to omit a fix it
+                // cannot ground, so the model's correct omission here used to count as a
+                // failure, be asked again in every round, and end as a failed part.
+                && !f.kind.as_ref().is_some_and(|k| k.is_informational())
         })
         .map(|(i, _)| i)
         .collect();
@@ -7051,6 +7098,111 @@ pub(crate) fn complete_array_objects<'a>(text: &'a str, key: &str) -> Vec<&'a st
         .into_iter()
         .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
         .collect()
+}
+
+/// The COMPLETE `"key": {...}` members of the object under `key` in a reply that may have been
+/// cut off mid-way, as `(member name, the member's object text)`: the keyed twin of
+/// [`complete_array_objects`], for a reply that holds one property per id. The last, unfinished
+/// member and anything after it are not guessed at. Strings and escapes are tracked, so a brace
+/// or a quote inside a string does not move a boundary. Each member's text is valid JSON.
+pub(crate) fn complete_keyed_objects<'a>(text: &'a str, key: &str) -> Vec<(String, &'a str)> {
+    let Some(obj_start) = text.find('{') else {
+        return Vec::new();
+    };
+    let json = &text[obj_start..];
+    let quoted = format!("\"{key}\"");
+    let Some(key_at) = json
+        .match_indices(quoted.as_str())
+        .map(|(i, _)| i)
+        .find(|&i| {
+            json[..i]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c == '{' || c == ',')
+        })
+    else {
+        return Vec::new();
+    };
+    let after = &json[key_at + quoted.len()..];
+    let Some(open) = after.find('{') else {
+        return Vec::new();
+    };
+    // Only whitespace and a colon may sit between the key and its object.
+    if !after[..open].chars().all(|c| c.is_whitespace() || c == ':') {
+        return Vec::new();
+    }
+    let body = &after[open + 1..];
+    let bytes = body.as_bytes();
+    let mut members: Vec<(String, &str)> = Vec::new();
+    let mut i = 0usize;
+    'members: while i < bytes.len() {
+        // Skip to the next member name (a string), or stop at the closing brace of the object.
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'"' {
+            break;
+        }
+        let name_start = i + 1;
+        let mut j = name_start;
+        let mut esc = false;
+        while j < bytes.len() {
+            if esc {
+                esc = false;
+            } else if bytes[j] == b'\\' {
+                esc = true;
+            } else if bytes[j] == b'"' {
+                break;
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        let Ok(name) = serde_json::from_str::<String>(&body[name_start - 1..=j]) else {
+            break;
+        };
+        i = j + 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'{' {
+            break;
+        }
+        let start = i;
+        let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if b == b'\\' {
+                    esc = true;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if b == b'"' {
+                in_str = true;
+            } else if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    let text = &body[start..=i];
+                    if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+                        members.push((name, text));
+                    }
+                    i += 1;
+                    continue 'members;
+                }
+            }
+            i += 1;
+        }
+        // The member never closed: the cut-off point. Nothing after it is read.
+        break;
+    }
+    members
 }
 
 /// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut
@@ -8950,6 +9102,36 @@ const MIN_CONTAINED_SNIPPET: usize = 12;
 /// problem (two things one rule found at line 0 of a file, or at one unresolved line
 /// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
 /// any repeat carried. Order is preserved.
+/// D1: remove, after the detail and calibration steps, every row the model INVENTED (rule id
+/// prefixed `AI-`) whose own text says to throw it away ("discard this finding", "placeholder
+/// finding"), or whose rule id or headline is a placeholder. Calibration itself never drops a
+/// row; the verdict it and the detail step write into the row's explanation is what is acted on
+/// here, and only for a row no adopted rule backs. Operator side, each removal is logged with its
+/// rule and place; the client report never mentions it. Returns how many rows were removed.
+fn drop_discarded_invented_rows(repo: &str, findings: &mut Vec<Finding>) -> usize {
+    let mut removed = Vec::new();
+    findings.retain(|f| {
+        let junk = f.rule_id.starts_with("AI-")
+            && crate::junk_finding::is_junk_invented_row(
+                &f.rule_id,
+                &finding_headline(f),
+                &f.detail,
+            );
+        if junk {
+            removed.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+        }
+        !junk
+    });
+    if !removed.is_empty() {
+        eprintln!(
+            "[camerata-server] {repo}: dropped {} finding(s) the model's own text said to discard: {}",
+            removed.len(),
+            removed.join("; ")
+        );
+    }
+    removed.len()
+}
+
 fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
     let mut by_key: std::collections::HashMap<(String, usize, String), Vec<(String, usize)>> =
         std::collections::HashMap::new();
@@ -12260,13 +12442,20 @@ pub async fn audit_repo(
             dropped_no_convention = before.saturating_sub(verified.len());
         }
     }
+    // D1: the detail and calibration steps write "discard this finding" into a placeholder row's
+    // explanation; act on it for the rows the model invented, and account for the removal below.
+    let dropped_discarded = drop_discarded_invented_rows(repo, &mut verified);
     // W1: calibration itself never drops a row (see this block's own doc comment above); the
     // ONLY row-count reductions between `pre_calibration_len` and here are the P7
-    // not-applicable filter and the A5.3 no-convention filter just above, so those are the
-    // explicit dispositions this stage accounts for.
+    // not-applicable filter, the A5.3 no-convention filter and the D1 discard filter just
+    // above, so those are the explicit dispositions this stage accounts for.
     {
         let rows_out = verified.len();
         let mut acc = crate::scan_ledger::StageAccounting::default();
+        if dropped_discarded > 0 {
+            acc.other
+                .push(("discarded_placeholder_row".to_string(), dropped_discarded));
+        }
         if dropped_not_applicable > 0 {
             acc.other.push((
                 "not_applicable_rule_filtered".to_string(),
@@ -14428,6 +14617,71 @@ mod tests {
         // Anti-over-rotation guard: the sibling medium finding must NOT be swept up into
         // critical just because another finding in the same batch was critical.
         assert_eq!(findings[1].severity, "medium");
+    }
+
+    /// D1: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
+    /// (title `placeholder`, code and detail `x`) is not a finding; the real row beside it is.
+    #[test]
+    fn parse_ai_findings_drops_a_placeholder_row_and_keeps_the_real_one() {
+        let raw = r#"{"findings":[
+            {"path":"lib/supabase/admin.ts","line":8,"severity":"low",
+             "rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER","title":"placeholder","code":"x","detail":"x"},
+            {"path":"lib/supabase/admin.ts","line":12,"severity":"high",
+             "rule":"service-role-key-in-client-bundle","title":"Service role key reaches the browser",
+             "code":"export const admin = createClient(url, serviceKey)",
+             "detail":"The admin client is built with the service role key in a module the browser imports."}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].line, 12);
+    }
+
+    /// D1: each junk shape is refused on its own (an empty reply for code and detail, a
+    /// placeholder title over real text, a placeholder rule id over real text).
+    #[test]
+    fn parse_ai_findings_refuses_each_junk_shape_for_an_invented_rule() {
+        let none = std::collections::HashSet::new();
+        for row in [
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"A real title","code":"","detail":""}"#,
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"A real title","code":"x","detail":"n/a"}"#,
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"placeholder","code":"db.query(sql)","detail":"Builds SQL from input."}"#,
+            r#"{"path":"a.ts","line":1,"rule":"typescript-placeholder","title":"A real title","code":"db.query(sql)","detail":"Builds SQL from input."}"#,
+        ] {
+            let raw = format!(r#"{{"findings":[{row}],"proposed_rules":[]}}"#);
+            let (findings, _) = parse_ai_findings("me/api", &raw, &none);
+            assert!(findings.is_empty(), "{row} produced {findings:#?}");
+        }
+    }
+
+    /// D1: a row under an ADOPTED rule is kept when it has a real title even with no code and
+    /// no detail, since the rule backs it.
+    #[test]
+    fn parse_ai_findings_keeps_an_adopted_rule_row_that_has_only_a_title() {
+        let adopted: std::collections::HashSet<String> = ["SEC-NO-RAW-SQL-CONCAT-1".to_string()]
+            .into_iter()
+            .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":1,"rule":"SEC-NO-RAW-SQL-CONCAT-1",
+            "title":"SQL built from request input","code":"","detail":""}],"proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert_eq!(findings.len(), 1);
+    }
+
+    /// D1: after the detail and calibration steps, a model-invented row whose explanation says
+    /// to discard it is removed; a row under an adopted rule is never removed by its prose.
+    #[test]
+    fn drop_discarded_invented_rows_acts_on_the_discard_verdict() {
+        let mut discarded = finding("AI-JAVASCRIPT-PLACEHOLDER-NOTE", "low");
+        discarded.detail = "This finding contains only a placeholder statement with the code 'x'. Discard this finding.".into();
+        let mut kept_ai = finding("AI-REAL-ONE", "high");
+        kept_ai.detail = "Real title — The handler trusts the caller.".into();
+        let mut adopted = finding("SEC-NO-RAW-SQL-CONCAT-1", "high");
+        adopted.detail = "Raw SQL — a note that says discard this finding".into();
+        let mut rows = vec![discarded, kept_ai, adopted];
+        let removed = drop_discarded_invented_rows("me/api", &mut rows);
+        assert_eq!(removed, 1);
+        let ids: Vec<&str> = rows.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(ids, vec!["AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"]);
     }
 
     #[test]
@@ -22220,6 +22474,68 @@ mod tests {
         assert_eq!(find_ungrounded_identifier(fix, evidence), None);
     }
 
+    /// D3: a standard JavaScript or Web API name is not an invented one, written as a backticked
+    /// name, inside a snippet, or bare (`import { randomUUID }`).
+    #[test]
+    fn find_ungrounded_identifier_accepts_standard_javascript_and_web_api_names() {
+        let evidence = "supabase/functions/charge/index.ts uses amount_cents";
+        for fix in [
+            "Validate `amount_cents` with `Number.isSafeInteger(amount_cents) && amount_cents > 0`.",
+            "Check that `Number.isSafeInteger` holds for `amount_cents`.",
+            "Use `crypto.randomUUID()` for the key instead of `Math.random()`.",
+            "Call `crypto.randomUUID` in supabase/functions/charge/index.ts.",
+            "Replace it with `const id = globalThis.crypto.randomUUID();`.",
+            "Read it with `const parsed = JSON.parse(raw); Object.keys(parsed).length`.",
+            "Import it: `import { randomUUID, timingSafeEqual } from \"crypto\"`.",
+            "Compare with `crypto.timingSafeEqual(a, b)` and encode with `new URLSearchParams()`.",
+            "Await `Promise.allSettled(jobs)` and use `Array.isArray(rows)`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    /// D3: a known ESLint rule name (core, `react-hooks/`, `@typescript-eslint/`) is not invented.
+    #[test]
+    fn find_ungrounded_identifier_accepts_known_eslint_rule_names() {
+        let evidence = "components/Panel.tsx line 12";
+        for fix in [
+            "Fix the hook call that `react-hooks/rules-of-hooks` reports in components/Panel.tsx.",
+            "Resolve `react-hooks/exhaustive-deps` by listing the dependency.",
+            "Remove the assertion that `@typescript-eslint/no-non-null-assertion` flags.",
+            "Turn `no-console` on for the build.",
+            "Enable `security/detect-object-injection` and `eqeqeq`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    /// D3: an invented API or rule name is still refused, including one that borrows a standard
+    /// namespace or a known plugin prefix.
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_invented_api_and_rule_names() {
+        let evidence = "supabase/functions/charge/index.ts uses amount_cents";
+        for (fix, bad) in [
+            ("Use `Number.toCents(amount_cents)`.", "toCents"),
+            ("Use `const id = crypto.makeToken();`.", "makeToken"),
+            ("Call `JSON.parseSafely(raw)`.", "parseSafely"),
+            (
+                "Fix what `react-hooks/hook-order-checker` reports.",
+                "react-hooks/hook-order-checker",
+            ),
+            ("Apply `no-magic-cents`.", "no-magic-cents"),
+            (
+                "Read `process.env.CHARGE_SIGNING_SECRET` first.",
+                "process.env.CHARGE_SIGNING_SECRET",
+            ),
+        ] {
+            let found = find_ungrounded_identifier(fix, evidence);
+            assert!(
+                found.as_deref().is_some_and(|f| f.contains(bad)),
+                "{fix} -> {found:?}"
+            );
+        }
+    }
+
     #[test]
     fn find_ungrounded_identifier_accepts_prose_with_no_named_identifiers() {
         let evidence = "some finding evidence";
@@ -22550,6 +22866,89 @@ mod tests {
         );
         assert!(!out[0].needs_review);
         assert_eq!(meter.snapshot().calls, 1);
+    }
+
+    /// A row that states a convention (or an assessment gap) has no defect to fix. D2: the fix
+    /// stage never sends it to the model, so the model's correct "nothing to fix" is never
+    /// counted as a failure and re-asked, and the stage reports no failed part for it.
+    fn convention_row(path: &str) -> Finding {
+        use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+        let mut f = fx(
+            "ARCH-MONOLITH-FIRST-1",
+            path,
+            0,
+            "The codebase consistently keeps one deployable.",
+            "",
+        );
+        f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "monolith".to_string(),
+            convention_label: "Monolith first".to_string(),
+        }));
+        f
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_never_sends_a_convention_observed_row_to_the_model() {
+        let completer = SequencedCompleter::new(&[r#"{"fixes":[]}"#]);
+        let meter = UsageMeter::default();
+        let (out, failed) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![convention_row("a.ts")],
+            &[],
+            None,
+            Some(&meter),
+            None,
+        )
+        .await;
+        assert_eq!(
+            meter.snapshot().calls,
+            0,
+            "no model call for a convention row"
+        );
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(failed.is_empty(), "no failed part: {failed:?}");
+        assert_eq!(out.len(), 1, "the row stays in the report");
+        assert_eq!(out[0].fix_specific, None);
+    }
+
+    /// Mixed with a defect, only the defect's block is in the prompt, and the convention row is
+    /// neither asked about in the first round nor in any retry.
+    #[tokio::test]
+    async fn generate_fix_specifics_asks_only_about_the_defect_beside_a_convention_row() {
+        let completer = CapturingCompleter::default();
+        let defect = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/defect.ts",
+            2,
+            "rawRedirect(p) is called with an unvalidated path.",
+            "rawRedirect(p)",
+        );
+        let (out, _) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![convention_row("app/convention.ts"), defect],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+        let seen = completer.seen.lock().unwrap();
+        assert!(!seen.is_empty(), "the defect is still sent");
+        for req in seen.iter() {
+            assert!(req.prompt.contains("app/defect.ts"), "{}", req.prompt);
+            assert!(
+                !req.prompt.contains("app/convention.ts"),
+                "the convention row was sent: {}",
+                req.prompt
+            );
+        }
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].fix_specific, None);
     }
 
     /// A finding a delta retest carried forward already has its codebase-specific fix. Asking the

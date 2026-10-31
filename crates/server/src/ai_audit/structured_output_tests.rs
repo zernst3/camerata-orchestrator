@@ -258,19 +258,24 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
 
     // Detail.
     let ids = vec!["a1b2c3".to_string(), "d4e5f6".to_string()];
-    let detail = serde_json::json!({"details": [{
-        "id": "a1b2c3", "why": "Because.", "fix_direction": "Guard it."
-    }]});
+    // One entry per id, keyed by the id: a reply that answers every id.
+    let detail = serde_json::json!({"details": {
+        "a1b2c3": {"why": "Because.", "fix_direction": "Guard it."},
+        "d4e5f6": {"why": "Also because.", "fix_direction": "Guard that too."}
+    }});
     assert_eq!(violation(&detail_reply_schema(&ids), &detail), None);
     let parsed = detail_regen::parse_detail_reply(&detail.to_string(), false);
-    assert_eq!(parsed.entries.len(), 1);
-    let foreign = serde_json::json!({"details": [{
-        "id": "ffffff", "why": "Because.", "fix_direction": "Guard it."
-    }]});
+    assert_eq!(parsed.entries.len(), 2);
+    let foreign = serde_json::json!({"details": {
+        "a1b2c3": {"why": "Because.", "fix_direction": "Guard it."},
+        "d4e5f6": {"why": "Because.", "fix_direction": "Guard it."},
+        "ffffff": {"why": "Because.", "fix_direction": "Guard it."}
+    }});
     // The finding's location is not part of the reply; an echo is not a reply the schema allows.
-    let echoing = serde_json::json!({"details": [{
-        "id": "a1b2c3", "path": "src/a.ts", "line": 12, "why": "Because.", "fix_direction": "x"
-    }]});
+    let echoing = serde_json::json!({"details": {
+        "a1b2c3": {"path": "src/a.ts", "line": 12, "why": "Because.", "fix_direction": "x"},
+        "d4e5f6": {"why": "Because.", "fix_direction": "x"}
+    }});
     assert!(violation(&detail_reply_schema(&ids), &echoing).is_some());
     assert!(violation(&detail_reply_schema(&ids), &foreign).is_some());
 
@@ -369,7 +374,89 @@ async fn the_calibration_request_carries_the_batch_size_in_its_schema() {
     assert_eq!(indices, &serde_json::json!([0, 1, 2]));
 }
 
-/// The detail request's `id` enum lists exactly the ids of the batch's findings, in the prompt.
+/// D4: the detail schema has one REQUIRED property per id of the batch, so a reply that answers
+/// 1 of 4 findings is not one the decoder can produce. A reply that answers all of them, a
+/// reply missing one id, and a reply with an id of another batch are told apart by the schema
+/// alone, and the schema stays inside the API's structured-output limits at the largest batch.
+#[test]
+fn the_detail_schema_requires_one_entry_per_id() {
+    let ids: Vec<String> = (0..4).map(|i| format!("{i:06x}")).collect();
+    let schema = detail_reply_schema(&ids);
+    let reply = |keys: &[&String]| {
+        let mut map = serde_json::Map::new();
+        for k in keys {
+            map.insert(
+                (*k).clone(),
+                serde_json::json!({"why": "w", "fix_direction": "f"}),
+            );
+        }
+        serde_json::json!({ "details": map })
+    };
+    let all: Vec<&String> = ids.iter().collect();
+    assert_eq!(violation(&schema, &reply(&all)), None);
+    // 1 of 4 answered, the case the efficiency run saw: not a reply the schema allows.
+    let one = reply(&all[..1]);
+    assert!(
+        violation(&schema, &one).is_some_and(|why| why.contains("missing required")),
+        "{:?}",
+        violation(&schema, &one)
+    );
+    // Each id, left out in turn, is refused.
+    for skip in 0..ids.len() {
+        let others: Vec<&String> = ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != skip)
+            .map(|(_, id)| id)
+            .collect();
+        assert!(
+            violation(&schema, &reply(&others)).is_some(),
+            "skipped {skip}"
+        );
+    }
+    // The required list is exactly the ids, and the entry itself needs both fields.
+    let mut required = enum_of(&schema["properties"]["details"]["required"]);
+    required.sort();
+    assert_eq!(required, ids);
+    let entry_schema = &schema["properties"]["details"]["properties"][ids[0].as_str()];
+    assert_eq!(
+        enum_of(&entry_schema["required"]),
+        vec!["why".to_string(), "fix_direction".to_string()]
+    );
+    // Within the documented limits at the largest batch the detail stage sends.
+    let big: Vec<String> = (0..25).map(|i| format!("{i:06x}")).collect();
+    assert!(limit_violations(&detail_reply_schema(&big)).is_empty());
+}
+
+/// The reader takes the keyed shape the schema produces, the array shape a backend that never
+/// saw the schema may send, and a keyed reply cut off at the output limit (the complete entries
+/// are kept).
+#[test]
+fn the_detail_reader_takes_the_keyed_and_the_array_shape_and_salvages_a_cut_off_one() {
+    let keyed = r#"{"details":{"a1b2c3":{"why":"Because.","fix_direction":"Guard it."},"d4e5f6":{"why":"Also.","fix_direction":"Too."}}}"#;
+    let parsed = detail_regen::parse_detail_reply(keyed, false);
+    let mut ids: Vec<&str> = parsed.entries.iter().map(|e| e.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["a1b2c3", "d4e5f6"]);
+    assert_eq!(parsed.unusable, 0);
+    let array = r#"{"details":[{"id":"a1b2c3","why":"Because.","fix_direction":"Guard it."}]}"#;
+    assert_eq!(
+        detail_regen::parse_detail_reply(array, false).entries.len(),
+        1
+    );
+    // Cut off in the middle of the second entry, with a brace and a quote inside the first.
+    let cut = r#"{"details":{"a1b2c3":{"why":"Uses `{x}` and \"y\".","fix_direction":"Guard it."},"d4e5f6":{"why":"Als"#;
+    let salvaged = detail_regen::parse_detail_reply(cut, true);
+    assert_eq!(salvaged.entries.len(), 1, "{salvaged:?}");
+    assert_eq!(salvaged.entries[0].id, "a1b2c3");
+    // A keyed entry that is not an object is unusable, not a panic.
+    let odd = r#"{"details":{"a1b2c3":"just text","d4e5f6":{"why":"w","fix_direction":"f"}}}"#;
+    let parsed = detail_regen::parse_detail_reply(odd, false);
+    assert_eq!(parsed.entries.len(), 1);
+    assert_eq!(parsed.unusable, 1);
+}
+
+/// The detail request's schema names exactly the ids of the batch's findings, in the prompt.
 #[tokio::test]
 async fn the_detail_schemas_id_enum_is_exactly_the_batch_ids() {
     let llm = Recorder::new();
@@ -402,9 +489,19 @@ async fn the_detail_schemas_id_enum_is_exactly_the_batch_ids() {
     assert!(!reqs.is_empty());
     for r in &reqs {
         let schema = r.response_schema.as_ref().expect("a detail schema");
-        let in_schema =
-            enum_of(&schema["properties"]["details"]["items"]["properties"]["id"]["enum"]);
-        assert_eq!(in_schema, prompt_ids(&r.prompt), "{}", r.prompt);
+        let mut in_schema: Vec<String> = schema["properties"]["details"]["properties"]
+            .as_object()
+            .expect("one property per id")
+            .keys()
+            .cloned()
+            .collect();
+        let mut required = enum_of(&schema["properties"]["details"]["required"]);
+        let mut in_prompt = prompt_ids(&r.prompt);
+        in_schema.sort();
+        required.sort();
+        in_prompt.sort();
+        assert_eq!(in_schema, in_prompt, "{}", r.prompt);
+        assert_eq!(required, in_prompt, "every id is required: {}", r.prompt);
         assert!(!in_schema.is_empty());
     }
     // The first request is the full batch of three.

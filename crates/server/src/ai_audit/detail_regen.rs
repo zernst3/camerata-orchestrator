@@ -89,8 +89,8 @@ Rules, every finding:
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
 
 Return ONLY JSON, no prose:
-{"details":[{"id":"<the finding's id, copied exactly>","why":"...","fix_direction":"..."}]}
-One entry per finding, addressed by its id alone: its location is already known, do not repeat it. An entry whose id is not one of the findings' ids is discarded."#
+{"details":{"<the finding's id, copied exactly>":{"why":"...","fix_direction":"..."}}}
+One entry for EVERY finding, keyed by its id alone: its location is already known, do not repeat it. A finding with no entry is asked about again; an entry whose key is not one of the findings' ids is discarded."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -552,7 +552,23 @@ fn entry_of(value: &serde_json::Value) -> Option<Entry> {
     })
 }
 
-/// Parse `{"details":[{"id","why","fix_direction"}]}` (or the single `detail` field a backend that
+/// Entries keyed by finding id (`{"<id>":{"why","fix_direction"}}`) as the array entries
+/// `entry_of` reads: the key becomes the `id`. A keyed value that is not an object has no text,
+/// so it reads as an entry with an id only and is counted unusable.
+fn keyed_entries(pairs: Vec<(String, serde_json::Value)>) -> Vec<serde_json::Value> {
+    pairs
+        .into_iter()
+        .map(|(id, value)| match value {
+            serde_json::Value::Object(mut map) => {
+                map.insert("id".to_string(), serde_json::Value::String(id));
+                serde_json::Value::Object(map)
+            }
+            _ => serde_json::json!({ "id": id }),
+        })
+        .collect()
+}
+
+/// Parse `{"details":{"<id>":{"why","fix_direction"}}}` (or the array `{"details":[{"id","why","fix_direction"}]}`` (or the single `detail` field a backend that
 /// never saw the schema may still send). Malformed output, a missing array or an
 /// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
 /// written", never as an empty explanation.
@@ -562,10 +578,20 @@ fn entry_of(value: &serde_json::Value) -> Option<Entry> {
 /// last one and anything after it are not guessed at.
 pub(super) fn parse_detail_reply(raw: &str, cut_off: bool) -> ParsedReply {
     let values: Vec<serde_json::Value> = if cut_off {
-        complete_array_objects(raw, "details")
+        let array: Vec<serde_json::Value> = complete_array_objects(raw, "details")
             .into_iter()
             .filter_map(|o| serde_json::from_str(o).ok())
-            .collect()
+            .collect();
+        if array.is_empty() {
+            keyed_entries(
+                complete_keyed_objects(raw, "details")
+                    .into_iter()
+                    .filter_map(|(id, o)| serde_json::from_str(o).ok().map(|v| (id, v)))
+                    .collect(),
+            )
+        } else {
+            array
+        }
     } else {
         let Some(json) = extract_json_object(raw) else {
             return ParsedReply::default();
@@ -573,10 +599,16 @@ pub(super) fn parse_detail_reply(raw: &str, cut_off: bool) -> ParsedReply {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
             return ParsedReply::default();
         };
-        let Some(arr) = v["details"].as_array() else {
-            return ParsedReply::default();
-        };
-        arr.clone()
+        match &v["details"] {
+            serde_json::Value::Array(arr) => arr.clone(),
+            // The shape the schema produces: one property per finding id.
+            serde_json::Value::Object(map) => keyed_entries(
+                map.iter()
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect(),
+            ),
+            _ => return ParsedReply::default(),
+        }
     };
     let mut out = ParsedReply::default();
     for value in &values {

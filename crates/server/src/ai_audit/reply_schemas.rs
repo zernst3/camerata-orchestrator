@@ -182,20 +182,23 @@ pub(crate) fn calibration_reply_schema(n: usize) -> Value {
     object(&[("verdicts", array(verdict))], &["verdicts"])
 }
 
-/// The detail regeneration reply for a batch whose findings carry the opaque `ids`: an entry per
-/// finding, its `id` one of the batch's, the explanation (`why`) apart from the direction of the
-/// fix (`fix_direction`). The finding's path and line are not echoed: Camerata knows them and
-/// attaches them.
+/// The detail regeneration reply for a batch whose findings carry the opaque `ids`: ONE REQUIRED
+/// PROPERTY PER ID, each an entry with the explanation (`why`) apart from the direction of the
+/// fix (`fix_direction`). An array cannot say "one item per id" (the API allows `minItems` of 0
+/// or 1 only), so a reply that answered 1 of 4 findings was a shape the decoder could produce and
+/// the stage paid to ask again. An object with a required property per id cannot be partial.
+/// The size is the batch's: ten ids make ten required properties and none optional, well inside
+/// the limits in the module docs. The finding's path and line are not echoed: Camerata knows
+/// them and attaches them.
 pub(crate) fn detail_reply_schema(ids: &[String]) -> Value {
     let entry = object(
-        &[
-            ("id", json!({ "type": "string", "enum": ids })),
-            ("why", string()),
-            ("fix_direction", string()),
-        ],
-        &["id", "why", "fix_direction"],
+        &[("why", string()), ("fix_direction", string())],
+        &["why", "fix_direction"],
     );
-    object(&[("details", array(entry))], &["details"])
+    let properties: Vec<(&str, Value)> =
+        ids.iter().map(|id| (id.as_str(), entry.clone())).collect();
+    let required: Vec<&str> = ids.iter().map(String::as_str).collect();
+    object(&[("details", object(&properties, &required))], &["details"])
 }
 
 /// The fix reply for a batch whose findings carry the opaque `ids`: a fix per finding it could

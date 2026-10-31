@@ -18,6 +18,19 @@ use super::report::Problem;
 /// Scans the text as given AND with zero-width characters stripped, so one inserted inside a key
 /// cannot hide it from the detector while a reader still sees the key.
 fn scan_text(file: &str, location: &str, text: &str, with_line: bool) -> Vec<Problem> {
+    scan_text_except(file, location, text, with_line, &|_, _| false)
+}
+
+/// [`scan_text`] with a `skip` test: a match for which `skip(match, matched text)` is true is
+/// left out. Only [`csv_problems`] uses it, for the one shape a JSON cell scanned as one string
+/// invents (see there); everything else keeps every match.
+fn scan_text_except(
+    file: &str,
+    location: &str,
+    text: &str,
+    with_line: bool,
+    skip: &dyn Fn(&camerata_secrets::SecretMatch, &str) -> bool,
+) -> Vec<Problem> {
     let stripped = crate::report_export::strip_zero_width(text);
     let mut variants: Vec<&str> = vec![text];
     if stripped.as_ref() != text {
@@ -27,6 +40,9 @@ fn scan_text(file: &str, location: &str, text: &str, with_line: bool) -> Vec<Pro
     let mut problems = Vec::new();
     for variant in variants {
         for m in camerata_secrets::detect_secrets(variant) {
+            if skip(&m, variant) {
+                continue;
+            }
             let form = m.redacted_form(variant);
             // A multi-line form (a PEM block) reads as one line in a message.
             let evidence = form.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -134,15 +150,73 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
         };
         for (c, cell) in record.iter().enumerate() {
             let column = headers.get(c).unwrap_or("?");
-            problems.extend(scan_text(
-                file,
-                &format!("row {}, column {column:?}", i + 1),
-                cell,
-                false,
-            ));
+            let at = format!("row {}, column {column:?}", i + 1);
+            match nested_json_cell(cell) {
+                // A nested list or object (the `also_locations` column) is JSON text. It is
+                // scanned BOTH ways, and the union is reported, so the check is never weaker
+                // than scanning the cell as one string was:
+                // 1. walked like `findings.json`, every string and key on its own (the same
+                //    detector, the same strictness), which also sees an unquoted `.env` line
+                //    inside a snippet that the one-string scan cannot (the line is not at a line
+                //    start there);
+                // 2. as one string, which also sees a value whose NAME sits in a neighbouring
+                //    field (a rule id naming a key beside a bare value in the snippet).
+                // The one-string scan invents exactly one false shape: a named secret literal
+                // whose "value" is itself an environment variable NAME, quoted by the JSON
+                // encoding, beside a rule id naming a key (the efficiency run's refused export).
+                // Only that shape is skipped, and only on the one-string pass.
+                Some(value) => {
+                    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                    for p in json_problems(file, &value) {
+                        seen.insert((p.message.clone(), p.evidence.clone()));
+                        problems.push(Problem::new(
+                            file,
+                            format!("{at}, {}", p.location),
+                            p.message,
+                            p.evidence,
+                        ));
+                    }
+                    for p in scan_text_except(file, &at, cell, false, &|m, text| {
+                        m.shape == camerata_secrets::SecretShape::NamedSecretLiteral
+                            && is_environment_variable_name(&text[m.value.clone()])
+                    }) {
+                        if seen.insert((p.message.clone(), p.evidence.clone())) {
+                            problems.push(p);
+                        }
+                    }
+                }
+                None => problems.extend(scan_text(file, &at, cell, false)),
+            }
         }
     }
     problems
+}
+
+/// Whether a matched "value" is an environment variable NAME rather than a value: upper case
+/// letters, digits and underscores only, at least one underscore, a letter first, and fewer
+/// than four digits (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY`, `S3_SECRET_ACCESS_KEY`), with the
+/// `=` the line may end in. A generated secret of that length has lower case letters or more
+/// digits in it; one with neither is still caught when its name is in the same string.
+fn is_environment_variable_name(value: &str) -> bool {
+    let name = value.trim_end_matches('=');
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && name.contains('_')
+        && name.chars().filter(char::is_ascii_digit).count() < 4
+}
+
+/// The parsed value of a CSV cell holding a nested JSON list or object, as `json_array_to_csv`
+/// writes one. `None` for any other cell (including a scalar that happens to parse as JSON).
+fn nested_json_cell(cell: &str) -> Option<Value> {
+    let trimmed = cell.trim();
+    if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .filter(|v| v.is_array() || v.is_object())
 }
 
 /// A workbook: every cell (located by sheet and cell reference) and every shared string (so a
