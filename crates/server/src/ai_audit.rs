@@ -5640,6 +5640,11 @@ fn snippet_names(span: &str) -> Vec<String> {
         let word = raw.trim_matches(|c: char| matches!(c, ':' | '-'));
         let followed_by_call = after.starts_with('(');
         let word_trimmed = word.trim_end_matches('.');
+        // D3: a standard JavaScript, Web or Node name (`Number.isSafeInteger`, `crypto.randomUUID`)
+        // is the platform's, not a name the repository chose.
+        if crate::fix_standard_names::is_standard_js_name(word_trimmed) {
+            continue;
+        }
         if is_file_like(word_trimmed, followed_by_call) {
             out.push(word_trimmed.to_string());
             continue;
@@ -5655,7 +5660,10 @@ fn snippet_names(span: &str) -> Vec<String> {
             }
         }
         for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if tok.len() >= 3 && is_chosen_name(tok) {
+            if tok.len() >= 3
+                && is_chosen_name(tok)
+                && !crate::fix_standard_names::is_standard_js_name(tok)
+            {
                 out.push(tok.to_string());
             }
         }
@@ -5807,6 +5815,8 @@ pub(crate) fn find_ungrounded_identifier_in(
         }
         if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str())
             || UNIVERSAL_FIX_NAMES.contains(&trimmed)
+            || crate::fix_standard_names::is_standard_js_name(trimmed)
+            || crate::fix_standard_names::is_known_eslint_rule(trimmed)
         {
             continue;
         }
@@ -22353,6 +22363,68 @@ mod tests {
         let fix = "Replace `rawRedirect` with `safeInternalPath` from lib/redirect.ts, as \
                     app/auth/signout/route.ts does.";
         assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    /// D3: a standard JavaScript or Web API name is not an invented one, written as a backticked
+    /// name, inside a snippet, or bare (`import { randomUUID }`).
+    #[test]
+    fn find_ungrounded_identifier_accepts_standard_javascript_and_web_api_names() {
+        let evidence = "supabase/functions/charge/index.ts uses amount_cents";
+        for fix in [
+            "Validate `amount_cents` with `Number.isSafeInteger(amount_cents) && amount_cents > 0`.",
+            "Check that `Number.isSafeInteger` holds for `amount_cents`.",
+            "Use `crypto.randomUUID()` for the key instead of `Math.random()`.",
+            "Call `crypto.randomUUID` in supabase/functions/charge/index.ts.",
+            "Replace it with `const id = globalThis.crypto.randomUUID();`.",
+            "Read it with `const parsed = JSON.parse(raw); Object.keys(parsed).length`.",
+            "Import it: `import { randomUUID, timingSafeEqual } from \"crypto\"`.",
+            "Compare with `crypto.timingSafeEqual(a, b)` and encode with `new URLSearchParams()`.",
+            "Await `Promise.allSettled(jobs)` and use `Array.isArray(rows)`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    /// D3: a known ESLint rule name (core, `react-hooks/`, `@typescript-eslint/`) is not invented.
+    #[test]
+    fn find_ungrounded_identifier_accepts_known_eslint_rule_names() {
+        let evidence = "components/Panel.tsx line 12";
+        for fix in [
+            "Fix the hook call that `react-hooks/rules-of-hooks` reports in components/Panel.tsx.",
+            "Resolve `react-hooks/exhaustive-deps` by listing the dependency.",
+            "Remove the assertion that `@typescript-eslint/no-non-null-assertion` flags.",
+            "Turn `no-console` on for the build.",
+            "Enable `security/detect-object-injection` and `eqeqeq`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    /// D3: an invented API or rule name is still refused, including one that borrows a standard
+    /// namespace or a known plugin prefix.
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_invented_api_and_rule_names() {
+        let evidence = "supabase/functions/charge/index.ts uses amount_cents";
+        for (fix, bad) in [
+            ("Use `Number.toCents(amount_cents)`.", "toCents"),
+            ("Use `const id = crypto.makeToken();`.", "makeToken"),
+            ("Call `JSON.parseSafely(raw)`.", "parseSafely"),
+            (
+                "Fix what `react-hooks/hook-order-checker` reports.",
+                "react-hooks/hook-order-checker",
+            ),
+            ("Apply `no-magic-cents`.", "no-magic-cents"),
+            (
+                "Read `process.env.CHARGE_SIGNING_SECRET` first.",
+                "process.env.CHARGE_SIGNING_SECRET",
+            ),
+        ] {
+            let found = find_ungrounded_identifier(fix, evidence);
+            assert!(
+                found.as_deref().is_some_and(|f| f.contains(bad)),
+                "{fix} -> {found:?}"
+            );
+        }
     }
 
     #[test]
