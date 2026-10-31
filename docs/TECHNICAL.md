@@ -3941,6 +3941,17 @@ one-string pass only, is a named secret literal whose "value" is itself an envir
 name (upper case, underscores, fewer than four digits). A real key inside the cell, quoted,
 escaped, nested or split from its name across fields, is still found.
 
+*An HTTP header name is not a credential (D6).* The faktura and lumen exports were refused on the
+`also_locations` cell: a merged CORS site whose snippet names `Access-Control-Allow-Credentials`
+(32 characters) or `Access-Control-Allow-Origin` (27) beside a rule id ending in `CREDENTIALS`
+read, on the one-string pass, as a secret literal whose value is the header name. That pass now
+also skips a value that is an HTTP header name: two or more alphabetic words joined by `-`, all
+Title-Case or all lower case, EVERY word taken from a fixed list of header words
+(`HEADER_WORDS`). The list is closed on purpose: an unlisted header stays refused (the gate fails
+closed), and `Correct-Horse-Battery-Staple`, a hyphenated random token, or a real key next to a
+header name in the same snippet or the next site are all still found. Tests use the two stored
+cells and the planted-key cases.
+
 **Known limits.** A finding's `path` and `repo` are not rewritten (a file named after a key is
 caught by the gate, not redacted). Calls that pass `repo_read_dir` give the model on-demand read
 access to the raw checkout; the inspection passes do not use it, the governed-dev flows do. The
