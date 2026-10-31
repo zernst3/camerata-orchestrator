@@ -1518,7 +1518,13 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
 /// a dot be written as its parts when a part is itself a name (a plain member access such as
 /// supabase.from stays as written).
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 3;
+///
+/// 4: retry fixes F3. The detail-regeneration reply is addressed by the opaque id alone (the
+/// finding's path and line are attached by Camerata, not echoed), splits the explanation from
+/// the fix direction, and the prompt lists the names the text must keep; the fix reply is
+/// addressed by the same kind of opaque id instead of a batch position, and its prompt lists
+/// the names the evidence lets the fix use.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 4;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
@@ -3544,6 +3550,7 @@ async fn reask_unanswered_verdicts(
                 .with_system(system.to_string())
                 .with_max_tokens(cap)
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(items.len()))
                 .with_model(stage_model(calibration_model)),
             Stage::Calibration,
         );
@@ -3708,6 +3715,7 @@ pub async fn verify_findings(
                     .with_system(system.clone())
                     .with_max_tokens(calibration_max_tokens(chunk_len))
                     .with_temperature(AUDIT_TEMPERATURE)
+                    .with_response_schema(reply_schemas::calibration_reply_schema(chunk_len))
                     .with_model(stage_model(calibration_model)),
                 Stage::Calibration,
             )
@@ -3854,6 +3862,9 @@ pub async fn verify_findings(
                 .with_system(system.clone())
                 .with_max_tokens(calibration_max_tokens(chunk_results[chunk_idx].len()))
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(
+                    chunk_results[chunk_idx].len(),
+                ))
                 .with_model(stage_model(calibration_model)),
             Stage::Calibration,
         );
@@ -4776,6 +4787,8 @@ async fn recommend_alternatives(
                 repo,
                 repo_map: &repo_map,
                 digest,
+                n_rule_batches: n_chunks,
+                n_digests: digests.len(),
                 nonce,
                 audit_model,
                 feedback,
@@ -4990,6 +5003,10 @@ struct AlternativesAsk<'a> {
     repo: &'a str,
     repo_map: &'a str,
     digest: &'a str,
+    /// How many rule batches the stage sends in all: every one of them re-sends `digest`.
+    n_rule_batches: usize,
+    /// How many file-chunk digests the stage asks about: every one re-sends `repo_map`.
+    n_digests: usize,
     nonce: &'a crate::prompt_frame::FrameNonce,
     audit_model: Option<&'a str>,
     feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
@@ -5011,15 +5028,24 @@ impl AlternativesAsk<'_> {
             repo,
             repo_map,
             digest,
+            n_rule_batches,
+            n_digests,
             nonce,
             audit_model,
             feedback,
             meter,
         } = *self;
-        let prompt = format!(
-            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-            build_alternatives_block(rules)
+        // The shared prefix (repo map, then digest) leads and the rules, which differ per batch,
+        // trail, so the digest the stage re-sends with every rule batch is one cached prefix.
+        let map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+        let static_prefix = format!("{map_prefix}{digest}\n\n");
+        let cache_breakpoints = alternatives_cache_breakpoints(
+            map_prefix.len(),
+            static_prefix.len(),
+            n_rule_batches,
+            n_digests,
         );
+        let prompt = format!("{static_prefix}{}", build_alternatives_block(rules));
         if let Some((store, key)) = feedback {
             store.register(
                 key,
@@ -5040,6 +5066,8 @@ impl AlternativesAsk<'_> {
                 ))
                 .with_max_tokens(alternatives_max_tokens(rules.len()))
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::alternatives_reply_schema())
+                .with_cache_breakpoints(cache_breakpoints)
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
@@ -5078,6 +5106,31 @@ impl AlternativesAsk<'_> {
         }
         Ok(resp)
     }
+}
+
+/// The cache breakpoints of an alternatives request: byte offsets into its prompt, each the end
+/// of a prefix a later request of the stage repeats exactly. The repo map is repeated by every
+/// request over another file-chunk digest (`n_digests > 1`); the digest after it is repeated by
+/// every further rule batch (`n_rule_batches > 1`), which is the saving: the stage re-sent the
+/// whole digest, 25k to 40k input tokens, uncached with each rule batch. A stage that sends one
+/// request over one digest repeats nothing (a cache write costs more than the plain input and
+/// nothing would read it), so it carries none. The same placement as the scan's
+/// ([`cache_breakpoints_for_pass`]); the schema and the system prompt are the same on every
+/// request of the stage, so the prefix is one cache entry.
+fn alternatives_cache_breakpoints(
+    map_prefix_len: usize,
+    static_prefix_len: usize,
+    n_rule_batches: usize,
+    n_digests: usize,
+) -> Vec<usize> {
+    let mut breakpoints = Vec::new();
+    if n_digests > 1 {
+        breakpoints.push(map_prefix_len);
+    }
+    if n_rule_batches > 1 {
+        breakpoints.push(static_prefix_len);
+    }
+    breakpoints
 }
 
 /// What a cut-off recommendation reply still answers: the recommendations for the rules in
@@ -5198,9 +5251,13 @@ Rules, every fix:
   isn't present anywhere in the evidence you were given for that finding: a name or file path
   in backticks must appear in that evidence, and so must every table, column, function, file
   or variable name inside a code snippet (ordinary words and universal names such as
-  `Authorization`, `console.error` and try/catch/finally are fine). When the fix needs a NEW
-  name, describe it in plain words ("a new helper that returns the signed URL") instead of
-  naming it in backticks or in a snippet.
+  `Authorization`, `console.error` and try/catch/finally are fine). Each finding's block ends
+  with a `Names you may use:` line: the identifiers and file names in its evidence. As a
+  backticked name or inside a snippet, use only those, names you know exist elsewhere in this
+  repository (another file, a column in the schema), ordinary words and the universal names; a
+  name that exists nowhere in the repository is rejected. When the fix needs a NEW name, or you
+  are not sure a name exists, describe it in plain words ("a new helper that returns the signed
+  URL") instead of naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
   app/auth/signout/route.ts does") instead of describing the pattern generically.
@@ -5218,9 +5275,10 @@ Rules, every fix:
   omit it from your response entirely rather than guessing.
 
 Return ONLY JSON, no prose:
-{"fixes":[{"index":0,"fix":"..."}]}
-One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
-could not confidently ground — an omitted fix is far better than an invented one."#
+{"fixes":[{"id":"<the finding's id, copied exactly>","fix":"..."}]}
+One entry per finding you could ground a fix for, addressed by the id in square brackets that
+opens its block. Omit any id you could not confidently ground — an omitted fix is far better
+than an invented one."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -5273,6 +5331,47 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     )
 }
 
+/// The most names a finding's `Names you may use:` line lists.
+const MAX_FIX_NAMES_LISTED: usize = 40;
+
+/// The identifiers and file names of a finding's fix evidence (`evidence`, the blob
+/// [`fix_evidence_blob`] builds, which is exactly what the grounding check looks a name up in):
+/// every file-like word and every word shaped like a name somebody chose (`snake_case`,
+/// `camelCase`, `PascalCase` with two capitals), in order of first appearance, without repeats.
+/// The prompt prints it under `Names you may use:` so the model is told which names the check
+/// will find; a name in backticks or in a snippet that is not in the evidence is rejected
+/// ([`find_ungrounded_identifier`]), whether or not it is listed here (a plain word that the
+/// evidence holds is as good as a listed one).
+fn fix_names_available(evidence: &str) -> Vec<String> {
+    let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
+    // Position of each candidate, so the list reads in the order the evidence does.
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for m in path_re.find_iter(evidence) {
+        let word = m.as_str().trim_matches(|c: char| matches!(c, '.' | ','));
+        if is_file_like(word, false) {
+            found.push((m.start(), word.to_string()));
+        }
+    }
+    let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+    for m in word_re.find_iter(evidence) {
+        let part = m.as_str();
+        if part.len() >= 3 && is_chosen_name(part) {
+            found.push((m.start(), part.to_string()));
+        }
+    }
+    found.sort_by_key(|(pos, _)| *pos);
+    let mut out: Vec<String> = Vec::new();
+    for (_, name) in found {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+        if out.len() >= MAX_FIX_NAMES_LISTED {
+            break;
+        }
+    }
+    out
+}
+
 /// The "Captured objects" line of a finding's block, or nothing when it captured none.
 fn captured_objects_line(f: &Finding) -> String {
     if object_captures(f).next().is_none() {
@@ -5286,11 +5385,13 @@ fn captured_objects_line(f: &Finding) -> String {
 }
 
 /// Build the per-finding prompt body for a fix-generation round. `findings` are the
-/// findings THIS round is asking about (batch-local order); `feedback`, when present for a
+/// findings THIS round is asking about (batch-local order) and `ids` their opaque ids, parallel
+/// to it (the reply addresses a fix by id, never by position); `feedback`, when present for a
 /// batch-local position, is a one-line note on why that finding's PRIOR attempt was
 /// rejected, appended so the model corrects the specific problem instead of guessing again.
 fn build_fix_specific_block(
     findings: &[&Finding],
+    ids: &[String],
     files: &[(String, String)],
     corpus: Option<&camerata_rules::RuleSet>,
     feedback: &std::collections::HashMap<usize, String>,
@@ -5298,8 +5399,9 @@ fn build_fix_specific_block(
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
+        let id = &ids[i];
         out.push_str(&format!(
-            "[{i}] rule {} — severity {}\n",
+            "[{id}] rule {} — severity {}\n",
             f.rule_id, f.severity
         ));
         // Everything that derives from the client's files (location, quoted code, detail,
@@ -5320,9 +5422,22 @@ fn build_fix_specific_block(
         if !context.is_empty() {
             evidence.push_str(&format!("Surrounding code:\n{context}"));
         }
+        // The names the grounding check will find, printed so the model is told what is checked.
+        let names =
+            fix_names_available(&camerata_secrets::redact_str(&fix_evidence_blob(f, files)));
+        if !names.is_empty() {
+            evidence.push_str(&format!(
+                "Names you may use: {}\n",
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         out.push_str(&crate::prompt_frame::frame_untrusted(
             nonce,
-            &format!("finding {i}"),
+            &format!("finding {id}"),
             &evidence,
         ));
         if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
@@ -5346,12 +5461,12 @@ fn build_fix_specific_block(
     out
 }
 
-/// Parse the `{"fixes":[{"index":N,"fix":"..."}]}` response into batch-local index -> fix
-/// text. Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix`
-/// string for an entry all simply leave that index absent from the map — the caller treats
-/// an absent index exactly like "the model couldn't ground this one" (never a panic, never a
-/// fabricated empty string).
-fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
+/// Parse the `{"fixes":[{"id":"...","fix":"..."}]}` response into opaque id -> fix text.
+/// Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix` string for an
+/// entry all simply leave that id absent from the map — the caller treats an absent id exactly
+/// like "the model couldn't ground this one" (never a panic, never a fabricated empty string).
+/// An id that is not one of the batch's matches nothing: the caller looks up its own ids.
+fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let Some(json) = extract_json_object(raw) else {
         return out;
@@ -5363,7 +5478,11 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         return out;
     };
     for entry in arr {
-        let Some(idx) = entry["index"].as_u64() else {
+        let Some(id) = entry["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let Some(text) = entry["fix"].as_str() else {
@@ -5373,7 +5492,7 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         if text.is_empty() {
             continue;
         }
-        out.insert(idx as usize, text.to_string());
+        out.insert(id.to_string(), text.to_string());
     }
     out
 }
@@ -5388,6 +5507,19 @@ const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined
 /// short on purpose; a name that is merely common in the repo does not belong here. Matched
 /// exactly (case-sensitive) against a backticked span or a path-like token.
 const UNIVERSAL_FIX_NAMES: &[&str] = &[
+    // A framework or runtime written with its dot reads as a file to the path regex; an
+    // abbreviation reads as one too; `void` is a keyword like `try`. None is a name a
+    // repository could hold, so none is asked for.
+    "Next.js",
+    "Node.js",
+    "React.js",
+    "Vue.js",
+    "Nuxt.js",
+    "Express.js",
+    "Deno.js",
+    "e.g",
+    "i.e",
+    "void",
     "Authorization",
     "console.error",
     "console.log",
@@ -5554,7 +5686,72 @@ fn is_chosen_name(tok: &str) -> bool {
 /// model a concrete, specific correction ("you named X, which isn't in the evidence") rather
 /// than a vague rejection. Returns `None` when every named identifier is grounded (including
 /// a fix that names none at all — pure prose is never rejected on this axis).
+#[cfg(test)]
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
+    find_ungrounded_identifier_in(fix, evidence, None)
+}
+
+/// The names a repository holds: the paths of its files and every identifier its files and paths
+/// spell. A name a fix uses that sits outside the finding's own evidence window but exists in the
+/// repository (`actor_id` two screens down, `tsconfig.json`, `.env.example`, a helper in another
+/// file) is a real name, not an invented one; a name found nowhere in the repository still is
+/// ([`find_ungrounded_identifier_in`]). Built once per repo from the file set the fix stage
+/// already holds.
+pub(crate) struct RepoNames<'a> {
+    files: &'a [(String, String)],
+    /// Every identifier-shaped word of a path or a file's content (`[A-Za-z0-9_]+`).
+    words: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> RepoNames<'a> {
+    pub(crate) fn new(files: &'a [(String, String)]) -> Self {
+        let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+        let mut words: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+        for (path, content) in files {
+            for text in [path.as_str(), content.as_str()] {
+                words.extend(word_re.find_iter(text).map(|m| m.as_str()));
+            }
+        }
+        Self { files, words }
+    }
+
+    /// Whether the repository holds `name`. A path-like name (a slash, or a file extension)
+    /// is a file or directory of the set (exact, a trailing part of a path, a directory on it,
+    /// or a file's base name), or is written in some file's content; any other name is known
+    /// when every identifier word in it is one the repository spells.
+    pub(crate) fn knows(&self, name: &str) -> bool {
+        let name = name.trim_start_matches("./").trim_end_matches('/');
+        if name.is_empty() {
+            return false;
+        }
+        if name.contains('/') || is_file_like(name, false) {
+            // `env.example` is how a fix trimmed of its dot names `.env.example`: a dotfile's
+            // base name is read with or without its leading dot.
+            let on_a_path = self.files.iter().any(|(p, _)| {
+                let base = p.rsplit('/').next().unwrap_or(p);
+                p == name
+                    || p.ends_with(&format!("/{name}"))
+                    || p.starts_with(&format!("{name}/"))
+                    || p.contains(&format!("/{name}/"))
+                    || base.strip_prefix('.') == Some(name)
+            });
+            return on_a_path || self.files.iter().any(|(_, c)| c.contains(name));
+        }
+        let mut parts = name
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|p| !p.is_empty())
+            .peekable();
+        parts.peek().is_some() && parts.all(|p| self.words.contains(p))
+    }
+}
+
+/// [`find_ungrounded_identifier`] with the repository to look a name up in when the finding's
+/// evidence does not hold it. `None` is the evidence alone.
+pub(crate) fn find_ungrounded_identifier_in(
+    fix: &str,
+    evidence: &str,
+    repo: Option<&RepoNames<'_>>,
+) -> Option<String> {
     let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
@@ -5586,7 +5783,7 @@ pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<St
         {
             continue;
         }
-        if !evidence.contains(trimmed) {
+        if !evidence.contains(trimmed) && !repo.is_some_and(|r| r.knows(trimmed)) {
             return Some(trimmed.to_string());
         }
     }
@@ -5848,6 +6045,7 @@ async fn run_fix_specifics_round(
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
     files: &[(String, String)],
+    repo_names: &RepoNames<'_>,
     findings: &mut [Finding],
     feedback: &mut std::collections::HashMap<usize, String>,
     pending: &[usize],
@@ -5874,6 +6072,12 @@ async fn run_fix_specifics_round(
             }
             Ok(permit) => permit,
         };
+        // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
+        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
+        for &i in batch {
+            let id = detail_regen::opaque_id(repo, i, &findings[i], &ids);
+            ids.push(id);
+        }
         let prompt = {
             let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
             let local_feedback: std::collections::HashMap<usize, String> = batch
@@ -5883,13 +6087,14 @@ async fn run_fix_specifics_round(
                 .collect();
             format!(
                 "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, files, corpus, &local_feedback, nonce)
+                build_fix_specific_block(&refs, &ids, files, corpus, &local_feedback, nonce)
             )
         };
         let req = with_stage_effort(
             LlmRequest::new(prompt)
                 .with_system(system.to_string())
                 .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_response_schema(reply_schemas::fix_reply_schema(&ids))
                 .with_model(stage_model(fix_model)),
             Stage::FixGeneration,
         );
@@ -5929,7 +6134,7 @@ async fn run_fix_specifics_round(
         let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
-            let Some(text) = parsed.get(&pos) else {
+            let Some(text) = parsed.get(&ids[pos]) else {
                 feedback
                     .entry(orig_idx)
                     .or_insert_with(|| "you did not return a fix for this finding".to_string());
@@ -5945,17 +6150,20 @@ async fn run_fix_specifics_round(
             let redacted_text = camerata_secrets::redact_str(text).into_owned();
             let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
-            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+            if let Some(bad) = find_ungrounded_identifier_in(text, &evidence, Some(repo_names)) {
                 turned_down.push(place(
                     &findings[orig_idx],
-                    &format!("named `{bad}`, which is not in the finding's evidence"),
+                    &format!(
+                        "named `{bad}`, which is not in the finding's evidence or anywhere in \
+                         the repository"
+                    ),
                 ));
                 feedback.insert(
                     orig_idx,
                     format!(
-                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence; keep your fix and its code snippet, but use only names \
-                         from the evidence, or describe a new name in plain words"
+                        "you named `{bad}`, which appears neither in this finding's evidence \
+                         nor anywhere in the repository; keep your fix and its code snippet, \
+                         but use only names that exist, or describe a new name in plain words"
                     ),
                 );
                 still_pending.push(orig_idx);
@@ -6118,6 +6326,8 @@ pub async fn generate_fix_specifics(
     // The fix prompt carries eight raw lines either side of each finding: redact them.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
+    // The names the repository holds, for grounding a name the finding's own window lacks.
+    let repo_names = RepoNames::new(files);
 
     // PRE-FILTER (no model call). A finding with no surrounding code to read (line 0, or its file
     // is not among the scanned files) was the bulk of the fix retries that were paid for and
@@ -6175,6 +6385,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
@@ -6199,6 +6410,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
@@ -6235,6 +6447,7 @@ pub async fn generate_fix_specifics(
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &retry,
@@ -6625,6 +6838,7 @@ async fn audit_pass(
             ))
             .with_max_tokens(scan_max_tokens(n_rules))
             .with_temperature(AUDIT_TEMPERATURE)
+            .with_response_schema(reply_schemas::scan_reply_schema())
             .with_model(stage_model(audit_model)),
         Stage::ScanPass,
     );
@@ -7644,6 +7858,7 @@ async fn run_passes_batch(
                     .with_max_tokens(scan_max_tokens(batch.len()))
                     .with_model(model.clone())
                     .with_cache_breakpoints(cache_bps)
+                    .with_response_schema(reply_schemas::scan_reply_schema())
                     .with_temperature(AUDIT_TEMPERATURE),
                 Stage::ScanPass,
             );
@@ -13000,6 +13215,7 @@ pub async fn run_deep_tier(
 }
 
 pub(crate) mod detail_regen;
+pub(crate) mod reply_schemas;
 use detail_regen::regenerate_full_details;
 
 #[cfg(test)]
@@ -13065,6 +13281,30 @@ mod drift_tests;
 
 #[cfg(test)]
 mod output_caps_tests;
+
+#[cfg(test)]
+mod structured_output_tests;
+
+#[cfg(test)]
+mod opaque_id_tests;
+
+#[cfg(test)]
+mod check_prompt_tests;
+
+#[cfg(test)]
+mod why_fix_direction_tests;
+
+#[cfg(test)]
+mod alternatives_cache_tests;
+
+#[cfg(test)]
+mod repo_grounding_tests;
+
+#[cfg(test)]
+mod stored_replay_tests;
+
+#[cfg(test)]
+mod resume_rejected_tests;
 
 #[cfg(test)]
 mod tests {
@@ -14448,14 +14688,15 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             self.streaming_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            on_delta(&self.text);
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
+            on_delta(&text);
             Ok(LlmResponse {
-                text: self.text.clone(),
+                text,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,
@@ -14682,7 +14923,7 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             let call = self
@@ -14705,6 +14946,7 @@ mod tests {
                     .collect();
                 format!(r#"{{"fixes":[{}]}}"#, entries.join(","))
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             on_delta(&text);
             Ok(LlmResponse {
                 text,
@@ -22097,6 +22339,27 @@ mod tests {
         }
     }
 
+    /// A framework name written with its dot (`Next.js`), an abbreviation (`e.g.`) and the `void`
+    /// keyword look like a file or a chosen name to the regexes but are no name the repository
+    /// could hold: the stored efficiency runs lost eight fixes to them.
+    #[test]
+    fn find_ungrounded_identifier_skips_framework_names_abbreviations_and_void() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Move the charge into a Next.js route handler in app/api/keys/route.ts.",
+            "Add a client query library (e.g. a cached fetch) only with an explicit decision, i.e. in the PR.",
+            "Return `void` from the handler and log instead.",
+            "Keep the handler in app/api/keys/route.ts and declare it `async function run(): Promise<void>`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+        // The list is not a blanket pass for dotted names: an unknown file is still rejected.
+        assert_eq!(
+            find_ungrounded_identifier("Move it into lib/charge.ts.", evidence),
+            Some("lib/charge.ts".to_string())
+        );
+    }
+
     #[test]
     fn find_ungrounded_identifier_still_rejects_a_path_named_inside_a_snippet() {
         let evidence = "app/api/keys/route.ts line 4";
@@ -22184,19 +22447,20 @@ mod tests {
 
     #[test]
     fn parse_fix_specifics_reads_a_well_formed_response() {
-        let raw =
-            r#"{"fixes":[{"index":0,"fix":"Do the thing."},{"index":2,"fix":"Do another."}]}"#;
+        let raw = r#"{"fixes":[{"id":"a1b2c3","fix":"Do the thing."},{"id":"d4e5f6","fix":"Do another."}]}"#;
         let out = parse_fix_specifics(raw);
-        assert_eq!(out.get(&0).map(String::as_str), Some("Do the thing."));
-        assert_eq!(out.get(&2).map(String::as_str), Some("Do another."));
+        assert_eq!(out.get("a1b2c3").map(String::as_str), Some("Do the thing."));
+        assert_eq!(out.get("d4e5f6").map(String::as_str), Some("Do another."));
         assert_eq!(out.len(), 2);
+        // A position is no address any more: an entry with only an `index` matches nothing.
+        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":"Do it."}]}"#).is_empty());
     }
 
     #[test]
     fn parse_fix_specifics_is_empty_on_garbage_input() {
         assert!(parse_fix_specifics("not json at all").is_empty());
         assert!(parse_fix_specifics(r#"{"nope":true}"#).is_empty());
-        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":""}]}"#).is_empty());
+        assert!(parse_fix_specifics(r#"{"fixes":[{"id":"a1b2c3","fix":""}]}"#).is_empty());
     }
 
     // ── generate_fix_specifics (async, stubbed LlmPort — no real model calls) ──────────
@@ -22220,7 +22484,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for SequencedCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut q = self.responses.lock().unwrap();
@@ -22229,6 +22493,7 @@ mod tests {
             } else {
                 q.front().cloned().unwrap_or_default()
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             Ok(LlmResponse {
                 text,
                 model: "stub".to_string(),
@@ -22845,11 +23110,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for CountingFixCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(LlmResponse {
-                text: self.canned.clone(),
+                text: super::reply_schemas::check::address_by_id(&req.prompt, &self.canned),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,

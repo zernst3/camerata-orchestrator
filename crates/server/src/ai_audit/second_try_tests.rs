@@ -83,7 +83,10 @@ impl LlmPort for FailThenGood {
                 ))),
             };
         }
-        Ok(response(self.good))
+        Ok(response(&super::reply_schemas::check::address_by_id(
+            &req.prompt,
+            self.good,
+        )))
     }
     async fn complete_streaming(
         &self,
@@ -540,9 +543,10 @@ impl LlmPort for MixedFixFailures {
                 "Anthropic API HTTP 529: overloaded",
             )));
         }
-        Ok(response(
+        Ok(response(&super::reply_schemas::check::address_by_id(
+            &req.prompt,
             r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
-        ))
+        )))
     }
     async fn complete_streaming(
         &self,

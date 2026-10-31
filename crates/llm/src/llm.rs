@@ -879,6 +879,18 @@ pub struct LlmRequest {
     /// the catalog, Haiku 4.5, does. Ignored by the CLI
     /// backend (`claude -p` has no temperature flag) and by OpenRouter.
     pub temperature: Option<f32>,
+    /// A JSON Schema the reply must satisfy, sent as `output_config.format`
+    /// (`{type: "json_schema", schema}`) on the Messages API to a model that accepts it
+    /// ([`crate::model_registry::accepts_structured_output`]). The API then constrains decoding
+    /// to the schema, so the reply's shape and field types cannot be wrong; the schema's
+    /// limits (every object closed with `additionalProperties: false`, no length or range
+    /// constraints, `minItems` of 0 or 1 only) are the API's. `None` = no schema: the reply is
+    /// free text and the caller parses it tolerantly. The CLI backend, OpenRouter and a model
+    /// without structured output ignore it, so a caller that sets one keeps its tolerant
+    /// parser as the fallback. Part of the request's identity (the run store's request key),
+    /// and the API caches a prompt per schema, so a stage that wants a cached prefix reused
+    /// across requests keeps one schema for all of them.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 impl LlmRequest {
@@ -894,7 +906,21 @@ impl LlmRequest {
             repo_read_extra_dirs: Vec::new(),
             effort: None,
             temperature: None,
+            response_schema: None,
         }
+    }
+
+    /// Ask for a reply that satisfies `schema` (see [`LlmRequest::response_schema`]).
+    pub fn with_response_schema(mut self, schema: serde_json::Value) -> Self {
+        self.response_schema = Some(schema);
+        self
+    }
+
+    /// Whether this request goes to `model` with its schema on the wire: it has one and the
+    /// model accepts structured output. False means the reply is free text parsed tolerantly.
+    /// (The backend can still ignore it: see [`structured_output_used`].)
+    pub fn sends_schema_to(&self, model: &str) -> bool {
+        self.response_schema.is_some() && crate::model_registry::accepts_structured_output(model)
     }
 
     /// Ask for `output_config.effort = effort` (API path only; see [`LlmRequest::effort`]).
@@ -2342,8 +2368,47 @@ fn apply_request_effort(req: &LlmRequest, model: &str, body: &mut serde_json::Va
         .map(str::trim)
         .filter(|e| !e.is_empty())
     {
-        body["output_config"] = serde_json::json!({ "effort": effort });
+        set_output_config(body, "effort", serde_json::json!(effort));
     }
+}
+
+/// Set one key of `body.output_config`, keeping whatever else is already there (the effort and
+/// the response format share the object).
+fn set_output_config(body: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if !body["output_config"].is_object() {
+        body["output_config"] = serde_json::json!({});
+    }
+    body["output_config"][key] = value;
+}
+
+/// Put the request's JSON Schema on the wire as `output_config.format`
+/// (`{type: "json_schema", schema}`), for a model that accepts structured output. It works
+/// alongside the streamed response, the adaptive thinking this crate asks of the 5.x models
+/// (the grammar constrains the final answer only; thinking is free), the effort setting and
+/// the Message Batches API. A request with no schema, or to a model that does not accept one,
+/// is left as it was: the reply is free text. The one place a schema reaches a wire body
+/// (real-time and batch alike).
+fn apply_response_schema(req: &LlmRequest, model: &str, body: &mut serde_json::Value) {
+    if !req.sends_schema_to(model) {
+        return;
+    }
+    if let Some(schema) = &req.response_schema {
+        set_output_config(
+            body,
+            "format",
+            serde_json::json!({ "type": "json_schema", "schema": schema }),
+        );
+    }
+}
+
+/// Whether a reply that came back from `backend` for model `model` was produced under the
+/// request's schema: the request carried one, the call went to the Anthropic API (real-time or
+/// batch; the CLI and OpenRouter ignore it) and the model accepts structured output. What the
+/// run store records as the reply's path: `"schema"` or `"tolerant"`.
+pub fn structured_output_used(asked_schema: bool, backend: &str, model: &str) -> bool {
+    asked_schema
+        && matches!(backend, "api" | "api/batch")
+        && crate::model_registry::accepts_structured_output(model)
 }
 
 /// Ask a model that thinks before it writes to stream a SUMMARY of its thinking
@@ -2389,6 +2454,7 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
         body["system"] = serde_json::json!(system);
     }
     apply_request_effort(req, model, &mut body);
+    apply_response_schema(req, model, &mut body);
     apply_thinking_display(model, &mut body);
     if let Some(t) = req.temperature_for(model) {
         body["temperature"] = serde_json::json!(t);
@@ -2471,6 +2537,7 @@ pub fn build_batch_item(
     // rejected parameter, so there is nothing to strip.
     let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
     apply_request_effort(req, model, &mut shape);
+    apply_response_schema(req, model, &mut shape);
     crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
@@ -4293,6 +4360,88 @@ mod tests {
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
         assert_eq!(v["system"], "you are an auditor");
+    }
+
+    fn two_field_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": {"type": "string"}, "ok": {"type": "boolean"} },
+            "required": ["id", "ok"],
+            "additionalProperties": false
+        })
+    }
+
+    /// A request with a schema sends it as `output_config.format` to a model that accepts
+    /// structured output, next to the effort and the streamed leg's adaptive thinking (neither
+    /// is displaced), and the batch item of the same request carries the same format.
+    #[test]
+    fn a_schema_reaches_the_wire_body_next_to_effort_and_thinking() {
+        for model in [
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let req = LlmRequest::new("p")
+                .with_system("s")
+                .with_effort("low")
+                .with_response_schema(two_field_schema());
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert_eq!(
+                body["output_config"]["format"]["type"], "json_schema",
+                "{model}"
+            );
+            assert_eq!(
+                body["output_config"]["format"]["schema"],
+                two_field_schema(),
+                "{model}"
+            );
+            if crate::model_registry::accepts_effort(model) {
+                assert_eq!(body["output_config"]["effort"], "low", "{model}: {body}");
+                assert_eq!(body["thinking"]["type"], "adaptive", "{model}: {body}");
+            }
+            assert!(req.sends_schema_to(model));
+            let item = build_batch_item("c0-b0", &req, model, BATCH_CACHE_TTL);
+            let v = serde_json::to_value(&item.params).unwrap();
+            assert_eq!(
+                v["output_config"]["format"], body["output_config"]["format"],
+                "{model}"
+            );
+        }
+    }
+
+    /// No schema leaves the body as it was; a model the catalog does not know gets no schema
+    /// (the tolerant parser is its fallback); the request says which path it took.
+    #[test]
+    fn without_a_schema_or_a_model_that_takes_one_the_body_is_unchanged() {
+        let plain = LlmRequest::new("p").with_system("s");
+        let body = messages_request_body(&plain, "claude-sonnet-5-5", CacheTtl::FiveMinutes);
+        assert!(
+            body.get("output_config")
+                .is_none_or(|c| c.get("format").is_none()),
+            "{body}"
+        );
+        let req = plain.clone().with_response_schema(two_field_schema());
+        let body = messages_request_body(&req, "some-future-model", CacheTtl::FiveMinutes);
+        assert!(
+            body.get("output_config")
+                .is_none_or(|c| c.get("format").is_none()),
+            "{body}"
+        );
+        assert!(!req.sends_schema_to("some-future-model"));
+        assert!(structured_output_used(true, "api", "claude-sonnet-5-5"));
+        assert!(structured_output_used(
+            true,
+            "api/batch",
+            "claude-sonnet-5-5"
+        ));
+        assert!(!structured_output_used(true, "cli", "claude-sonnet-5-5"));
+        assert!(!structured_output_used(
+            true,
+            "openrouter/api",
+            "claude-sonnet-5-5"
+        ));
+        assert!(!structured_output_used(false, "api", "claude-sonnet-5-5"));
+        assert!(!structured_output_used(true, "api", "some-future-model"));
     }
 
     /// Rank 10: an effort on the request is sent as `output_config.effort` on the wire body and

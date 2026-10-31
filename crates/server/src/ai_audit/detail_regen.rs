@@ -19,9 +19,10 @@
 //! # The reply is not trusted
 //!
 //! The regenerated text feeds severity decisions, so a reply is accepted per finding, and only
-//! when it passes four checks (see [`accept_entry`]). It is addressed by an opaque id and echoes
-//! the finding's path and line (a reply numbered from 1, or reordered, cannot land on a
-//! neighbour); it must keep every path or identifier the short statement named; it must not add
+//! when it passes the checks of [`accept_entry`]. It is addressed by an opaque id alone, one of
+//! the batch's (a reply numbered from 1, or reordered, cannot land on a neighbour), and echoes
+//! nothing Camerata already knows: the finding's path and line are attached from the finding. It
+//! must keep every path or identifier the short statement named; it must not add
 //! an exploit precondition that neither the statement nor the code shown makes (the same phrase
 //! list calibration's raise-block uses, [`mentions_exploit_precondition`]); and a borderline
 //! statement stays borderline. An entry that fails is simply not written, exactly like one the
@@ -75,21 +76,21 @@ fn round_batch_size(round: usize) -> usize {
 pub(crate) fn detail_regen_system_prompt() -> String {
     r#"You write the full explanation for audit findings that were reported in one short sentence. A human architect reads it to decide what to do, so it must be specific to the code shown.
 
-Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
+Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write two fields, two to four sentences in all: `why`, saying why THIS code is a problem (what is wrong, and nothing about the fix), and `fix_direction`, saying in a sentence or two which way the fix goes. The two are joined into the explanation the architect reads.
 
 Rules, every finding:
-- Keep every fact the short statement already makes: each file name, symbol, flag and other file it names stays in your explanation, spelled exactly as given. Never contradict it.
+- Keep every fact the short statement already makes. Never contradict it. Each finding's block has a `Names to keep:` line: the exact names (files, symbols, flags) your explanation must contain, spelled as listed. An explanation missing one of them is discarded; no other name is required, so write everything else in your own words.
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
-- Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. The fix direction may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
-- If the statement says the case is borderline, start your explanation with "Borderline:", keep saying so, and say what would settle it.
-- A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) may be written as its separate parts, each spelled exactly as given, when a part is itself a name (snake_case or camelCase); a plain member access such as supabase.from stays as written.
+- Do not add conditions the statement does not make. In `why`, do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so; the rule is about exploitation (who must be logged in, what must be enabled, what an attacker must do), and saying in ordinary terms what a value or behaviour depends on is fine. `fix_direction` may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
+- If the statement says the case is borderline, start `why` with "Borderline:", keep saying so, and say what would settle it.
+- A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) is listed as its separate parts when a part is itself a name (snake_case or camelCase): write each listed part. A plain member access such as supabase.from is listed whole and stays as written.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
 
 Return ONLY JSON, no prose:
-{"details":[{"id":"<the finding's id, copied exactly>","path":"<its path, copied exactly>","line":<its line number>,"detail":"..."}]}
-One entry per finding. An entry whose id, path or line does not match its finding is discarded."#
+{"details":[{"id":"<the finding's id, copied exactly>","why":"...","fix_direction":"..."}]}
+One entry per finding, addressed by its id alone: its location is already known, do not repeat it. An entry whose id is not one of the findings' ids is discarded."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -456,6 +457,18 @@ fn build_block(
             camerata_secrets::redact_str(&f.snippet)
         ));
     }
+    // The names the check requires the explanation to keep, printed so the model is told what is
+    // checked ([`names_to_keep`] is also what the check reads).
+    let keep = names_to_keep(f, files);
+    if !keep.is_empty() {
+        evidence.push_str(&format!(
+            "Names to keep: {}\n",
+            keep.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     evidence.push_str(&captured_objects_line(f));
     let mut code_shown = f.snippet.clone();
     let window = fix_context_window(files, &f.path, f.line, DETAIL_CONTEXT_RADIUS);
@@ -481,13 +494,20 @@ fn build_block(
 
 // ── the reply ───────────────────────────────────────────────────────────────────────────────
 
-/// One entry of the reply, before any check.
+/// One entry of the reply, before any check. Addressed by the opaque id alone: Camerata knows the
+/// finding's path and line, so a model that still echoes them (a reply from a backend that never
+/// saw the schema) has them ignored.
+///
+/// The reply splits the explanation from the fix direction (`why`, `fix_direction`); `detail` is
+/// the two joined with a space, the text that is written, so a client reads exactly what a single
+/// `detail` field of the same words would have said. `why` is `Some` when the reply split them:
+/// the exploit-precondition check reads that part alone. A reply that gave one `detail` field (a
+/// backend that never saw the schema) has `why: None` and is read as it always was, by sentence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub id: String,
-    pub path: Option<String>,
-    pub line: Option<u64>,
     pub detail: String,
+    pub why: Option<String>,
 }
 
 /// A reply read entry by entry: the usable entries, and how many array members were not one
@@ -500,19 +520,40 @@ pub(super) struct ParsedReply {
 
 fn entry_of(value: &serde_json::Value) -> Option<Entry> {
     let id = value["id"].as_str()?.trim().to_string();
-    let detail = value["detail"].as_str()?.trim().to_string();
-    if id.is_empty() || detail.is_empty() {
+    if id.is_empty() {
+        return None;
+    }
+    let field = |name: &str| value[name].as_str().map(str::trim).unwrap_or_default();
+    let (why, direction) = (field("why"), field("fix_direction"));
+    if !why.is_empty() {
+        let detail = if direction.is_empty() {
+            why.to_string()
+        } else {
+            format!("{why} {direction}")
+        };
+        return Some(Entry {
+            id,
+            detail,
+            why: Some(why.to_string()),
+        });
+    }
+    // One `detail` field, or a fix direction with no explanation: read as the single text it is.
+    let detail = match field("detail") {
+        "" => direction,
+        detail => detail,
+    };
+    if detail.is_empty() {
         return None;
     }
     Some(Entry {
         id,
-        path: value["path"].as_str().map(|p| p.trim().to_string()),
-        line: value["line"].as_u64(),
-        detail,
+        detail: detail.to_string(),
+        why: None,
     })
 }
 
-/// Parse `{"details":[{"id","path","line","detail"}]}`. Malformed output, a missing array or an
+/// Parse `{"details":[{"id","why","fix_direction"}]}` (or the single `detail` field a backend that
+/// never saw the schema may still send). Malformed output, a missing array or an
 /// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
 /// written", never as an empty explanation.
 ///
@@ -550,8 +591,6 @@ pub(super) fn parse_detail_reply(raw: &str, cut_off: bool) -> ParsedReply {
 /// Why a reply entry was not written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Reject {
-    /// The echoed path or line is not the finding's.
-    Mismatch,
     /// A path or identifier the statement named is missing from the text.
     DropsNamedToken(String),
     /// The text makes an exploit precondition that neither the statement nor the code shown makes.
@@ -562,9 +601,6 @@ impl Reject {
     /// The reason in words, for the saved reply and the failure report.
     pub(super) fn reason(&self) -> String {
         match self {
-            Self::Mismatch => {
-                "the entry echoed another path or line than the finding's".to_string()
-            }
             Self::DropsNamedToken(token) => {
                 format!("dropped `{token}`, which the one-sentence statement named")
             }
@@ -574,16 +610,6 @@ impl Reject {
             }
         }
     }
-}
-
-/// `path` without a leading `./` or `/` (repeated), so `./src/a.rs` and `/src/a.rs` read as
-/// `src/a.rs`.
-fn normalized_path(path: &str) -> &str {
-    let mut p = path.trim();
-    while let Some(rest) = p.strip_prefix("./").or_else(|| p.strip_prefix('/')) {
-        p = rest;
-    }
-    p
 }
 
 /// Whether a statement is marked borderline (`Borderline: ...`, any case).
@@ -666,6 +692,65 @@ const FIX_DIRECTION_LEADS: &[&str] = &[
     "create",
 ];
 
+/// Words and phrases that put a precondition sentence about EXPLOITING the problem: who must be
+/// logged in or hold what, what must be enabled, what the attacker must do, or the same told
+/// from the other side (the attack, the victim, a forged or stolen credential, a compromised
+/// account). A "depends on" with none of them ("depends on the runtime's locale") is an
+/// ordinary explanation, not a condition on whether the problem can be exploited. Word stems,
+/// matched as substrings of the lowercased sentence ("attack" covers "attacker").
+const EXPLOIT_CONTEXT: &[&str] = &[
+    "attack",
+    "adversar",
+    "malicious",
+    "exploit",
+    "abus",
+    "victim",
+    "forged",
+    "forging",
+    "stolen",
+    "steal",
+    "compromis",
+    "hijack",
+    "spoof",
+    "logged in",
+    "logged-in",
+    "signed in",
+    "signed-in",
+    "authenticated",
+    "valid session",
+    "valid token",
+    "valid credential",
+    "session cookie",
+    "privileged",
+    "the caller",
+    "a caller",
+    "any user",
+    "a user",
+    "an admin",
+    "enabled",
+    "turned on",
+];
+
+/// Whether the explanation (`why`) makes an EXPLOIT precondition: a sentence that carries one of
+/// [`EXPLOIT_PRECONDITION_PHRASES`] ("requires", "depends on", "only if", "assuming", ...) and is
+/// about who must be logged in, what must be enabled or what an attacker must do
+/// ([`EXPLOIT_CONTEXT`]). The shared predicate calibration's raise-block uses
+/// ([`mentions_exploit_precondition`]) fires on the bare phrase anywhere, which turned down
+/// "depends on the runtime's locale" and "requires confirming the defaults" as invented
+/// conditions; this one is for the acceptance of a regenerated explanation only, and the text
+/// that is written still goes through calibration's own guard, which is unchanged.
+pub(super) fn why_makes_exploit_precondition(why: &str) -> bool {
+    sentences(why).into_iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        let phrase = contains_non_negated_requires(&lower)
+            || EXPLOIT_PRECONDITION_PHRASES
+                .iter()
+                .filter(|p| **p != "requires ")
+                .any(|p| lower.contains(*p));
+        phrase && EXPLOIT_CONTEXT.iter().any(|c| lower.contains(c))
+    })
+}
+
 /// The sentences of `text`, split at a full stop, `!` or `?` followed by white space, and at a
 /// line break.
 fn sentences(text: &str) -> Vec<&str> {
@@ -737,8 +822,32 @@ pub(super) fn precondition_scope(text: &str) -> String {
     kept.join(" ")
 }
 
+/// The names a finding's regenerated explanation must contain: every path or identifier its
+/// one-sentence statement names (after the secret redaction both sides go through), a compound
+/// name (`audit_log.action`, `created_by/modified_by`) as its parts. ONE function for the prompt
+/// (each block lists these under `Names to keep:`) and for the check ([`accept_entry`]), so the
+/// model is told exactly what is checked.
+pub(super) fn names_to_keep(f: &Finding, files: &[(String, String)]) -> Vec<String> {
+    let redacted_short = camerata_secrets::redact_str(short_statement_of(&f.detail));
+    let mut out: Vec<String> = Vec::new();
+    for token in named_tokens(&redacted_short, files) {
+        let names = if token.parts.is_empty() {
+            vec![token.text]
+        } else {
+            token.parts
+        };
+        for name in names {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 /// The checks one entry must pass to be written (the id match is done by the caller, which
-/// knows the batch). Returns the text to write: the model's, with `Borderline: ` put back at the
+/// knows the batch; the entry carries no location, because Camerata attaches the finding's).
+/// Returns the text to write: the model's, with `Borderline: ` put back at the
 /// front when the statement was borderline and the text lost it. `files` is the file set a
 /// named path is looked up in (see [`named_tokens`]).
 pub(super) fn accept_entry(
@@ -747,37 +856,32 @@ pub(super) fn accept_entry(
     code_shown: &str,
     files: &[(String, String)],
 ) -> Result<String, Reject> {
-    // The path is read forgivingly (a leading "./" or "/" is not a different file); the line is
-    // not: any other line is another place.
-    if entry.path.as_deref().map(normalized_path) != Some(normalized_path(&f.path))
-        || entry.line != Some(f.line as u64)
-    {
-        return Err(Reject::Mismatch);
-    }
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
     // Every path or identifier the statement named stays; a compound name stays as its parts.
-    // Both sides go through the same secret redaction: the text is what would be written, and a
+    // The list is the one the prompt printed under `Names to keep:` ([`names_to_keep`]). Both
+    // sides go through the same secret redaction: the text is what would be written, and a
     // name the redactor rewrites in the statement is rewritten the same way in the text, so a
     // kept secret-shaped name is not mistaken for a dropped one.
-    let redacted_short = camerata_secrets::redact_str(short);
-    for token in named_tokens(&redacted_short, files) {
-        if token.parts.is_empty() {
-            if !text.contains(&token.text) {
-                return Err(Reject::DropsNamedToken(token.text));
-            }
-        } else if let Some(missing) = token.parts.iter().find(|p| !text.contains(p.as_str())) {
-            return Err(Reject::DropsNamedToken(missing.clone()));
-        }
+    if let Some(missing) = names_to_keep(f, files)
+        .into_iter()
+        .find(|name| !text.contains(name.as_str()))
+    {
+        return Err(Reject::DropsNamedToken(missing));
     }
     // No new exploit precondition. The same phrase list as calibration's raise-block and the D5
     // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would
     // silently stop calibration raising a critical, on a claim nobody made. A borderline
     // statement is exempt (the prompt orders the model to say what would settle it, and
-    // calibration already reads borderline as low confidence); the check reads the explanation,
-    // not the fix direction ([`precondition_scope`]).
+    // calibration already reads borderline as low confidence). The check reads the explanation
+    // alone: the `why` field when the reply split it from the fix direction, else (a single
+    // `detail`) the sentences that are not a fix direction ([`precondition_scope`]).
+    let explanation = match &entry.why {
+        Some(why) => camerata_secrets::redact_str(why).into_owned(),
+        None => precondition_scope(&text),
+    };
     if !is_borderline(short)
-        && mentions_exploit_precondition(&precondition_scope(&text))
+        && why_makes_exploit_precondition(&explanation)
         && !mentions_exploit_precondition(short)
         && !mentions_exploit_precondition(code_shown)
     {
@@ -793,7 +897,7 @@ pub(super) fn accept_entry(
 /// An opaque per-finding id for one batch: not its position, so a reply numbered from 1 or
 /// reordered cannot land on a neighbour. Six hex digits of a hash of the finding's place in the
 /// run, re-hashed on the rare collision within the batch.
-fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
+pub(super) fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
     let mut salt = 0u32;
     loop {
         let h = crate::suppression::fnv1a(&format!(
@@ -864,6 +968,7 @@ async fn run_detail_round(
             LlmRequest::new(prompt)
                 .with_system(system.to_string())
                 .with_max_tokens(camerata_ui_core::scan::regen_call_max_tokens(batch.len()))
+                .with_response_schema(super::reply_schemas::detail_reply_schema(&ids))
                 .with_model(super::stage_model(model)),
             Stage::DetailRegeneration,
         );
@@ -937,7 +1042,6 @@ async fn run_detail_round(
                 }
                 Err(reject) => {
                     match &reject {
-                        Reject::Mismatch => rejections.mismatch += 1,
                         Reject::DropsNamedToken(_) => rejections.drops_named_token += 1,
                         Reject::InventedPrecondition => rejections.invented_precondition += 1,
                     }

@@ -116,7 +116,10 @@ impl LlmPort for FixStub {
         } else {
             r#"{"fixes":[{"index":0,"fix":"Validate `raw` before it reaches `query`."},{"index":1,"fix":"Call `neverInEvidence` first."}]}"#
         };
-        Ok(response(text, false))
+        Ok(response(
+            &super::reply_schemas::check::address_by_id(&req.prompt, text),
+            false,
+        ))
     }
     async fn complete_streaming(
         &self,
@@ -228,6 +231,12 @@ async fn a_fix_reply_with_every_fix_turned_down_is_set_aside() {
         // not in this finding's evidence, so the one fix of the reply is turned down.
         let (findings, files) = two_fix_findings();
         let findings = vec![findings[1].clone()];
+        // The other file is not in the repository this finding is judged against, so `query`
+        // (a name in it) is a name found nowhere in the repository.
+        let files: Vec<(String, String)> = files
+            .into_iter()
+            .filter(|(path, _)| path == "src/work.ts")
+            .collect();
         let (out, failed) =
             generate_fix_specifics(&journal, "o/r", findings, &files, None, None, None).await;
         assert!(failed.is_empty(), "{failed:?}");
@@ -300,9 +309,12 @@ async fn a_fix_give_up_records_the_reason_per_finding_in_its_attempts_and_in_fai
     struct AlwaysInvents;
     #[async_trait::async_trait]
     impl LlmPort for AlwaysInvents {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(response(
-                r#"{"fixes":[{"index":0,"fix":"Call `neverInEvidence` first."}]}"#,
+                &super::reply_schemas::check::address_by_id(
+                    &req.prompt,
+                    r#"{"fixes":[{"index":0,"fix":"Call `neverInEvidence` first."}]}"#,
+                ),
                 false,
             ))
         }

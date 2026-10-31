@@ -47,8 +47,8 @@ elif "calibrating an automated audit" in system:
     out = {"verdicts": [{"index": i, "severity": "medium", "confidence": "high",
                          "reason": "checked", "effort": "low"} for i in range(n)]}
 elif "ONE concrete, codebase-specific fix" in system:
-    n = len([l for l in labels if l.startswith("finding ")])
-    out = {"fixes": [{"index": i, "fix": "Check the input before it is used."} for i in range(n)]}
+    out = {"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
+                     for l in labels if l.startswith("finding ")]}
 else:
     out = {"findings": [], "proposed_rules": [], "needs_files": [], "verdicts": [],
            "fixes": [], "recommendations": []}

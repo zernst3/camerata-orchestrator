@@ -223,9 +223,10 @@ impl Stub {
 #[async_trait::async_trait]
 impl LlmPort for Stub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
-            text: self.text.clone(),
+            text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,

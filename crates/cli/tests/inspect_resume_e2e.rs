@@ -122,13 +122,18 @@ impl Scripted {
                 serde_json::json!({ "verdicts": verdicts }).to_string()
             }
             PartKind::Fix => {
-                let n = req
+                // A fix is addressed by the opaque id its block opens with, which is also the label
+                // of the block's frame: `<<<UNTRUSTED token "finding a1b2c3">>>`.
+                let ids: Vec<&str> = req
                     .prompt
                     .lines()
-                    .filter(|l| l.starts_with("<<<UNTRUSTED ") && l.contains("\"finding "))
-                    .count();
-                let fixes: Vec<serde_json::Value> = (0..n)
-                    .map(|i| serde_json::json!({"index": i, "fix": "Check the input before it is used."}))
+                    .filter(|l| l.starts_with("<<<UNTRUSTED "))
+                    .filter_map(|l| l.split("\"finding ").nth(1))
+                    .filter_map(|rest| rest.split('"').next())
+                    .collect();
+                let fixes: Vec<serde_json::Value> = ids
+                    .iter()
+                    .map(|id| serde_json::json!({"id": id, "fix": "Check the input before it is used."}))
                     .collect();
                 serde_json::json!({ "fixes": fixes }).to_string()
             }

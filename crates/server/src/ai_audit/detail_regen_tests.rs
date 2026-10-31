@@ -1093,14 +1093,45 @@ async fn a_dropped_id_leaves_only_that_finding_unwritten() {
         .any(|f| f.pass == STAGE_DETAIL && f.reason.contains("1 of 2")));
 }
 
+/// Camerata knows the finding's path and line, so the reply does not carry them and an echo that
+/// is there anyway (a backend that never saw the schema) is ignored, wrong or not: the id alone
+/// addresses the finding.
 #[tokio::test]
-async fn an_entry_that_echoes_the_wrong_line_is_not_written() {
+async fn an_echoed_path_or_line_is_ignored_the_id_alone_addresses_the_finding() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
     let meter = meter_with(EfficiencyConfig::default());
     let (findings, failed) = audit(&llm, &meter).await;
-    assert!(findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
-    assert!(!findings[0].detail.contains("(finding at line"));
-    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+    assert!(!findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(findings[0].detail.contains("(finding at line"));
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+}
+
+/// The request no longer asks for the echo: the prompt's reply shape names the id and the
+/// detail, and the schema has no path or line to fill.
+#[tokio::test]
+async fn the_request_does_not_ask_the_model_to_echo_the_path_or_line() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::Writes);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = audit(&llm, &meter).await;
+    let system = llm.systems(Role::Regen).remove(0);
+    assert!(system.contains(r#"{"details":[{"id":"#), "{system}");
+    assert!(!system.contains(r#""path":"<"#), "{system}");
+    assert!(!system.contains("its line number"), "{system}");
+    let reqs: Vec<LlmRequest> = llm
+        .log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(r, _)| *r == Role::Regen)
+        .map(|(_, q)| q.clone())
+        .collect();
+    let schema = reqs[0].response_schema.as_ref().expect("a schema");
+    let props = schema["properties"]["details"]["items"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(props.contains_key("id") && props.contains_key("why"));
+    assert!(props.contains_key("fix_direction"));
+    assert!(!props.contains_key("path") && !props.contains_key("line"));
 }
 
 #[tokio::test]
@@ -1121,12 +1152,11 @@ async fn an_invented_exploit_precondition_keeps_the_short_statement() {
         .contains("requires a valid session"));
 }
 
-fn entry(f: &Finding, detail: &str) -> Entry {
+fn entry(_f: &Finding, detail: &str) -> Entry {
     Entry {
         id: "x".to_string(),
-        path: Some(f.path.clone()),
-        line: Some(f.line as u64),
         detail: detail.to_string(),
+        why: None,
     }
 }
 
@@ -1135,18 +1165,8 @@ fn statement(short: &str) -> Finding {
 }
 
 #[test]
-fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
+fn accept_entry_requires_the_named_tokens_and_no_new_precondition() {
     let f = statement(SHORT);
-    // The echo.
-    let mut wrong_path = entry(&f, FULL);
-    wrong_path.path = Some("other.rs".to_string());
-    assert_eq!(
-        accept_entry(&f, &wrong_path, "", &[]),
-        Err(Reject::Mismatch)
-    );
-    let mut no_line = entry(&f, FULL);
-    no_line.line = None;
-    assert_eq!(accept_entry(&f, &no_line, "", &[]), Err(Reject::Mismatch));
     // Every path or identifier the statement names must survive.
     assert_eq!(
         accept_entry(
@@ -1567,13 +1587,11 @@ fn rejections(meter: &UsageMeter) -> crate::stage_telemetry::DetailRejections {
 
 #[tokio::test]
 async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
-    // A wrong line is turned down once per attempt: 3 rounds, 1 finding (an answered reply gets
-    // no second try).
+    // A wrong echoed line is no longer a reason to turn an entry down: nothing is echoed.
     let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
-    let r = rejections(&meter);
-    assert_eq!((r.mismatch, r.total()), (3, 3), "{r:?}");
+    assert!(meter.stage_telemetry(0).detail_rejections.is_none());
 
     let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
     let meter = meter_with(EfficiencyConfig::default());
@@ -1740,38 +1758,7 @@ fn the_rejection_line_is_in_the_operator_table() {
     }
 }
 
-// ── the echoed path is read forgivingly, the line is not ────────────────────────────────────
-
-#[test]
-fn a_dot_slash_or_leading_slash_path_is_the_same_path() {
-    let f = statement(SHORT);
-    let with = |path: &str, line: u64| Entry {
-        id: "x".to_string(),
-        path: Some(path.to_string()),
-        line: Some(line),
-        detail: FULL.to_string(),
-    };
-    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "", &[]).is_ok());
-    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "", &[]).is_ok());
-    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "", &[]).is_ok());
-    // Anything else is still a different place: another file, a suffix of it, another line.
-    assert_eq!(
-        accept_entry(&f, &with("other/webhook.rs", 9), "", &[]),
-        Err(Reject::Mismatch)
-    );
-    assert_eq!(
-        accept_entry(&f, &with("handlers/webhook.rs", 9), "", &[]),
-        Err(Reject::Mismatch)
-    );
-    assert_eq!(
-        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), "", &[]),
-        Err(Reject::Mismatch)
-    );
-    // The finding's own path is read the same way.
-    let mut dotted = statement(SHORT);
-    dotted.path = format!("./{HANDLER}");
-    assert!(accept_entry(&dotted, &with(HANDLER, 9), "", &[]).is_ok());
-}
+// ── a stray echo is ignored ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn a_reply_that_echoes_dot_slash_paths_is_written() {
@@ -2129,8 +2116,13 @@ fn a_borderline_statement_may_say_what_would_settle_it() {
                 REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
     let kept = accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).unwrap();
     assert!(kept.starts_with("Borderline: "));
-    // The same words on a confident statement are an invented precondition.
+    // On a confident statement, hedging the problem is not an exploit precondition (retry fixes
+    // F3 narrowed the check to who must be logged in and what must be enabled)...
     let confident = statement("Profile edits are not gated for verified members in src/config.rs.");
+    assert!(accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]).is_ok());
+    // ...but a condition on the attacker still is.
+    let text = "It is a problem only if the attacker is logged in as a verified member, as \
+                REQUIRE_WEBHOOK_SIGNATURE in src/config.rs suggests. Gate the edit on the flag.";
     assert_eq!(
         accept_entry(&confident, &entry(&confident, text), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
@@ -2161,8 +2153,13 @@ fn a_requires_whose_object_is_a_backticked_construct_is_not_a_precondition() {
     let text = "The policy requires a `to authenticated` clause and does not have one, in \
                 src/config.rs, so every row is readable.";
     assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
-    // A bare "requires" is still one.
+    // A bare "requires" about the code is an ordinary explanation, not a condition on who can
+    // exploit it (retry fixes F3 narrowed the check)...
     let text = "The policy requires a role clause and does not have one, in src/config.rs.";
+    assert!(accept_entry(&f, &entry(&f, text), "let x = 1;", &[]).is_ok());
+    // ...one about the attacker or the session still is.
+    let text = "Reading a row requires a valid session, and the policy has no role clause, in \
+                src/config.rs.";
     assert_eq!(
         accept_entry(&f, &entry(&f, text), "let x = 1;", &[]),
         Err(Reject::InventedPrecondition)
@@ -2191,7 +2188,6 @@ fn a_rejection_names_what_was_wrong() {
     assert!(Reject::DropsNamedToken("seed.sql".to_string())
         .reason()
         .contains("`seed.sql`"));
-    assert!(Reject::Mismatch.reason().contains("path or line"));
     assert!(Reject::InventedPrecondition
         .reason()
         .contains("exploit precondition"));

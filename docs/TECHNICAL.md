@@ -2945,6 +2945,98 @@ The command line's pre-flight, the cockpit's cost readout
 file list to route, and without the clone judge) and the batch gate's fallback projection
 (`ai_audit::batch_estimate_usd`) all price from it.
 
+**Structured replies** (retry fixes F3, `crates/server/src/ai_audit/reply_schemas.rs`).
+Every JSON stage (scan, alternatives, calibration, detail, fix) sends a JSON Schema as
+`output_config.format` on the API backend, to a model the registry says accepts one
+(`model_registry::accepts_structured_output`: every Claude model of the catalog), so a
+reply's shape and field types cannot be wrong. The Anthropic structured-outputs page says
+the grammar constrains the final answer only, so it works with the streamed leg, the
+adaptive thinking the 5.x models are asked for, the effort setting and the Message Batches
+API; the schemas keep to its limits (closed objects, no length or range constraints, at most
+24 optional properties), checked by a test. The CLI backend, OpenRouter and a model without
+structured output never see the schema and reply as they always did, so every stage keeps its
+tolerant parser (first `{` to last `}`, salvage of a cut-off reply) as the fallback. The
+schema is part of the request's identity (the run store's request key), and each stored
+call carries `output_path`: `schema` when the reply was produced under the schema,
+`tolerant` when the request carried one the backend or model could not take. The API caches
+a prompt per schema, so the stages that send a cached digest (scan, alternatives) use one
+schema for every request of a run; calibration, detail and fix, which send no cached prefix,
+name the ids of their batch in the schema. A schema cannot make a reply cover every id (the
+API allows `minItems` of 0 or 1 only), so a finding the reply leaves out is handled as before.
+
+*Ids Camerata knows are never echoed.* The detail reply is `{"details":[{"id","detail"}]}`:
+the finding's path and line are attached by Camerata from the finding, so the reply no
+longer echoes them (an echo from a backend that never saw the schema is ignored, and the
+old "wrong place" rejection is gone; `DetailRejections::mismatch` stays in the ledger as a
+zero so older ledgers read). The fix stage moved from the batch position to the same kind
+of opaque id: each fix block opens `[a1b2c3] rule ...`, the reply is
+`{"fixes":[{"id","fix"}]}`, and the schema's `id` is an enum of the batch's ids. A finding
+keeps its id across rounds (it hashes the finding's place in the run, not its place in the
+batch), and a position is no address, so a reply numbered from 0 or 1 lands on no finding.
+Prompt schema version 4.
+
+*The prompt says what the check requires.* Each detail block carries a `Names to keep:`
+line (`detail_regen::names_to_keep`: every path or identifier the one-sentence statement
+names, a compound such as `audit_log.action` as its parts) and the acceptance check reads
+the same function, so the sentence and the check cannot differ. Each fix block ends with a
+`Names you may use:` line (`fix_names_available`: the file-like words and chosen-shaped
+identifiers of the evidence the grounding check looks a name up in); anything else is
+introduced as a new name in plain words.
+
+*`why` and `fix_direction`.* The detail reply is `{"id","why","fix_direction"}`. The text
+that is written is the two joined with a space (a test pins that a client reads exactly
+what one `detail` field of the same words gave), the named-token check reads the joined
+text, and the exploit-precondition check reads `why` alone, so a fix direction that says
+what the fix needs ("make sure the endpoint requires a session") is no longer mistaken for
+a condition on the problem. A reply with a single `detail` field (a backend that never saw
+the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
+direction as part of the finding's `Detail:` in its evidence; it has no separate input.
+
+*The precondition check names exploit preconditions.* With `why` its own field, the detail
+acceptance check no longer fires on every bare "depends on" or "requires": a sentence of
+`why` is an invented precondition when it carries one of the shared phrases AND is about
+exploitation (`detail_regen::why_makes_exploit_precondition`: an attacker, who must be logged
+in or hold a valid session or token, what must be enabled). "Depends on the runtime's
+locale" and "requires a trailing slash" now pass; "exploitation requires a valid session
+cookie" and "an attacker must be logged in" are still turned down. Calibration's own guard
+(`mentions_exploit_precondition`, which blocks an upward move when the written text holds
+any of the phrases) is unchanged and still reads the written text.
+
+*A resume does not pay again for an answer already judged wrong.* The run store used to
+re-ask, identically, a fix or detail reply every entry of which the stage had turned down (or
+that was cut off or held no JSON), because only a good reply was replayed. The live run had
+already moved on to the changed request (the feedback line, the smaller batch), so a resume
+paid twice for the first request and then replayed the rest. For these two stages
+(`journal::replays_on_resume`, the only ones whose own rounds change the request after a reply
+they turned down) the stored reply is now replayed: the stage judges it again, turns it down
+for the same reason, and its next round is the changed request the live run stored. A give-up
+replays to the same give-up at no cost. Scan, calibration and alternatives keep their policy
+(a rejected stage is set aside whole and asked again). `calls_done` and the resume estimate
+count a replayable reply as stored.
+
+*The fix checker knows the repository.* A fix's names were grounded only in the finding's
+own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
+outside it (`actor_id`, `bucket_id`, `tsconfig.json`, `.env.example`) were rejected, about 28
+of 185 fixes in the Sonnet run. `RepoNames` (built once per repo from the file set the stage
+holds) now backs the check: a path-like name is grounded when it is a file or directory of
+the set (exact, a trailing part of a path, a dotfile read with or without its dot) or is
+written in some file; any other name is grounded when every identifier word in it is one the
+repository spells. A name found nowhere in the repository (a constraint name nobody wrote,
+a proposed file) is still rejected, and the retry's feedback says the name is neither in the
+evidence nor anywhere in the repository. `stored_replay_tests` (ignored; set
+`CAMERATA_STORED_RUNS`) replays the stored fix replies of the two efficiency runs against a
+repository rebuilt from their scan calls' paths and quoted code, and asserts that
+`billing_accounts_user_id_fkey` and `app/api/charge/route.ts` are still flagged.
+
+*The alternatives digest is a cached prefix.* The stage re-sent the whole file digest (25k
+to 40k input tokens) uncached with every rule batch. Its prompt is now the repo map and the
+digest, then the batch's rules, with cache breakpoints (`alternatives_cache_breakpoints`):
+after the digest when the stage sends more than one rule batch, after the repo map when it
+asks about more than one file-chunk digest, none when one request over one digest repeats
+nothing. The system prompt and the response schema are the same on every request of the
+stage, so the prefix is one cache entry. The pre-flight estimate still prices the digest
+re-send at the full input rate, so it is an upper bound for a run with several rule batches.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its

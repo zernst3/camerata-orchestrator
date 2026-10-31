@@ -14,9 +14,9 @@ struct UsageStub {
 
 #[async_trait::async_trait]
 impl LlmPort for UsageStub {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: self.text.clone(),
+            text: super::reply_schemas::check::address_by_id(&req.prompt, &self.text),
             model: "stub".to_string(),
             backend: "api".to_string(),
             cost_usd: Some(0.5),
