@@ -22,6 +22,9 @@ pub enum CheckId {
     /// The PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV
     /// agree with `json/all-findings.json` by severity AND kind (22d).
     Counts,
+    /// No finding the model invented is junk: a placeholder title or rule id, no evidence, or an
+    /// explanation that says to discard it (D1).
+    Content,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -33,12 +36,13 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 8] = [
+    pub const ALL: [CheckId; 9] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
         CheckId::RowParity,
         CheckId::Counts,
+        CheckId::Content,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -52,6 +56,7 @@ impl CheckId {
             CheckId::DatasetParity => "dataset parity",
             CheckId::RowParity => "row parity",
             CheckId::Counts => "severity and kind counts",
+            CheckId::Content => "finding content",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",

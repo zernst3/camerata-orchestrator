@@ -132,6 +132,10 @@ pub mod credentials;
 /// eyeball into a verdict with an exit code, so a silently degraded scan is caught before a
 /// graded run is paid for rather than after. See the module doc comment.
 pub mod integrity_gate;
+/// D1: the content test for a junk model finding (placeholder text, no evidence, a discard
+/// verdict in its own explanation), shared by scan parsing, the post-calibration filter and the
+/// release gate. See the module doc comment.
+pub mod junk_finding;
 /// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
 /// must resolve to a real wired detector. See the module doc comment.
 mod mechanical_gate;

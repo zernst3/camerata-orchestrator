@@ -11,7 +11,7 @@
 //! `build_product_zip(` or `compile_pdf_from_data(`.
 //!
 //! The checks, in order: secrets, dataset set, dataset parity, row parity, severity and kind
-//! counts, confidentiality marking, manifest, provenance
+//! counts, finding content, confidentiality marking, manifest, provenance
 //! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
 //! same functions, so the test and the runtime check cannot drift.
 
@@ -279,6 +279,7 @@ fn audit_zip_with(zip_bytes: &[u8], pdf_text: Option<&str>, allow_incomplete: bo
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
+    report.record(CheckId::Content, content_problems(&entries));
     report.record(CheckId::Marking, marking_problems(&entries));
     let mut manifest_problems = verify_manifest(&entries);
     if !allow_incomplete {
@@ -368,6 +369,47 @@ fn archive_secret_problems(
         }
     }
     problems
+}
+
+/// The content check (D1): no row the model invented (rule id prefixed `AI-`) in `findings.json`
+/// is junk. A placeholder title or rule id, a row with no evidence and no explanation, or an
+/// explanation that is itself the verdict "discard this finding" makes the package unfit to
+/// ship. The same test ([`crate::junk_finding::row_problem`]) removes such a row at scan
+/// parsing and after calibration, so this check only fires if a row got past both.
+fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+    let Some(bytes) = entries.get("findings.json") else {
+        // The dataset-set check reports the missing file.
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let text = |row: &serde_json::Value, key: &str| row[key].as_str().unwrap_or("").to_string();
+    doc["findings"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    let rule_id = text(row, "rule_id");
+                    crate::junk_finding::row_problem(
+                        &rule_id,
+                        &text(row, "headline"),
+                        &text(row, "snippet"),
+                        &text(row, "detail"),
+                    )
+                    .map(|why| {
+                        Problem::new(
+                            "findings.json",
+                            format!("findings[{i}]"),
+                            format!("a finding the model invented is junk: {why}"),
+                            Some(rule_id),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn provenance_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
@@ -500,6 +542,9 @@ mod patterns_tests;
 
 #[cfg(test)]
 mod merged_site_tests;
+
+#[cfg(test)]
+mod junk_content_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]

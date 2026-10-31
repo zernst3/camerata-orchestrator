@@ -1904,6 +1904,7 @@ pub fn parse_ai_findings(
     };
 
     let mut findings = Vec::new();
+    let mut junk_dropped: Vec<String> = Vec::new();
     if let Some(arr) = v["findings"].as_array() {
         for f in arr {
             let rule = ["rule", "rule_id", "id"]
@@ -1940,6 +1941,21 @@ pub fn parse_ai_findings(
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
             if title.is_empty() && detail.is_empty() && code.is_empty() {
+                continue;
+            }
+            // D1: a row the model filled with placeholder text (title `placeholder`, code and
+            // detail `x`, a rule id naming a placeholder) never becomes a finding. Counted below.
+            if let Some(why) = crate::junk_finding::parse_gate_reason(
+                !adopted.contains(&rule_id),
+                &rule_id,
+                &title,
+                &code,
+                &detail,
+            ) {
+                junk_dropped.push(format!(
+                    "{rule_id} at {}: {why}",
+                    f["path"].as_str().unwrap_or("(repo)")
+                ));
                 continue;
             }
             // `snippet` holds the VERBATIM offending line when the model gave one (matches the
@@ -2011,6 +2027,15 @@ pub fn parse_ai_findings(
             crate::onboard::redact::redact_finding(&mut finding);
             findings.push(finding);
         }
+    }
+    if !junk_dropped.is_empty() {
+        // Operator side only: the client report never mentions a row the model should not have
+        // written.
+        eprintln!(
+            "[camerata-server] {repo}: dropped {} junk finding(s) at scan parsing: {}",
+            junk_dropped.len(),
+            junk_dropped.join("; ")
+        );
     }
 
     let mut proposed = Vec::new();
@@ -8950,6 +8975,36 @@ const MIN_CONTAINED_SNIPPET: usize = 12;
 /// problem (two things one rule found at line 0 of a file, or at one unresolved line
 /// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
 /// any repeat carried. Order is preserved.
+/// D1: remove, after the detail and calibration steps, every row the model INVENTED (rule id
+/// prefixed `AI-`) whose own text says to throw it away ("discard this finding", "placeholder
+/// finding"), or whose rule id or headline is a placeholder. Calibration itself never drops a
+/// row; the verdict it and the detail step write into the row's explanation is what is acted on
+/// here, and only for a row no adopted rule backs. Operator side, each removal is logged with its
+/// rule and place; the client report never mentions it. Returns how many rows were removed.
+fn drop_discarded_invented_rows(repo: &str, findings: &mut Vec<Finding>) -> usize {
+    let mut removed = Vec::new();
+    findings.retain(|f| {
+        let junk = f.rule_id.starts_with("AI-")
+            && crate::junk_finding::is_junk_invented_row(
+                &f.rule_id,
+                &finding_headline(f),
+                &f.detail,
+            );
+        if junk {
+            removed.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+        }
+        !junk
+    });
+    if !removed.is_empty() {
+        eprintln!(
+            "[camerata-server] {repo}: dropped {} finding(s) the model's own text said to discard: {}",
+            removed.len(),
+            removed.join("; ")
+        );
+    }
+    removed.len()
+}
+
 fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
     let mut by_key: std::collections::HashMap<(String, usize, String), Vec<(String, usize)>> =
         std::collections::HashMap::new();
@@ -12260,13 +12315,20 @@ pub async fn audit_repo(
             dropped_no_convention = before.saturating_sub(verified.len());
         }
     }
+    // D1: the detail and calibration steps write "discard this finding" into a placeholder row's
+    // explanation; act on it for the rows the model invented, and account for the removal below.
+    let dropped_discarded = drop_discarded_invented_rows(repo, &mut verified);
     // W1: calibration itself never drops a row (see this block's own doc comment above); the
     // ONLY row-count reductions between `pre_calibration_len` and here are the P7
-    // not-applicable filter and the A5.3 no-convention filter just above, so those are the
-    // explicit dispositions this stage accounts for.
+    // not-applicable filter, the A5.3 no-convention filter and the D1 discard filter just
+    // above, so those are the explicit dispositions this stage accounts for.
     {
         let rows_out = verified.len();
         let mut acc = crate::scan_ledger::StageAccounting::default();
+        if dropped_discarded > 0 {
+            acc.other
+                .push(("discarded_placeholder_row".to_string(), dropped_discarded));
+        }
         if dropped_not_applicable > 0 {
             acc.other.push((
                 "not_applicable_rule_filtered".to_string(),
@@ -14428,6 +14490,71 @@ mod tests {
         // Anti-over-rotation guard: the sibling medium finding must NOT be swept up into
         // critical just because another finding in the same batch was critical.
         assert_eq!(findings[1].severity, "medium");
+    }
+
+    /// D1: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
+    /// (title `placeholder`, code and detail `x`) is not a finding; the real row beside it is.
+    #[test]
+    fn parse_ai_findings_drops_a_placeholder_row_and_keeps_the_real_one() {
+        let raw = r#"{"findings":[
+            {"path":"lib/supabase/admin.ts","line":8,"severity":"low",
+             "rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER","title":"placeholder","code":"x","detail":"x"},
+            {"path":"lib/supabase/admin.ts","line":12,"severity":"high",
+             "rule":"service-role-key-in-client-bundle","title":"Service role key reaches the browser",
+             "code":"export const admin = createClient(url, serviceKey)",
+             "detail":"The admin client is built with the service role key in a module the browser imports."}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].line, 12);
+    }
+
+    /// D1: each junk shape is refused on its own (an empty reply for code and detail, a
+    /// placeholder title over real text, a placeholder rule id over real text).
+    #[test]
+    fn parse_ai_findings_refuses_each_junk_shape_for_an_invented_rule() {
+        let none = std::collections::HashSet::new();
+        for row in [
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"A real title","code":"","detail":""}"#,
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"A real title","code":"x","detail":"n/a"}"#,
+            r#"{"path":"a.ts","line":1,"rule":"made-up-rule","title":"placeholder","code":"db.query(sql)","detail":"Builds SQL from input."}"#,
+            r#"{"path":"a.ts","line":1,"rule":"typescript-placeholder","title":"A real title","code":"db.query(sql)","detail":"Builds SQL from input."}"#,
+        ] {
+            let raw = format!(r#"{{"findings":[{row}],"proposed_rules":[]}}"#);
+            let (findings, _) = parse_ai_findings("me/api", &raw, &none);
+            assert!(findings.is_empty(), "{row} produced {findings:#?}");
+        }
+    }
+
+    /// D1: a row under an ADOPTED rule is kept when it has a real title even with no code and
+    /// no detail, since the rule backs it.
+    #[test]
+    fn parse_ai_findings_keeps_an_adopted_rule_row_that_has_only_a_title() {
+        let adopted: std::collections::HashSet<String> = ["SEC-NO-RAW-SQL-CONCAT-1".to_string()]
+            .into_iter()
+            .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":1,"rule":"SEC-NO-RAW-SQL-CONCAT-1",
+            "title":"SQL built from request input","code":"","detail":""}],"proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert_eq!(findings.len(), 1);
+    }
+
+    /// D1: after the detail and calibration steps, a model-invented row whose explanation says
+    /// to discard it is removed; a row under an adopted rule is never removed by its prose.
+    #[test]
+    fn drop_discarded_invented_rows_acts_on_the_discard_verdict() {
+        let mut discarded = finding("AI-JAVASCRIPT-PLACEHOLDER-NOTE", "low");
+        discarded.detail = "This finding contains only a placeholder statement with the code 'x'. Discard this finding.".into();
+        let mut kept_ai = finding("AI-REAL-ONE", "high");
+        kept_ai.detail = "Real title — The handler trusts the caller.".into();
+        let mut adopted = finding("SEC-NO-RAW-SQL-CONCAT-1", "high");
+        adopted.detail = "Raw SQL — a note that says discard this finding".into();
+        let mut rows = vec![discarded, kept_ai, adopted];
+        let removed = drop_discarded_invented_rows("me/api", &mut rows);
+        assert_eq!(removed, 1);
+        let ids: Vec<&str> = rows.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(ids, vec!["AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"]);
     }
 
     #[test]
