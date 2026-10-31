@@ -5303,7 +5303,9 @@ Return ONLY JSON, no prose:
 {"fixes":[{"id":"<the finding's id, copied exactly>","fix":"..."}]}
 One entry per finding you could ground a fix for, addressed by the id in square brackets that
 opens its block. Omit any id you could not confidently ground — an omitted fix is far better
-than an invented one."#
+than an invented one. Every finding you are sent is a fault with something to change (a
+statement that the code follows a convention is never sent to you), so an omitted id is asked
+about once more in a smaller request, and then gets the rule's own generic fix."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -6341,7 +6343,13 @@ pub async fn generate_fix_specifics(
         .iter()
         .enumerate()
         .filter(|(_, f)| {
-            f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID && f.fix_specific.is_none()
+            f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID
+                && f.fix_specific.is_none()
+                // D2: a row that states a convention or an assessment gap (an informational
+                // kind) has no defect to fix. The prompt tells the model to omit a fix it
+                // cannot ground, so the model's correct omission here used to count as a
+                // failure, be asked again in every round, and end as a failed part.
+                && !f.kind.as_ref().is_some_and(|k| k.is_informational())
         })
         .map(|(i, _)| i)
         .collect();
@@ -22677,6 +22685,89 @@ mod tests {
         );
         assert!(!out[0].needs_review);
         assert_eq!(meter.snapshot().calls, 1);
+    }
+
+    /// A row that states a convention (or an assessment gap) has no defect to fix. D2: the fix
+    /// stage never sends it to the model, so the model's correct "nothing to fix" is never
+    /// counted as a failure and re-asked, and the stage reports no failed part for it.
+    fn convention_row(path: &str) -> Finding {
+        use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+        let mut f = fx(
+            "ARCH-MONOLITH-FIRST-1",
+            path,
+            0,
+            "The codebase consistently keeps one deployable.",
+            "",
+        );
+        f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "monolith".to_string(),
+            convention_label: "Monolith first".to_string(),
+        }));
+        f
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_never_sends_a_convention_observed_row_to_the_model() {
+        let completer = SequencedCompleter::new(&[r#"{"fixes":[]}"#]);
+        let meter = UsageMeter::default();
+        let (out, failed) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![convention_row("a.ts")],
+            &[],
+            None,
+            Some(&meter),
+            None,
+        )
+        .await;
+        assert_eq!(
+            meter.snapshot().calls,
+            0,
+            "no model call for a convention row"
+        );
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(failed.is_empty(), "no failed part: {failed:?}");
+        assert_eq!(out.len(), 1, "the row stays in the report");
+        assert_eq!(out[0].fix_specific, None);
+    }
+
+    /// Mixed with a defect, only the defect's block is in the prompt, and the convention row is
+    /// neither asked about in the first round nor in any retry.
+    #[tokio::test]
+    async fn generate_fix_specifics_asks_only_about_the_defect_beside_a_convention_row() {
+        let completer = CapturingCompleter::default();
+        let defect = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/defect.ts",
+            2,
+            "rawRedirect(p) is called with an unvalidated path.",
+            "rawRedirect(p)",
+        );
+        let (out, _) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![convention_row("app/convention.ts"), defect],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await;
+        let seen = completer.seen.lock().unwrap();
+        assert!(!seen.is_empty(), "the defect is still sent");
+        for req in seen.iter() {
+            assert!(req.prompt.contains("app/defect.ts"), "{}", req.prompt);
+            assert!(
+                !req.prompt.contains("app/convention.ts"),
+                "the convention row was sent: {}",
+                req.prompt
+            );
+        }
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].fix_specific, None);
     }
 
     /// A finding a delta retest carried forward already has its codebase-specific fix. Asking the
