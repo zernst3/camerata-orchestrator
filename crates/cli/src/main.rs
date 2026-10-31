@@ -131,12 +131,19 @@ enum Command {
     /// export button produces to `--export`. No BFF, no UI — see
     /// `camerata::inspect_cmd`'s module doc comment.
     Inspect {
-        /// The repo's local working tree to inspect.
-        #[arg(long)]
-        repo: PathBuf,
+        /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
+        /// project (one scan, one report, one cache); each then needs a `--repo-name`.
+        #[arg(long, required_unless_present = "resume")]
+        repo: Vec<PathBuf>,
+        /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
+        /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
+        /// than one `--repo` is given; a single repo is named for its folder when this is omitted.
+        #[arg(long = "repo-name", value_name = "OWNER/REPO")]
+        repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
-        #[arg(long)]
-        export: PathBuf,
+        /// With `--resume`, defaults to where the saved run was to write it.
+        #[arg(long, required_unless_present = "resume")]
+        export: Option<PathBuf>,
         /// `api` (the Anthropic Messages API; uses the key saved in the app, or
         /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
         /// a client inspection runs on a metered, single-party chain) or `cli` (the operator's
@@ -144,16 +151,28 @@ enum Command {
         /// explicitly); the same compliance-safety setting a project's `backend` field carries.
         #[arg(long, default_value = "api", value_parser = parse_backend)]
         backend: ProjectBackend,
-        /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned
+        /// Force the Anthropic Message Batches path (~50% cheaper; latency is not returned
         /// until the whole batch completes). Requires `--backend api` plus a configured key.
-        #[arg(long)]
+        /// On the API backend this is already the default unless `batch_default` is switched
+        /// off (`--efficiency batch_default=off`).
+        #[arg(long, conflicts_with = "realtime")]
         batch: bool,
+        /// Force real-time (parallel) calls instead of a Message Batch: results as each pass
+        /// finishes, at the full price.
+        #[arg(long)]
+        realtime: bool,
         /// Model override for the audit pass. Defaults to the project-less model floor.
         #[arg(long)]
         model: Option<String>,
         /// Model override for the calibration pass. Defaults to the project-less model floor.
         #[arg(long = "calibration-model")]
         calibration_model: Option<String>,
+        #[arg(long = "fix-model", help = fix_model_help())]
+        fix_model: Option<String>,
+        /// Model for the duplicate-code checker (the clone judge). Unset: the built-in fast
+        /// default, Haiku 5.5.
+        #[arg(long = "clone-judge-model")]
+        clone_judge_model: Option<String>,
         /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
         #[arg(long)]
         full: bool,
@@ -162,6 +181,94 @@ enum Command {
         /// summary.
         #[arg(long)]
         verbose: bool,
+        /// Optional. Without it there is NO limit: the inspection runs to completion whatever it
+        /// costs (the pre-flight still prints the expected cost and the ceiling). Given, it stops
+        /// the run, between passes, once actual spend reaches this many US dollars. A run
+        /// that stops early lists every pass and stage it did not run, marks its export incomplete
+        /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
+        /// fix batch and deep-tier call starts; one that has started always finishes, and once
+        /// the limit has stopped anything no later stage starts. So a run can end about one pass
+        /// over the limit (a pass can include one retry). In batch mode the limit is checked
+        /// before the batch is submitted.
+        #[arg(long = "max-cost-usd", value_name = "USD")]
+        max_cost_usd: Option<f64>,
+        /// Switch a token-efficiency measure `on` or `off` for this run, e.g.
+        /// `--efficiency warm_schedule=off`. Repeatable; wins over `CAMERATA_EFFICIENCY`. Every
+        /// measure is on by default; the run states which were on. Measures: warm_schedule,
+        /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter,
+        /// fix_on_haiku, terse_output, batch_default, applies_to_routing, candidates_prefilter.
+        #[arg(long = "efficiency", value_name = "NAME=on|off")]
+        efficiency: Vec<String>,
+        /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
+        /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
+        /// is checked before anything is read or spent.
+        #[arg(long, value_name = "NAME", required_unless_present = "resume")]
+        client: Option<String>,
+        /// Not a client engagement: the maintainer's own development. Without this flag every
+        /// inspection is a client engagement, which runs only on the Anthropic API with
+        /// Anthropic models (`--backend cli` and OpenRouter models are refused before any file
+        /// is read) and never executes the repository's own code.
+        #[arg(long)]
+        internal: bool,
+        /// Opt in to steps that execute the client's own code in a client engagement (today the
+        /// `cargo clippy` preview, which builds the crate and so runs its build scripts and
+        /// procedural macros). Off by default; recorded in the ledger and stated in the report.
+        #[arg(long = "run-client-tooling")]
+        run_client_tooling: bool,
+        /// Three-pass consensus for client work: run the AI audit three times and keep only the
+        /// findings at least two runs report. Off by default. About three times the AI cost
+        /// (the pre-flight estimate includes it), and a finding only one run in three notices is
+        /// dropped.
+        #[arg(long)]
+        consensus: bool,
+        /// Run only what remains of a saved run: `--resume <RUN-ID>` or `--resume latest` (the
+        /// newest run with work left; with `--repo`, the newest of those repos). Every inspection
+        /// is saved part by part, so a part that failed (the AI service was down) or a run that
+        /// was interrupted (a crash, a closed laptop) costs only that part. A resume prints what
+        /// remains and what it should cost, refuses in plain words if a repo's commit or files,
+        /// the models, the rules or this version of Camerata differ from the saved run, sends
+        /// again only the model calls that are not stored as good, then merges, ranks and
+        /// exports everything. `--export` and `--max-cost-usd` may be given again; everything
+        /// else is the saved run's. A run that is already complete says so and does nothing.
+        #[arg(long, value_name = "RUN-ID|latest")]
+        resume: Option<String>,
+    },
+
+    /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
+    /// cache bypassed and print the difference (counts by tier, rule and severity, plus the
+    /// findings one run reported and the other did not, matched by fingerprint). Prints the
+    /// pre-flight estimate first and refuses without `--max-cost-usd`. Writes nothing. Exit 0
+    /// when both runs completed, 4 when either was incomplete. See
+    /// `camerata::repeatability_cmd`'s module doc comment.
+    Repeatability {
+        /// The repo's local working tree.
+        #[arg(long)]
+        repo: PathBuf,
+        /// `api` (default) or `cli`, as for `inspect`.
+        #[arg(long, default_value = "api", value_parser = parse_backend)]
+        backend: ProjectBackend,
+        /// Model override for the audit pass.
+        #[arg(long)]
+        model: Option<String>,
+        /// Model override for the calibration pass.
+        #[arg(long = "calibration-model")]
+        calibration_model: Option<String>,
+        /// REQUIRED. The spend limit in US dollars for both runs together; each run gets half.
+        /// Refused when one run's estimate is above its half.
+        #[arg(long = "max-cost-usd", value_name = "USD")]
+        max_cost_usd: Option<f64>,
+        /// Switch a token-efficiency measure `on` or `off`, as for `inspect`. `result_cache` is
+        /// always off here.
+        #[arg(long = "efficiency", value_name = "NAME=on|off")]
+        efficiency: Vec<String>,
+        /// `text` (default) or `json`.
+        #[arg(long, default_value = "text", value_parser = camerata::repeatability_cmd::parse_format)]
+        format: camerata::repeatability_cmd::OutputFormat,
+        /// Not a client engagement: the maintainer's own development. Without this flag the run
+        /// is a client engagement, refused on the `cli` backend or with a non-Anthropic model
+        /// before any estimate or model call, as for `inspect`.
+        #[arg(long)]
+        internal: bool,
     },
 
     /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
@@ -293,6 +400,17 @@ fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
     }
 }
 
+/// `--fix-model` help text. The default model's name comes from the same constant the server
+/// resolves it from, so the help cannot drift from what the fix stage actually runs.
+fn fix_model_help() -> String {
+    format!(
+        "Model for the fix stage (one concrete fix per finding). Unset: {} while the \
+         `fix_on_haiku` efficiency measure is on (the default), else the calibration model, else \
+         the audit model",
+        camerata_api_types::project::fix_stage_haiku_display_name()
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Record the operator's redaction switch BEFORE the .env loader runs: the .env is resolved
@@ -363,23 +481,73 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Inspect {
             repo,
+            repo_name,
             export,
             backend,
             batch,
+            realtime,
             model,
             calibration_model,
+            fix_model,
+            clone_judge_model,
             full,
             verbose,
+            max_cost_usd,
+            efficiency,
+            client,
+            internal,
+            run_client_tooling,
+            consensus,
+            resume,
         } => {
+            if let Some(run) = resume {
+                return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
+            }
+            let mut repos = repo.into_iter();
+            // Without `--resume`, clap guarantees at least one repo, an export and a client.
+            let first = repos.next().unwrap_or_default();
             run_inspect_cmd(InspectArgs {
-                repo,
-                export,
+                repo: first,
+                also_repos: repos.collect(),
+                repo_names: repo_name,
+                export: export.unwrap_or_default(),
                 backend,
                 batch,
+                realtime,
                 model,
                 calibration_model,
+                fix_model,
+                clone_judge_model,
                 full,
                 verbose,
+                max_cost_usd,
+                efficiency,
+                client: client.unwrap_or_default(),
+                client_engagement: !internal,
+                run_client_tooling,
+                consensus,
+            })
+            .await
+        }
+        Command::Repeatability {
+            repo,
+            backend,
+            model,
+            calibration_model,
+            max_cost_usd,
+            efficiency,
+            format,
+            internal,
+        } => {
+            run_repeatability_cmd(camerata::repeatability_cmd::RepeatabilityArgs {
+                repo,
+                backend,
+                model,
+                calibration_model,
+                max_cost_usd,
+                efficiency,
+                format,
+                client_engagement: !internal,
             })
             .await
         }
@@ -486,19 +654,99 @@ fn run_integrity_gate_cmd(args: IntegrityGateArgs) -> anyhow::Result<()> {
     }
 }
 
+/// `repeatability`'s handler: print the comparison in the chosen format, exit
+/// [`camerata::repeatability_cmd::EXIT_INCOMPLETE`] when either run was incomplete, or print the
+/// refusal and exit 1.
+async fn run_repeatability_cmd(
+    args: camerata::repeatability_cmd::RepeatabilityArgs,
+) -> anyhow::Result<()> {
+    use camerata::repeatability_cmd::{run_repeatability, OutputFormat};
+    let format = args.format;
+    match run_repeatability(args).await {
+        Ok(outcome) => {
+            match format {
+                OutputFormat::Text => println!("{}", outcome.render_text()),
+                OutputFormat::Json => println!("{}", outcome.render_json()),
+            }
+            let code = outcome.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("camerata repeatability: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `inspect`'s handler: run the headless pipeline and print its report, or fail loudly with
 /// a non-zero exit — never a silent partial result (matches every other subcommand's
 /// error-handling shape in this file).
 async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
-    match inspect_cmd::run_inspect(args).await {
+    report_inspect_result(inspect_cmd::run_inspect(args).await)
+}
+
+/// `inspect --resume`'s handler: the same report and exit codes as a run.
+async fn run_resume_cmd(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+) -> anyhow::Result<()> {
+    report_inspect_result(inspect_cmd::run_resume(run, repos, export, max_cost_usd).await)
+}
+
+/// Print what a run (or a resume) came to and exit with its code.
+fn report_inspect_result(
+    result: Result<inspect_cmd::InspectOutcome, inspect_cmd::InspectError>,
+) -> anyhow::Result<()> {
+    match result {
         Ok(outcome) => {
             println!("{}", inspect_cmd::format_outcome_report(&outcome));
+            for line in &outcome.failure_lines {
+                eprintln!("{line}");
+            }
+            // A run the spend limit cut short wrote an export (marked incomplete) but is not a
+            // success: a script must not read it as one.
+            if outcome.outage_stopped() {
+                eprintln!(
+                    "camerata inspect: STOPPED BY AN OUTAGE; the model provider could not be \
+                     reached. The export is INCOMPLETE (see the passes listed as NOT RUN above). \
+                     Run it again when the provider is back."
+                );
+                std::process::exit(inspect_cmd::EXIT_OUTAGE_STOPPED);
+            }
+            if outcome.cost_capped() {
+                eprintln!(
+                    "camerata inspect: STOPPED BY THE SPEND LIMIT; the export is INCOMPLETE (see \
+                     the passes listed as NOT RUN above)."
+                );
+                std::process::exit(inspect_cmd::EXIT_COST_CAPPED);
+            }
+            if !outcome.incomplete_reasons.is_empty() {
+                eprintln!(
+                    "camerata inspect: THIS RUN DID NOT COMPLETE ({}); the export is INTERNAL \
+                     INCOMPLETE and is not for a client.",
+                    outcome.incomplete_reasons.join("; ")
+                );
+                std::process::exit(inspect_cmd::EXIT_INCOMPLETE_RUN);
+            }
             Ok(())
         }
         Err(e) => {
             // A refused export prints the gate's own block (which never carries a secret value)
-            // and exits 3; any other failure exits 1.
+            // and exits 3; any other failure exits 1. A run that is already complete says so.
             eprintln!("camerata inspect: {e}");
+            if let inspect_cmd::InspectError::IncompleteRun(run) = &e {
+                for line in &run.failure_lines {
+                    eprintln!("{line}");
+                }
+                for note in &run.run_notes {
+                    eprintln!("run note: {note}");
+                }
+            }
             std::process::exit(e.exit_code());
         }
     }
@@ -637,6 +885,23 @@ async fn run_gate_probe_cmd() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod cli_parse_tests {
+    /// The `--fix-model` help names the fix stage's default model from the shared constant.
+    #[test]
+    fn the_fix_model_help_names_the_default_model_from_the_shared_constant() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let inspect = cmd.find_subcommand("inspect").expect("inspect subcommand");
+        let arg = inspect
+            .get_arguments()
+            .find(|a| a.get_id() == "fix_model")
+            .expect("--fix-model");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(
+            help.contains(&camerata_api_types::project::fix_stage_haiku_display_name()),
+            "{help}"
+        );
+    }
+
     use super::*;
 
     /// Every preserved demo/eval subcommand must still parse with no extra args
@@ -814,9 +1079,60 @@ mod cli_parse_tests {
             "--repo",
             "/tmp/r",
             "--export",
-            "/tmp/o.zip"
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn inspect_takes_repeated_repos_with_one_name_each() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/Users/auditor/clients/acme/api",
+            "--repo-name",
+            "acme/api",
+            "--repo",
+            "/Users/auditor/clients/acme/web",
+            "--repo-name",
+            "acme/web",
+            "--export",
+            "/Users/auditor/out/acme.zip",
+            "--client",
+            "Example Client Ltd",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                repo, repo_name, ..
+            } => {
+                assert_eq!(
+                    repo,
+                    vec![
+                        PathBuf::from("/Users/auditor/clients/acme/api"),
+                        PathBuf::from("/Users/auditor/clients/acme/web")
+                    ]
+                );
+                assert_eq!(
+                    repo_name,
+                    vec!["acme/api".to_string(), "acme/web".to_string()]
+                );
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        // At least one --repo is required.
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--export",
+            "/Users/auditor/out/acme.zip",
+            "--client",
+            "Example Client Ltd"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -828,30 +1144,234 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
         ])
         .expect("must parse");
         match cli.command {
             Command::Inspect {
                 repo,
+                repo_name,
                 export,
                 backend,
                 batch,
+                realtime,
                 model,
                 calibration_model,
+                fix_model,
+                clone_judge_model,
                 full,
                 verbose,
+                max_cost_usd,
+                efficiency,
+                client,
+                internal,
+                run_client_tooling,
+                consensus,
+                resume,
             } => {
-                assert_eq!(repo, PathBuf::from("/tmp/r"));
-                assert_eq!(export, PathBuf::from("/tmp/o.zip"));
+                assert!(resume.is_none(), "a new run unless --resume is given");
+                assert_eq!(client.as_deref(), Some("Example Client Ltd"));
+                assert!(repo_name.is_empty(), "a lone repo needs no name");
+                assert!(
+                    !internal,
+                    "every inspection is a client engagement by default"
+                );
+                assert!(!run_client_tooling, "client tooling is opt-in");
+                assert_eq!(repo, vec![PathBuf::from("/tmp/r")]);
+                assert_eq!(export, Some(PathBuf::from("/tmp/o.zip")));
                 assert_eq!(backend, ProjectBackend::Api);
-                assert!(!batch);
+                assert!(!batch, "no mode forced: the run's default applies");
+                assert!(!realtime);
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
+                assert!(fix_model.is_none(), "no fix model unless asked for");
+                assert!(
+                    clone_judge_model.is_none(),
+                    "no clone judge model unless asked for"
+                );
                 assert!(!full);
                 assert!(!verbose);
+                assert!(max_cost_usd.is_none(), "no cap unless asked for");
+                assert!(efficiency.is_empty());
+                assert!(!consensus, "consensus is off unless asked for");
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--consensus",
+        ])
+        .expect("must parse");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                consensus: true,
+                ..
+            }
+        ));
+    }
+
+    /// `--resume` stands in for the repo, export and client, which the saved run holds; without
+    /// it all three are still required.
+    #[test]
+    fn inspect_resume_replaces_the_repo_export_and_client() {
+        let cli = Cli::try_parse_from(["camerata", "inspect", "--resume", "latest"])
+            .expect("a resume needs no repo, export or client");
+        match cli.command {
+            Command::Inspect {
+                resume,
+                repo,
+                export,
+                client,
+                ..
+            } => {
+                assert_eq!(resume.as_deref(), Some("latest"));
+                assert!(repo.is_empty() && export.is_none() && client.is_none());
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--resume",
+            "20261029T101500Z-ab12cd",
+            "--max-cost-usd",
+            "5",
+            "--export",
+            "/tmp/o.zip",
+        ])
+        .expect("a resume may set a new limit and export path");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                max_cost_usd: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["camerata", "inspect"]).is_err(),
+            "without --resume the repo, export and client are required"
+        );
+    }
+
+    #[test]
+    fn inspect_parses_the_internal_and_client_tooling_flags() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--internal",
+            "--run-client-tooling",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                internal,
+                run_client_tooling,
+                ..
+            } => {
+                assert!(internal);
+                assert!(run_client_tooling);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_parses_the_spend_limit_and_repeatable_efficiency_switches() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--max-cost-usd",
+            "12.50",
+            "--efficiency",
+            "warm_schedule=off",
+            "--efficiency",
+            "result_cache=off",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                max_cost_usd,
+                efficiency,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, Some(12.5));
+                assert_eq!(efficiency, vec!["warm_schedule=off", "result_cache=off"]);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeatability_parses_its_flags_and_defaults_to_text() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "repeatability",
+            "--repo",
+            "/tmp/r",
+            "--max-cost-usd",
+            "8",
+            "--format",
+            "json",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Repeatability {
+                max_cost_usd,
+                format,
+                backend,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, Some(8.0));
+                assert_eq!(format, camerata::repeatability_cmd::OutputFormat::Json);
+                assert!(matches!(backend, ProjectBackend::Api));
+            }
+            other => panic!("expected Command::Repeatability, got {other:?}"),
+        }
+        // The limit is checked at run time, after the estimate is printed, so clap accepts its
+        // absence; the format defaults to text.
+        let cli = Cli::try_parse_from(["camerata", "repeatability", "--repo", "/tmp/r"])
+            .expect("must parse");
+        match cli.command {
+            Command::Repeatability {
+                max_cost_usd,
+                format,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, None);
+                assert_eq!(format, camerata::repeatability_cmd::OutputFormat::Text);
+            }
+            other => panic!("expected Command::Repeatability, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "repeatability",
+            "--repo",
+            "/tmp/r",
+            "--format",
+            "yaml"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -863,6 +1383,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "api",
             "--batch",
@@ -870,6 +1392,10 @@ mod cli_parse_tests {
             "claude-sonnet-5",
             "--calibration-model",
             "claude-opus-5",
+            "--fix-model",
+            "claude-sonnet-5",
+            "--clone-judge-model",
+            "claude-haiku-4-5-20251001",
             "--full",
             "--verbose",
         ])
@@ -880,6 +1406,8 @@ mod cli_parse_tests {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
+                clone_judge_model,
                 full,
                 verbose,
                 ..
@@ -888,11 +1416,45 @@ mod cli_parse_tests {
                 assert!(batch);
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
+                assert_eq!(fix_model.as_deref(), Some("claude-sonnet-5"));
+                assert_eq!(
+                    clone_judge_model.as_deref(),
+                    Some("claude-haiku-4-5-20251001")
+                );
                 assert!(full);
                 assert!(verbose);
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn inspect_parses_realtime_and_refuses_it_together_with_batch() {
+        let base = [
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Acme",
+        ];
+        let cli =
+            Cli::try_parse_from(base.iter().copied().chain(["--realtime"])).expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                batch, realtime, ..
+            } => {
+                assert!(realtime);
+                assert!(!batch);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(base.iter().copied().chain(["--realtime", "--batch"])).is_err(),
+            "forcing both modes at once is a usage error"
+        );
     }
 
     #[test]
@@ -904,6 +1466,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "API",
         ])
@@ -920,11 +1484,31 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "azure",
         ]) {
             Ok(_) => panic!("an unknown --backend value must fail to parse"),
             Err(err) => assert!(err.to_string().contains("azure"), "{err}"),
+        }
+    }
+
+    /// Confidentiality: `--client` is required, so a headless run cannot reach its export
+    /// without a client to mark it for.
+    #[test]
+    fn inspect_requires_the_client_name() {
+        let parsed = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+        ]);
+        match parsed {
+            Ok(_) => panic!("inspect without --client must fail to parse"),
+            Err(err) => assert!(err.to_string().contains("--client"), "{err}"),
         }
     }
 }

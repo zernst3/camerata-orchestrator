@@ -25,7 +25,9 @@
 //!   fallback). [`Llm::from_env`] remains only as a keyless Cli-default construction
 //!   convenience for hermetic tests and any caller that will never make an `api` call.
 //!
-//! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
+//! A model is NEVER read from the environment. Every request names its model (the open
+//! project's setting, a CLI flag, or the built-in [`DEFAULT_MODEL`] the caller resolved);
+//! a request that names none is refused, not filled in.
 
 use serde::{Deserialize, Serialize};
 
@@ -96,8 +98,8 @@ impl Vendor {
     }
 }
 
-/// The default model when none is configured / requested. Capable by default; override
-/// per call or via `CAMERATA_LLM_MODEL`.
+/// The default model when none is configured / requested. Capable by default; a project
+/// or a call names another one explicitly (never the environment).
 ///
 /// The const was RELOCATED to `camerata_api_types::project` (Phase A of the DTO
 /// extraction; `camerata_app_core::project` re-exports it from there). Re-exported here
@@ -370,18 +372,73 @@ fn heartbeat_timeout_error(
     idle: std::time::Duration,
     overall_timeout: std::time::Duration,
 ) -> anyhow::Error {
-    match kind {
-        HeartbeatTimeout::Silent => anyhow::anyhow!(
+    let message = match kind {
+        HeartbeatTimeout::Silent => format!(
             "Claude CLI timed out after {}s (no output). The `claude` process may be \
              stuck waiting for authentication or input.",
             overall_timeout.as_secs()
         ),
-        HeartbeatTimeout::Stalled => anyhow::anyhow!(
+        HeartbeatTimeout::Stalled => format!(
             "claude produced no model output for {}s — treating as a hang (likely \
              rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
             idle.as_secs()
         ),
+    };
+    // A hung process is the CLI's form of an overloaded or unreachable provider: transport,
+    // and worth another attempt.
+    cli_failure(
+        "",
+        crate::failure::FailureClass::Transport,
+        true,
+        message,
+        None,
+        "",
+    )
+}
+
+/// The last lines of a CLI's stderr, scrubbed and capped, for the attempt record.
+fn stderr_tail(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
     }
+    let tail = lines[lines.len().saturating_sub(5)..].join(" | ");
+    Some(crate::failure::scrub_message(
+        &tail,
+        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+    ))
+}
+
+/// Streamed to the listener when the CLI is run again after an attempt that had already streamed
+/// text. The text before it came from the failed attempt and is superseded by what follows, so a
+/// transcript that records it shows one divider instead of two answers run together. Relocated to
+/// `camerata_api_types::llm`: the cockpit reads the same marker to render it as a muted note.
+pub use camerata_api_types::llm::CLI_ATTEMPT_SUPERSEDED;
+
+/// A typed CLI failure: `message` is the text the CLI path has always returned, and the one
+/// attempt record carries the exit code and the stderr tail. `retryable` says whether another
+/// run could help; the retry loop in [`Llm::complete_cli_streaming`] reads it.
+fn cli_failure(
+    model: &str,
+    class: crate::failure::FailureClass,
+    retryable: bool,
+    message: String,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> anyhow::Error {
+    let mut record = crate::failure::AttemptRecord::new("cli", model);
+    record.message =
+        crate::failure::scrub_message(&message, crate::failure::MAX_RECORD_MESSAGE_CHARS);
+    record.exit_code = exit_code;
+    record.stderr_tail = stderr_tail(stderr);
+    let mut failure = crate::failure::LlmCallFailure::new(class, message);
+    failure.retryable = retryable;
+    failure.attempts = vec![record];
+    anyhow::Error::new(failure)
 }
 
 /// Map a `claude` CLI spawn error to a clear, actionable message. `NotFound` gets a
@@ -482,7 +539,16 @@ async fn read_cli_stream(
                 return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
             }
             Ok(Ok(None)) => break, // EOF — the process finished
-            Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
+            Ok(Err(e)) => {
+                return Err(cli_failure(
+                    model,
+                    crate::failure::FailureClass::Transport,
+                    true,
+                    format!("reading claude stdout: {e}"),
+                    None,
+                    "",
+                ))
+            }
             Ok(Ok(Some(line))) => {
                 // W6: ANY line at all — even one that fails to parse below, or a plain
                 // status/keepalive event — is proof the process is alive and writing, so
@@ -546,7 +612,7 @@ async fn read_cli_stream(
                                 // ABSENT `result` field is weaker evidence: when real
                                 // content already streamed, that content IS the answer, so
                                 // defer to the SALVAGE rule below rather than discard it.
-                                let fatal = v["is_error"].as_bool() == Some(true);
+                                let fatal = v["is_error"].as_bool() == Some(true) || is_refusal(&e);
                                 result_failure = Some((e, fatal));
                             }
                         }
@@ -574,7 +640,22 @@ async fn read_cli_stream(
     };
     if let Some((e, fatal)) = result_failure {
         if fatal || full.trim().is_empty() {
-            return Err(e);
+            // A refusal keeps its own type (callers react to it); any other in-band failure is
+            // classified from its text, so an overloaded or rate-limited answer is retried and
+            // a login or billing failure is not.
+            if is_refusal(&e) {
+                return Err(e);
+            }
+            let message = e.to_string();
+            let (class, retryable) = crate::failure::classify_text(&message);
+            return Err(cli_failure(
+                model,
+                class,
+                retryable,
+                message,
+                status.code(),
+                &stderr_text,
+            ));
         }
     }
     // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
@@ -583,10 +664,25 @@ async fn read_cli_stream(
     // interruption is what made a fully-streamed audit collapse to "0/3 findings".
     // Only fail when there's genuinely nothing to salvage.
     if !status.success() && full.trim().is_empty() {
-        anyhow::bail!(
-            "claude CLI (stream) exited {status}: {}",
-            stderr_text.trim()
-        );
+        // Nothing streamed and the process died: transport, retried, unless its stderr says the
+        // login or the account is the problem.
+        let (class, retryable) = match crate::failure::classify_text(&stderr_text) {
+            (crate::failure::FailureClass::AuthOrBilling, _) => {
+                (crate::failure::FailureClass::AuthOrBilling, false)
+            }
+            _ => (crate::failure::FailureClass::Transport, true),
+        };
+        return Err(cli_failure(
+            model,
+            class,
+            retryable,
+            format!(
+                "claude CLI (stream) exited {status}: {}",
+                stderr_text.trim()
+            ),
+            status.code(),
+            &stderr_text,
+        ));
     }
     Ok(LlmResponse {
         text: full,
@@ -623,19 +719,44 @@ async fn read_cli_stream(
 /// of this minimal seam, so `audit_repo`'s batch branch downcasts back to `&Llm`. In
 /// production the value is always a real `Llm`, so the downcast always succeeds and the
 /// behavior is unchanged; a non-`Llm` stub (tests) drives only the non-batch paths.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait LlmPort: Send + Sync {
     /// Run a completion. Mirrors [`Llm::complete`].
-    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse>;
+    fn complete<'life0, 'async_trait>(
+        &'life0 self,
+        req: LlmRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 
     /// Run a completion, streaming text deltas to `on_delta`. Mirrors
     /// [`Llm::complete_streaming`]; the callback is a `&mut dyn` so the trait stays
     /// object-safe.
-    async fn complete_streaming(
-        &self,
+    fn complete_streaming<'life0, 'life1, 'async_trait>(
+        &'life0 self,
         req: LlmRequest,
-        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> anyhow::Result<LlmResponse>;
+        on_delta: &'life1 mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
+
+    /// The caller turned down some or all of the reply to the request named by `request_key`
+    /// (the digest the run store names a request by), for `reason`. `whole` is true when every
+    /// entry of the reply was turned down. A completer that keeps its replies (the run store's
+    /// journal) records the reason on that reply and, when `whole`, sets it aside so a resume
+    /// asks again; a reply with an accepted entry in it stays good, so a resume replays what was
+    /// accepted instead of paying for it twice. Every other completer ignores it.
+    fn note_rejected_reply(&self, _request_key: &str, _reason: &str, _whole: bool) {}
 
     /// Downcast hook for the concrete-only batch path. See the trait doc.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -747,6 +868,29 @@ pub struct LlmRequest {
     /// the primary. READ-ONLY and non-agentic — same posture as `repo_read_dir`. Empty by
     /// default; ignored on the API backend.
     pub repo_read_extra_dirs: Vec<std::path::PathBuf>,
+    /// The Messages API `output_config.effort` (`low` | `medium` | `high` | ...). `None` = the
+    /// field is not sent and the model uses its own default. Sent on the real-time API path
+    /// only; the CLI backend and non-Anthropic vendors ignore it.
+    pub effort: Option<String>,
+    /// H5: the sampling temperature to ask for, or `None` for the provider's default. Sent ONLY
+    /// to a model whose catalog shape accepts sampling parameters
+    /// ([`crate::model_registry::accepts_sampling_params`]); the strict models never receive
+    /// it (so it never trips `conform_messages_body`'s strip warning) and the one legacy model in
+    /// the catalog, Haiku 4.5, does. Ignored by the CLI
+    /// backend (`claude -p` has no temperature flag) and by OpenRouter.
+    pub temperature: Option<f32>,
+    /// A JSON Schema the reply must satisfy, sent as `output_config.format`
+    /// (`{type: "json_schema", schema}`) on the Messages API to a model that accepts it
+    /// ([`crate::model_registry::accepts_structured_output`]). The API then constrains decoding
+    /// to the schema, so the reply's shape and field types cannot be wrong; the schema's
+    /// limits (every object closed with `additionalProperties: false`, no length or range
+    /// constraints, `minItems` of 0 or 1 only) are the API's. `None` = no schema: the reply is
+    /// free text and the caller parses it tolerantly. The CLI backend, OpenRouter and a model
+    /// without structured output ignore it, so a caller that sets one keeps its tolerant
+    /// parser as the fallback. Part of the request's identity (the run store's request key),
+    /// and the API caches a prompt per schema, so a stage that wants a cached prefix reused
+    /// across requests keeps one schema for all of them.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 impl LlmRequest {
@@ -760,7 +904,42 @@ impl LlmRequest {
             cache_breakpoints: Vec::new(),
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
+            effort: None,
+            temperature: None,
+            response_schema: None,
         }
+    }
+
+    /// Ask for a reply that satisfies `schema` (see [`LlmRequest::response_schema`]).
+    pub fn with_response_schema(mut self, schema: serde_json::Value) -> Self {
+        self.response_schema = Some(schema);
+        self
+    }
+
+    /// Whether this request goes to `model` with its schema on the wire: it has one and the
+    /// model accepts structured output. False means the reply is free text parsed tolerantly.
+    /// (The backend can still ignore it: see [`structured_output_used`].)
+    pub fn sends_schema_to(&self, model: &str) -> bool {
+        self.response_schema.is_some() && crate::model_registry::accepts_structured_output(model)
+    }
+
+    /// Ask for `output_config.effort = effort` (API path only; see [`LlmRequest::effort`]).
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
+    }
+
+    /// Ask for sampling temperature `t` where the model accepts it (see [`Self::temperature`]).
+    pub fn with_temperature(mut self, t: f32) -> Self {
+        self.temperature = Some(t);
+        self
+    }
+
+    /// The temperature to put on the wire for `model`: [`Self::temperature`] when the model
+    /// accepts sampling parameters, else `None`.
+    fn temperature_for(&self, model: &str) -> Option<f32> {
+        self.temperature
+            .filter(|_| crate::model_registry::accepts_sampling_params(model))
     }
 
     /// Grant the CLI-backend model ON-DEMAND READ access to a local repo clone: it runs with
@@ -877,7 +1056,12 @@ pub use camerata_api_types::llm::LlmResponse;
 ///
 /// `text` concatenates the content's text blocks; cost is computed from usage times the model's
 /// list price (the API reports no dollar figure); `truncated` is `stop_reason == "max_tokens"`.
-fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> LlmResponse {
+fn messages_response(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> LlmResponse {
     let text = msg["content"]
         .as_array()
         .map(|blocks| {
@@ -889,12 +1073,16 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
         })
         .unwrap_or_default();
     let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&msg["usage"]);
-    let cost_usd = compute_cost_usd(
+    let cost_usd = usage_cost_usd(
         model,
-        input_tokens,
-        output_tokens,
-        cache_read,
-        cache_creation,
+        &CallUsage {
+            input: input_tokens,
+            output: output_tokens,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: msg["usage"]["cache_creation"]["ephemeral_1h_input_tokens"].as_u64(),
+        },
+        basis,
     );
     LlmResponse {
         text,
@@ -908,6 +1096,107 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
         or_cache_discount: None,
         truncated: msg["stop_reason"].as_str() == Some("max_tokens"),
     }
+}
+
+/// Price a reply that carries no dollar figure at the model the request NAMED.
+///
+/// A Message Batches result row is priced by the model id the API echoes in it
+/// ([`parse_batch_results_jsonl`]), and the parser cannot know what was requested. Should the API
+/// echo an id the model registry does not price (a snapshot or variant name the catalog has no
+/// entry for), the row's cost would be unknown, and a spend limit that cannot cost a call admits
+/// nothing more: the run would stop with the limit unspent. The request named a model the
+/// pre-flight checked for a price, and the call was billed as that model, so its list price is
+/// the figure to use. Cache writes are priced at `basis`'s TTL (the row's own 1-hour split is
+/// not kept on the response).
+///
+/// Returns the echoed id when the fallback was applied; the response keeps it as `model` so the
+/// ledger records what the API said ran, and the caller notes both ids. `None` when the reply
+/// already carried a cost, named the requested model itself, lacks token counts, or the requested
+/// model is unpriced too (the cost stays unknown, and the limit stops the run as before).
+pub fn price_as_requested(
+    resp: &mut LlmResponse,
+    requested_model: &str,
+    basis: PriceBasis,
+) -> Option<String> {
+    if resp.cost_usd.is_some() {
+        return None;
+    }
+    let requested = requested_model.trim();
+    if requested.is_empty() || requested == resp.model {
+        return None;
+    }
+    let cost = usage_cost_usd(
+        requested,
+        &CallUsage {
+            input: resp.input_tokens,
+            output: resp.output_tokens,
+            cache_read: resp.cache_read_input_tokens,
+            cache_creation: resp.cache_creation_input_tokens,
+            cache_creation_1h: None,
+        },
+        basis,
+    )?;
+    resp.cost_usd = Some(cost);
+    Some(resp.model.clone())
+}
+
+/// The error for a Messages response that ended with `stop_reason: "refusal"`. These models
+/// can decline a request with HTTP 200 and no usable content; read as a normal response that
+/// is an empty answer, which a scan would take for "no findings" and report a clean pass.
+/// Returning an error instead makes the pass a FAILED PASS (disclosed, export incomplete).
+/// `None` for any other stop reason. This form carries no usage; use
+/// [`refusal_error_billed`] where the response's usage is known.
+pub fn refusal_error(msg: &serde_json::Value) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal"))
+        .then(|| anyhow::Error::new(ModelRefusal { billed: None }))
+}
+
+/// [`refusal_error`] for a response whose usage is known: the error carries the call's
+/// [`LlmResponse`] (empty text, the tokens and the dollars the call was BILLED), so a caller
+/// that meters spend (the cumulative ledger, the run's spend cap) can count it before
+/// propagating the failure. A refused call costs what any other call costs.
+pub fn refusal_error_billed(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal")).then(|| {
+        anyhow::Error::new(ModelRefusal {
+            billed: Some(Box::new(messages_response(msg, model, backend, basis))),
+        })
+    })
+}
+
+/// The typed error behind a refusal, so a caller that must react differently to "the model
+/// declined" than to "the call broke" (the agentic loop keeps its partial work on the first)
+/// can tell them apart with [`is_refusal`] instead of matching message text.
+#[derive(Debug)]
+pub struct ModelRefusal {
+    /// What the refused call was billed, when the transport knew it.
+    pub billed: Option<Box<LlmResponse>>,
+}
+
+impl std::fmt::Display for ModelRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "model refused the request (stop_reason: refusal); this pass produced no answer",
+        )
+    }
+}
+
+impl std::error::Error for ModelRefusal {}
+
+/// Whether `e` (or anything it wraps) is a [`ModelRefusal`].
+pub fn is_refusal(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<ModelRefusal>())
+}
+
+/// The usage a refused call was billed, when `e` is a refusal that carries it.
+pub fn refusal_billed(e: &anyhow::Error) -> Option<&LlmResponse> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<ModelRefusal>())
+        .and_then(|r| r.billed.as_deref())
 }
 
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
@@ -924,6 +1213,12 @@ fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u6
 /// (execution error, max-turns abort, etc.) or omit `result` entirely; accepting that as a
 /// successful empty completion masks a backend failure as a low-quality result, so bail.
 fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
+    // The CLI's `result` event carries the final `stop_reason` of the run. A model REFUSAL
+    // can arrive with `is_error:false` and prose in `result`, which would parse as a clean
+    // "no findings" pass; the explicit stop reason is the signal (no text heuristic).
+    if v["stop_reason"].as_str() == Some("refusal") {
+        return Err(anyhow::Error::new(ModelRefusal { billed: None }));
+    }
     if v["is_error"].as_bool() == Some(true) {
         anyhow::bail!(
             "claude CLI returned is_error=true (subtype {}): {}",
@@ -939,20 +1234,145 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     })
 }
 
-/// List price ($/Mtok input, $/Mtok output) for a model id, from
-/// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
-/// doc comment for why this must not be a second, independently-maintained price list).
-fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    crate::model_registry::CLAUDE_REGISTRY_MODELS
-        .iter()
-        .find(|m| m.id == model_id)
-        .map(|m| (m.price_in, m.price_out))
+/// Whether `model_id` has a list price in the model registry (the exact id, a dated snapshot of
+/// it, or the undated alias of a dated entry, the one resolution [`rates_for`] uses). The
+/// spend-cap refusal for an unpriced model asks this, so a model the cost arithmetic CAN price
+/// is never refused as unpriced.
+pub fn is_priced(model_id: &str) -> bool {
+    crate::model_registry::registry_entry_for(model_id)
+        .is_some_and(|e| e.price_in > 0.0 && e.price_out > 0.0)
 }
 
-/// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
-/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are ~0.1×
-/// and cache writes ~1.25×. Price the three input components separately so cached reads are
-/// not over-billed ~10×. Returns `None` unless the model is priced and both token counts are
+/// Dollars to whole micro-dollars, ROUNDED UP, for anything that feeds a spend cap: flooring
+/// would let a run that is a fraction of a micro-dollar over the limit read as under it. The
+/// product is first rounded to the nearest nano-dollar so float noise (`0.25 * 1e6` landing a
+/// hair above `250000`) cannot add a phantom micro-dollar.
+pub fn usd_to_micro_ceil(usd: f64) -> u64 {
+    let micro = usd * 1_000_000.0;
+    ((micro * 1_000.0).round() / 1_000.0).ceil().max(0.0) as u64
+}
+
+/// How a call was billed, which decides the multipliers [`compute_cost_usd`] applies on top of
+/// the list price. Both facts are properties of the REQUEST, known when it is built, so the
+/// caller states them rather than the arithmetic guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceBasis {
+    /// The call was an item of a Message Batch: every token (input, output, cache write and
+    /// cache read) is billed at [`BATCH_MULT`] of the real-time price.
+    pub batch: bool,
+    /// The prompt-cache TTL the request asked for; it sets the cache-WRITE multiplier.
+    pub cache_ttl: CacheTtl,
+}
+
+impl PriceBasis {
+    /// A real-time `/v1/messages` call with the TTL the transport will request
+    /// ([`CacheTtl::from_env`]).
+    pub fn realtime() -> Self {
+        Self {
+            batch: false,
+            cache_ttl: CacheTtl::from_env(),
+        }
+    }
+
+    /// The basis a finished response was billed on, read from the backend that produced it
+    /// (`api/batch` is a Message Batch item at [`BATCH_CACHE_TTL`]). For pricing a response that
+    /// reports tokens but no dollar figure.
+    pub fn for_response(r: &LlmResponse) -> Self {
+        if r.backend == "api/batch" {
+            Self::batch(BATCH_CACHE_TTL)
+        } else {
+            Self::realtime()
+        }
+    }
+
+    /// A Message Batch item with the TTL its request carried.
+    pub fn batch(cache_ttl: CacheTtl) -> Self {
+        Self {
+            batch: true,
+            cache_ttl,
+        }
+    }
+}
+
+/// Anthropic's published price ratios, applied on top of the list input price. ONE definition:
+/// every dollar figure in the product (the printed cost, the telemetry, the `--max-cost-usd`
+/// cap) comes from [`compute_cost_usd`], so they cannot disagree with each other.
+/// A 5-minute cache write is 1.25x input.
+pub const CACHE_WRITE_5M_MULT: f64 = 1.25;
+/// A 1-hour cache write is 2x input.
+pub const CACHE_WRITE_1H_MULT: f64 = 2.0;
+/// A cache read is 0.1x input.
+pub const CACHE_READ_MULT: f64 = 0.1;
+/// A Message Batch item is billed at half the real-time price, on input and output alike.
+pub const BATCH_MULT: f64 = 0.5;
+
+/// Dollars for `input_tokens` of plain (uncached) input on `model_id` under `basis`, or `None`
+/// for an unpriced model. For projections (the batch spend-cap gate); the actual cost of a call
+/// always comes from [`compute_cost_usd`] with its real usage.
+pub fn input_cost_usd(model_id: &str, input_tokens: u64, basis: PriceBasis) -> Option<f64> {
+    compute_cost_usd(model_id, Some(input_tokens), Some(0), 0, 0, basis)
+}
+
+impl CacheTtl {
+    /// The cache-write multiplier this TTL is billed at.
+    pub fn write_multiplier(self) -> f64 {
+        match self {
+            CacheTtl::FiveMinutes => CACHE_WRITE_5M_MULT,
+            CacheTtl::OneHour => CACHE_WRITE_1H_MULT,
+        }
+    }
+}
+
+/// The usage one call reported, as the cost arithmetic needs it. `input` folds in the cache
+/// read and cache write tokens (so it is also the prompt size that picks a long-prompt price
+/// tier); `cache_creation_1h` is how many of the cache-WRITE tokens were 1-hour writes when the
+/// API said (`usage.cache_creation.ephemeral_1h_input_tokens`), else `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub cache_creation_1h: Option<u64>,
+}
+
+/// THE dollar cost of one call: the single function the real-time/batch response parser
+/// ([`compute_cost_usd`]) and the usage ledger's fallback both price through, so the printed
+/// cost, the telemetry, the spend cap and the cumulative meter cannot disagree.
+///
+/// Rates come from [`crate::model_registry::rates_for`] for the prompt size (the model's own
+/// cache-read price, and its long-prompt tier above the threshold). The fresh input (`input`
+/// minus the cache read and cache creation tokens) is billed at the input rate; cache reads at the cache-read rate; cache
+/// writes at the 1-hour rate for the `cache_creation_1h` tokens and the 5-minute rate for the
+/// rest (when the API did not split them, every write takes `basis.cache_ttl`'s rate); output
+/// at the output rate. A Message Batch item ([`PriceBasis::batch`]) is billed at
+/// [`BATCH_MULT`] of the whole figure. `None` unless the model is priced and both the input and
+/// output token counts are present.
+pub fn usage_cost_usd(model_id: &str, usage: &CallUsage, basis: PriceBasis) -> Option<f64> {
+    let (i, o) = (usage.input?, usage.output?);
+    let r = crate::model_registry::rates_for(model_id, i)?;
+    let fresh = i
+        .saturating_sub(usage.cache_read)
+        .saturating_sub(usage.cache_creation);
+    let writes_1h = usage
+        .cache_creation_1h
+        .unwrap_or(if basis.cache_ttl == CacheTtl::OneHour {
+            usage.cache_creation
+        } else {
+            0
+        })
+        .min(usage.cache_creation);
+    let writes_5m = usage.cache_creation - writes_1h;
+    let list = fresh as f64 * r.input
+        + usage.cache_read as f64 * r.cache_read
+        + writes_5m as f64 * r.cache_write_5m
+        + writes_1h as f64 * r.cache_write_1h
+        + o as f64 * r.output;
+    Some(if basis.batch { list * BATCH_MULT } else { list })
+}
+
+/// [`usage_cost_usd`] for a call whose cache writes are not split by TTL (every write is priced
+/// at `basis.cache_ttl`). Returns `None` unless the model is priced and both token counts are
 /// present.
 fn compute_cost_usd(
     model_id: &str,
@@ -960,17 +1380,19 @@ fn compute_cost_usd(
     output: Option<u64>,
     cache_read: u64,
     cache_creation: u64,
+    basis: PriceBasis,
 ) -> Option<f64> {
-    price_for(model_id).and_then(|(pin, pout)| match (input, output) {
-        (Some(i), Some(o)) => {
-            let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
-            let input_cost = fresh_input as f64 * pin
-                + cache_read as f64 * pin * 0.1
-                + cache_creation as f64 * pin * 1.25;
-            Some((input_cost + o as f64 * pout) / 1_000_000.0)
-        }
-        _ => None,
-    })
+    usage_cost_usd(
+        model_id,
+        &CallUsage {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: None,
+        },
+        basis,
+    )
 }
 
 /// The shared `reqwest::Client` for every Anthropic API call (`complete_api` + the
@@ -1004,6 +1426,121 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// The Messages endpoint the API leg posts to.
+const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
+/// The shared client for STREAMED calls. Unlike [`shared_http_client`] it has no total timeout:
+/// a healthy streamed reply may run for minutes, and the idle window
+/// ([`Llm::complete_api_streaming`]) is what fails a dead one. Only the connect step is bounded.
+pub(crate) fn shared_stream_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build the shared Anthropic streaming reqwest::Client")
+    })
+}
+
+/// A `reqwest` response body read a chunk at a time.
+struct ResponseChunks(reqwest::Response);
+
+#[async_trait::async_trait]
+impl crate::sse::ChunkSource for ResponseChunks {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.0
+            .chunk()
+            .await
+            .map(|c| c.map(|b| b.to_vec()))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// One attempt at a streamed Messages call: send, then read the event stream under the idle
+/// window. `Done` carries the folded message (shaped like a non-streaming reply); a stream that
+/// died after delivering text is `Done` too, with the stop reason of a reply cut off at the limit
+/// and its output recorded at `max_tokens` (see [`Llm::complete_api_streaming`]).
+async fn stream_attempt(
+    url: &str,
+    key: &str,
+    body: &serde_json::Value,
+    idle: std::time::Duration,
+    max_tokens: u64,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> crate::retry::StreamAttempt<serde_json::Value> {
+    use crate::retry::{RawResponse, StreamAttempt};
+    use crate::sse::{read_stream, SseAccumulator, StreamEnd};
+
+    // The streaming client has no total timeout, so the wait for the response HEADERS is bounded
+    // by the same idle window as the body: a server that accepts the connection and never
+    // answers is a stall, not a hang for ever.
+    let sent = tokio::time::timeout(
+        idle,
+        shared_stream_client()
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(body)
+            .send(),
+    )
+    .await;
+    let resp = match sent {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return StreamAttempt::Connect(e.to_string()),
+        Err(_) => {
+            return StreamAttempt::Stalled(format!(
+                "the reply stream went silent for {}s before any answer (set \
+                 CAMERATA_LLM_IDLE_SECS to tune)",
+                idle.as_secs()
+            ))
+        }
+    };
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        let retry_after = crate::retry::retry_after_from_headers(resp.headers());
+        let request_id = resp
+            .headers()
+            .get("request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = resp.text().await.unwrap_or_default();
+        return StreamAttempt::Status(RawResponse {
+            status,
+            body,
+            retry_after,
+            request_id,
+        });
+    }
+    let mut acc = SseAccumulator::default();
+    let end = read_stream(&mut ResponseChunks(resp), idle, &mut acc, on_delta).await;
+    if acc.is_finished() {
+        // The model reported its stop reason; only the trailing `message_stop` was lost.
+        return StreamAttempt::Done(acc.message(None));
+    }
+    match end {
+        StreamEnd::Finished => StreamAttempt::Done(acc.message(None)),
+        failed if acc.has_text() => {
+            eprintln!(
+                "[camerata-llm] the stream ended before the reply was finished ({failed:?}); \
+                 keeping the text that arrived as a reply cut off at the limit"
+            );
+            StreamAttempt::Done(acc.message(Some(max_tokens)))
+        }
+        StreamEnd::Stalled(window) => StreamAttempt::Stalled(format!(
+            "the reply stream went silent for {}s (set CAMERATA_LLM_IDLE_SECS to tune)",
+            window.as_secs()
+        )),
+        StreamEnd::Broken(message) => match acc.provider_error() {
+            Some((error_type, text)) => StreamAttempt::Provider {
+                error_type: error_type.clone(),
+                message: text.clone(),
+            },
+            None => StreamAttempt::Interrupted(message),
+        },
+    }
+}
+
 /// The Anthropic prompt-cache TTL requested via `cache_control` on the API path (both the
 /// single-call `complete_api` path and the Message Batches path — see
 /// [`build_batch_item`]). Anthropic bills a 5-minute ephemeral cache at the normal
@@ -1012,7 +1549,7 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
 /// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
 /// Message Batches are the exception: their items run minutes to hours apart, so
-/// [`build_batch_item`] always requests 1h.
+/// [`build_batch_item`] is given [`BATCH_CACHE_TTL`] (1h).
 ///
 /// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
 /// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
@@ -1022,6 +1559,9 @@ pub enum CacheTtl {
     FiveMinutes,
     OneHour,
 }
+
+/// The TTL every Message Batch item asks for (see [`build_batch_item`]).
+pub const BATCH_CACHE_TTL: CacheTtl = CacheTtl::OneHour;
 
 impl CacheTtl {
     /// Resolve from `CAMERATA_ANTHROPIC_CACHE_TTL_1H` (truthy -> 1h; anything else,
@@ -1200,7 +1740,6 @@ pub fn resolve_backend(backend: ProjectBackend, has_api_key: bool) -> BackendRes
 pub struct Llm {
     vendor: Vendor,
     backend: Backend,
-    default_model: String,
     api_key: Option<String>,
     /// Process-global cumulative usage meter, threaded so the chokepoint records every call.
     /// `None` in tests / standalone construction (recording is then simply skipped).
@@ -1208,6 +1747,12 @@ pub struct Llm {
     /// Collector for the Claude Code session every CLI spawn creates (see
     /// [`crate::session_sink`]). `None` = nobody is recording; the spawn is still tagged.
     sessions: Option<SessionSink>,
+    /// Waits between retry attempts. `None` = real sleeping; tests inject a recording sleeper so
+    /// the backoff schedule is asserted without waiting.
+    sleeper: Option<std::sync::Arc<dyn crate::retry::Sleeper>>,
+    /// The Messages endpoint to post to; `None` = the production endpoint. A test points it at
+    /// a local mock server so the whole streamed path runs without a network.
+    messages_url: Option<String>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -1215,7 +1760,6 @@ impl std::fmt::Debug for Llm {
         f.debug_struct("Llm")
             .field("vendor", &self.vendor)
             .field("backend", &self.backend)
-            .field("default_model", &self.default_model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("ledger", &self.ledger.as_ref().map(|_| "<set>"))
             .finish()
@@ -1228,8 +1772,8 @@ impl Llm {
     /// [`crate::credentials::anthropic_api_key`] (credential store first, `ANTHROPIC_API_KEY`
     /// env only as the fallback) at the moment it builds the client, so a key saved or replaced
     /// in the app takes effect on the next call with no restart. Only the vendor
-    /// (`CAMERATA_LLM_VENDOR`, default anthropic) and the default model (`CAMERATA_LLM_MODEL`)
-    /// still come from env.
+    /// (`CAMERATA_LLM_VENDOR`, default anthropic) still comes from env. The model never does:
+    /// every request names its own (see [`Llm::complete`]).
     ///
     /// This is the constructor every project-scoped or chat-scoped call site uses
     /// (`docs/design/2026-09-22_per-project-backend.md`): the caller resolves `Cli`/`Api`
@@ -1239,17 +1783,14 @@ impl Llm {
     pub fn for_backend(backend: Backend, api_key: Option<String>) -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
         let api_key = api_key.filter(|k| !k.trim().is_empty());
-        let default_model = std::env::var("CAMERATA_LLM_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         Self {
             vendor,
             backend,
-            default_model,
             api_key,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         }
     }
 
@@ -1279,6 +1820,31 @@ impl Llm {
         Self::from_env().with_ledger(ledger)
     }
 
+    /// Replace the sleeper retries wait with. Production sleeps for real; a test injects a
+    /// recorder and never waits.
+    pub fn with_sleeper(mut self, sleeper: std::sync::Arc<dyn crate::retry::Sleeper>) -> Self {
+        self.sleeper = Some(sleeper);
+        self
+    }
+
+    /// Post Messages calls to `url` instead of the production endpoint. For tests that run the
+    /// streamed API leg against a local mock server; production never sets it.
+    pub fn with_messages_url(mut self, url: impl Into<String>) -> Self {
+        self.messages_url = Some(url.into());
+        self
+    }
+
+    fn messages_url(&self) -> &str {
+        self.messages_url.as_deref().unwrap_or(MESSAGES_URL)
+    }
+
+    fn sleeper(&self) -> &dyn crate::retry::Sleeper {
+        match &self.sleeper {
+            Some(s) => s.as_ref(),
+            None => &crate::retry::TokioSleeper,
+        }
+    }
+
     /// Attach (or replace) the process-global usage ledger on an existing instance.
     pub fn with_ledger(mut self, ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         self.ledger = Some(ledger);
@@ -1293,16 +1859,12 @@ impl Llm {
         self
     }
 
-    /// Fold one completed response into the ledger (model id resolved from the response,
-    /// falling back to the configured default). No-op when no ledger is attached.
+    /// Fold one completed response into the ledger (the model id the response carries; every
+    /// response names the model the request named when the provider did not echo one). No-op
+    /// when no ledger is attached.
     fn ledger_record(&self, resp: &LlmResponse) {
         if let Some(l) = &self.ledger {
-            let model = if resp.model.trim().is_empty() {
-                self.default_model.as_str()
-            } else {
-                resp.model.as_str()
-            };
-            l.record(model, resp);
+            l.record(resp.model.as_str(), resp);
         }
     }
 
@@ -1323,12 +1885,22 @@ impl Llm {
         format!("{}/{t}", self.vendor.label())
     }
 
-    fn model_for(&self, req: &LlmRequest) -> String {
-        if req.model.trim().is_empty() {
-            self.default_model.clone()
-        } else {
-            req.model.clone()
+    /// The model a request runs on: the one it names. A request that names none is REFUSED,
+    /// never filled in from the environment or a process default: the pre-flight prices, the
+    /// ledger records and the spend limit checks the model the request names, so a model chosen
+    /// here would be one none of them saw (a paid run stopped on 2026-10-29 because a stage sent
+    /// no model and the transport filled in an unpriced id from a local `.env`). The call site
+    /// that sent no model is the bug; the error says so.
+    fn model_for(&self, req: &LlmRequest) -> anyhow::Result<String> {
+        let model = req.model.trim();
+        if model.is_empty() {
+            anyhow::bail!(
+                "this request names no model: every model call must carry the model the \
+                 project's settings or the command's flags chose (a bug in the caller; no \
+                 model is filled in from the environment)"
+            );
         }
+        Ok(req.model.clone())
     }
 
     /// Run a completion, STREAMING text deltas to `on_delta` as they arrive (so the UI can
@@ -1339,7 +1911,7 @@ impl Llm {
         req: LlmRequest,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let model = self.model_for(&req);
+        let model = self.model_for(&req)?;
         // CHOKEPOINT: every streaming call records into the cumulative ledger (success folds
         // usage + clears the rate-limit flag; failure runs the rate-limit detector). The `_`
         // arm delegates to `complete`, which records there — so guard against double-counting
@@ -1353,9 +1925,12 @@ impl Llm {
                 r
             }
             (Vendor::Anthropic, Backend::Api) => {
-                let r = self.complete_api(&req, &model).await;
+                // Streamed end to end: each text delta reaches `on_delta` as it arrives, so the
+                // listener is never handed the whole reply at once at the end.
+                let r = self
+                    .complete_api_streaming(self.messages_url(), &req, &model, on_delta)
+                    .await;
                 if let Ok(resp) = &r {
-                    on_delta(&resp.text);
                     self.ledger_record(resp);
                 }
                 r
@@ -1377,7 +1952,7 @@ impl Llm {
     /// match arm here plus its [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] entries; the
     /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
-        let model = self.model_for(&req);
+        let model = self.model_for(&req)?;
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
@@ -1436,9 +2011,50 @@ impl Llm {
         model: &str,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
+        // The streaming callback is shared by every attempt, so it sits behind an async mutex the
+        // attempt closure locks; one attempt runs at a time.
+        let on_delta = tokio::sync::Mutex::new(on_delta);
+        // Whether the attempt that just ran streamed any text. A retry then tells the listener
+        // that text is superseded, so a live transcript never shows two answers run together.
+        let streamed = std::sync::atomic::AtomicBool::new(false);
+        let outcome = crate::retry::drive(self.sleeper(), |attempt| {
+            let on_delta = &on_delta;
+            let streamed = &streamed;
+            async move {
+                let mut guard = on_delta.lock().await;
+                if attempt > 0 && streamed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    (**guard)(CLI_ATTEMPT_SUPERSEDED);
+                }
+                let mut counted = |text: &str| {
+                    if !text.is_empty() {
+                        streamed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    (**guard)(text);
+                };
+                self.cli_attempt(req, model, &mut counted).await
+            }
+        })
+        .await;
+        match outcome {
+            Ok((resp, _trail)) => Ok(resp),
+            Err((last, trail)) => Err(with_full_trail(last, trail)),
+        }
+    }
+
+    /// ONE spawn-and-read of the `claude` CLI, reported as a retry [`crate::retry::Step`]: a
+    /// missing binary or a failure waiting cannot fix stops the loop, a transport-class failure
+    /// (a non-zero exit with nothing streamed, a timeout, an overloaded or rate-limited answer)
+    /// asks for another run.
+    async fn cli_attempt(
+        &self,
+        req: &LlmRequest,
+        model: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> crate::retry::Step<LlmResponse, anyhow::Error> {
+        use crate::retry::{RetryReason, Step};
         // Tag the call with an id of OUR choosing and record it BEFORE the spawn: a call that
         // times out or is killed has still written (part of) a session file, and "delete the
-        // client's source" must be able to find it.
+        // client's source" must be able to find it. Every attempt is its own session.
         let session_id = new_session_id();
         if let Some(sink) = &self.sessions {
             let cwd = match &req.repo_read_dir {
@@ -1452,7 +2068,24 @@ impl Llm {
             });
         }
         let mut cmd = build_cli_command(req, model, &session_id);
-        let child = cmd.spawn().map_err(map_spawn_error)?;
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                // A missing binary means no provider can be reached at all, so it stops the run;
+                // any other spawn failure is local.
+                let class = if e.kind() == std::io::ErrorKind::NotFound {
+                    crate::failure::FailureClass::AuthOrBilling
+                } else {
+                    crate::failure::FailureClass::Io
+                };
+                let message = map_spawn_error(e).to_string();
+                let err = cli_failure(model, class, false, message, None, "");
+                let record = crate::failure::call_failure_of(&err)
+                    .and_then(|f| f.attempts.first().cloned())
+                    .unwrap_or_default();
+                return Step::Stop { record, last: err };
+            }
+        };
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
 
@@ -1471,7 +2104,43 @@ impl Llm {
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
 
-        read_cli_stream(child, model, idle, overall_timeout, on_delta).await
+        match read_cli_stream(child, model, idle, overall_timeout, on_delta).await {
+            Ok(resp) => Step::Done(resp),
+            Err(e) => {
+                let Some(failure) = crate::failure::call_failure_of(&e) else {
+                    // A refusal or an error nobody typed: not worth another run.
+                    let mut record = crate::failure::AttemptRecord::new("cli", model);
+                    record.message = crate::failure::scrub_message(
+                        &e.to_string(),
+                        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+                    );
+                    return Step::Stop { record, last: e };
+                };
+                let mut record = failure.attempts.first().cloned().unwrap_or_default();
+                if record.model.is_empty() {
+                    record.model = model.to_string();
+                }
+                if failure.retryable {
+                    let lower = failure.message.to_ascii_lowercase();
+                    let reason = if ["overloaded", "529", "503"]
+                        .iter()
+                        .any(|p| lower.contains(p))
+                    {
+                        RetryReason::Overloaded
+                    } else {
+                        RetryReason::Network
+                    };
+                    Step::Retry {
+                        reason,
+                        retry_after: None,
+                        record,
+                        last: e,
+                    }
+                } else {
+                    Step::Stop { record, last: e }
+                }
+            }
+        }
     }
 
     /// API path: POST the Anthropic Messages API with the key.
@@ -1496,6 +2165,33 @@ impl Llm {
     /// [`call_with_fallback`]/a different model — a transient limit on the CHOSEN model is
     /// not a reason to silently answer from a different one.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        self.complete_api_streaming(self.messages_url(), req, model, &mut |_| {})
+            .await
+    }
+
+    /// The API leg: the request is sent with `stream: true` and the server-sent events are read
+    /// to the end of the reply, each text delta passed to `on_delta` as it arrives.
+    ///
+    /// Why a stream. The reply is generated for as long as it takes, minutes for a large
+    /// `max_tokens`, and a fixed total timeout around a one-shot request turns a healthy long
+    /// reply into a transport failure that is retried (a second payment for the same answer).
+    /// A stream shows progress, so only SILENCE is a failure: the idle window
+    /// (`CAMERATA_LLM_IDLE_SECS`, 120 seconds by default, the CLI leg's knob) governs, never the
+    /// total time, and the output ceiling can follow the model's own limit.
+    ///
+    /// A stream that dies after delivering text is SALVAGED (as the CLI leg does): the text that
+    /// arrived is returned as a reply cut off at the limit, so the stage keeps every complete
+    /// entry in it and asks only for the rest. The output such a call was billed is unknown, so
+    /// it is recorded at the request's cap (the most it could have generated): a spend limit
+    /// never under-counts. A stream that stalls or breaks with NOTHING delivered is a Transport
+    /// failure; a stall is retried once, the other failures on the standard schedule.
+    async fn complete_api_streaming(
+        &self,
+        url: &str,
+        req: &LlmRequest,
+        model: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "API backend selected but no Anthropic API key is configured; {}",
@@ -1503,40 +2199,85 @@ impl Llm {
             )
         })?;
 
-        let user_content = cached_user_content(
-            &req.prompt,
-            &req.cache_breakpoints,
-            true,
-            CacheTtl::from_env(),
-        );
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": user_content }],
-        });
-        if let Some(system) = &req.system {
-            body["system"] = serde_json::json!(system);
-        }
+        let basis = PriceBasis::realtime();
+        let mut body = messages_request_body(req, model, basis.cache_ttl);
+        body["stream"] = serde_json::json!(true);
+        let max_tokens = body["max_tokens"].as_u64().unwrap_or(0);
+        let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
+        // Every attempt writes to the same listener; a retry only starts when nothing was
+        // delivered, so no text is ever forwarded twice.
+        let listener = tokio::sync::Mutex::new(on_delta);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
-        let make_request = || {
-            shared_http_client()
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
+        let attempt = || async {
+            let mut guard = listener.lock().await;
+            stream_attempt(url, key, &body, idle, max_tokens, &mut **guard).await
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("Anthropic API HTTP {status}: {text}");
+        match crate::retry::execute_stream(attempt, self.sleeper(), model).await? {
+            crate::retry::StreamResult::Done(message, _trail) => {
+                self.api_response_or_refusal(&message, model, basis)
+            }
+            crate::retry::StreamResult::Http(out) => Err(http_failure("Anthropic API", out)),
         }
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        Ok(messages_response(&v, model, "api"))
     }
+
+    /// Turn a parsed Messages response into the call's result. A refusal is an `Err`, but a
+    /// refused call is still BILLED, so its usage is folded into the ledger first
+    /// (`complete` only records successes).
+    fn api_response_or_refusal(
+        &self,
+        v: &serde_json::Value,
+        model: &str,
+        basis: PriceBasis,
+    ) -> anyhow::Result<LlmResponse> {
+        if let Some(refusal) = refusal_error_billed(v, model, "api", basis) {
+            // A refused call is billed: the ledger counts it now, and the error carries the
+            // same usage so a run's spend cap can count it too.
+            if let Some(billed) = refusal_billed(&refusal) {
+                self.ledger_record(billed);
+            }
+            return Err(refusal);
+        }
+        Ok(messages_response(v, model, "api", basis))
+    }
+}
+
+/// `last` (the final attempt's error) carrying the whole trail of attempts. An error that is not a
+/// typed transport failure (a model refusal) passes through unchanged.
+fn with_full_trail(
+    last: anyhow::Error,
+    trail: Vec<crate::failure::AttemptRecord>,
+) -> anyhow::Error {
+    match crate::failure::call_failure_of(&last) {
+        Some(f) => {
+            let mut full = f.clone();
+            full.attempts = trail;
+            anyhow::Error::new(full)
+        }
+        None => last,
+    }
+}
+
+/// The typed error for a terminal non-success HTTP answer from the Messages API: the message is
+/// the one the transport has always returned, the class says what waiting or credentials could
+/// do about it, and the trail holds every attempt (status, provider error, request id, waits).
+fn http_failure(what: &str, out: crate::retry::ApiOutcome) -> anyhow::Error {
+    let status = reqwest::StatusCode::from_u16(out.status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| out.status.to_string());
+    let (etype, emsg) = crate::failure::provider_error_of(&out.body);
+    let (class, retryable) = crate::failure::classify_http(
+        out.status,
+        etype.as_deref(),
+        emsg.as_deref().unwrap_or(&out.body),
+    );
+    let mut failure =
+        crate::failure::LlmCallFailure::new(class, format!("{what} HTTP {status}: {}", out.body));
+    failure.retryable = retryable;
+    failure.attempts = out.attempts;
+    failure.http = Some((out.status, out.body));
+    anyhow::Error::new(failure)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -1591,6 +2332,16 @@ pub struct BatchItemParams {
     pub max_tokens: u32,
     pub system: Option<String>,
     pub messages: Vec<BatchMessage>,
+    /// `output_config` (effort): the request's own effort when it set one, else the model
+    /// registry's default for models whose default is not the one the audit was tuned for;
+    /// absent otherwise. Filled by [`build_batch_item`] through the same path as the real-time
+    /// body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
+    /// H5: the request's temperature, only for a model that accepts it (see
+    /// [`LlmRequest::temperature`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 /// One message in the `messages` array of a batch item.
@@ -1598,6 +2349,118 @@ pub struct BatchItemParams {
 pub struct BatchMessage {
     pub role: String,
     pub content: serde_json::Value,
+}
+
+/// Write the request's own `effort` (when it asks for one) into `body.output_config.effort`.
+/// Must run BEFORE [`crate::model_registry::conform_messages_body`]: the conformer only fills
+/// the model's effort default when none is present, so a caller-chosen effort wins. A blank
+/// effort is treated as none. Sent only to a model that accepts an effort setting
+/// ([`crate::model_registry::accepts_effort`]): the stage that chose it does not know which
+/// model it will run on, and an older model answers the field with HTTP 400. The one place a
+/// request's effort reaches a wire body (real-time and batch alike).
+fn apply_request_effort(req: &LlmRequest, model: &str, body: &mut serde_json::Value) {
+    if !crate::model_registry::accepts_effort(model) {
+        return;
+    }
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        set_output_config(body, "effort", serde_json::json!(effort));
+    }
+}
+
+/// Set one key of `body.output_config`, keeping whatever else is already there (the effort and
+/// the response format share the object).
+fn set_output_config(body: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if !body["output_config"].is_object() {
+        body["output_config"] = serde_json::json!({});
+    }
+    body["output_config"][key] = value;
+}
+
+/// Put the request's JSON Schema on the wire as `output_config.format`
+/// (`{type: "json_schema", schema}`), for a model that accepts structured output. It works
+/// alongside the streamed response, the adaptive thinking this crate asks of the 5.x models
+/// (the grammar constrains the final answer only; thinking is free), the effort setting and
+/// the Message Batches API. A request with no schema, or to a model that does not accept one,
+/// is left as it was: the reply is free text. The one place a schema reaches a wire body
+/// (real-time and batch alike).
+fn apply_response_schema(req: &LlmRequest, model: &str, body: &mut serde_json::Value) {
+    if !req.sends_schema_to(model) {
+        return;
+    }
+    if let Some(schema) = &req.response_schema {
+        set_output_config(
+            body,
+            "format",
+            serde_json::json!({ "type": "json_schema", "schema": schema }),
+        );
+    }
+}
+
+/// Whether a reply that came back from `backend` for model `model` was produced under the
+/// request's schema: the request carried one, the call went to the Anthropic API (real-time or
+/// batch; the CLI and OpenRouter ignore it) and the model accepts structured output. What the
+/// run store records as the reply's path: `"schema"` or `"tolerant"`.
+pub fn structured_output_used(asked_schema: bool, backend: &str, model: &str) -> bool {
+    asked_schema
+        && matches!(backend, "api" | "api/batch")
+        && crate::model_registry::accepts_structured_output(model)
+}
+
+/// Ask a model that thinks before it writes to stream a SUMMARY of its thinking
+/// (`thinking: {type: "adaptive", display: "summarized"}`). With the API's default display the
+/// thinking phase sends nothing down the stream (the block opens, then one empty delta and a
+/// signature when it ends), so a long think is silence that an idle window cannot tell from a
+/// stall: the call would be killed, billed, and sent again. The summary deltas are progress and
+/// nothing else: the stream reader keeps only `text_delta`s, so no thinking text is stored or
+/// shown, and the display changes neither what the model thinks nor what it bills. Sent only to
+/// a model of the 5.x line ([`crate::model_registry::accepts_effort`]); the batch path, which is
+/// not streamed, does not ask for it. The real-time body only.
+fn apply_thinking_display(model: &str, body: &mut serde_json::Value) {
+    if crate::model_registry::accepts_effort(model) && body.get("thinking").is_none() {
+        body["thinking"] = serde_json::json!({ "type": "adaptive", "display": "summarized" });
+    }
+}
+
+/// The `max_tokens` a request is sent with: its own, never above what `model` can write in one
+/// reply (the registry's `max_output`; a model the registry lists without a figure keeps the
+/// request's own). The API answers a larger value with HTTP 400, and a stage's runaway ceiling
+/// is a constant that does not know the model.
+fn request_max_tokens(req: &LlmRequest, model: &str) -> u32 {
+    match crate::model_registry::max_output_for(model) {
+        Some(limit) => req.max_tokens.min(limit),
+        None => req.max_tokens,
+    }
+}
+
+/// Pure request-body builder for [`Llm::complete_api`]: the user message (split into cached
+/// blocks per `req.cache_breakpoints`), the optional system prompt, the request's own effort
+/// ([`apply_request_effort`]), and then [`crate::model_registry::conform_messages_body`], the
+/// one place a body is made valid for its model (effort default, fields the model rejects).
+/// Kept separate from the HTTP call so the exact request shape is unit-testable without a
+/// network.
+fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
+    let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": request_max_tokens(req, model),
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    apply_request_effort(req, model, &mut body);
+    apply_response_schema(req, model, &mut body);
+    apply_thinking_display(model, &mut body);
+    if let Some(t) = req.temperature_for(model) {
+        body["temperature"] = serde_json::json!(t);
+    }
+    crate::model_registry::conform_messages_body(model, &mut body);
+    body
 }
 
 /// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
@@ -1619,6 +2482,13 @@ fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
     });
     if let Some(system) = &req.system {
         body["system"] = serde_json::json!(system);
+    }
+    // Same conformer as every other body (one path), then drop the one thing it adds that
+    // cannot change a token count: `output_config.effort` is a generation setting, and this
+    // endpoint only needs the token-bearing content.
+    crate::model_registry::conform_messages_body(model, &mut body);
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("output_config");
     }
     body
 }
@@ -1649,22 +2519,38 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// is forwarded verbatim (the batch API accepts the same `system` field as the messages
 /// API).
 ///
-/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
-/// batch over minutes to hours, so the 5-minute default would have expired before most items
-/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
-/// the 5-minute default (see [`CacheTtl::from_env`]).
-pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
+/// `cache_ttl` is the TTL the cached blocks ask for. The product passes
+/// [`BATCH_CACHE_TTL`] (1 hour): Anthropic processes a batch over minutes to hours, so the
+/// 5-minute default would have expired before most items ran and every item would re-write the
+/// prefix it was meant to read. Real-time requests keep the 5-minute default (see
+/// [`CacheTtl::from_env`]). The same TTL must be given to [`parse_batch_results_jsonl`] so the
+/// cost is priced at the matching write multiplier.
+pub fn build_batch_item(
+    custom_id: impl Into<String>,
+    req: &LlmRequest,
+    model: &str,
+    cache_ttl: CacheTtl,
+) -> BatchItem {
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
+    // Run the SAME conformer `complete_api` uses on the equivalent body, then lift what it
+    // added (`output_config`) onto the typed params. The typed struct has no field for any
+    // rejected parameter, so there is nothing to strip.
+    let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
+    apply_request_effort(req, model, &mut shape);
+    apply_response_schema(req, model, &mut shape);
+    crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
             model: model.to_string(),
-            max_tokens: req.max_tokens,
+            max_tokens: request_max_tokens(req, model),
             system: req.system.clone(),
             messages: vec![BatchMessage {
                 role: "user".to_string(),
                 content,
             }],
+            output_config: shape.get("output_config").cloned(),
+            temperature: req.temperature_for(model),
         },
     }
 }
@@ -1707,6 +2593,10 @@ pub struct BatchResultRow {
     pub response: Option<LlmResponse>,
     /// The error message when `result_type != "succeeded"`.
     pub error: Option<String>,
+    /// What the item was BILLED when it failed after running (a model refusal): empty text, the
+    /// tokens and dollars of the call. `None` for an item that never ran or whose usage the API
+    /// did not report.
+    pub billed: Option<LlmResponse>,
 }
 
 impl Llm {
@@ -1748,10 +2638,16 @@ impl Llm {
                 .header("content-type", "application/json")
                 .json(&body)
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("Message Batches API HTTP {status}: {text}");
+        // The batch's model, for the attempt records of a failed submit.
+        let model = items
+            .first()
+            .map(|i| i.params.model.clone())
+            .unwrap_or_default();
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), &model).await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("Message Batches API", out));
         }
+        let text = out.body;
         let v: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
         let batch_id = v["id"]
@@ -1789,10 +2685,11 @@ impl Llm {
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("batch poll HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch poll", out));
         }
+        let text = out.body;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch poll: {e}"))?;
         let processing_status = v["processing_status"]
@@ -1816,7 +2713,11 @@ impl Llm {
     /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
     /// batch has already run to completion (tokens spent) would be a pure waste, so this
     /// retries transient failures rather than surfacing immediately.
-    pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+    pub async fn fetch_batch_results(
+        &self,
+        batch_id: &str,
+        cache_ttl: CacheTtl,
+    ) -> anyhow::Result<Vec<BatchResultRow>> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "batch result fetch requires an Anthropic API key; {}",
@@ -1831,11 +2732,11 @@ impl Llm {
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("batch results HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch results", out));
         }
-        parse_batch_results_jsonl(&text)
+        parse_batch_results_jsonl(&out.body, cache_ttl)
     }
 
     /// Convenience accessor for the API key (needed by the batch polling loop to confirm
@@ -1895,8 +2796,12 @@ fn parse_request_counts(v: &serde_json::Value) -> BatchRequestCounts {
 /// Parse the JSONL results body (one JSON object per line) into a vec of `BatchResultRow`.
 /// Robust: malformed lines are skipped (logged at debug), so one bad item never aborts
 /// the whole result set. The caller converts this vec into a `custom_id -> response` map
-/// via [`reassemble_batch_results`].
-pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+/// via [`reassemble_batch_results`]. `cache_ttl` is the TTL the batch was SUBMITTED with (see
+/// [`build_batch_item`]); it prices the cache writes in each row.
+pub fn parse_batch_results_jsonl(
+    jsonl: &str,
+    cache_ttl: CacheTtl,
+) -> anyhow::Result<Vec<BatchResultRow>> {
     let mut rows = Vec::new();
     for line in jsonl.lines() {
         let line = line.trim();
@@ -1922,11 +2827,34 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
+            if let Some(refusal) = refusal_error_billed(
+                msg,
+                msg["model"].as_str().unwrap_or(""),
+                "api/batch",
+                PriceBasis::batch(cache_ttl),
+            ) {
+                // A refusal is a failed item, never an empty answer: no response, so the
+                // reassembler reports it missing and the pass is disclosed as failed. Its
+                // usage is kept: the item was billed.
+                rows.push(BatchResultRow {
+                    custom_id,
+                    response: None,
+                    error: Some(refusal.to_string()),
+                    billed: refusal_billed(&refusal).cloned(),
+                });
+                continue;
+            }
             let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
-                response: Some(messages_response(msg, model_id, "api/batch")),
+                response: Some(messages_response(
+                    msg,
+                    model_id,
+                    "api/batch",
+                    PriceBasis::batch(cache_ttl),
+                )),
                 error: None,
+                billed: None,
             });
         } else {
             let error_msg = v["result"]["error"]["message"]
@@ -1937,26 +2865,60 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
                 custom_id,
                 response: None,
                 error: Some(error_msg),
+                billed: None,
             });
         }
     }
     Ok(rows)
 }
 
-/// Build a `custom_id -> LlmResponse` map from a flat list of `BatchResultRow`s (the
-/// unordered JSONL stream from [`Llm::fetch_batch_results`]). Items whose result was an
-/// error (no `response`) are absent from the map, so the caller's reassembler can detect
-/// which (chunk, batch) pairs failed and handle them (log, skip, surface as partial).
+/// The batch results keyed by `custom_id`: the answers, and the per-item reason for every
+/// item that has none (errored, expired, canceled, or REFUSED).
+#[derive(Debug, Default)]
+pub struct BatchResults {
+    pub responses: std::collections::HashMap<String, LlmResponse>,
+    /// `custom_id -> reason` for each row without a response. A caller that finds an item in
+    /// neither map reports it as missing from the results; one that finds it here reports the
+    /// real reason (a refusal reads as a refusal).
+    pub errors: std::collections::HashMap<String, String>,
+    /// `custom_id -> usage` for failed items that were nevertheless BILLED (a refusal). A caller
+    /// that meters spend counts these before reporting the failure.
+    pub billed: std::collections::HashMap<String, LlmResponse>,
+}
+
+impl BatchResults {
+    /// Fold another sub-batch's results into this one.
+    pub fn extend(&mut self, other: BatchResults) {
+        self.responses.extend(other.responses);
+        self.errors.extend(other.errors);
+        self.billed.extend(other.billed);
+    }
+}
+
+/// Build the `custom_id -> LlmResponse` map (and the `custom_id -> reason` map for failed
+/// items) from a flat list of `BatchResultRow`s (the unordered JSONL stream from
+/// [`Llm::fetch_batch_results`]).
 ///
 /// This is the KEY STEP that undoes the unordered delivery: the caller assigned
 /// deterministic `custom_id`s of the form `c{ci}-b{bi}` when building the batch, and this
-/// map lets it look up each (ci, bi) pair's response in O(1).
-pub fn reassemble_batch_results(
-    rows: Vec<BatchResultRow>,
-) -> std::collections::HashMap<String, LlmResponse> {
-    rows.into_iter()
-        .filter_map(|r| r.response.map(|resp| (r.custom_id, resp)))
-        .collect()
+/// lets it look up each (ci, bi) pair's outcome in O(1).
+pub fn reassemble_batch_results(rows: Vec<BatchResultRow>) -> BatchResults {
+    let mut out = BatchResults::default();
+    for r in rows {
+        match (r.response, r.error) {
+            (Some(resp), _) => {
+                out.responses.insert(r.custom_id, resp);
+            }
+            (None, Some(err)) => {
+                if let Some(billed) = r.billed {
+                    out.billed.insert(r.custom_id.clone(), billed);
+                }
+                out.errors.insert(r.custom_id, err);
+            }
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -2497,6 +3459,13 @@ pub async fn call_with_fallback(
 }
 
 #[cfg(test)]
+mod temperature_tests;
+
+// The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
+#[cfg(test)]
+mod stream_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2603,21 +3572,51 @@ mod tests {
     }
 
     #[test]
-    fn model_defaulting() {
+    fn the_request_model_is_the_only_model() {
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         };
-        // Empty request model -> default.
-        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
-        // Explicit model wins.
+        // A request that names no model is refused, never filled in.
+        let err = llm
+            .model_for(&LlmRequest::new("hi"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no model"), "{err}");
+        assert!(llm
+            .model_for(&LlmRequest::new("hi").with_model("  "))
+            .is_err());
+        // The model it names is the one that runs.
         assert_eq!(
-            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5")),
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5"))
+                .unwrap(),
             "claude-opus-5"
+        );
+    }
+
+    /// `CAMERATA_LLM_MODEL` used to fill in a request that named no model (a local `.env` line
+    /// sent a paid run to an unpriced id). It is ignored now: set to anything, a request with no
+    /// model is still refused and one that names a model runs on exactly that model.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn camerata_llm_model_in_the_environment_is_ignored() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_MODEL", "env-picked-model");
+        let llm = Llm::for_backend(Backend::Cli, None);
+        let err = llm
+            .model_for(&LlmRequest::new("hi"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no model"), "{err}");
+        assert!(!err.contains("env-picked-model"), "{err}");
+        assert_eq!(
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-sonnet-5-5"))
+                .unwrap(),
+            "claude-sonnet-5-5"
         );
     }
 
@@ -2723,8 +3722,8 @@ mod tests {
         // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
         // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
         // (base 100, read 200, creation 30 -> 330); fresh input is 100.
-        let cost =
-            compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30).expect("priced model");
+        let cost = compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30, five_min())
+            .expect("priced model");
         // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
         let expected =
             (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0) / 1_000_000.0;
@@ -2740,44 +3739,353 @@ mod tests {
         );
 
         // No cache tokens -> matches the plain input*price formula.
-        let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
+        let plain =
+            compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0, five_min()).unwrap();
         assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
-        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
-        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0, five_min()).is_none());
+        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0, five_min()).is_none());
     }
 
-    // Regression for the stale-pricing bug: `price_for` (and everything built on it —
-    // `compute_cost_usd`, the usage ledger's cost fallback, and the legacy `/api/models`
-    // list) must agree EXACTLY with the live registry, never a second hand-maintained
-    // number. Locks Opus's price at the registry's $5/$25 rather than the old $15/$75.
+    fn five_min() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// The published ratios, each pinned on its own so a wrong constant cannot hide behind a
+    /// sum: opus is $5 in / $25 out per Mtok. One million of each token kind makes the
+    /// expected dollars read straight off the price.
     #[test]
-    fn price_for_matches_the_live_model_registry_exactly() {
+    fn compute_cost_applies_the_published_price_ratios() {
+        const M: u64 = 1_000_000;
+        let cost = |input: u64, output: u64, read: u64, write: u64, basis: PriceBasis| {
+            compute_cost_usd(
+                "claude-opus-5",
+                Some(input + read + write),
+                Some(output),
+                read,
+                write,
+                basis,
+            )
+            .expect("priced model")
+        };
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let hour = PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::OneHour,
+        };
+
+        // 5-minute cache write: 1.25x input.
+        close(cost(0, 0, 0, M, five_min()), 5.0 * 1.25);
+        // 1-hour cache write: 2x input.
+        close(cost(0, 0, 0, M, hour), 5.0 * 2.0);
+        // Cache read: 0.1x input, at either TTL.
+        close(cost(0, 0, M, 0, five_min()), 5.0 * 0.1);
+        close(cost(0, 0, M, 0, hour), 5.0 * 0.1);
+        // Plain input and output are at list price; the TTL does not touch them.
+        close(cost(M, 0, 0, 0, hour), 5.0);
+        close(cost(0, M, 0, 0, hour), 25.0);
+
+        // A batch item is half price on EVERYTHING: input, output, cache write, cache read.
+        let batch_5m = PriceBasis::batch(CacheTtl::FiveMinutes);
+        let batch_1h = PriceBasis::batch(CacheTtl::OneHour);
+        close(cost(M, 0, 0, 0, batch_5m), 5.0 * 0.5);
+        close(cost(0, M, 0, 0, batch_5m), 25.0 * 0.5);
+        close(cost(0, 0, 0, M, batch_5m), 5.0 * 1.25 * 0.5);
+        close(cost(0, 0, 0, M, batch_1h), 5.0 * 2.0 * 0.5);
+        close(cost(0, 0, M, 0, batch_1h), 5.0 * 0.1 * 0.5);
+
+        // The same usage, every basis: batch is exactly half of real-time at the same TTL.
+        let real = cost(3 * M, 2 * M, 4 * M, M, hour);
+        let batch = cost(3 * M, 2 * M, 4 * M, M, batch_1h);
+        close(batch, real * 0.5);
+    }
+
+    /// A batch row is priced as a batch row, at the TTL the batch was submitted with: the
+    /// number the product prints must be what the API bills.
+    #[test]
+    fn a_batch_result_row_is_priced_at_the_batch_discount_and_its_submitted_ttl() {
+        let line = serde_json::json!({
+            "custom_id": "c0-b0",
+            "result": {"type": "succeeded", "message": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "{}"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1_000_000u64,
+                    "output_tokens": 1_000_000u64,
+                    "cache_creation_input_tokens": 1_000_000u64,
+                    "cache_read_input_tokens": 0u64,
+                },
+            }},
+        })
+        .to_string();
+        // fresh 1M + write 1M at the TTL + output 1M, then halved.
+        let price = |ttl| {
+            parse_batch_results_jsonl(&line, ttl).unwrap()[0]
+                .response
+                .as_ref()
+                .unwrap()
+                .cost_usd
+                .unwrap()
+        };
+        assert!((price(CacheTtl::OneHour) - (5.0 + 5.0 * 2.0 + 25.0) * 0.5).abs() < 1e-9);
+        assert!((price(CacheTtl::FiveMinutes) - (5.0 + 5.0 * 1.25 + 25.0) * 0.5).abs() < 1e-9);
+    }
+
+    // Regression for the stale-pricing bug: the rates the billing path uses (and everything
+    // built on them, `compute_cost_usd`, the usage ledger's cost fallback, and the legacy
+    // `/api/models` list) must agree EXACTLY with the live registry, never a second
+    // hand-maintained number. Locks Opus's price at the registry's $5/$25 rather than the old
+    // $15/$75.
+    #[test]
+    fn billing_rates_match_the_live_model_registry_exactly() {
         for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
-            let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
+            let r = crate::model_registry::rates_for(reg.id, 0).unwrap_or_else(|| {
                 panic!(
-                    "price_for must resolve every registry model id, missing {}",
+                    "rates_for must resolve every registry model id, missing {}",
                     reg.id
                 )
             });
-            assert_eq!(
-                pin, reg.price_in,
-                "{} price_in must match the registry",
+            assert!(
+                (r.input * 1e6 - reg.price_in).abs() < 1e-9,
+                "{} input rate must match the registry",
                 reg.id
             );
-            assert_eq!(
-                pout, reg.price_out,
-                "{} price_out must match the registry",
+            assert!(
+                (r.output * 1e6 - reg.price_out).abs() < 1e-9,
+                "{} output rate must match the registry",
                 reg.id
             );
         }
-        let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
-        assert_eq!(
-            (opus_in, opus_out),
-            (5.0, 25.0),
+        let r = crate::model_registry::rates_for("claude-opus-5", 0).unwrap();
+        assert!(
+            (r.input * 1e6 - 5.0).abs() < 1e-9 && (r.output * 1e6 - 25.0).abs() < 1e-9,
             "Opus must price at the current $5/$25, not the stale $15/$75"
         );
+    }
+
+    // ---- the billing path prices through the registry's per-model rates ------------------------
+
+    fn usd(model: &str, usage: CallUsage, basis: PriceBasis) -> f64 {
+        usage_cost_usd(model, &usage, basis).expect("priced model")
+    }
+
+    fn rt() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// Fable 5.1 reads cache at $0.25/M (0.025x), not the usual 0.1x ($1.00/M).
+    #[test]
+    fn fable_5_1_cache_reads_bill_at_its_own_rate() {
+        // 1M prompt tokens, all of them cache reads, 0 output: $0.25.
+        let c = usd(
+            "claude-fable-5-1",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((c - 0.25).abs() < 1e-9, "got {c}");
+        // The same usage on Fable 5 (no override) is the 0.1x default.
+        let legacy = usd(
+            "claude-fable-5",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((legacy - 1.0).abs() < 1e-9, "got {legacy}");
+    }
+
+    /// Haiku 5.5: a prompt above 100K tokens moves the WHOLE request to the higher tier.
+    #[test]
+    fn haiku_5_5_bills_the_long_prompt_tier_above_100k() {
+        let at = |input: u64| {
+            usd(
+                "claude-haiku-5-5",
+                CallUsage {
+                    input: Some(input),
+                    output: Some(1_000_000),
+                    ..Default::default()
+                },
+                rt(),
+            )
+        };
+        // 100K prompt: 0.1M * $0.10 + 1M * $0.50.
+        assert!(
+            (at(100_000) - (0.01 + 0.50)).abs() < 1e-9,
+            "{}",
+            at(100_000)
+        );
+        // 100,001 prompt tokens: every token at $0.50 / $2.50.
+        let long = at(100_001);
+        assert!(
+            (long - (100_001.0 * 0.50 / 1e6 + 2.50)).abs() < 1e-9,
+            "{long}"
+        );
+    }
+
+    /// Cache writes split by TTL when the API says how many were 1-hour writes; otherwise the
+    /// request's TTL decides.
+    #[test]
+    fn cache_writes_split_by_the_apis_one_hour_count() {
+        let usage = |one_hour: Option<u64>| CallUsage {
+            input: Some(1_000_000),
+            output: Some(0),
+            cache_creation: 1_000_000,
+            cache_creation_1h: one_hour,
+            ..Default::default()
+        };
+        // Opus 5.5 is $4/M: 5m write 1.25x = $5, 1h write 2x = $8.
+        let all_5m = usd("claude-opus-5-5", usage(None), rt());
+        assert!((all_5m - 5.0).abs() < 1e-9, "{all_5m}");
+        let half = usd("claude-opus-5-5", usage(Some(500_000)), rt());
+        assert!((half - (2.5 + 4.0)).abs() < 1e-9, "{half}");
+        let all_1h = usd(
+            "claude-opus-5-5",
+            usage(None),
+            PriceBasis {
+                batch: false,
+                cache_ttl: CacheTtl::OneHour,
+            },
+        );
+        assert!((all_1h - 8.0).abs() < 1e-9, "{all_1h}");
+    }
+
+    /// Through the real response parser: the API's `cache_creation.ephemeral_1h_input_tokens`
+    /// reaches the cost, and a batch row is halved.
+    #[test]
+    fn the_response_parser_prices_the_one_hour_split_and_the_batch_discount() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 500_000,
+                    "ephemeral_1h_input_tokens": 500_000
+                },
+                "output_tokens": 1_000_000
+            }
+        });
+        let real = messages_response(&msg, "claude-opus-5-5", "api", rt());
+        // 0.5M * $5 + 0.5M * $8 + 1M * $20 = 2.5 + 4 + 20.
+        assert!(
+            (real.cost_usd.unwrap() - 26.5).abs() < 1e-9,
+            "{:?}",
+            real.cost_usd
+        );
+        let batch = messages_response(
+            &msg,
+            "claude-opus-5-5",
+            "api/batch",
+            PriceBasis::batch(CacheTtl::OneHour),
+        );
+        assert!(
+            (batch.cost_usd.unwrap() - 13.25).abs() < 1e-9,
+            "a batch row is half price: {:?}",
+            batch.cost_usd
+        );
+    }
+
+    /// A batch RESULT row (the JSONL the batch path really parses) for Fable 5.1 with cache
+    /// reads: per-model cache-read rate, then the 0.5x batch discount.
+    #[test]
+    fn a_fable_5_1_batch_row_prices_cache_reads_then_halves() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-fable-5-1","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":0,"cache_read_input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
+        assert!((cost - 0.125).abs() < 1e-9, "$0.25 x 0.5, got {cost}");
+    }
+
+    /// A batch row whose echoed model id the registry cannot price is left uncosted by the parser
+    /// (it cannot know what was requested); priced as the requested model it carries that model's
+    /// batch price and keeps the echoed id. A row already priced, or one whose requested model is
+    /// unpriced too, is left alone.
+    #[test]
+    fn a_batch_row_echoing_an_unpriced_id_is_priced_as_the_requested_model() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-5-experimental","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let mut resp = rows[0].response.clone().unwrap();
+        assert!(
+            resp.cost_usd.is_none(),
+            "the parser cannot price the echoed id"
+        );
+        let basis = PriceBasis::batch(BATCH_CACHE_TTL);
+        assert_eq!(
+            price_as_requested(&mut resp, "claude-sonnet-5", basis).as_deref(),
+            Some("claude-sonnet-5-experimental")
+        );
+        let expected = usd(
+            "claude-sonnet-5",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                ..Default::default()
+            },
+            basis,
+        );
+        assert!((resp.cost_usd.unwrap() - expected).abs() < 1e-9);
+        assert_eq!(
+            resp.model, "claude-sonnet-5-experimental",
+            "what ran is kept"
+        );
+        // Already priced: untouched.
+        assert!(price_as_requested(&mut resp, "claude-opus-5", basis).is_none());
+        assert!((resp.cost_usd.unwrap() - expected).abs() < 1e-9);
+        // Requested model unpriced too: still unknown.
+        let mut again = rows[0].response.clone().unwrap();
+        assert!(price_as_requested(&mut again, "some/other:free", basis).is_none());
+        assert!(again.cost_usd.is_none());
+        // No request model to fall back to: unknown.
+        assert!(price_as_requested(&mut again, "  ", basis).is_none());
+    }
+
+    /// The usage ledger's fallback prices a response with no reported cost through the SAME
+    /// function (here: Haiku 5.5, 100,001 prompt tokens -> the long-prompt tier).
+    #[test]
+    fn the_ledger_fallback_prices_through_the_same_function() {
+        let ledger = crate::usage_ledger::UsageLedger::new();
+        let resp = LlmResponse {
+            text: String::new(),
+            model: "claude-haiku-5-5".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: Some(100_001),
+            output_tokens: Some(0),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        };
+        ledger.record("claude-haiku-5-5", &resp);
+        let expected = usd(
+            "claude-haiku-5-5",
+            CallUsage {
+                input: Some(100_001),
+                output: Some(0),
+                ..Default::default()
+            },
+            PriceBasis::realtime(),
+        );
+        assert!((ledger.snapshot().total_cost_usd - expected).abs() < 2e-6);
+        // An undated alias of a dated entry is priced too, and is "priced" for the spend cap.
+        assert!(is_priced("claude-haiku-4-5"));
+        assert!(is_priced("claude-opus-5-5-20261001"));
+        assert!(!is_priced("some-unlisted-model"));
     }
 
     #[test]
@@ -2823,16 +4131,44 @@ mod tests {
         let llm = Llm {
             vendor: Vendor::OpenAi,
             backend: Backend::Api,
-            default_model: "gpt".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         };
-        let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
+        let err = llm
+            .complete(LlmRequest::new("hi").with_model("claude-sonnet-5-5"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
     }
 
     // ── Message Batches (#61) ──────────────────────────────────────────────────────
+
+    /// The API request bodies Camerata sends carry no `tools` (and no `tool_choice`): a model
+    /// reading client code is given text to answer, never a tool to call. `LlmRequest` has no
+    /// field that could add one; this pins the wire shape of both the Messages and the Batches
+    /// paths so a future field cannot add one silently.
+    #[test]
+    fn api_request_bodies_never_carry_tools() {
+        let req = LlmRequest::new("review this code")
+            .with_model("claude-sonnet-5")
+            .with_max_tokens(256);
+        let messages = messages_request_body(&req, "claude-sonnet-5", CacheTtl::FiveMinutes);
+        let batch = serde_json::to_value(build_batch_item(
+            "c0",
+            &req,
+            "claude-sonnet-5",
+            BATCH_CACHE_TTL,
+        ))
+        .unwrap();
+        for (what, body) in [("messages", &messages), ("batch params", &batch["params"])] {
+            let obj = body.as_object().expect("a JSON object");
+            assert!(!obj.contains_key("tools"), "{what}: {body}");
+            assert!(!obj.contains_key("tool_choice"), "{what}: {body}");
+        }
+    }
 
     /// `build_batch_item` produces a correctly-shaped item with the deterministic `custom_id`
     /// and the prompt forwarded into the `messages[0].content` field.
@@ -2841,7 +4177,7 @@ mod tests {
         let req = LlmRequest::new("audit this code")
             .with_model("claude-sonnet-5")
             .with_max_tokens(2048);
-        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         assert_eq!(item.custom_id, "c0-b1");
         assert_eq!(item.params.model, "claude-sonnet-5");
         assert_eq!(item.params.max_tokens, 2048);
@@ -2860,7 +4196,7 @@ mod tests {
         let req = LlmRequest::new(prompt)
             .with_cache_prefix_len(split)
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 2);
@@ -2891,7 +4227,7 @@ mod tests {
         let req = LlmRequest::new(&prompt)
             .with_cache_breakpoints(vec![bp1, bp2])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 3, "two breakpoints -> three blocks");
@@ -2929,6 +4265,7 @@ mod tests {
             &message_with_stop(Some("max_tokens")),
             "claude-sonnet-5",
             "api",
+            PriceBasis::realtime(),
         );
         assert!(r.truncated);
         assert_eq!(r.output_tokens, Some(8192));
@@ -2943,7 +4280,12 @@ mod tests {
             Some("tool_use"),
             None,
         ] {
-            let r = messages_response(&message_with_stop(stop), "claude-sonnet-5", "api");
+            let r = messages_response(
+                &message_with_stop(stop),
+                "claude-sonnet-5",
+                "api",
+                PriceBasis::realtime(),
+            );
             assert!(!r.truncated, "{stop:?}");
         }
     }
@@ -2955,9 +4297,9 @@ mod tests {
                 r#"{{"custom_id":"c0-b0","result":{{"type":"succeeded","message":{{"model":"claude-sonnet-5","content":[{{"type":"text","text":"x"}}],"stop_reason":"{stop}","usage":{{"input_tokens":1,"output_tokens":2}}}}}}}}"#
             )
         };
-        let truncated = parse_batch_results_jsonl(&line("max_tokens")).unwrap();
+        let truncated = parse_batch_results_jsonl(&line("max_tokens"), BATCH_CACHE_TTL).unwrap();
         assert!(truncated[0].response.as_ref().unwrap().truncated);
-        let complete = parse_batch_results_jsonl(&line("end_turn")).unwrap();
+        let complete = parse_batch_results_jsonl(&line("end_turn"), BATCH_CACHE_TTL).unwrap();
         assert!(!complete[0].response.as_ref().unwrap().truncated);
         assert_eq!(complete[0].response.as_ref().unwrap().backend, "api/batch");
     }
@@ -2972,7 +4314,7 @@ mod tests {
         let req = LlmRequest::new("static prefix\ndynamic suffix")
             .with_cache_breakpoints(vec!["static prefix\n".len()])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
@@ -3013,11 +4355,172 @@ mod tests {
         let req = LlmRequest::new("check this")
             .with_system("you are an auditor")
             .with_model("claude-haiku-4-5-20251001");
-        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001");
+        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001", BATCH_CACHE_TTL);
         assert_eq!(item.params.system.as_deref(), Some("you are an auditor"));
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
         assert_eq!(v["system"], "you are an auditor");
+    }
+
+    fn two_field_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": {"type": "string"}, "ok": {"type": "boolean"} },
+            "required": ["id", "ok"],
+            "additionalProperties": false
+        })
+    }
+
+    /// A request with a schema sends it as `output_config.format` to a model that accepts
+    /// structured output, next to the effort and the streamed leg's adaptive thinking (neither
+    /// is displaced), and the batch item of the same request carries the same format.
+    #[test]
+    fn a_schema_reaches_the_wire_body_next_to_effort_and_thinking() {
+        for model in [
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let req = LlmRequest::new("p")
+                .with_system("s")
+                .with_effort("low")
+                .with_response_schema(two_field_schema());
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert_eq!(
+                body["output_config"]["format"]["type"], "json_schema",
+                "{model}"
+            );
+            assert_eq!(
+                body["output_config"]["format"]["schema"],
+                two_field_schema(),
+                "{model}"
+            );
+            if crate::model_registry::accepts_effort(model) {
+                assert_eq!(body["output_config"]["effort"], "low", "{model}: {body}");
+                assert_eq!(body["thinking"]["type"], "adaptive", "{model}: {body}");
+            }
+            assert!(req.sends_schema_to(model));
+            let item = build_batch_item("c0-b0", &req, model, BATCH_CACHE_TTL);
+            let v = serde_json::to_value(&item.params).unwrap();
+            assert_eq!(
+                v["output_config"]["format"], body["output_config"]["format"],
+                "{model}"
+            );
+        }
+    }
+
+    /// No schema leaves the body as it was; a model the catalog does not know gets no schema
+    /// (the tolerant parser is its fallback); the request says which path it took.
+    #[test]
+    fn without_a_schema_or_a_model_that_takes_one_the_body_is_unchanged() {
+        let plain = LlmRequest::new("p").with_system("s");
+        let body = messages_request_body(&plain, "claude-sonnet-5-5", CacheTtl::FiveMinutes);
+        assert!(
+            body.get("output_config")
+                .is_none_or(|c| c.get("format").is_none()),
+            "{body}"
+        );
+        let req = plain.clone().with_response_schema(two_field_schema());
+        let body = messages_request_body(&req, "some-future-model", CacheTtl::FiveMinutes);
+        assert!(
+            body.get("output_config")
+                .is_none_or(|c| c.get("format").is_none()),
+            "{body}"
+        );
+        assert!(!req.sends_schema_to("some-future-model"));
+        assert!(structured_output_used(true, "api", "claude-sonnet-5-5"));
+        assert!(structured_output_used(
+            true,
+            "api/batch",
+            "claude-sonnet-5-5"
+        ));
+        assert!(!structured_output_used(true, "cli", "claude-sonnet-5-5"));
+        assert!(!structured_output_used(
+            true,
+            "openrouter/api",
+            "claude-sonnet-5-5"
+        ));
+        assert!(!structured_output_used(false, "api", "claude-sonnet-5-5"));
+        assert!(!structured_output_used(true, "api", "some-future-model"));
+    }
+
+    /// Rank 10: an effort on the request is sent as `output_config.effort` on the wire body and
+    /// survives the model conformer; a request without one (or a blank one) gets the model
+    /// registry's default (`high` on Haiku 5.5, nothing on Sonnet 5).
+    #[test]
+    fn request_effort_reaches_the_wire_body_and_survives_conforming() {
+        let plain = LlmRequest::new("fix this").with_system("s");
+        let body = messages_request_body(&plain, "claude-sonnet-5", CacheTtl::FiveMinutes);
+        assert!(body.get("output_config").is_none(), "{body}");
+        assert_eq!(body["model"], "claude-sonnet-5");
+        assert_eq!(body["system"], "s");
+
+        // The fix call on Haiku 5.5: the caller's `low` beats the registry's `high`.
+        let low = LlmRequest::new("fix this").with_effort("low");
+        let body = messages_request_body(&low, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert_eq!(body["output_config"]["effort"], "low", "{body}");
+        assert_eq!(body["model"], "claude-haiku-5-5");
+
+        // No effort, or a blank one: the registry fills its default.
+        for req in [
+            LlmRequest::new("fix this"),
+            LlmRequest::new("fix this").with_effort("  "),
+        ] {
+            let body = messages_request_body(&req, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+            assert_eq!(body["output_config"]["effort"], "high", "{body}");
+        }
+    }
+
+    /// A stage chooses its effort without knowing the model: every model of the 5.x line carries
+    /// it (Opus 5.5 and Haiku 5.5 default to `medium` and Sonnet 5.5 to `high`, so the chosen
+    /// effort wins on all of them), and a model that does not take the setting never receives it.
+    #[test]
+    fn a_stage_effort_reaches_every_model_that_takes_one_and_no_other() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+        ] {
+            let req = LlmRequest::new("detail").with_effort("medium");
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert_eq!(body["output_config"]["effort"], "medium", "{model}: {body}");
+            let batch =
+                serde_json::to_value(build_batch_item("c0-b0", &req, model, BATCH_CACHE_TTL))
+                    .unwrap();
+            assert_eq!(
+                batch["params"]["output_config"]["effort"], "medium",
+                "{model}"
+            );
+        }
+        for model in ["claude-haiku-4-5-20251001", "claude-unheard-of-9"] {
+            let req = LlmRequest::new("detail").with_effort("medium");
+            let body = messages_request_body(&req, model, CacheTtl::FiveMinutes);
+            assert!(body.get("output_config").is_none(), "{model}: {body}");
+        }
+    }
+
+    /// The batch path takes the request's effort through the same helper, so a future batched
+    /// fix stage keeps `low` on Haiku 5.5 and agrees with the real-time body.
+    #[test]
+    fn batch_item_keeps_the_request_effort() {
+        let low = LlmRequest::new("fix this").with_effort("low");
+        let item = build_batch_item("c0-b0", &low, "claude-haiku-5-5", BATCH_CACHE_TTL);
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["params"]["output_config"]["effort"], "low", "{v}");
+        let realtime = messages_request_body(&low, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert_eq!(v["params"]["output_config"], realtime["output_config"]);
+
+        let none = build_batch_item(
+            "c0-b0",
+            &LlmRequest::new("fix this"),
+            "claude-haiku-5-5",
+            BATCH_CACHE_TTL,
+        );
+        let v = serde_json::to_value(&none).unwrap();
+        assert_eq!(v["params"]["output_config"]["effort"], "high", "{v}");
     }
 
     /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips
@@ -3029,7 +4532,8 @@ mod tests {
 {"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
 malformed line, not json
 "#;
-        let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
+        let rows =
+            parse_batch_results_jsonl(jsonl, BATCH_CACHE_TTL).expect("parse should not fail");
         // 2 succeeded + 1 errored; the malformed line is skipped.
         assert_eq!(
             rows.len(),
@@ -3078,11 +4582,13 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c1-b0".to_string(),
                 response: None,
                 error: Some("limit exceeded".to_string()),
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c0-b1".to_string(),
@@ -3099,9 +4605,16 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
         ];
-        let map = reassemble_batch_results(rows);
+        let results = reassemble_batch_results(rows);
+        assert_eq!(
+            results.errors.get("c1-b0").map(String::as_str),
+            Some("limit exceeded"),
+            "the error row's reason is kept"
+        );
+        let map = results.responses;
         assert_eq!(map.len(), 2, "two succeeded rows in map");
         assert!(map.contains_key("c0-b0"));
         assert!(map.contains_key("c0-b1"));
@@ -3115,7 +4628,8 @@ malformed line, not json
     /// never an error). Empty bodies arise when a batch has 0 items that completed.
     #[test]
     fn parse_batch_results_empty_body_is_ok() {
-        let rows = parse_batch_results_jsonl("").expect("empty body should not error");
+        let rows =
+            parse_batch_results_jsonl("", BATCH_CACHE_TTL).expect("empty body should not error");
         assert!(rows.is_empty());
     }
 
@@ -3125,7 +4639,7 @@ malformed line, not json
         let req = LlmRequest::new("hello")
             .with_model("claude-sonnet-5")
             .with_max_tokens(512);
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
         assert!(v["params"]["model"].is_string());
@@ -3200,10 +4714,11 @@ malformed line, not json
         std::sync::Arc::new(Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         })
     }
 
@@ -3809,6 +5324,147 @@ exit 1
         assert_eq!(resp.text, "half an answer");
     }
 
+    /// A refused call is billed: its usage reaches the ledger even though the call is an `Err`.
+    #[test]
+    fn a_refused_api_call_is_recorded_in_the_ledger_before_it_fails() {
+        let ledger = std::sync::Arc::new(crate::usage_ledger::UsageLedger::new());
+        let llm = Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Api,
+            api_key: Some("k".to_string()),
+            ledger: Some(ledger.clone()),
+            sessions: None,
+            sleeper: None,
+            messages_url: None,
+        };
+        let refused = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
+            "usage": {"input_tokens": 1000, "output_tokens": 7}
+        });
+        let err = llm
+            .api_response_or_refusal(&refused, "claude-opus-5-5", rt())
+            .expect_err("a refusal is an error");
+        assert!(is_refusal(&err));
+        let snap = ledger.snapshot();
+        assert_eq!(snap.calls, 1, "the refused call is counted");
+        assert_eq!(snap.input_tokens, 1000);
+        assert_eq!(snap.output_tokens, 7);
+        // A normal response is returned (and left for `complete` to record).
+        let fine = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        assert_eq!(
+            llm.api_response_or_refusal(&fine, "claude-opus-5-5", rt())
+                .unwrap()
+                .text,
+            "x"
+        );
+        assert_eq!(ledger.snapshot().calls, 1);
+    }
+
+    /// A refusal error carries what the call was billed, for any caller that meters spend.
+    #[test]
+    fn a_refusal_error_carries_the_billed_usage() {
+        let msg = serde_json::json!({
+            "model": "claude-fable-5-1", "content": [], "stop_reason": "refusal",
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 0 }
+        });
+        let e = refusal_error_billed(&msg, "claude-fable-5-1", "api", rt()).unwrap();
+        assert!(is_refusal(&e));
+        let billed = refusal_billed(&e).expect("the error carries the usage");
+        assert!((billed.cost_usd.unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(billed.input_tokens, Some(1_000_000));
+        // The plain form carries none, and a non-refusal is not an error at all.
+        assert!(refusal_billed(&refusal_error(&msg).unwrap()).is_none());
+        assert!(refusal_error_billed(
+            &serde_json::json!({"stop_reason": "end_turn"}),
+            "m",
+            "api",
+            rt()
+        )
+        .is_none());
+        // Still found through added context.
+        let wrapped = e.context("provider call failed");
+        assert!(refusal_billed(&wrapped).is_some());
+    }
+
+    #[test]
+    fn a_refused_batch_row_keeps_its_billed_usage() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let results = reassemble_batch_results(rows);
+        let billed = &results.billed["c0-b0"];
+        // $4/M input, halved for a batch item.
+        assert!((billed.cost_usd.unwrap() - 2.0).abs() < 1e-9);
+        assert!(results.errors["c0-b0"].contains("refus"));
+    }
+
+    #[test]
+    fn micro_dollars_round_up_but_float_noise_does_not_add_one() {
+        assert_eq!(usd_to_micro_ceil(0.0), 0);
+        assert_eq!(usd_to_micro_ceil(0.0000001), 1);
+        assert_eq!(usd_to_micro_ceil(0.25), 250_000);
+        assert_eq!(usd_to_micro_ceil(0.60), 600_000);
+        assert_eq!(usd_to_micro_ceil(1.0000004), 1_000_001);
+        assert_eq!(usd_to_micro_ceil(-1.0), 0);
+    }
+
+    #[test]
+    fn a_model_is_priced_only_with_non_zero_input_and_output_prices() {
+        assert!(is_priced("claude-opus-5"));
+        assert!(is_priced("claude-haiku-5-5"));
+        assert!(!is_priced(""));
+        assert!(!is_priced("some-free-model:free"));
+        // Every catalog entry that counts as priced really has both prices.
+        for e in crate::model_registry::CLAUDE_REGISTRY_MODELS {
+            assert!(e.price_in > 0.0 && e.price_out > 0.0, "{}", e.id);
+            assert!(is_priced(e.id), "{}", e.id);
+        }
+    }
+
+    /// `count_tokens` goes through the same conformer as every other body, minus the
+    /// generation-only `output_config`.
+    #[test]
+    fn count_tokens_body_is_conformed_and_carries_no_output_config() {
+        let body = count_tokens_body(&shape_request(), "claude-opus-5-5");
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["model"], "claude-opus-5-5");
+    }
+
+    /// A CLI `result` event whose `stop_reason` is `refusal` is a failed call even though
+    /// `is_error` is false and the prose in `result` (or already-streamed text) looks like an
+    /// answer: it must never parse as a clean pass.
+    #[tokio::test]
+    async fn a_cli_result_with_refusal_stop_reason_is_a_refusal_error() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"I cannot help with that."}}}'
+printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result":"I cannot help with that."}'
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("a refusal stop_reason is a failure");
+        assert!(is_refusal(&err), "{err}");
+    }
+
+    #[test]
+    fn cli_result_text_accepts_other_stop_reasons() {
+        for sr in ["end_turn", "max_tokens", "tool_use"] {
+            let v = serde_json::json!({"is_error": false, "stop_reason": sr, "result": "ok"});
+            assert_eq!(cli_result_text(&v).unwrap(), "ok", "{sr}");
+        }
+        let v = serde_json::json!({"is_error": false, "stop_reason": null, "result": "ok"});
+        assert_eq!(cli_result_text(&v).unwrap(), "ok");
+    }
+
     /// ...but a non-zero exit with NOTHING streamed is still a hard failure.
     #[tokio::test]
     async fn read_cli_stream_fails_when_a_non_zero_exit_left_nothing_to_salvage() {
@@ -3976,11 +5632,25 @@ exit 1
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create fake-claude dir");
             let bin = dir.join("claude");
+            // Every fake exits at once when CAMERATA_FAKE_WARM is set, and is run that way once
+            // here. macOS security-checks a newly written executable on its first run, which
+            // took over 2s on a loaded machine; uncounted, that check landed inside the 1s
+            // windows these tests measure and failed them with "(no output)". The timed run
+            // is now the second run, so the windows measure Camerata and not the OS scan.
+            let script = match script.split_once('\n') {
+                Some((shebang, rest)) => {
+                    format!("{shebang}\n[ -n \"$CAMERATA_FAKE_WARM\" ] && exit 0\n{rest}")
+                }
+                None => script.to_string(),
+            };
             let mut f = std::fs::File::create(&bin).expect("create fake claude");
             f.write_all(script.as_bytes()).expect("write fake claude");
             drop(f);
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod fake claude");
+            let _ = std::process::Command::new(&bin)
+                .env("CAMERATA_FAKE_WARM", "1")
+                .status();
             Self { dir }
         }
     }
@@ -4015,10 +5685,11 @@ exit 1
         Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-haiku-4-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         }
     }
 
@@ -4078,9 +5749,11 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        llm.complete(LlmRequest::new("a prompt carrying client source"))
-            .await
-            .expect("fake claude answers");
+        llm.complete(
+            LlmRequest::new("a prompt carrying client source").with_model("claude-sonnet-5-5"),
+        )
+        .await
+        .expect("fake claude answers");
 
         let recorded = sink.snapshot();
         assert_eq!(recorded.len(), 1, "one spawn, one recorded session");
@@ -4113,7 +5786,9 @@ exit 1
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        let result = llm.complete(LlmRequest::new("prompt")).await;
+        let result = llm
+            .complete(LlmRequest::new("prompt").with_model("claude-sonnet-5-5"))
+            .await;
 
         assert!(result.is_err(), "the fake reports an error");
         assert_eq!(
@@ -4140,9 +5815,13 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let sink = SessionSink::new();
         let llm = cli_llm().with_session_sink(sink.clone());
 
-        llm.complete(LlmRequest::new("p").with_repo_read(repo.clone()))
-            .await
-            .expect("fake claude answers");
+        llm.complete(
+            LlmRequest::new("p")
+                .with_model("claude-sonnet-5-5")
+                .with_repo_read(repo.clone()),
+        )
+        .await
+        .expect("fake claude answers");
 
         assert_eq!(sink.snapshot()[0].cwd, repo.to_string_lossy());
         let _ = std::fs::remove_dir_all(&repo);
@@ -4155,14 +5834,17 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Api,
-            default_model: "claude-haiku-4-5".to_string(),
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
+            messages_url: None,
         }
         .with_session_sink(sink.clone());
         // No key: the call fails before any network, and must not have recorded a session.
-        let _ = llm.complete(LlmRequest::new("p")).await;
+        let _ = llm
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await;
         assert!(sink.snapshot().is_empty());
     }
 
@@ -4194,7 +5876,9 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
 
         let started = std::time::Instant::now();
         let resp = cli_llm()
-            .complete(LlmRequest::new("a legitimately long audit pass"))
+            .complete(
+                LlmRequest::new("a legitimately long audit pass").with_model("claude-sonnet-5-5"),
+            )
             .await;
         let elapsed = started.elapsed();
 
@@ -4227,12 +5911,17 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let fake = FakeClaude::new("wedged", "#!/bin/sh\nexec sleep 30\n");
         let _env = fake_cli_env(&fake.dir, 1);
 
+        // A hung process is retried like any transport failure, so the backoff sleeper is a
+        // recorder: the test measures the kills, not the waits.
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
         let started = std::time::Instant::now();
         let err = cli_llm()
-            .complete(LlmRequest::new("this one wedges"))
+            .with_sleeper(sleeper.clone())
+            .complete(LlmRequest::new("this one wedges").with_model("claude-sonnet-5-5"))
             .await
             .expect_err("a silent process must still time out");
         let elapsed = started.elapsed();
+        assert_eq!(sleeper.waits(), vec![2, 8, 30], "four tries, each killed");
 
         let msg = err.to_string();
         assert!(
@@ -4247,5 +5936,430 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
             elapsed < std::time::Duration::from_secs(15),
             "the wedged call must die in BOUNDED time, took {elapsed:?}"
         );
+    }
+
+    // ── Run to completion: the CLI backend retries like the API does ──────────────────────
+
+    /// Records the waits a retry asks for and returns at once.
+    #[derive(Default)]
+    struct RecordingSleeper {
+        waits: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl RecordingSleeper {
+        fn waits(&self) -> Vec<u64> {
+            self.waits.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::retry::Sleeper for RecordingSleeper {
+        fn sleep<'a>(
+            &'a self,
+            d: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.waits.lock().unwrap().push(d.as_secs());
+            Box::pin(async {})
+        }
+    }
+
+    const OK_RESULT: &str = r#"printf '%s\n' '{"type":"result","is_error":false,"result":"RECOVERED","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'"#;
+
+    /// A fake `claude` whose first `failures` runs execute `failure_body` and whose later runs
+    /// answer. A counter file in the fake's folder counts the runs.
+    fn flaky_claude(tag: &str, failures: u32, failure_body: &str) -> FakeClaude {
+        let script = format!(
+            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\n{OK_RESULT}\n"
+        );
+        FakeClaude::new(tag, &script)
+    }
+
+    fn runs_of(fake: &FakeClaude) -> u32 {
+        std::fs::read_to_string(fake.dir.join("count"))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    fn llm_with(sleeper: &std::sync::Arc<RecordingSleeper>) -> Llm {
+        cli_llm().with_sleeper(sleeper.clone())
+    }
+
+    /// A non-zero exit with nothing streamed is retried on the standard schedule.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_non_zero_exit_with_nothing_streamed_is_retried_then_succeeds() {
+        let fake = flaky_claude("cli-exit-retry", 1, "echo 'connection reset' >&2\nexit 1");
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        assert_eq!(
+            sleeper.waits(),
+            vec![2],
+            "the standard first wait, injected"
+        );
+    }
+
+    /// Overloaded or rate-limit text reported by the CLI is retried; overloaded takes the
+    /// longer schedule.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_overloaded_text_is_retried_on_the_longer_schedule() {
+        let fake = flaky_claude(
+            "cli-overloaded",
+            2,
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"API Error: 529 overloaded_error"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect("the third run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 3);
+        assert_eq!(sleeper.waits(), vec![5, 20]);
+    }
+
+    /// The silent and the stalled timeouts are retried: a hung process is the CLI's form of an
+    /// overloaded provider.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_timeout_is_retried() {
+        let fake = flaky_claude("cli-timeout-retry", 1, "exec sleep 30");
+        let _env = fake_cli_env(&fake.dir, 1);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        assert_eq!(sleeper.waits().len(), 1);
+    }
+
+    /// An attempt that streamed text and then failed is superseded: the retry's text follows a
+    /// marker, so a live transcript never shows the two answers run together.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_cli_retry_marks_the_earlier_streamed_text_as_superseded() {
+        let fake = flaky_claude(
+            "cli-superseded",
+            1,
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"PARTIAL"}}}'
+printf '%s\n' '{"type":"result","is_error":true,"result":"API Error: 529 overloaded_error"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let mut seen = String::new();
+        let resp = llm_with(&sleeper)
+            .complete_streaming(
+                LlmRequest::new("p").with_model("claude-sonnet-5-5"),
+                &mut |d| seen.push_str(d),
+            )
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        let partial = seen.find("PARTIAL").expect("the failed attempt streamed");
+        let marker = seen
+            .find(CLI_ATTEMPT_SUPERSEDED)
+            .expect("the retry marks the earlier text superseded");
+        assert!(partial < marker, "{seen:?}");
+    }
+
+    /// A retry after an attempt that streamed nothing adds no marker.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_cli_retry_after_a_silent_failure_adds_no_marker() {
+        let fake = flaky_claude("cli-no-marker", 1, "echo 'connection reset' >&2\nexit 1");
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+        let mut seen = String::new();
+        llm_with(&sleeper)
+            .complete_streaming(
+                LlmRequest::new("p").with_model("claude-sonnet-5-5"),
+                &mut |d| seen.push_str(d),
+            )
+            .await
+            .expect("the second run answers");
+        assert!(!seen.contains(CLI_ATTEMPT_SUPERSEDED), "{seen:?}");
+    }
+
+    /// A login or billing failure is not retried: waiting does not log anyone in.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_auth_failure_is_not_retried_and_is_classed_auth_or_billing() {
+        let fake = flaky_claude(
+            "cli-auth",
+            9,
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Invalid API key. Please run /login"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect_err("auth failure surfaces");
+
+        assert_eq!(runs_of(&fake), 1, "one run, no retry");
+        assert!(sleeper.waits().is_empty());
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::AuthOrBilling
+        );
+    }
+
+    /// A missing binary is not retried either.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_missing_binary_is_not_retried() {
+        let empty = std::env::temp_dir().join(format!("camerata-llm-nobin-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("dir");
+        let _path = camerata_test_env::EnvGuard::set("PATH", empty.display().to_string());
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect_err("no claude on PATH");
+
+        assert!(err.to_string().contains("was not found on PATH"), "{err}");
+        assert!(sleeper.waits().is_empty());
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::AuthOrBilling
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// When every attempt fails the error is a transport failure whose trail has one record per
+    /// attempt, each with the exit code, the stderr tail and the wait before the next one.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_exhausted_retries_leave_a_trail_with_exit_code_and_stderr() {
+        let fake = flaky_claude(
+            "cli-exhausted",
+            99,
+            "echo 'upstream connect error' >&2\necho 'key sk-ant-api03-AAAAAAAAAAAAAAAA1234' >&2\nexit 7",
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+            .await
+            .expect_err("every run fails");
+
+        assert_eq!(runs_of(&fake), 4, "first run plus three retries");
+        assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+        let failure = crate::failure::call_failure_of(&err).expect("typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.attempts.len(), 4);
+        let first = &failure.attempts[0];
+        assert_eq!(first.backend, "cli");
+        assert_eq!(first.exit_code, Some(7));
+        let tail = first.stderr_tail.as_deref().unwrap_or_default();
+        assert!(tail.contains("upstream connect error"), "{tail}");
+        assert!(!tail.contains("AAAAAAAA"), "secrets are scrubbed: {tail}");
+        assert_eq!(first.wait_secs, Some(2));
+        assert_eq!(failure.attempts[3].wait_secs, None);
+    }
+
+    // ── Request shape for the strict models (HTTP 400 if wrong) ───────────────────────────
+
+    const STRICT_MODELS: [&str; 4] = [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+
+    /// Every field the strict models answer with HTTP 400, asserted absent from a body. The one
+    /// `thinking` shape every 5.x model accepts, `{type: "adaptive"}` with a display, is allowed
+    /// (the streamed leg asks for it so a thinking phase is not silence); a budget or a
+    /// `disabled` thinking is not.
+    fn assert_no_rejected_fields(body: &serde_json::Value, what: &str) {
+        for key in ["temperature", "top_p", "top_k"] {
+            assert!(body.get(key).is_none(), "{what}: `{key}` must not be sent");
+        }
+        if let Some(thinking) = body.get("thinking") {
+            assert_eq!(thinking["type"], "adaptive", "{what}: {thinking}");
+            assert!(
+                thinking.get("budget_tokens").is_none(),
+                "{what}: a thinking budget is rejected"
+            );
+        }
+        let tc = body.get("tool_choice");
+        assert!(
+            tc.is_none() || tc.unwrap()["type"] == "auto",
+            "{what}: tool_choice must be absent or auto, got {tc:?}"
+        );
+        if let Some(msgs) = body["messages"].as_array() {
+            assert_ne!(
+                msgs.last().and_then(|m| m["role"].as_str()),
+                Some("assistant"),
+                "{what}: the last message must not be an assistant prefill"
+            );
+        }
+    }
+
+    fn shape_request() -> LlmRequest {
+        LlmRequest::new("review this code\nsecond segment\ntail")
+            .with_system("You are an auditor.")
+            .with_max_tokens(8192)
+            .with_cache_breakpoints(vec![17, 32])
+    }
+
+    #[test]
+    fn complete_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            assert_no_rejected_fields(&body, &format!("complete/{model}"));
+            assert_eq!(body["model"], model);
+            assert_eq!(body["max_tokens"], 8192);
+        }
+    }
+
+    #[test]
+    fn batch_item_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let item = build_batch_item("c0-b0", &shape_request(), model, BATCH_CACHE_TTL);
+            let v = serde_json::to_value(&item).unwrap();
+            assert_no_rejected_fields(&v["params"], &format!("batch/{model}"));
+        }
+    }
+
+    #[test]
+    fn count_tokens_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = count_tokens_body(&shape_request(), model);
+            assert_no_rejected_fields(&body, &format!("count_tokens/{model}"));
+        }
+    }
+
+    /// Opus 5.5 and Haiku 5.5 default to `medium` effort; every audit call was tuned on the old
+    /// `high` default, so both request kinds that run the model must ask for `high` explicitly.
+    /// The other two default to the effort we want and must not carry an `output_config`.
+    #[test]
+    fn effort_is_set_high_only_where_the_model_defaults_lower() {
+        for model in STRICT_MODELS {
+            let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
+            let complete = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            let batch = serde_json::to_value(build_batch_item(
+                "c0-b0",
+                &shape_request(),
+                model,
+                BATCH_CACHE_TTL,
+            ))
+            .unwrap();
+            if wants_high {
+                assert_eq!(complete["output_config"]["effort"], "high", "{model}");
+                assert_eq!(
+                    batch["params"]["output_config"]["effort"], "high",
+                    "{model}"
+                );
+            } else {
+                assert!(complete.get("output_config").is_none(), "{model}");
+                assert!(batch["params"].get("output_config").is_none(), "{model}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_models_get_the_request_they_always_got() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            assert!(body.get("output_config").is_none(), "{model}");
+        }
+    }
+
+    // ── Refusal: stop_reason "refusal" with HTTP 200 is a FAILED pass, never "no findings" ──
+
+    #[test]
+    fn a_refusal_stop_reason_is_an_error() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5",
+            "content": [],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 10, "output_tokens": 0}
+        });
+        let err = refusal_error(&msg).expect("refusal must be an error");
+        assert!(err.to_string().contains("refus"), "{err}");
+        for ok in ["end_turn", "max_tokens", "tool_use", "stop_sequence"] {
+            let m = serde_json::json!({"stop_reason": ok});
+            assert!(refusal_error(&m).is_none(), "{ok} is not a refusal");
+        }
+        assert!(refusal_error(&serde_json::json!({})).is_none());
+    }
+
+    /// A batch submit, poll or fetch that ends on an HTTP error is a typed failure that keeps
+    /// every attempt (status, provider message, request id, wait), exactly like a real-time call,
+    /// and the message keeps the wording callers have always seen.
+    #[test]
+    fn a_failed_batch_call_keeps_its_class_message_and_every_attempt() {
+        let mut first = crate::failure::AttemptRecord::new("api", "m");
+        first.http_status = Some(529);
+        first.request_id = Some("req_1".to_string());
+        first.wait_secs = Some(5);
+        let mut last = crate::failure::AttemptRecord::new("api", "m");
+        last.http_status = Some(529);
+        let out = crate::retry::ApiOutcome {
+            status: 529,
+            body: r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+            attempts: vec![first, last],
+        };
+        let err = http_failure("Message Batches API", out);
+        assert!(
+            err.to_string().starts_with("Message Batches API HTTP 529"),
+            "{err}"
+        );
+        let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.attempts.len(), 2);
+        assert_eq!(failure.attempts[0].request_id.as_deref(), Some("req_1"));
+    }
+
+    #[test]
+    fn a_refused_batch_item_is_an_error_row_and_is_absent_from_the_results_map() {
+        let refused = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1,"output_tokens":0}}}}"#;
+        let fine = r#"{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}}}"#;
+        let rows =
+            parse_batch_results_jsonl(&format!("{refused}\n{fine}\n"), BATCH_CACHE_TTL).unwrap();
+        assert_eq!(rows.len(), 2);
+        let r0 = rows.iter().find(|r| r.custom_id == "c0-b0").unwrap();
+        assert!(r0.response.is_none(), "a refusal carries no response");
+        assert!(r0.error.as_deref().unwrap().contains("refus"));
+        let results = reassemble_batch_results(rows);
+        assert!(
+            !results.responses.contains_key("c0-b0"),
+            "the refused item has no response"
+        );
+        assert!(
+            results.errors["c0-b0"].contains("refus"),
+            "its reason is kept and names the refusal"
+        );
+        assert!(results.responses.contains_key("c0-b1"));
     }
 }

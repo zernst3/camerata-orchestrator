@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-SEPARATE-UNIT-PROJECT-1"
-version = 1
+version = 3
 title = "Unit tests live in a dedicated .UnitTests project; integration tests live in a separate .IntegrationTests project"
 domain = "csharp:testing"
 layer = "language"
@@ -20,7 +20,7 @@ id = "separate-test-projects"
 label = "one .UnitTests project and one .IntegrationTests project, each in their own directory"
 directive = "Create MyApp.UnitTests/ and MyApp.IntegrationTests/ as sibling directories of the src/ folder (or alongside the production csproj). The unit-test project references only the production project and xUnit + Moq; it must not reference infrastructure packages. The integration-test project may reference Microsoft.AspNetCore.Mvc.Testing, real database packages, etc. Both projects are added to the solution file. CI runs dotnet test for unit tests on every commit; integration tests run in a later pipeline stage."
 remediation = """
-Split the combined test project into MyApp.UnitTests and MyApp.IntegrationTests sibling projects, moving tests that touch real infrastructure into the integration project and keeping the unit project free of infrastructure package references. Verify by confirming the unit test project's dependencies list contains no database driver, HTTP client, or other infrastructure package, and CI can run the unit suite without spinning up any external service.
+Split the combined test project into MyApp.UnitTests and MyApp.IntegrationTests sibling projects, moving tests that touch real infrastructure into the integration project and keeping the unit project free of infrastructure package references. Verify by confirming the unit test project's dependencies list contains no database driver, HTTP client or other infrastructure package, and CI can run the unit suite without spinning up any external service.
 """
 why = "Separation enforces infrastructure isolation at the project level rather than relying on filtering conventions."
 
@@ -33,8 +33,8 @@ why = "Requires discipline to keep infrastructure packages from contaminating un
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"
-title = "Integration tests in ASP.NET Core — Separation requirement"
+title = "Integration tests in ASP.NET Core: Separation requirement"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Avoid infrastructure dependencies"
+title = "Best practices for writing unit tests: Avoid infrastructure dependencies"

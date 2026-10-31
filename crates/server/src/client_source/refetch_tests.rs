@@ -440,3 +440,18 @@ async fn a_full_disk_refuses_the_refetch_before_cloning() {
     assert!(!fx.checkout.join(".git").exists());
     assert!(fx.state.source_records.refetches(&fx.project_id).is_empty());
 }
+
+/// A repo outside GitHub (a `non_github/...` name) has no GitHub remote: probe and re-fetch are
+/// refused in plain words before any URL is built, while a GitHub repo passes.
+#[test]
+fn network_steps_refuse_a_repo_outside_github() {
+    use super::refetch::require_github_for_network;
+    let refused = require_github_for_network("non_github/acme-api").expect_err("refused");
+    assert_eq!(refused.code, "not_on_github");
+    assert!(
+        refused.message.contains("not on GitHub"),
+        "{}",
+        refused.message
+    );
+    assert!(require_github_for_network("acme/app").is_ok());
+}

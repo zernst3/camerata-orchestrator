@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-DBCONTEXT-SCOPED-1"
-version = 1
+version = 3
 title = "DbContext is registered as Scoped (per-request); never Singleton"
 domain = "csharp:efcore"
 layer = "library"
@@ -28,7 +28,7 @@ id = "singleton-dbcontext"
 violates = true
 label = "DbContext registered as Singleton"
 directive = "DbContext is registered via AddSingleton<AppDbContext>(), sharing one instance across all requests and threads."
-why = "Produces data corruption under concurrent load: shared change tracker, stale identity-map cache entries, and thread-safety violations. Forbidden."
+why = "Produces data corruption under concurrent load: shared change tracker, stale identity-map cache entries and thread-safety violations. Forbidden."
 
 [[option]]
 id = "transient-dbcontext"
@@ -40,4 +40,4 @@ why = "Breaks transaction scope: two injection sites within the same request rec
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/dbcontext-configuration/"
-title = "DbContext Lifetime, Configuration, and Initialization — EF Core | Microsoft Learn"
+title = "DbContext Lifetime, Configuration and Initialization: EF Core | Microsoft Learn"

@@ -39,22 +39,29 @@ use camerata_core::{AgentDriver, AgentOutcome, FleetCoordinator, FleetStage, Rol
 // ─── self-cleaning temp worktree (no new crate dependency) ───────────────────
 
 struct TempWorktree {
+    /// The throwaway clone root. The worktree lives under it in the production layout
+    /// `<clone>/.camerata-worktrees/<name>`, so this test exercises the real checks the way
+    /// they run in production: the shared cargo target dir they derive
+    /// (`<clone>/.camerata-shared-target`) is created inside this throwaway tree and removed
+    /// with it, never outside it.
+    root: PathBuf,
     path: PathBuf,
 }
 
 impl TempWorktree {
     fn new(tag: &str) -> std::io::Result<Self> {
-        let mut path = std::env::temp_dir();
+        let mut root = std::env::temp_dir();
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        path.push(format!(
+        root.push(format!(
             "camerata-fleet-{tag}-{}-{stamp}",
             std::process::id()
         ));
+        let path = root.join(".camerata-worktrees").join("fleet-probe");
         fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        Ok(Self { root, path })
     }
 
     fn path(&self) -> &Path {
@@ -64,7 +71,7 @@ impl TempWorktree {
 
 impl Drop for TempWorktree {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

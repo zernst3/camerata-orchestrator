@@ -50,7 +50,7 @@ fn redact_option(text: &mut Option<String>) -> usize {
 
 /// Redact every client-visible free-text field of a finding IN PLACE: `snippet`, `detail`,
 /// `fix_specific`, `calibration_rationale`, every `captures` value, every `also_locations`
-/// snippet, and the string payload of the finding's kind. Returns the number of values replaced.
+/// snippet and headline, and the string payload of the finding's kind. Returns the number of values replaced.
 /// Idempotent. Called by every producer the moment a row is complete.
 pub(crate) fn redact_finding(f: &mut Finding) -> usize {
     let mut count = redact_string(&mut f.snippet)
@@ -62,6 +62,7 @@ pub(crate) fn redact_finding(f: &mut Finding) -> usize {
     }
     for site in &mut f.also_locations {
         count += redact_string(&mut site.snippet);
+        count += redact_string(&mut site.headline);
     }
     count += match &mut f.kind {
         Some(FindingKind::Deviation(d)) => redact_string(&mut d.convention_label),
@@ -117,13 +118,25 @@ pub(crate) fn redact_deep_report(deep: &mut crate::ai_audit::DeepReport) -> usiz
     count
 }
 
+/// `text` with every absolute local path cut down to its file name (the report is read by the
+/// client, who has no use for the auditor's directory layout). Repository-relative paths and
+/// URLs are left alone.
+fn scrub_machine_paths(text: &str) -> String {
+    crate::dep_audit::scrub_local_paths(text, std::path::Path::new(""))
+}
+
 /// Redact ScanReport-level text that bypasses `Finding`: the per-rule recommendations
 /// (`evidence`, `recommendation_reasoning`, observed option labels), coverage notes, failed
 /// passes, the AI error and block reason, the report message, the proposed rules' text, and the
 /// deep tier's prose. Returns the number of values replaced.
 pub(crate) fn redact_report_text(report: &mut ScanReport) -> usize {
     let mut count = 0;
-    for rec in report.recommendations.values_mut() {
+    // The by-rule view and the per-(rule, repo) list carry the same kinds of text.
+    for rec in report
+        .recommendations
+        .values_mut()
+        .chain(report.recommendations_by_repo.iter_mut())
+    {
         count += redact_option(&mut rec.evidence);
         count += redact_string(&mut rec.recommendation_reasoning);
         for option in &mut rec.observed_options {
@@ -133,11 +146,20 @@ pub(crate) fn redact_report_text(report: &mut ScanReport) -> usize {
     for note in &mut report.coverage_notes {
         count += redact_string(&mut note.message);
     }
+    // The failure text comes straight from a tool or the model service and is printed under
+    // Coverage, so a path on the machine that ran the scan goes too, after any secret does.
     for pass in &mut report.failed_passes {
         count += redact_string(&mut pass.reason);
+        pass.reason = scrub_machine_paths(&pass.reason);
     }
     count += redact_option(&mut report.ai_error);
     count += redact_option(&mut report.ai_blocked_reason);
+    for text in [&mut report.ai_error, &mut report.ai_blocked_reason]
+        .into_iter()
+        .flatten()
+    {
+        *text = scrub_machine_paths(text);
+    }
     count += redact_option(&mut report.message);
     for rule in &mut report.proposed_rules {
         count += redact_string(&mut rule.title);
@@ -167,7 +189,6 @@ a credential value; refer to it by its variable name and line.";
 /// architectural checkers keep reading the RAW set (they must still FIND the secret); only what
 /// leaves the machine is redacted. Honors the `model_prompt_redaction` flag (default ON), which is
 /// read from the environment only, never from a config file in a client repo.
-#[allow(dead_code)] // wired into the model entry points in the next commit
 pub(crate) fn files_for_model(files: &[(String, String)]) -> Vec<(String, String)> {
     files_for_model_with(
         files,
@@ -178,7 +199,6 @@ pub(crate) fn files_for_model(files: &[(String, String)]) -> Vec<(String, String
 /// [`files_for_model`] with the flag decided by the caller (the pure, testable core). When
 /// `enabled` is false the raw set is returned and a warning is logged: raw client code is
 /// leaving the machine.
-#[allow(dead_code)] // wired into the model entry points in the next commit
 pub(crate) fn files_for_model_with(
     files: &[(String, String)],
     enabled: bool,

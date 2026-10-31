@@ -98,11 +98,17 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
         ..onboard::ScanProvenance::default()
     };
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/api".to_string()],
         stacks: Vec::new(),
         files_scanned: 1,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 48,
         code_lines: 3,
         code_lines_by_language: Vec::new(),
@@ -231,7 +237,7 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
         &SilentModel,
         "acme/api",
         &files,
-        &semantic,
+        &camerata_server::scan_routing::rules_from_pairs(&semantic),
         &[], // alternatives
         &HashMap::new(),
         None,
@@ -257,7 +263,15 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
     // suppressed would still pollute the accounting.)
     let mut ledger = ScanLedger::new();
     for (rid, _) in &semantic {
-        ledger.record_rule(rid.clone(), RuleTier::Semantic, true, None, files.len(), 0);
+        ledger.record_rule(
+            "",
+            rid.clone(),
+            RuleTier::Semantic,
+            true,
+            None,
+            files.len(),
+            0,
+        );
     }
     assert!(
         ledger.rule(EMIT_ONLY_RULE).is_none(),

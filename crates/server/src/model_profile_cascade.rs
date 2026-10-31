@@ -10,9 +10,9 @@ use crate::project::{L3ReviewConfig, ModelProfile, StepModels};
 
 // ── Known model ids ───────────────────────────────────────────────────────────
 
-const OPUS: &str = "claude-opus-5";
-const SONNET: &str = "claude-sonnet-5";
-const HAIKU: &str = "claude-haiku-4-5-20251001";
+const OPUS: &str = "claude-opus-5-5";
+const SONNET: &str = "claude-sonnet-5-5";
+const HAIKU: &str = "claude-haiku-5-5";
 
 // ── Assignment output ─────────────────────────────────────────────────────────
 
@@ -61,6 +61,8 @@ fn balanced_assignments() -> ProfileAssignments {
         step_models: StepModels {
             audit: HAIKU.to_string(),
             calibration: HAIKU.to_string(),
+            // A profile never sets the fix model: unset leaves it to the `fix_on_haiku` switch.
+            fix: String::new(),
             research_chat: HAIKU.to_string(),
             story_authoring: HAIKU.to_string(),
             decomposition: HAIKU.to_string(),
@@ -70,6 +72,7 @@ fn balanced_assignments() -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: false,
             model: String::new(),
+            ..Default::default()
         },
     }
 }
@@ -87,6 +90,8 @@ fn max_quality_assignments() -> ProfileAssignments {
         step_models: StepModels {
             audit: SONNET.to_string(),
             calibration: SONNET.to_string(),
+            // A profile never sets the fix model: unset leaves it to the `fix_on_haiku` switch.
+            fix: String::new(),
             research_chat: SONNET.to_string(),
             story_authoring: SONNET.to_string(),
             decomposition: SONNET.to_string(),
@@ -96,6 +101,7 @@ fn max_quality_assignments() -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: true,
             model: SONNET.to_string(),
+            ..Default::default()
         },
     }
 }
@@ -172,6 +178,8 @@ fn max_efficiency_assignments(registry: &ModelRegistry) -> ProfileAssignments {
         step_models: StepModels {
             audit: step_model.clone(),
             calibration: step_model.clone(),
+            // A profile never sets the fix model: unset leaves it to the `fix_on_haiku` switch.
+            fix: String::new(),
             research_chat: step_model.clone(),
             story_authoring: step_model.clone(),
             decomposition: step_model.clone(),
@@ -181,6 +189,7 @@ fn max_efficiency_assignments(registry: &ModelRegistry) -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: l3_enabled,
             model: l3_model,
+            ..Default::default()
         },
     }
 }

@@ -1,5 +1,5 @@
 //! `POST /api/orchestrator/message` — the first functional increment of the
-//! architect-orchestrator LOOP (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+//! architect-orchestrator LOOP (the product-owner vibe-mode design notes,
 //! "Architect-orchestrator design (decided 2026-07-10)").
 //!
 //! Scope: handle a CHANGE REQUEST against an EXISTING scaffolded project, end to
@@ -128,7 +128,16 @@ pub async fn orchestrator_message(
         Ok(l) => l,
         Err(message) => return honest_error(axum::http::StatusCode::CONFLICT, message),
     };
-    let llm = RealTurnLlm { llm: turn_llm };
+    // The interpretation runs on the open project's story-authoring model (project settings;
+    // never the environment). A blank slot cannot happen for this step, but is never sent.
+    let model = match project.model_for_step(crate::project::StepKind::StoryAuthoring) {
+        m if m.trim().is_empty() => crate::llm::DEFAULT_MODEL.to_string(),
+        m => m.to_string(),
+    };
+    let llm = RealTurnLlm {
+        llm: turn_llm,
+        model,
+    };
     let executor = RealTurnExecutor {
         state: state.clone(),
         repo,
@@ -170,6 +179,8 @@ fn honest_error(status: axum::http::StatusCode, error: String) -> Response {
 /// synthesizes a canned `Interpretation` when the model call fails.
 struct RealTurnLlm {
     llm: Llm,
+    /// The model the request names (the project's setting).
+    model: String,
 }
 
 const INTERPRET_SYSTEM_PROMPT: &str = r#"You are the interpretation step of a software change-request \
@@ -203,7 +214,9 @@ impl TurnLlm for RealTurnLlm {
             "## Living spec summary\n\n{}\n\n## User's change request\n\n{message}",
             spec.summary
         );
-        let req = LlmRequest::new(prompt).with_system(INTERPRET_SYSTEM_PROMPT);
+        let req = LlmRequest::new(prompt)
+            .with_model(self.model.clone())
+            .with_system(INTERPRET_SYSTEM_PROMPT);
         let resp = self.llm.complete(req).await.map_err(|e| {
             anyhow::anyhow!("live LLM required to interpret the change request: {e}")
         })?;

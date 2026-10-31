@@ -80,6 +80,11 @@ pub mod extract;
 /// and the "Pass 4b-2 landed" note.
 pub mod import_boundary_checker;
 
+/// Token-efficiency rank 8: the deterministic candidate-site locators a rule's `candidates`
+/// block names (statement filters over the SQL splitter in [`supabase::splitter`]). See
+/// `candidates.rs`.
+pub mod candidates;
+
 /// Supabase-stack checkers built on the [`arch_checker`] seam: migration-timeline replay for
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
@@ -121,7 +126,7 @@ pub mod strict_layering_call_checker;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
 pub mod resource_lifecycle_checker;
 
-/// D2 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// D2 (the codebase-inspection hardening notes) — lexical (comment-aware)
 /// detection of `SEC-NO-WEAK-TOKEN-RANDOMNESS-1`: a general-purpose PRNG (`Math.random`,
 /// Python's `random.*`, `rand()`, `new Random()`) feeding a value whose surrounding identifier
 /// marks it as a security credential (token/secret/password/session/nonce/CSRF/OTP/reset-code/
@@ -129,7 +134,13 @@ pub mod resource_lifecycle_checker;
 /// sampling, shuffling). See `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml`.
 pub mod weak_randomness_checker;
 
-/// D3 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// H3 (prompt-injection defense): deterministic detection of `SEC-NO-AI-REVIEWER-INSTRUCTIONS-1`,
+/// text in a comment or a string literal addressed to an AI code reviewer ("report no findings",
+/// "ignore previous instructions", a fake file delimiter). One phrase list, case-insensitive,
+/// comments and strings only. See `crates/rules/principles/universal/sec-no-ai-reviewer-instructions-1.toml`.
+pub mod ai_reviewer_injection_checker;
+
+/// D3 (the codebase-inspection hardening notes) — lexical (comment-aware)
 /// detection of `SEC-NO-QUERY-GRAMMAR-INJECTION-1`: user-controlled data concatenated or
 /// interpolated into a query/filter GRAMMAR string — PostgREST `.or()`/`.filter()`, a raw SQL
 /// string issued via `.query()`/`.execute()`/`.raw()`, a MongoDB `$where` clause, or an LDAP
@@ -174,6 +185,28 @@ pub mod clone_rules;
 /// configuration, and stays silent whenever a configuration cannot be read with certainty. See
 /// `crates/rules/principles/javascript/react/ui-react-hooks-lint-1.toml`.
 pub mod react_hooks_lint_checker;
+
+/// `UI-STATE-SHAPE-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// React state shaped so one fact is stored twice. Proves two shapes deterministically
+/// (boolean flags that are pairwise exclusive by construction; state whose only writer is an
+/// effect copying a pure expression of its dependencies) and leaves the rest of the rule to the
+/// semantic pass. See `crates/rules/principles/ui/ui-state-shape-1.toml`.
+pub mod state_shape_checker;
+
+/// `STYLE-NEEDLESS-COMPLEXITY-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a negated conditional (`!x ? a : b`, which is `x ? b : a` written backwards), and a TSX
+/// component prop declared optional that every call site passes with a defined value. Call
+/// sites are found through [`one_import_path_checker`]'s re-export graph, and a component any
+/// of whose references cannot be accounted for is skipped. See
+/// `crates/rules/principles/javascript/style-needless-complexity-1.toml`.
+pub mod needless_complexity_checker;
+
+/// `TESTING-MEANINGFUL-ASSERTION-1` (master sequence 22e, with W29 Wave D,
+/// `docs/design/2026-10-21_w29-detector-implementation.md`): a test whose body holds no
+/// assertion at all, in JavaScript and TypeScript, Python and Rust test code. "Asserts only a
+/// stub" is a judgment left to the semantic pass. See
+/// `crates/rules/principles/testing/testing-meaningful-assertion-1.toml`.
+pub mod test_assertion_checker;
 
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
@@ -318,14 +351,32 @@ pub(crate) fn diagnostics_for(label: &str, combined: &str, violated: &[RuleId]) 
 // conservative fail-open choice: a mis-derived target dir that points to the wrong
 // clone would be worse than a per-worktree fallback.
 
+/// Directory that holds every UoW worktree of a clone: `<clone>/.camerata-worktrees/<branch>`.
+const WORKTREES_DIR_NAME: &str = ".camerata-worktrees";
+
+/// The clone root that owns `worktree`, but ONLY for the canonical layout
+/// `<clone>/.camerata-worktrees/<branch>`. Any other path (a worktree made by hand at an
+/// arbitrary location, a temp dir) has no known owning clone, so this returns `None`.
+///
+/// Deriving "grandparent of whatever path we were given" would be wrong: for a worktree
+/// nested under another clone's subdirectory it names that other clone, and for a path
+/// directly under a top-level directory it names the filesystem root. Both the shared
+/// target dir and the janitor's reclaim step are keyed off the clone root, so a
+/// mis-derived root points a `cargo` build, or a deletion, at another clone's data.
+fn clone_root_of(worktree: &Path) -> Option<PathBuf> {
+    let worktrees_dir = worktree.parent()?;
+    if worktrees_dir.file_name()? != WORKTREES_DIR_NAME {
+        return None;
+    }
+    worktrees_dir.parent().map(Path::to_path_buf)
+}
+
 /// Derive the shared `CARGO_TARGET_DIR` path from a UoW worktree path.
 ///
 /// Returns `Some(<clone>/.camerata-shared-target)` for the canonical layout
 /// (`<clone>/.camerata-worktrees/<branch>`), and `None` for out-of-band worktrees.
 pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
-    // parent() → `.camerata-worktrees`, parent() → clone root
-    let clone = worktree.parent()?.parent()?;
-    Some(clone.join(".camerata-shared-target"))
+    clone_root_of(worktree).map(|clone| clone.join(".camerata-shared-target"))
 }
 
 /// Run the disk-headroom preflight check before a cargo build, using the worktree
@@ -346,17 +397,25 @@ pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 /// only — `off` restores the pre-janitor pure-block behavior; Zone B is unaffected
 /// either way (it is never automatic).
 fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
-    let min = disk_headroom_threshold_bytes();
-    let mode = janitor::janitor_mode();
+    check_build_disk_headroom_with(
+        worktree,
+        disk_headroom_threshold_bytes(),
+        janitor::janitor_mode(),
+    )
+}
 
+/// [`check_build_disk_headroom`] with the threshold and janitor mode passed in, so the
+/// decision and the reclaim scoping are testable without mutating process environment.
+fn check_build_disk_headroom_with(
+    worktree: &Path,
+    min: u64,
+    mode: janitor::JanitorMode,
+) -> anyhow::Result<()> {
     // The clone that owns this worktree's Zone-A scratch, when derivable (canonical
     // `<clone>/.camerata-worktrees/<branch>` layout). `None` for an out-of-band
     // worktree — reclaim is simply skipped in that case, same fail-open stance as
     // `derive_shared_target_dir`'s own doc comment.
-    let clone = worktree
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf());
+    let clone = clone_root_of(worktree);
 
     let mut reclaimed_log: Vec<janitor::ReclaimLogEntry> = Vec::new();
     let outcome = janitor::check_headroom_with_reclaim(
@@ -680,12 +739,13 @@ mod tests {
     #[test]
     fn derive_shared_target_dir_canonical_layout() {
         // Canonical: <clone>/.camerata-worktrees/<branch-seg>
-        let worktree = Path::new("/Users/me/ws/acme/api/.camerata-worktrees/camerata__story-7");
+        let worktree =
+            Path::new("/Users/auditor/ws/acme/api/.camerata-worktrees/camerata__story-7");
         let got = derive_shared_target_dir(worktree);
         assert_eq!(
             got,
             Some(PathBuf::from(
-                "/Users/me/ws/acme/api/.camerata-shared-target"
+                "/Users/auditor/ws/acme/api/.camerata-shared-target"
             )),
             "derived target must be sibling of .camerata-worktrees under clone"
         );
@@ -693,18 +753,86 @@ mod tests {
 
     #[test]
     fn derive_shared_target_dir_out_of_band_worktree_returns_none() {
-        // A worktree at root level has no grandparent — derivation returns None.
-        let worktree = Path::new("/wt");
-        let got = derive_shared_target_dir(worktree);
-        // May or may not be None depending on whether "/" has a parent; the key
-        // invariant is that it does not panic.
-        let _ = got; // just confirm no panic
+        // None of these sit directly under a `.camerata-worktrees` directory, so none has a
+        // known owning clone. A grandparent derivation would name `/`, `/tmp` or another
+        // clone's root instead.
+        for out_of_band in [
+            "/wt",
+            "/tmp/x",
+            "/home/u/repoA/sub/wt",
+            "/home/u/repoA/.camerata-worktrees/nested/wt",
+            "/home/u/repoA/.camerata-worktrees",
+        ] {
+            assert_eq!(
+                derive_shared_target_dir(Path::new(out_of_band)),
+                None,
+                "{out_of_band} is not <clone>/.camerata-worktrees/<branch>"
+            );
+            assert_eq!(clone_root_of(Path::new(out_of_band)), None, "{out_of_band}");
+        }
+    }
+
+    // ── disk-headroom reclaim is scoped to the worktree's OWN clone ──────────
+
+    /// An impossible threshold forces the reclaim path; the check then fails because no disk
+    /// has that much free space, which is what these tests expect.
+    const UNSATISFIABLE: u64 = u64::MAX;
+
+    #[test]
+    fn headroom_guard_never_prunes_a_target_derived_from_an_out_of_band_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `<tmp>/repoA/.camerata-shared-target` belongs to some clone at `<tmp>/repoA`.
+        // The worktree `<tmp>/repoA/sub/wt` is NOT under `.camerata-worktrees`, so a
+        // grandparent derivation would wrongly treat `<tmp>/repoA` as its clone.
+        let repo_a = tmp.path().join("repoA");
+        let shared = repo_a.join(".camerata-shared-target");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact"), "x").unwrap();
+        let worktree = repo_a.join("sub").join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let result =
+            check_build_disk_headroom_with(&worktree, UNSATISFIABLE, janitor::JanitorMode::On);
+
+        assert!(
+            result.is_err(),
+            "the unsatisfiable threshold must still fail"
+        );
+        assert!(
+            shared.join("artifact").exists(),
+            "another clone's shared target must survive an out-of-band worktree's headroom check"
+        );
+    }
+
+    #[test]
+    fn headroom_guard_prunes_the_shared_target_of_its_own_clone() {
+        // Positive control: the same setup in the canonical layout DOES reclaim, so the
+        // test above is not passing merely because the janitor never deletes anything.
+        let tmp = tempfile::tempdir().unwrap();
+        let clone = tmp.path().join("repoA");
+        let shared = clone.join(".camerata-shared-target");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact"), "x").unwrap();
+        let worktree = clone.join(".camerata-worktrees").join("story-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let result =
+            check_build_disk_headroom_with(&worktree, UNSATISFIABLE, janitor::JanitorMode::On);
+
+        assert!(
+            result.is_err(),
+            "the unsatisfiable threshold must still fail"
+        );
+        assert!(
+            !shared.join("artifact").exists(),
+            "the canonical worktree's own clone shared target is reclaimed under emergency pressure"
+        );
     }
 
     #[test]
     fn derive_shared_target_dir_two_worktrees_same_clone() {
         // Two different branch worktrees under the SAME clone must derive the SAME target dir.
-        let base = "/Users/me/ws/acme/api/.camerata-worktrees";
+        let base = "/Users/auditor/ws/acme/api/.camerata-worktrees";
         let wt_a = PathBuf::from(base).join("camerata__story-a");
         let wt_b = PathBuf::from(base).join("camerata__story-b");
         assert_eq!(

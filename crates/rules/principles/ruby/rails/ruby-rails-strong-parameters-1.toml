@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-STRONG-PARAMS-1"
-version = 1
+version = 4
 title = "Controllers use strong parameters to guard mass assignment"
 domain = "ruby:rails"
 layer = "framework"
@@ -18,9 +18,9 @@ why = "Without explicit allowlisting, an attacker can POST any attribute — inc
 [[option]]
 id = "strong-params-permit"
 label = "require + permit on every inbound params hash"
-directive = "Every controller action that writes model attributes calls `.require(:resource_name).permit(:field1, :field2, ...)` on the params object before passing the result to a model method. Nested attributes are nested inside `permit`. Passing `params`, `params[:model]`, or any unfiltered slice to `.new`, `.create`, `.update`, or `.update_attributes` is forbidden. A private helper method (e.g. `def user_params`) is the canonical place to define the permit block for a resource."
+directive = "Every controller action that writes model attributes calls `.require(:resource_name).permit(:field1, :field2, ...)` on the params object before passing the result to a model method. Nested attributes are nested inside `permit`. Passing `params`, `params[:model]` or any unfiltered slice to `.new`, `.create`, `.update` or `.update_attributes` is forbidden. A private helper method (e.g. `def user_params`) is the canonical place to define the permit block for a resource."
 remediation = """
-Add .require(:resource_name).permit(:field1, :field2, ...) on the params object in the controller action before passing the result to the model, instead of passing params or params[:model] directly, or relying on a model-level attr_accessible allowlist. Verify by attempting to submit a request with an unpermitted attribute and confirming it is silently stripped rather than mass-assigned.
+Add .require(:resource_name).permit(:field1, :field2, ...) on the params object in the controller action before passing the result to the model, instead of passing params or params[:model] directly or relying on a model-level attr_accessible allowlist. Verify by attempting to submit a request with an unpermitted attribute and confirming it is silently stripped rather than mass-assigned.
 """
 effort = "medium"
 why = "Strong Parameters moves the allowlist to the controller, where the action context is known, and raises at runtime if unfiltered params are passed to a model, making violations loud rather than silent."
@@ -30,7 +30,7 @@ id = "attr-accessible-on-model"
 violates = true
 label = "attr_accessible allowlist on the model class"
 directive = "Model classes declare `attr_accessible :field1, :field2` to limit which attributes can be set via mass assignment, rather than permitting fields in the controller."
-why = "The Rails 2/3 pattern; superseded in Rails 4+ by Strong Parameters. The model cannot distinguish a trusted internal call from an external form submission, so the allowlist is too broad or too narrow for every caller."
+why = "The model cannot distinguish a trusted internal call from an external form submission, so the allowlist is too broad or too narrow for every caller. This is the Rails 2/3 pattern, superseded in Rails 4 and later by Strong Parameters."
 
 [[option]]
 id = "no-mass-assignment-protection"
@@ -41,9 +41,9 @@ why = "Allows any attacker-controlled parameter to be written to the database; t
 
 [[sources]]
 url = "https://brakemanscanner.org/docs/warning_types/mass_assignment/"
-title = "Brakeman — Mass Assignment warning type"
+title = "Brakeman: Mass Assignment warning type"
 linter = "Brakeman: Mass Assignment"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
-title = "Rails Guides — Action Controller Overview: Strong Parameters"
+title = "Rails Guides: Action Controller Overview: Strong Parameters"

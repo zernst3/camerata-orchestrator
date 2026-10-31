@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-FILE-NAMING-1"
-version = 1
+version = 3
 title = "Test files follow test_*.py naming so pytest auto-discovers them"
 domain = "python:testing"
 layer = "language"
@@ -33,4 +33,4 @@ why = "Requires every contributor to understand the custom configuration; risks 
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/goodpractices.html"
-title = "pytest — Good Integration Practices (Conventions for Python test discovery)"
+title = "pytest: Good Integration Practices (Conventions for Python test discovery)"

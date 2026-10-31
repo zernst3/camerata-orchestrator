@@ -1,5 +1,5 @@
 id = "ARCH-TRIGGER-ENV-1"
-version = 1
+version = 2
 title = "Trigger→environment mapping with immutable prod tags"
 domain = "ci-cd"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — Deployment section (Trigger→environment mapping table: push to main → dev; release branch → staging; semver tag → prod)"
+title = "CONVENTIONS.md: Deployment section (Trigger→environment mapping table: push to main → dev; release branch → staging; semver tag → prod)"
 
 [[sources]]
 url = "https://devblogs.microsoft.com/devops/release-flow-how-we-do-branching-on-the-vsts-team/"
-title = "Microsoft — Release Flow: How We Do Branching on the VSTS Team"
+title = "Microsoft: Release Flow: How We Do Branching on the VSTS Team"
 
 [decision]
 question = "How do changes map to deploy environments?"

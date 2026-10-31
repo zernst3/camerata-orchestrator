@@ -57,15 +57,29 @@ pub enum ReviewError {
 
 /// REVIEWER SEAM — review a live [`RefinementSession`] and produce a
 /// [`RefinementReview`] to fold in. Provider / model / tier live behind this seam.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait RefinementReviewer: Send + Sync {
     /// Review the session (in the light of the original form) and return the
     /// changes to apply this turn.
-    async fn review(
-        &self,
-        session: &RefinementSession,
-        form: &IntakeForm,
-    ) -> Result<RefinementReview, ReviewError>;
+    fn review<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        session: &'life1 RefinementSession,
+        form: &'life2 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<RefinementReview, ReviewError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic stub ──────────────────────────────────────────────────────
@@ -270,9 +284,9 @@ impl RefinementReviewer for StubRefinementReviewer {
 /// manually. Behind the seam: only this concrete type names a model.
 ///
 /// Callers that want a different model should use
-/// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
-/// environment variable overrides this at runtime for CLI / one-off invocations.
-pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5";
+/// [`ClaudeRefinementReviewer::with_model`] (the open project's setting). The environment is
+/// never consulted.
+pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
 /// session and returns the review JSON. Read-only and ungoverned (it plans, it
@@ -306,17 +320,12 @@ impl Default for ClaudeRefinementReviewer {
 }
 
 impl ClaudeRefinementReviewer {
-    /// Construct with the configured model: reads `CAMERATA_REVIEWER_MODEL`
-    /// first, then falls back to [`DEFAULT_REVIEWER_MODEL`]. Use
+    /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from a per-project config or the server's `/api/models` catalog).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_REVIEWER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_REVIEWER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_REVIEWER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -666,6 +675,25 @@ mod tests {
 
     fn form_with_owner() -> IntakeForm {
         IntakeForm::sample_app()
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The reviewer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_REVIEWER_MODEL", "env-model");
+        assert_eq!(
+            ClaudeRefinementReviewer::new().model,
+            DEFAULT_REVIEWER_MODEL
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model("picked").model,
+            "picked"
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model(" ").model,
+            DEFAULT_REVIEWER_MODEL
+        );
     }
 
     #[test]

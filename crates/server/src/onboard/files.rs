@@ -30,6 +30,14 @@ const CODE_EXTS: &[&str] = &[
     // Firebase rules file by its `service` header, never by its name. Admitted by extension, not
     // by the two default basenames, because `firebase.json` may point at any file.
     "rules",
+    // H8: build and script source the walk used to drop unseen. Gradle build scripts (Groovy and
+    // Kotlin) hold signing passwords and repository tokens; Scala, C++ headers and PowerShell and
+    // batch scripts are hand-written source and a common home of inline credentials.
+    "gradle", "kts", "scala", "cc", "hpp", "ps1", "bat",
+    // H8: single-file components. Their `<script>` is source code the model never saw while they
+    // were only reference text for the dead-code rule (which still reads them: the architectural
+    // tier is handed the audited files and the reference list together).
+    "vue", "svelte", "astro",
 ];
 
 /// Extensionless basenames that still carry stack/CI signal and must be extracted so
@@ -61,7 +69,30 @@ const CONFIG_TEXT_EXTS: &[&str] = &[
     // Apple property lists: `GoogleService-Info.plist` carries the iOS Firebase `API_KEY`, and
     // real committed credentials land in plists.
     "plist",
+    // H8: secret-bearing files the walk used to drop unseen. A `.key` is a private key by
+    // convention (the secret-file rule names the extension); `.tfvars` and `.tfstate` hold
+    // Terraform variables and state, which carry credentials in clear; `.p8` is an Apple signing
+    // key; `.xml` and `.config` hold connection strings and API keys (`web.config`, Maven
+    // `settings.xml`, Android resources); a notebook's outputs keep whatever was printed.
+    "key",
+    "tfvars",
+    "tfstate",
+    "p8",
+    "xml",
+    "config",
+    "ipynb",
 ];
+
+/// Extensionless file names that hold credentials, admitted by name because they have no
+/// extension to match (H8): the AWS shared credentials file, a kubeconfig, and the default SSH
+/// private key names with any suffix (`id_rsa_deploy`). A public key (`id_rsa.pub`) has an
+/// extension and is not one of these.
+fn is_credential_basename(basename: &str) -> bool {
+    const PRIVATE_KEY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    basename == "credentials"
+        || basename == "kubeconfig"
+        || PRIVATE_KEY_PREFIXES.iter().any(|p| basename.starts_with(p))
+}
 
 /// Directory names that are build output, dependency trees, caches, or tool state — pure
 /// noise for an architecture audit, and the bulk of a repo's bytes/tokens. A real consumer
@@ -246,24 +277,26 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
     if basename.starts_with('.') && basename.len() > 1 {
         return true;
     }
-    match path.rsplit_once('.') {
+    // The extension of the file NAME, not of the whole path: `home/.aws/credentials` has a dot in
+    // a directory, and splitting the path on its last dot read `aws/credentials` as an extension.
+    match basename.rsplit_once('.') {
         Some((_, ext)) => CONFIG_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
-        // Extensionless, non-dotfile basename (e.g. a bare `credentials`). Deliberately NOT
-        // broadened here — `CODE_BASENAMES` (checked above via `has_code_ext`) remains the
-        // explicit opt-in list for that narrower case; a blanket "any extensionless file"
-        // admission would sweep up compiled binaries and other noise with no extension at all.
-        None => false,
+        // Extensionless, non-dotfile basename. Deliberately NOT broadened to "any extensionless
+        // file" (that would sweep up compiled binaries and other noise): `CODE_BASENAMES`
+        // (checked above via `has_code_ext`) and `is_credential_basename` are the explicit
+        // opt-in lists for this narrower case.
+        None => is_credential_basename(basename),
     }
 }
 
 /// Extensions of REFERENCE TEXT: files that are not audited as code and carry no committed-secret
 /// signal of their own, but whose text can REFER to a source file by name (a `<script src>` in
-/// HTML, an import inside a Vue or Svelte component, a run instruction in a README, a stylesheet
-/// `@import`). The dead-code rule needs them to see that a file is still used; nothing else
+/// HTML, a run instruction in a README, a stylesheet `@import`; Vue, Svelte and Astro components
+/// are audited source now (H8) and reach the dead-code rule with the audited files). The dead-code rule needs them to see that a file is still used; nothing else
 /// reads them. See [`ExtractedRepo::reference_files`].
 const REFERENCE_TEXT_EXTS: &[&str] = &[
-    "html", "htm", "vue", "svelte", "astro", "md", "mdx", "css", "scss", "less", "ejs", "erb",
-    "hbs", "pug", "njk", "j2", "jinja", "jinja2",
+    "html", "htm", "md", "mdx", "css", "scss", "less", "ejs", "erb", "hbs", "pug", "njk", "j2",
+    "jinja", "jinja2",
 ];
 
 /// Extensionless build-runner files that name the scripts and sources they run.
@@ -462,6 +495,18 @@ pub struct ExtractedRepo {
     pub truncated: bool,
     /// The reference list hit [`HARD_CAP_REFERENCE_FILES`]: some reference text is missing.
     pub reference_truncated: bool,
+    /// Admissible files NOT read because they exceed [`MAX_FILE_BYTES`], by path. Listed under
+    /// Coverage in the report and `findings.json`, so a skipped file is named, never silent.
+    pub skipped_oversize: Vec<String>,
+    /// Admissible files NOT read because the walk had already admitted [`HARD_CAP_FILES`], by
+    /// path. Non-empty exactly when `truncated` is true. Listed under Coverage like
+    /// `skipped_oversize`.
+    pub skipped_beyond_cap: Vec<String>,
+    /// H9: admissible files NOT read because their bytes are not text this scan can decode
+    /// (binary key stores, files in a legacy code page), by path. Named under Coverage, and the
+    /// path-only floor rules still run over each, so a `.p12` is flagged by its name though it
+    /// could not be read.
+    pub skipped_unreadable: Vec<String>,
     pub excluded_noise: usize,
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
@@ -469,6 +514,18 @@ pub struct ExtractedRepo {
 }
 
 impl ExtractedRepo {
+    /// Put every list in path order. The directory walks list entries in whatever order the
+    /// filesystem returns them (sorted on APFS, hash order on ext4), and everything downstream
+    /// of this struct (the audit digest the model sees, finding order, which files survive a
+    /// cap) would otherwise depend on that. Sorting here makes the same tree produce the same
+    /// extraction on every filesystem.
+    fn sorted(mut self) -> Self {
+        self.files.sort_by(|a, b| a.0.cmp(&b.0));
+        self.reference_files.sort_by(|a, b| a.0.cmp(&b.0));
+        self.excluded_noise_paths.sort();
+        self
+    }
+
     /// How many ADMITTED files are Camerata's own artifacts ([`is_engine_artifact`]).
     ///
     /// Must be zero. Non-zero means the engine is about to audit its own output, which is the
@@ -510,25 +567,113 @@ impl ExtractedRepo {
 /// Paths are relative to the repo root, forward-slashed. Synchronous (blocking IO) —
 /// call via `tokio::task::spawn_blocking`.
 pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
+    // A folder that is gone, or a path that is not a folder, is a repo that could not be read.
+    // Walking it would return no files and no error, which reads as an empty repo with nothing
+    // wrong in it.
+    if !root.is_dir() {
+        anyhow::bail!(
+            "the repository folder could not be read: it is not a folder on this machine"
+        );
+    }
     let extra_dirs = extra_exclude_dirs();
     if root.join(".git").exists() {
-        read_local_repo_files_gitignore(root, &extra_dirs)
+        read_local_repo_files_gitignore(root, &extra_dirs, HARD_CAP_FILES)
     } else {
-        read_local_repo_files_noise_denylist(root, &extra_dirs)
+        read_local_repo_files_noise_denylist(root, &extra_dirs, HARD_CAP_FILES)
     }
+}
+
+/// Where the walk puts each admissible (non-noise, auditable) file: read into `files`, or
+/// named in `oversize` / `beyond_cap` when it is not read. Every admissible file lands in
+/// exactly one of the three, so nothing the scan would have audited is dropped silently (H4).
+struct AdmittedSink {
+    cap: usize,
+    files: Vec<(String, String)>,
+    oversize: Vec<String>,
+    beyond_cap: Vec<String>,
+    unreadable: Vec<String>,
+}
+
+impl AdmittedSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            files: Vec::new(),
+            oversize: Vec::new(),
+            beyond_cap: Vec::new(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// Admit `rel` (at `full`, `len` bytes on disk; `None` when the size could not be read,
+    /// which skips it as before: an unreadable entry is not a file the walk can name honestly).
+    /// Returns whether it was read into `files`.
+    fn admit(&mut self, rel: String, full: &std::path::Path, len: Option<u64>) -> bool {
+        let Some(len) = len else {
+            return false;
+        };
+        if len as usize > MAX_FILE_BYTES {
+            self.oversize.push(rel);
+            return false;
+        }
+        if self.files.len() >= self.cap {
+            self.beyond_cap.push(rel);
+            return false;
+        }
+        // H9: a file that is not valid UTF-8 is decoded when it is UTF-16 with a byte order mark
+        // (what Windows tools and SQL Server write), and otherwise named as unreadable. It is
+        // never dropped without a trace.
+        let Some(content) = std::fs::read(full).ok().and_then(|b| decode_text(&b)) else {
+            self.unreadable.push(rel);
+            return false;
+        };
+        self.files.push((rel, content));
+        true
+    }
+
+    fn truncated(&self) -> bool {
+        !self.beyond_cap.is_empty()
+    }
+}
+
+/// The text in `bytes`: UTF-8, or UTF-16 announced by a byte order mark. `None` for anything else
+/// (binary, or a legacy code page), which the caller names as unreadable rather than guessing.
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Some(text.to_string());
+    }
+    let (body, little_endian) = match bytes {
+        [0xFF, 0xFE, rest @ ..] => (rest, true),
+        [0xFE, 0xFF, rest @ ..] => (rest, false),
+        _ => return None,
+    };
+    if body.len() % 2 != 0 {
+        return None;
+    }
+    let units = body.chunks_exact(2).map(|pair| {
+        if little_endian {
+            u16::from_le_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_be_bytes([pair[0], pair[1]])
+        }
+    });
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .ok()
 }
 
 /// Gitignore-aware walk (used when `.git` exists). Delegates to the `ignore` crate so
 /// `.gitignore`, `.git/info/exclude`, and the user's global gitignore are all respected.
-/// The noise denylist is applied afterward as a belt-and-suspenders guard.
+/// The noise denylist is applied afterward as a belt-and-suspenders guard. `cap` is
+/// [`HARD_CAP_FILES`] in production; tests pass a small one.
 fn read_local_repo_files_gitignore(
     root: &std::path::Path,
     extra_dirs: &[String],
+    cap: usize,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut files = Vec::new();
+    let mut admitted = AdmittedSink::new(cap);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
 
     // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
@@ -539,9 +684,11 @@ fn read_local_repo_files_gitignore(
         .git_exclude(true)
         .ignore(true)
         .hidden(false)
+        // Walk in path order, so which files survive a cap is the same on every filesystem.
+        .sort_by_file_path(|a, b| a.cmp(b))
         .build();
 
-    'walk: for result in walker {
+    for result in walker {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -581,22 +728,10 @@ fn read_local_repo_files_gitignore(
         if noise || !admissible {
             continue;
         }
-        if entry
-            .metadata()
-            .map(|m| m.len() as usize)
-            .unwrap_or(usize::MAX)
-            > MAX_FILE_BYTES
-        {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(p) else {
-            continue; // skip non-UTF-8 / unreadable
-        };
-        files.push((rel, content));
-        if files.len() >= HARD_CAP_FILES {
-            truncated = true;
-            break 'walk;
-        }
+        // Past the cap the walk continues, naming each further admissible file instead of
+        // reading it, so the report can list what the cap left out.
+        let len = entry.metadata().ok().map(|m| m.len());
+        admitted.admit(rel, p, len);
     }
 
     // Union in git-TRACKED files the ignore-aware walk above skipped because they match a
@@ -606,7 +741,8 @@ fn read_local_repo_files_gitignore(
     // for this scan to catch, not a gap to leave open. `git_tracked_files` returns `None` on
     // any failure (no `git` on PATH, etc.); the primary walk above already succeeded
     // regardless, so this is purely additive and never turns a working scan into an error.
-    if !truncated {
+    // It runs past the cap too, so a tracked file beyond the cap is named like any other.
+    {
         if let Some(tracked) = git_tracked_files(root) {
             for rel in tracked {
                 if seen.contains(&rel) {
@@ -629,30 +765,28 @@ fn read_local_repo_files_gitignore(
                 let Ok(meta) = std::fs::metadata(&full) else {
                     continue; // tracked in the index but not present on disk (rare edge case)
                 };
-                if !meta.is_file() || meta.len() as usize > MAX_FILE_BYTES {
+                if !meta.is_file() {
                     continue;
                 }
-                let Ok(content) = std::fs::read_to_string(&full) else {
-                    continue; // skip non-UTF-8 / unreadable
-                };
                 seen.insert(rel.clone());
-                files.push((rel, content));
-                if files.len() >= HARD_CAP_FILES {
-                    truncated = true;
-                    break;
-                }
+                admitted.admit(rel, &full, Some(meta.len()));
             }
         }
     }
 
+    let truncated = admitted.truncated();
     Ok(ExtractedRepo {
-        files,
+        files: admitted.files,
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
+        skipped_oversize: admitted.oversize,
+        skipped_beyond_cap: admitted.beyond_cap,
+        skipped_unreadable: admitted.unreadable,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
-    })
+    }
+    .sorted())
 }
 
 /// The full set of git-TRACKED file paths under `root` (relative, forward-slashed), via
@@ -663,6 +797,7 @@ fn read_local_repo_files_gitignore(
 /// still stands on its own.
 fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
+        .args(crate::workspace::GIT_NO_REPO_COMMANDS)
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
@@ -684,17 +819,20 @@ fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
 fn read_local_repo_files_noise_denylist(
     root: &std::path::Path,
     extra_dirs: &[String],
+    cap: usize,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut files = Vec::new();
+    let mut admitted = AdmittedSink::new(cap);
     let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        // Sorted by name, so which files survive a cap is the same on every filesystem.
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
             let p = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             // Path relative to the repo root, forward-slashed (matches tarball paths).
@@ -730,35 +868,23 @@ fn read_local_repo_files_noise_denylist(
             if noise || !admissible {
                 continue;
             }
-            if entry
-                .metadata()
-                .map(|m| m.len() as usize)
-                .unwrap_or(usize::MAX)
-                > MAX_FILE_BYTES
-            {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&p) else {
-                continue; // skip non-UTF-8 / unreadable
-            };
-            files.push((rel, content));
-            if files.len() >= HARD_CAP_FILES {
-                truncated = true;
-                break;
-            }
-        }
-        if truncated {
-            break;
+            let len = entry.metadata().ok().map(|m| m.len());
+            admitted.admit(rel, &p, len);
         }
     }
+    let truncated = admitted.truncated();
     Ok(ExtractedRepo {
-        files,
+        files: admitted.files,
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
+        skipped_oversize: admitted.oversize,
+        skipped_beyond_cap: admitted.beyond_cap,
+        skipped_unreadable: admitted.unreadable,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
-    })
+    }
+    .sorted())
 }
 
 #[cfg(test)]
@@ -926,9 +1052,6 @@ mod tests {
         for yes in [
             "index.html",
             "pages/x.htm",
-            "src/App.vue",
-            "src/Page.svelte",
-            "src/pages/index.astro",
             "README.md",
             "docs/guide.mdx",
             "styles/a.css",
@@ -951,6 +1074,10 @@ mod tests {
             assert!(is_reference_text(yes), "{yes}");
         }
         for no in [
+            // Single-file components are audited source now (H8), not reference text.
+            "src/App.vue",
+            "src/Page.svelte",
+            "src/pages/index.astro",
             "src/a.ts",
             "src/a.rs",
             "Makefile.bak",
@@ -966,13 +1093,7 @@ mod tests {
 
     #[test]
     fn reference_text_is_not_audit_input() {
-        for path in [
-            "index.html",
-            "src/App.vue",
-            "README.md",
-            "a.css",
-            "Makefile",
-        ] {
+        for path in ["index.html", "README.md", "a.css", "Makefile"] {
             assert!(
                 !is_admissible_text(path),
                 "{path} must stay out of the audited file list"
@@ -983,7 +1104,11 @@ mod tests {
     fn reference_fixture(root: &std::path::Path) {
         write(root, "src/a.ts", "export const a = 1;\n");
         write(root, "index.html", "<script src=\"/src/a.ts\"></script>\n");
-        write(root, "src/App.vue", "<script setup>import './a'</script>\n");
+        write(
+            root,
+            "views/page.ejs",
+            "<script src=\"/src/a.ts\"></script>\n",
+        );
         // A secret-shaped literal in prose: reference text is not read by the secrets floor.
         let readme = concat!("Run it.\nAPI_KEY=\"Zq9Xk3Pm7Rt2", "Vw5Yb8Nc4Jd6Hf1Ga0\"\n");
         write(root, "README.md", readme);
@@ -1015,8 +1140,8 @@ mod tests {
                 "Makefile",
                 "README.md",
                 "index.html",
-                "src/App.vue",
-                "styles/a.css"
+                "styles/a.css",
+                "views/page.ejs"
             ],
             "noise dirs, engine artifacts and oversized files are excluded from the tier too"
         );
@@ -1024,11 +1149,15 @@ mod tests {
         assert!(!extracted.truncated);
 
         // The digest input is byte-for-byte the digest of the audited files alone.
-        let expected = crate::ai_audit::build_digest(&[(
-            "src/a.ts".to_string(),
-            "export const a = 1;\n".to_string(),
-        )]);
-        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let expected = crate::ai_audit::build_digest(
+            &[("src/a.ts".to_string(), "export const a = 1;\n".to_string())],
+            &nonce,
+        );
+        assert_eq!(
+            crate::ai_audit::build_digest(&extracted.files, &nonce),
+            expected
+        );
 
         // The secrets floor reads only the audited files, so the literal in the README is not a
         // finding, and nothing about the floor's input changed.
@@ -1189,17 +1318,62 @@ mod tests {
             ["src/__generated__/ops.ts", "src/routeTree.gen.ts"],
             "generated code is kept as reference; vendored, built and minified code is not"
         );
-        let expected = crate::ai_audit::build_digest(&[
-            (
-                "src/main.tsx".to_string(),
-                "import { routeTree } from './routeTree.gen';\n".to_string(),
-            ),
-            (
-                "src/routes/about.tsx".to_string(),
-                "export const Route = 1;\n".to_string(),
-            ),
-        ]);
-        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let expected = crate::ai_audit::build_digest(
+            &[
+                (
+                    "src/main.tsx".to_string(),
+                    "import { routeTree } from './routeTree.gen';\n".to_string(),
+                ),
+                (
+                    "src/routes/about.tsx".to_string(),
+                    "export const Route = 1;\n".to_string(),
+                ),
+            ],
+            &nonce,
+        );
+        assert_eq!(
+            crate::ai_audit::build_digest(&extracted.files, &nonce),
+            expected
+        );
+    }
+
+    /// A tree with enough files and directories, created in reverse order, that a scanner
+    /// returning filesystem order would differ from path order on at least one filesystem.
+    fn many_files_fixture(root: &std::path::Path) {
+        for dir in ["zeta", "alpha", "mid", "beta", "src/z", "src/a"] {
+            for i in (0..12).rev() {
+                write(root, &format!("{dir}/f{i:02}.ts"), "export {};\n");
+            }
+        }
+        write(root, "z-last.ts", "export {};\n");
+        write(root, "a-first.ts", "export {};\n");
+    }
+
+    fn expect_path_order(extracted: &ExtractedRepo) {
+        let order: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order.len(), 6 * 12 + 2, "every fixture file is admitted");
+        assert_eq!(
+            order, sorted,
+            "the scanner must return files in path order, not filesystem order"
+        );
+    }
+
+    #[test]
+    fn scan_returns_files_in_stable_sorted_order_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        many_files_fixture(dir.path());
+        expect_path_order(&scan(dir.path()));
+    }
+
+    #[test]
+    fn scan_returns_files_in_stable_sorted_order_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        many_files_fixture(dir.path());
+        expect_path_order(&scan(dir.path()));
     }
 
     #[test]
@@ -1424,5 +1598,269 @@ mod tests {
                 .any(|f| f.path == "lib/config.dart" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
             "the floor must read lib/config.dart: {findings:#?}"
         );
+    }
+
+    // ── H4: no silent loss — skipped files are named, by path ──────────────────
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    fn oversize_fixture(root: &std::path::Path) {
+        write(root, "src/a.rs", "fn a() {}\n");
+        write(root, "src/huge.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        // Not admissible at all (no code extension), so not "skipped for size" either.
+        write(root, "assets/huge.bin", &"x".repeat(MAX_FILE_BYTES + 1));
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_listed_by_path_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        oversize_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/a.rs"]);
+        assert_eq!(extracted.skipped_oversize, ["src/huge.rs"]);
+        assert!(extracted.skipped_beyond_cap.is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_listed_by_path_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        oversize_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/a.rs"]);
+        assert_eq!(extracted.skipped_oversize, ["src/huge.rs"]);
+    }
+
+    #[test]
+    fn a_tracked_but_gitignored_oversize_file_is_listed_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status();
+            matches!(status, Ok(s) if s.success())
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on PATH: the union path is not exercisable here
+        }
+        write(root, "src/a.rs", "fn a() {}\n");
+        write(root, "gen/big.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        assert!(git(&["add", "-f", "src/a.rs", "gen/big.rs"]));
+        write(root, ".gitignore", "gen/\n");
+        let extracted = scan(root);
+        assert_eq!(extracted.skipped_oversize, ["gen/big.rs"]);
+    }
+
+    fn cap_fixture(root: &std::path::Path) {
+        for i in 0..5 {
+            write(root, &format!("src/f{i}.rs"), "fn f() {}\n");
+        }
+        write(
+            root,
+            "README.md",
+            "not admissible, never counted against the cap\n",
+        );
+    }
+
+    #[test]
+    fn files_beyond_the_file_cap_are_listed_by_path_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        cap_fixture(dir.path());
+        let extracted =
+            read_local_repo_files_noise_denylist(dir.path(), &[], 3).expect("walk succeeds");
+        assert!(extracted.truncated);
+        assert_eq!(extracted.files.len(), 3);
+        assert_eq!(extracted.skipped_beyond_cap.len(), 2);
+        let mut all: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
+        all.extend(extracted.skipped_beyond_cap.clone());
+        assert_eq!(
+            sorted(all),
+            [
+                "src/f0.rs",
+                "src/f1.rs",
+                "src/f2.rs",
+                "src/f3.rs",
+                "src/f4.rs"
+            ],
+            "every admissible file is either read or named as beyond the cap"
+        );
+    }
+
+    #[test]
+    fn files_beyond_the_file_cap_are_listed_by_path_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        cap_fixture(dir.path());
+        let extracted = read_local_repo_files_gitignore(dir.path(), &[], 3).expect("walk succeeds");
+        assert!(extracted.truncated);
+        assert_eq!(extracted.files.len(), 3);
+        let mut all: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
+        all.extend(extracted.skipped_beyond_cap.clone());
+        assert_eq!(
+            sorted(all),
+            [
+                "src/f0.rs",
+                "src/f1.rs",
+                "src/f2.rs",
+                "src/f3.rs",
+                "src/f4.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tree_under_the_cap_lists_nothing_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        cap_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert!(!extracted.truncated);
+        assert!(extracted.skipped_beyond_cap.is_empty());
+        assert!(extracted.skipped_oversize.is_empty());
+    }
+
+    // ── H8 / H9: secret-bearing and source files the walk used to drop unseen ───────────────
+
+    #[test]
+    fn h8_files_that_carry_secrets_or_source_are_admitted() {
+        for yes in [
+            "deploy/server.key",
+            "infra/prod.tfvars",
+            "infra/terraform.tfstate",
+            "keys/AuthKey_ABC123.p8",
+            "android/app/build.gradle",
+            "android/app/build.gradle.kts",
+            "settings.kts",
+            "config/web.config",
+            "pom.xml",
+            "src/Main.scala",
+            "src/util.cc",
+            "include/util.hpp",
+            "scripts/deploy.ps1",
+            "scripts/deploy.bat",
+            "notebooks/analysis.ipynb",
+            "src/App.vue",
+            "src/Page.svelte",
+            "src/pages/index.astro",
+            "home/.aws/credentials",
+            "credentials",
+            "kubeconfig",
+            "ops/kubeconfig",
+            "keys/id_rsa",
+            "keys/id_ed25519",
+            "keys/id_rsa_deploy",
+        ] {
+            assert!(is_admissible_text(yes), "{yes} must be audited");
+        }
+        for no in ["README", "notes", "keys/id_rsa.pub", "logo.png", "Makefile"] {
+            assert!(!is_admissible_text(no), "{no} must stay out");
+        }
+    }
+
+    #[test]
+    fn h9_a_pem_private_key_file_is_read_and_reaches_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "deploy/server.key",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----\n",
+        );
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["deploy/server.key"]);
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.path == "deploy/server.key" && f.rule_id == "SEC-NO-SECRET-FILE-1"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn h9_a_utf16_file_with_a_byte_order_mark_is_decoded_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "CREATE TABLE users (id int);\r\n";
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let full = dir.path().join("db/schema.sql");
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(&full, &bytes).unwrap();
+        let big_endian: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        fs::write(dir.path().join("db/other.sql"), &big_endian).unwrap();
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["db/other.sql", "db/schema.sql"]);
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(_, content)| content.contains("CREATE TABLE users")));
+        assert!(extracted.skipped_unreadable.is_empty());
+    }
+
+    #[test]
+    fn h9_a_file_that_is_not_text_is_named_as_skipped_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("deploy")).unwrap();
+        fs::write(
+            dir.path().join("deploy/store.p12"),
+            [0x30, 0x82, 0x00, 0xFF, 0xFE],
+        )
+        .unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/main.rs"]);
+        assert_eq!(extracted.skipped_unreadable, ["deploy/store.p12"]);
+    }
+
+    #[test]
+    fn h9_the_path_rule_runs_over_a_file_the_walk_could_not_read() {
+        let findings = crate::onboard::audit::audit_unread_paths(
+            "o/r",
+            &[
+                "deploy/store.p12".to_string(),
+                "src/huge.rs".to_string(),
+                "keys/big.pem".to_string(),
+            ],
+            &[],
+        );
+        let hits: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(hits, ["deploy/store.p12", "keys/big.pem"], "{findings:#?}");
+        assert!(findings
+            .iter()
+            .all(|f| f.rule_id == "SEC-NO-SECRET-FILE-1" && f.line == 0));
+    }
+
+    #[test]
+    fn h8_a_tfstate_with_a_single_line_json_escaped_pem_is_flagged_and_never_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8QuKUpRKfFLfRYC9AIKjbJTWit";
+        // Terraform state writes a PEM on one line, newlines as JSON escapes.
+        let state = format!(
+            "{{\"resources\":[{{\"instances\":[{{\"attributes\":{{\"private_key_pem\":\
+             \"-----BEGIN RSA PRIVATE KEY-----\\n{body}\\n-----END RSA PRIVATE KEY-----\\n\"}}}}]}}]}}\n"
+        );
+        write(dir.path(), "infra/terraform.tfstate", &state);
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["infra/terraform.tfstate"]);
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings.iter().any(|f| f.path == "infra/terraform.tfstate"),
+            "the state file is flagged: {findings:#?}"
+        );
+        for f in &findings {
+            let shown = format!("{} {} {:?}", f.snippet, f.detail, f.captures);
+            assert!(
+                !shown.contains(&body[..24]),
+                "the key material must not be quoted: {shown}"
+            );
+        }
     }
 }

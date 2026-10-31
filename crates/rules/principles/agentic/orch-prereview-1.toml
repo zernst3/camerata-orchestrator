@@ -1,5 +1,5 @@
 id = "ORCH-PREREVIEW-1"
-version = 1
+version = 3
 title = "Every change carries an AI reviewer's verdict into the human review queue"
 domain = "agentic"
 layer = "universal"
@@ -8,19 +8,20 @@ kind = "decision"
 inspectable = true
 default = true
 qualifies = "Not enforceable by any off-the-shelf linter: this is a pipeline-topology commitment (an AI reviewer agent gating the human queue), enforced by the orchestration system and branch-protection config, not by a third-party tool with a citable rule-id. Codified and verified at pipeline-config time: an AI reviewer step is wired into the change pipeline as a pre-merge hook, a CI job, or a bot on the pull request, such that a change cannot reach the human merge gate without an approval status from the reviewer agent. Conformance holds when the pipeline configuration shows that required reviewer status and an unreviewed change is blocked from the human queue; it fails when AI-authored changes flow to human review with no enforced reviewer-agent verdict gating them."
-verification = "grounded"
+# `policy`, not `grounded`: the only outside source is rated low authority and supports pre-merge review generally; the AI-reviewer gate is this project's own pipeline decision.
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-PREREVIEW-1 (every change carries an AI reviewer's verdict)"
+title = "AGENTS.md: ORCH-PREREVIEW-1 (every change carries an AI reviewer's verdict)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (pipeline: execute → integrate → cross-agent gate → push/PR → human QA)"
+title = "Decision: Cross-agent rules: the integration gate (pipeline: execute → integrate → cross-agent gate → push/PR → human QA)"
 
 [[sources]]
 url = "https://research.google/pubs/modern-code-review-a-case-study-at-google/"
-title = "Sadowski et al. — Modern Code Review: A Case Study at Google"
+title = "Sadowski et al.: Modern Code Review: A Case Study at Google"
 relevance = "Authority note (author-facing): low — supports pre-merge review generally, not an AI-reviewer-specific mandate"
 
 [decision]
@@ -31,9 +32,9 @@ why = "Human reviewers are the scarcest resource in any AI-orchestrated workflow
 [[option]]
 id = "ai-pre-review-then-human-review"
 label = "AI pre-review then human review"
-directive = "Code changes authored by autonomous agents pass through an AI review step. A reviewer agent reads the diff against the project's codified architectural commitments and either approves the change, requests specific changes, or escalates the change as out of scope. The human review queue contains only changes the reviewer agent has cleared or has explicitly flagged for human attention. The reviewer step is wired into the change pipeline (a pre-merge hook, a CI job, a bot on the pull request, or equivalent) such that the change cannot reach the human merge gate without an approval status from the reviewer agent."
+directive = "Code changes authored by autonomous agents pass through an AI review step. A reviewer agent reads the diff against the project's codified architectural commitments and either approves the change, requests specific changes or escalates the change as out of scope. The human review queue contains only changes the reviewer agent has cleared or has explicitly flagged for human attention. The reviewer step is wired into the change pipeline (a pre-merge hook, a CI job, a bot on the pull request or equivalent) such that the change cannot reach the human merge gate without an approval status from the reviewer agent."
 remediation = """
-Add an AI review step between an autonomous agent's change and the human review queue: a reviewer agent reads the diff against the project's codified architectural commitments and either approves it, requests specific changes, or flags it as out of scope. Configure the human queue to receive only changes the reviewer agent cleared or explicitly escalated, not every raw diff. Verify by confirming a sampled change in the human queue carries a reviewer-agent verdict attached to it.
+Add an AI review step between an autonomous agent's change and the human review queue: a reviewer agent reads the diff against the project's codified architectural commitments and either approves it, requests specific changes or flags it as out of scope. Configure the human queue to receive only changes the reviewer agent cleared or explicitly escalated, not every raw diff. Verify by confirming a sampled change in the human queue carries a reviewer-agent verdict attached to it.
 """
 why = "An AI pre-review step catches common drift cases cheaply so the human review pool sees a sharper, smaller queue; the review agent also acts as a forcing function that surfaces commitments that cannot be checked from the diff alone, strengthening the commitment library over time."
 

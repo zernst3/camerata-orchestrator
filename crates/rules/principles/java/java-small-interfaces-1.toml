@@ -1,5 +1,5 @@
 id = "JAVA-SMALL-INTERFACES-1"
-version = 1
+version = 3
 title = "Interfaces are small and focused; each interface has a single responsibility, not a god-interface"
 domain = "java"
 layer = "architecture"
@@ -17,13 +17,13 @@ why = "A small, focused interface is easier to implement and reason about. An in
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#excessivepubliccount"
-title = "PMD — ExcessivePublicCount: Flags classes/interfaces exposing too many public methods"
+title = "PMD: ExcessivePublicCount: Flags classes/interfaces exposing too many public methods"
 linter = "PMD: ExcessivePublicCount"
 
 [[option]]
 id = "small-focused-interfaces"
 label = "define small, focused interfaces sized by cohesion, not a fixed method count"
-directive = "Each interface has a single responsibility and the set of methods that responsibility actually requires — judge size by cohesion (does every method belong to the same capability/role?), not by a fixed cap. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory — typically small, but a cohesive single-purpose interface (e.g. a callback SPI) is fine with more methods when they all belong to the one role it represents."
+directive = "Each interface has a single responsibility and the set of methods that responsibility actually requires: judge size by cohesion (does every method belong to the same capability/role?), not by a fixed cap. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory; these are typically small, but a cohesive single-purpose interface (e.g. a callback SPI) is fine with more methods when they all belong to the one role it represents."
 remediation = """
 Split the large interface into smaller interfaces grouped by cohesive capability, and change the class or method depending on it to depend on only the interface(s) it actually needs. Have a caller depend on an interface rather than a concrete class where that dependency crosses an architectural boundary. Verify by confirming an implementation no longer needs to provide methods unrelated to its actual responsibility.
 """
@@ -41,4 +41,4 @@ id = "no-interfaces"
 violates = true
 label = "use concrete classes directly instead of interfaces"
 directive = "Callers depend on concrete classes rather than abstract interfaces."
-why = "Tightly couples code to a specific implementation and makes swapping implementations impossible (no seam for a second implementation, e.g. a different persistence backend or a test double with real substitutable behavior). This is the real cost, not mockability: modern mocking frameworks can mock concrete classes directly (Mockito has been able to mock non-final, non-static concrete classes via subclassing since 1.10+, and does so by default since Mockito 2), so 'cannot mock' is not an accurate reason to require an interface — decoupling from a concrete implementation is."
+why = "Tightly couples code to a specific implementation and makes swapping implementations impossible (no seam for a second implementation, e.g. a different persistence backend or a test double with real substitutable behavior). This is the real cost, not mockability: modern mocking frameworks can mock concrete classes directly (Mockito has been able to mock non-final, non-static concrete classes via subclassing since 1.10+ and does so by default since Mockito 2), so 'cannot mock' is not an accurate reason to require an interface: decoupling from a concrete implementation is."

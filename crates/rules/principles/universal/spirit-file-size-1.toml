@@ -1,5 +1,5 @@
 id = "SPIRIT-FILE-SIZE-1"
-version = 1
+version = 4
 title = "Files are sized for human reading, not for AI write-cost"
 domain = "universal"
 layer = "universal"
@@ -7,21 +7,29 @@ enforcement = "prose"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1080.html"
+title = "MITRE CWE-1080: Source Code File with Excessive Number of Lines of Code (an oversized file is harder to maintain)"
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/max-lines"
+title = "ESLint max-lines: enforce a maximum number of lines per file"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — SPIRIT-FILE-SIZE-1 (files sized for human reading)"
+title = "Project policy: hand-maintained files are split at sizes a person can read without losing their place; generated files are exempt"
 
 [decision]
-question = "What position does the project take on: Files are sized for human reading, not for AI write-cost?"
+question = "How are hand-maintained files sized and split so a human can navigate them?"
 default = "files-are-sized-for-human-reading-not-for-ai-write-cost"
 why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) that made monolithic files a defensible tradeoff. AI removed that cost. The only remaining force keeping hand-written files small is human comprehension, so let it be the deciding axis. Generated artifacts are read tools-first, so the rule doesn't bind them. Letting hand-maintained files grow without a human-reading size guideline fails the human-comprehension axis the rule exists to protect: AI happily extends files, but humans reviewing or debugging those files bog down and lose orientation as the files grow. Applying the same size guideline to auto-generated files fails in the opposite direction, because it forces useless splits in files no person hand-edits and that tooling rewrites wholesale anyway."
 
 [[option]]
 id = "files-are-sized-for-human-reading-not-for-ai-write-cost"
 label = "Files are sized for human reading, not for AI write-cost"
-directive = "Hand-maintained files are split at sizes a human can navigate without losing their place. AI can generate and read a 2000-line file at no cost; every human who reviews, debugs, or maintains it pays full attention price. Auto-generated files (schema dumps, generated entity files, ORM-emitted models, lockfiles) are exempt: a tool maintains them, not a person."
+directive = "Hand-maintained files are split at sizes a human can navigate without losing their place. AI can generate and read a 2000-line file at no cost; every human who reviews, debugs or maintains it pays full attention price. Auto-generated files (schema dumps, generated entity files, ORM-emitted models, lockfiles) are exempt: a tool maintains them, not a person."
 remediation = """
 Split the oversized hand-maintained file into smaller files sized for a human to navigate without losing their place, leaving auto-generated files (schema dumps, ORM-emitted models, lockfiles) exempt from the same threshold. Verify by confirming the file's line count now falls under the project's human-reading guideline and each resulting file has a coherent, single responsibility.
 """

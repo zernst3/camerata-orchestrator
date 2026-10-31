@@ -588,11 +588,11 @@ pub(super) fn findings_csv(findings: &[FindingView]) -> String {
     out
 }
 
-// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status, estimate_audit_cost)
+// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status)
 // now live in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit
 // call sites are unchanged. `default_finding_status` is re-exported via the triage block below
 // (FindingView moved to core::triage), so it's not repeated here.
-pub(super) use camerata_ui_core::scan::{det_tool_label, estimate_audit_cost, human_tokens};
+pub(super) use camerata_ui_core::scan::{det_tool_label, human_tokens};
 
 // The onboarding-triage state machine + its data shapes now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1): FindingView, Disposition (+ its Default), TriageState, TechDebtBucket,
@@ -608,7 +608,7 @@ pub(super) use camerata_ui_core::triage::{
     finding_key, Disposition, FindingView, TechDebtBucket, TriageCounts, TriageModel, TriageState,
 };
 
-// Pass 2 step 1 (docs/plans/2026-10-11_pass2-curator-ui-design.md): the five-kind taxonomy's
+// Pass 2 step 1 (the pass-2 curator UI design notes): the five-kind taxonomy's
 // surface routing, the Kind badge's wire tag, and the one-rule-one-surface invariant. All pure,
 // all in core; this layer only renders them.
 pub(super) use camerata_ui_core::triage::{
@@ -674,6 +674,7 @@ use camerata_ui_core::progress::{progress_text, FP_MEANING};
 // for the rule-level bulk actions. Both are pure and structured-fields-only — there is no prose
 // path in either, and there must never be one.
 pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, DeviationGroup};
+pub(super) use camerata_ui_core::triage::{finding_location_label, repo_counts_line};
 
 // Pass 2 step 4 (THE DOCKED DETAIL PANE, design §2 + the owner's Q5 ruling in §13). All pure
 // and all in core: the row cursor that arrow keys drive, the SCOPED key handler (the whole of
@@ -1006,7 +1007,7 @@ pub(super) struct RuleRecommendationView {
     #[serde(default)]
     pub operator_chosen: bool,
     /// The `file:line` (or `file:line — short note`) citation in the repo the model grounded its
-    /// pick in (P7, docs/plans/2026-09-29_codebase-inspection-hardening.md). `None` when the
+    /// pick in (P7, the codebase-inspection hardening notes). `None` when the
     /// model gave no evidence for this rule (or, for an operator-forced pick, no evidence is
     /// expected). Mirrors `camerata_server::ai_audit::RuleRecommendation::evidence`.
     /// `#[serde(default)]` so a report from before this field existed still deserializes as
@@ -1029,8 +1030,108 @@ fn default_recommendation_applicable() -> bool {
     true
 }
 
+/// A pass or stage that failed or did not run (mirror of the server's `FailedPass`). Before this
+/// the desktop app dropped the whole list, so a scan the spend limit cut short, or a pass that
+/// failed, looked complete.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default, Debug)]
+pub(super) struct FailedPassView {
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub pass: String,
+    #[serde(default)]
+    pub reason: String,
+    /// Why the part failed (transport, auth_or_billing, content, spend_limit, outage_stop, io).
+    /// Empty for a report from before the class existed.
+    #[serde(default)]
+    pub class: String,
+    /// The files the part was shown and did not review.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// What each attempt got back. Operator only; the cockpit shows it, no export carries it.
+    #[serde(default)]
+    pub attempts: Vec<AttemptView>,
+    /// A disclosed limit of the scope, not a failed part.
+    #[serde(default)]
+    pub scope_note: bool,
+}
+
+/// One attempt at a failed part (mirror of the transport's attempt record).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default, Debug)]
+pub(super) struct AttemptView {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+    #[serde(default)]
+    pub second_try: bool,
+    /// Why each reply of the part was turned down (empty when none came back to turn down).
+    #[serde(default)]
+    pub rejections: Vec<String>,
+}
+
+impl AttemptView {
+    /// The one-line form shown in the failure panel.
+    pub(super) fn line(&self) -> String {
+        let mut out = format!("{} {} {}", self.at, self.backend, self.model);
+        if self.second_try {
+            out.push_str(" (second try)");
+        }
+        if let Some(s) = self.http_status {
+            out.push_str(&format!(", HTTP {s}"));
+        }
+        if let Some(t) = &self.error_type {
+            out.push_str(&format!(", {t}"));
+        }
+        if let Some(r) = &self.request_id {
+            out.push_str(&format!(", request {r}"));
+        }
+        if let Some(r) = self.retry_after_secs {
+            out.push_str(&format!(", retry-after {r}s"));
+        }
+        if let Some(w) = self.wait_secs {
+            out.push_str(&format!(", waited {w}s"));
+        }
+        if let Some(c) = self.exit_code {
+            out.push_str(&format!(", exit {c}"));
+        }
+        if !self.message.is_empty() {
+            out.push_str(&format!(": {}", self.message));
+        }
+        if let Some(t) = &self.stderr_tail {
+            out.push_str(&format!(" [stderr: {t}]"));
+        }
+        out
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScanReportView {
+    /// Every pass or stage that failed or did not run. Non-empty means the scan is INCOMPLETE.
+    #[serde(default)]
+    pub failed_passes: Vec<FailedPassView>,
+    /// The saved run this scan is; "Run what remains" resumes it. `None` for a scan that could
+    /// not be saved.
+    #[serde(default)]
+    pub run_id: Option<String>,
     #[serde(default)]
     pub repos: Vec<String>,
     #[serde(default)]
@@ -1093,6 +1194,11 @@ pub(super) struct ScanReportView {
     /// an empty map (no recommendations to show — matches the pre-feature UI exactly).
     #[serde(default)]
     pub recommendations: std::collections::HashMap<String, RuleRecommendationView>,
+    /// Where the services of a multi-repo project differ on a rule: an observation, read-only,
+    /// shown in its own tab. Mirrors `camerata_server::onboard::ScanReport::
+    /// patterns_across_services`; empty (no tab) for a project of one repo.
+    #[serde(default)]
+    pub patterns_across_services: camerata_ui_core::patterns::PatternsView,
 }
 
 pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -1258,6 +1364,7 @@ pub(super) async fn audit_against(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<ScanReportView> {
     // Loading guard: the Bombe machine runs for the full audit round-trip.
     let _guard = crate::loading::LoadingGuard::new();
@@ -1275,6 +1382,7 @@ pub(super) async fn audit_against(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -1592,6 +1700,35 @@ impl RegistryEntryWire {
     }
 }
 
+/// One repo's size for the pre-audit estimate, from `POST /api/onboard/preflight`: what the scan
+/// will read from it, or why it cannot be read.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct RepoSizeView {
+    pub repo: String,
+    #[serde(default)]
+    pub files: usize,
+    #[serde(default)]
+    pub code_chars: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Ask the server how big each repo is as the scan will read it. The scan chunks and calibrates
+/// every repo on its own, so a project of several repos is estimated repo by repo, not as one
+/// stream of code. `None` when the server cannot be reached (the caller falls back to the one
+/// total it already has).
+pub(super) async fn fetch_repo_sizes(repos: &[String]) -> Option<Vec<RepoSizeView>> {
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/preflight", crate::bff_base()))
+        .json(&serde_json::json!({ "repos": repos }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelsResp {
     pub models: Vec<AuditModelOption>,
@@ -1630,7 +1767,7 @@ impl AuditModelsResp {
     /// Return only vision-capable models, grouped by provider.
     // dead_code: the Designer (vision) band selector now lists ALL models (06003633), so the
     // vision-only grouping is unwired; kept (with its tests) because
-    // docs/plans/2026-07-01_ui-core-extraction.md lists it among the pure logic to extract.
+    // The UI-core extraction notes list it among the pure logic to extract.
     #[allow(dead_code)]
     pub fn vision_grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
         let claude: Vec<&AuditModelOption> = self
@@ -1715,6 +1852,9 @@ pub(super) struct JobStateView {
     pub done: usize,
     #[serde(default)]
     pub total: usize,
+    /// Passes refused (spend limit) that did not run; not part of `done`.
+    #[serde(default)]
+    pub not_run: usize,
     #[serde(default)]
     pub findings: Vec<FindingView>,
     /// Live deterministic-pass progress (floor + preview tools). Empty until a tool registers.
@@ -1764,6 +1904,7 @@ pub(super) async fn audit_job_start(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
@@ -1779,6 +1920,7 @@ pub(super) async fn audit_job_start(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -1791,17 +1933,95 @@ pub(super) async fn audit_job_start(
 
 /// Recommend a scan mode by the scanned codebase's SCALE (the design's auto-select):
 /// multi-repo or a large codebase → Background job (decoupled, walk-away); otherwise
-/// Parallel (fast enough to wait on). Sequential is never auto-recommended — it's a manual
-/// gentle/debug override. The user can always change it.
+/// `auto`, the server's default (a Message Batch on the API backend, real time on the CLI
+/// backend; `camerata_server::ai_audit::resolve_scan_mode`). Parallel and Sequential are never
+/// auto-recommended: picking one forces real time. The user can always change it.
 pub(super) fn recommend_scan_mode(report: &ScanReportView) -> String {
     if report.repos.len() > 1 || report.files_scanned > 150 {
         "job".to_string()
     } else {
-        "parallel".to_string()
+        "auto".to_string()
     }
 }
 
 /// Poll an async audit job for progress + incremental findings + the final report.
+/// What "Run what remains" would do: shown before it starts (mirror of the server's preview).
+#[derive(Clone, PartialEq, serde::Deserialize, Default, Debug)]
+pub(super) struct ResumePlanView {
+    /// The parts that remain, the stored and unsent calls and the estimate, ready to show.
+    #[serde(default)]
+    pub text: String,
+    /// Why the resume cannot start now, in plain words; `None` when it can.
+    #[serde(default)]
+    pub refusal: Option<String>,
+}
+
+/// Fetch the resume plan of a saved run.
+pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> {
+    let resp = reqwest::get(format!(
+        "{}/api/inspections/{run_id}/plan",
+        crate::bff_base()
+    ))
+    .await
+    .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    if !resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("that run is not saved any more")
+            .to_string());
+    }
+    resp.json::<ResumePlanView>()
+        .await
+        .map_err(|e| format!("the plan could not be read: {e}"))
+}
+
+/// Start the resume of a saved run as a background job; returns the job id, or the plain reason.
+pub(super) async fn resume_start(run_id: &str) -> Result<String, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/inspections/{run_id}/resume",
+            crate::bff_base()
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    let ok = resp.status().is_success();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if ok {
+        body["job_id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "the server did not return a job".to_string())
+    } else {
+        Err(body["error"]
+            .as_str()
+            .unwrap_or("the run could not be resumed")
+            .to_string())
+    }
+}
+
+/// The whole of "Run what remains" for one run, with the Bombe held from the first request to the
+/// end of the polling: the guard is the first thing built, so it covers the start request, the
+/// job's whole run (`poll`) and every early return. `start` and `poll` are the requests, passed in
+/// so the flow is testable without a server.
+pub(super) async fn run_what_remains<S, SF, P, PF>(
+    loading_count: crate::loading::LoadingCount,
+    start: S,
+    poll: P,
+) -> Result<(), String>
+where
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<String, String>>,
+    P: FnOnce(String) -> PF,
+    PF: std::future::Future<Output = ()>,
+{
+    let _guard = crate::loading::LoadingGuard::from_count(loading_count);
+    let job_id = start().await?;
+    poll(job_id).await;
+    Ok(())
+}
+
 pub(super) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
     reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
@@ -1842,7 +2062,7 @@ pub(super) async fn poll_job(
     jid: String,
     mut audit: Signal<Option<ScanReportView>>,
     mut auditing: Signal<bool>,
-    mut job_progress: Signal<Option<(usize, usize, usize)>>,
+    mut job_progress: Signal<Option<(usize, usize, usize, usize)>>,
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered by the
     // "Deterministic scan" component above the AI agent-activity drawer. `None` clears it.
     mut det_progress: Signal<Option<DetProgressView>>,
@@ -1865,7 +2085,12 @@ pub(super) async fn poll_job(
             Some(js) => {
                 misses = 0;
                 scan_idle_ms.set(js.idle_ms);
-                job_progress.set(Some((js.job.done, js.job.total, js.job.findings.len())));
+                job_progress.set(Some((
+                    js.job.done,
+                    js.job.total,
+                    js.job.findings.len(),
+                    js.job.not_run,
+                )));
                 // Surface the deterministic progress whenever any tool has registered, so the
                 // component appears the moment the floor starts (not only once findings land).
                 if js.job.deterministic.total > 0 {
@@ -2029,6 +2254,7 @@ pub(super) fn finding_columns(
             BadgeVariant::new("Medium", "yellow"),
         )
         .with(severity_sort_value("low"), BadgeVariant::new("Low", "gray"));
+    let multi_repo = repos.len() > 1;
     let mut cols = vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
             CellValue::Text(f.repo.clone())
@@ -2203,8 +2429,10 @@ pub(super) fn finding_columns(
         // rule → file, so a rule violated 4× across one file collapses under a
         // "handlers.rs (4)" sub-header instead of 4 loose rows. Path-only (not path:line)
         // so all sites in a file share one group; the line lives in the Line column.
-        ColumnDef::new(ColumnId("file"), "File", |f: &FindingView| {
-            CellValue::Text(f.path.clone())
+        // Several repos: the value leads with the repo, because `src/index.ts` exists in every
+        // service and a bare path would merge them into one group (and one filter match).
+        ColumnDef::new(ColumnId("file"), "File", move |f: &FindingView| {
+            CellValue::Text(camerata_ui_core::triage::file_group_label(f, multi_repo))
         })
         .sortable()
         .filter(FilterKind::Text)
@@ -2819,6 +3047,7 @@ pub(super) fn ProgressStrip(
             if let Some(open) = on_open_stats {
                 button {
                     class: "btn-edit-sm progress-stats-btn",
+                    "data-tour": camerata_ui_core::walkthrough::target::REVIEW_TIME,
                     title: "Internal review-time stats. Never part of an export.",
                     onclick: move |_| open.call(()),
                     "Review time"
@@ -4640,6 +4869,8 @@ pub(super) fn FindingsTable(
     // functions the buttons and keys already call. Hosted at the results root (`palette.rs`),
     // like the other overlays, and registered below.
     let palette_slot = try_use_context::<super::palette::PaletteSlot>();
+    // The inspection walkthrough, for the palette's "Start walkthrough" line.
+    let tour_handle = try_use_context::<crate::walkthrough::TourHandle>();
     let mut palette_open = use_signal(|| Option::<super::palette::PaletteOpen>::None);
     let mut palette_serial = use_signal(|| 0u64);
     // THE GATE, read from the live state: refused while ANY reason prompt is open (the pane's or
@@ -4717,6 +4948,14 @@ pub(super) fn FindingsTable(
                 }
             }
             PaletteAction::OpenStats => on_open_stats.call(()),
+            // The Help menu's "Start walkthrough" calls this same function. It asks the page
+            // for a reason prompt, an overlay or a dialog itself and refuses under one.
+            PaletteAction::StartWalkthrough => {
+                if let Some(tour) = tour_handle {
+                    // Only this line may start it while the palette (which is running it) is open.
+                    tour.start(camerata_ui_core::walkthrough::StartSource::Palette);
+                }
+            }
         }
         true
     });
@@ -4935,7 +5174,10 @@ pub(super) fn FindingsTable(
                 ProgressStrip { counts }
             }
         }
-        div { class: "findings-toolbar",
+        div {
+            class: "findings-toolbar",
+            // The walkthrough points here for the review queue (the decisions live in this bar).
+            "data-tour": camerata_ui_core::walkthrough::target::REVIEW_QUEUE,
             // View-specific triage actions. A move writes the new disposition for each
             // selected finding and drops it from this table; it reappears under its target
             // table on the next switch. Backend commit happens later, at Process.
@@ -5044,6 +5286,7 @@ pub(super) fn FindingsTable(
             button {
                 class: "btn-edit-sm",
                 id: super::palette::PALETTE_BUTTON_ID,
+                "data-tour": camerata_ui_core::walkthrough::target::SPEED_TOOLS,
                 title: "Open the command palette: every review action in one filtered list (Ctrl+K or Cmd+K).",
                 onclick: move |_| toggle_palette.call(false),
                 "Commands"
@@ -5295,6 +5538,9 @@ pub(super) enum RepoDetect {
         repo: String,
         path: String,
         onboarded_in: Option<String>,
+        /// What is limited for a folder that is not on GitHub (it can be inspected, but push and
+        /// pull requests are GitHub-only). `None` for a GitHub repo.
+        note: Option<String>,
     },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
@@ -5332,6 +5578,10 @@ pub(super) async fn detect_local_repo() -> RepoDetect {
                 onboarded_in: v
                     .get("onboarded_project")
                     .and_then(|p| p.as_str())
+                    .map(|s| s.to_string()),
+                note: v
+                    .get("note")
+                    .and_then(|n| n.as_str())
                     .map(|s| s.to_string()),
             },
             None => RepoDetect::Failed("no repo in the response".to_string()),
@@ -5432,6 +5682,72 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
     let scan_blocked = crate::source_ui::use_scan_block()
         .and_then(|b| camerata_ui_core::readiness::scan_block_for(&b, &scan_scope));
 
+    // Saved inspections of the open project: an inspection the app lost (it was closed, crashed
+    // or the machine died) or that ended with a part left is offered here, on app start and when
+    // a project is opened, with "Run what remains". Any interruption should cost minutes, never
+    // the run. The plan preview, the resume and the Bombe are the ones the incomplete-scan banner
+    // uses; this is the way in from a screen that has no report yet.
+    let mut saved_epoch = use_signal(|| 0u32);
+    let saved_res = use_resource(move || async move {
+        let _ = saved_epoch();
+        super::saved_inspections::fetch_saved_inspections().await
+    });
+    let saved: Vec<camerata_ui_core::saved_inspections::SavedInspection> =
+        saved_res.read().clone().unwrap_or_default();
+    let mut saved_plan = use_signal(|| Option::<(String, ResumePlanView)>::None);
+    let mut saved_busy = use_signal(|| false);
+    let mut saved_error = use_signal(|| Option::<String>::None);
+    let mut active_audit_job = use_context::<Signal<Option<String>>>();
+    // Captured here, in the render body, as `poll_job` requires (see BOMBE-SILENT-MISS there).
+    let loading_count = use_context::<crate::loading::LoadingCount>();
+    let saved_for_resume = saved.clone();
+    let on_saved_plan = EventHandler::new(move |run_id: String| {
+        saved_error.set(None);
+        spawn(async move {
+            let plan = match resume_plan(&run_id).await {
+                Ok(plan) => plan,
+                Err(why) => ResumePlanView {
+                    text: String::new(),
+                    refusal: Some(why),
+                },
+            };
+            saved_plan.set(Some((run_id, plan)));
+        });
+    });
+    let on_saved_resume = EventHandler::new(move |run_id: String| {
+        let repos = saved_for_resume
+            .iter()
+            .find(|r| r.id == run_id)
+            .map(|r| r.repos.clone())
+            .unwrap_or_default();
+        saved_plan.set(None);
+        saved_error.set(None);
+        saved_busy.set(true);
+        spawn(async move {
+            // The Bombe runs from the start request to the end of the job; the scan results
+            // mount while it runs and pick the job up from `active_audit_job` (as they do for a
+            // scan started before the view was left), so the report appears there.
+            let result = run_what_remains(
+                loading_count,
+                || async { resume_start(&run_id).await },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    repo.set(repos.join("\n"));
+                    if let Some(report) = scan_repos(&repos).await {
+                        scan.set(Some(report));
+                    }
+                    super::saved_inspections::wait_for_audit_job(&jid).await;
+                },
+            )
+            .await;
+            saved_busy.set(false);
+            saved_epoch += 1;
+            if let Err(why) = result {
+                saved_error.set(Some(format!("Cannot resume now: {why}")));
+            }
+        });
+    });
+
     // Greenfield-specific state: the new repo's name, the local directory to create,
     // the selected corpus rules to bake in, the in-progress flag, and the scaffold result.
     // These signals are mutated inside the GreenfieldForm child component — the parent
@@ -5498,6 +5814,8 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
             div { class: "onboard-head",
                 p { class: "onboard-title", "Onboard repos into governance" }
                 p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
+                // The inspection's start screen carries the "Guided inspection" switch.
+                crate::walkthrough::GuidedSwitch {}
             }
 
             // Path chooser.
@@ -5527,6 +5845,17 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
 
             // ── Brownfield path: browse existing repos + scan ─────────────────
             if path() == OnboardPath::Brownfield {
+                // A saved inspection to finish comes before starting another.
+                if scan().is_none() {
+                    super::saved_inspections::SavedInspectionsPanel {
+                        saved: saved.clone(),
+                        plan: saved_plan(),
+                        busy: saved_busy(),
+                        error: saved_error(),
+                        on_plan: Some(on_saved_plan),
+                        on_resume: Some(on_saved_resume),
+                    }
+                }
                 div { class: "onboard-repo-block",
                     label { class: "onboard-repo-label", "Repositories — browse to each repo's local folder (a feature often spans several)" }
                     {
@@ -5569,15 +5898,16 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                     }
                     button {
                         class: "btn-edit-sm onboard-browse",
+                        "data-tour": camerata_ui_core::walkthrough::target::REPO_ADD,
                         onclick: move |_| {
                             spawn(async move {
                                 match detect_local_repo().await {
                                     RepoDetect::Cancelled => {}
                                     // #50: block re-onboarding a repo that's already onboarded.
                                     RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time, so add it to your workspace to work on it, instead of re-onboarding."));
                                     }
-                                    RepoDetect::Found { repo: found, path: folder, .. } => {
+                                    RepoDetect::Found { repo: found, path: folder, note, .. } => {
                                         let saved = set_repo_path(&found, &folder).await;
                                         let mut cur = repo();
                                         let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
@@ -5590,14 +5920,15 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                             cur.push_str(&found);
                                             repo.set(cur);
                                             if saved {
-                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                                                let limit = note.map(|n| format!(" {n}")).unwrap_or_default();
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder}).{limit}"));
                                             } else {
                                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
                                             }
                                         }
                                     }
                                     RepoDetect::Failed(msg) => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repository."));
                                     }
                                 }
                             });
@@ -6622,7 +6953,9 @@ pub(super) fn RuleAlternativesPanel(
 pub(super) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     rsx! {
         if let Some(msg) = message {
-            div { class: "onboard-gate scan-job-failed-banner",
+            div {
+                class: "onboard-gate scan-job-failed-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "Scan failed" }
@@ -6630,6 +6963,159 @@ pub(super) fn ScanJobFailedBanner(message: Option<String>) -> Element {
                     p { class: "onboard-gate-hint",
                         "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan."
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The progress line under the bar. Passes the spend limit refused are named on their own and
+/// are NOT in `done`, so a stopped scan never reads as complete.
+pub(super) fn job_progress_label(
+    done: usize,
+    total: usize,
+    findings: usize,
+    not_run: usize,
+) -> String {
+    if not_run > 0 {
+        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN (spend limit) \u{b7} {findings} finding(s) so far")
+    } else {
+        format!("{done}/{total} passes \u{b7} {findings} finding(s) so far")
+    }
+}
+
+/// The INCOMPLETE banner: renders whenever any pass or stage failed or did not run (a spend
+/// limit stop, a failed pass, a skipped stage) and nothing otherwise. Before this the desktop
+/// app showed no failed pass of any cause, so an incomplete scan read as a clean one.
+/// `compact` is the one-line form shown beside the export button, where the export will carry
+/// the same disclosure. Its own component so it is SSR-testable without `ScanResults`.
+#[component]
+pub(super) fn IncompletePassesBanner(
+    failed_passes: Vec<FailedPassView>,
+    compact: bool,
+    // The saved run this scan is. With it, "Run what remains" is live; without, it stays off.
+    #[props(default)] run_id: Option<String>,
+    // What the resume would do, once asked for (`on_plan`): shown before anything is sent.
+    #[props(default)] plan: Option<ResumePlanView>,
+    // True while the resume job runs.
+    #[props(default)] busy: bool,
+    #[props(default)] on_plan: Option<EventHandler<String>>,
+    #[props(default)] on_resume: Option<EventHandler<String>>,
+) -> Element {
+    if failed_passes.is_empty() {
+        return rsx! {};
+    }
+    let n = failed_passes.len();
+    let stopped_by_limit = failed_passes
+        .iter()
+        .any(|f| f.reason.contains("spend limit"));
+    if compact {
+        return rsx! {
+            div { class: "onboard-gate scan-incomplete-banner scan-incomplete-compact",
+                span { class: "onboard-gate-dot" }
+                p { class: "onboard-gate-b",
+                    "Incomplete: {n} pass(es) or stage(s) did not run. The export will say so."
+                }
+            }
+        };
+    }
+    rsx! {
+        div { class: "onboard-gate scan-incomplete-banner",
+            span { class: "onboard-gate-dot" }
+            div {
+                p { class: "onboard-gate-h", "Incomplete: {n} pass(es) or stage(s) did not run" }
+                if stopped_by_limit {
+                    p { class: "onboard-gate-b",
+                        "Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run."
+                    }
+                }
+                ul { class: "scan-incomplete-list",
+                    for (i , f) in failed_passes.iter().enumerate() {
+                        li { key: "{i}",
+                            details { class: "scan-failure",
+                                summary { "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                                p { class: "scan-failure-meta",
+                                    "Class: {f.class}. Repo: {f.repo}. Part: {f.pass}. Files: {f.files.len()}."
+                                }
+                                if !f.files.is_empty() {
+                                    p { class: "scan-failure-files", "{f.files.join(\", \")}" }
+                                }
+                                ol { class: "scan-failure-attempts",
+                                    for (n , a) in f.attempts.iter().enumerate() {
+                                        li { key: "{n}",
+                                            "{a.line()}"
+                                            if !a.rejections.is_empty() {
+                                                ul { class: "scan-failure-rejections",
+                                                    for (m , r) in a.rejections.iter().enumerate() {
+                                                        li { key: "{m}", "Turned down: {r}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                button {
+                                    class: "scan-failure-copy",
+                                    r#type: "button",
+                                    onclick: {
+                                        let entry = f.clone();
+                                        move |_| {
+                                            let text = serde_json::to_string_pretty(&entry).unwrap_or_default();
+                                            spawn(async move {
+                                                let _ = crate::source_ui::copy_to_clipboard(&text).await;
+                                            });
+                                        }
+                                    },
+                                    "Copy as JSON"
+                                }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "scan-run-what-remains",
+                    r#type: "button",
+                    disabled: run_id.is_none() || busy,
+                    title: if run_id.is_some() {
+                        "Show what would run again and what it should cost. Nothing is sent until you confirm."
+                    } else {
+                        "This scan was not saved, so it cannot be resumed. Run it again."
+                    },
+                    onclick: {
+                        let run_id = run_id.clone();
+                        move |_| {
+                            if let (Some(id), Some(handler)) = (run_id.clone(), on_plan) {
+                                handler.call(id);
+                            }
+                        }
+                    },
+                    "Run what remains"
+                }
+                if let Some(plan) = plan.clone() {
+                    div { class: "scan-resume-plan",
+                        pre { class: "scan-resume-plan-text", "{plan.text}" }
+                        if let Some(why) = plan.refusal.clone() {
+                            p { class: "onboard-gate-b scan-resume-refusal", "Cannot resume now: {why}" }
+                        } else {
+                            button {
+                                class: "scan-resume-confirm",
+                                r#type: "button",
+                                disabled: busy,
+                                onclick: {
+                                    let run_id = run_id.clone();
+                                    move |_| {
+                                        if let (Some(id), Some(handler)) = (run_id.clone(), on_resume) {
+                                            handler.call(id);
+                                        }
+                                    }
+                                },
+                                "Start: run only these parts"
+                            }
+                        }
+                    }
+                }
+                p { class: "onboard-gate-hint",
+                    "A clean result here does NOT mean the missing parts are clean. Raise the limit or re-run to cover them."
                 }
             }
         }
@@ -6650,7 +7136,9 @@ pub(super) fn AiReviewBlockedBanner(
 ) -> Element {
     rsx! {
         if let Some(reason) = ai_blocked_reason {
-            div { class: "onboard-gate ai-review-blocked-banner",
+            div {
+                class: "onboard-gate ai-review-blocked-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "AI review did not run" }
@@ -6661,7 +7149,9 @@ pub(super) fn AiReviewBlockedBanner(
                 }
             }
         } else if let Some(err) = ai_error {
-            div { class: "onboard-gate ai-review-error-banner",
+            div {
+                class: "onboard-gate ai-review-error-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "AI review failed" }
@@ -7358,6 +7848,56 @@ pub(super) fn NotAssessedPanel(
     }
 }
 
+/// The read-only "Patterns across services" tab: the rules the services of a multi-repo project
+/// differ on, one grid per rule. An observation, not a finding: nothing here is triaged, rated
+/// or counted, and a service where a rule does not apply, or was not reviewed, is shown as such
+/// and never as clean. Mirrors the report's section (`camerata_ui_core::patterns`).
+#[component]
+pub(super) fn PatternsPanel(
+    view: camerata_ui_core::patterns::PatternsView,
+    titles: Option<std::collections::HashMap<String, String>>,
+) -> Element {
+    // The same rows the report prints: under the rule's title, and without a row whose rule is
+    // not in the loaded library.
+    let shown = view.rows_with_titles(titles.as_ref());
+    if shown.is_empty() {
+        return rsx! {
+            p { class: "kind-panel-empty",
+                "No rule was found violated in one service and clean in another."
+            }
+        };
+    }
+    rsx! {
+        div { class: "kind-panel patterns-panel",
+            p { class: "kind-panel-sub",
+                "Where the services of this project differ on a rule. An observation, not a finding: it carries no severity and is in no count. A service where a rule does not apply, or was not reviewed, is shown as such and is never counted as clean."
+            }
+            for (row , title) in shown.iter() {
+                div { key: "{row.rule_id}", class: "kind-panel-group",
+                    p { class: "kind-panel-group-h", "{title}" }
+                    p { class: "kind-panel-sub",
+                        "{camerata_ui_core::patterns::pattern_sentence(title)}"
+                    }
+                    ul { class: "kind-panel-list",
+                        for cell in row.cells.iter() {
+                            li { key: "{cell.repo}", class: "kind-panel-row",
+                                span { class: "kind-panel-repo", "{cell.repo}" }
+                                span { class: "kind-panel-label", "{cell.label()}" }
+                            }
+                        }
+                    }
+                }
+            }
+            for theme in view.themes.iter() {
+                div { key: "{theme.name}", class: "kind-panel-group",
+                    p { class: "kind-panel-group-h", "{theme.name}" }
+                    p { class: "kind-panel-sub", "{theme.note}" }
+                }
+            }
+        }
+    }
+}
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -7418,8 +7958,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             calibration_model.set(m);
         }
     }
-    // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
-    // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
+    // Scan mode (user-facing): "auto" (default: the server picks batch on the API backend),
+    // "parallel" / "sequential" (forced real time), "batch" (forced batch), or "job" (async:
+    // submit, walk away, poll). Job sends "auto", so it batches on the API backend too.
     // AUTO-SELECTED by the scan's scale; the user can override.
     let recommended_mode = recommend_scan_mode(&report);
     let mut audit_mode = use_signal(|| recommended_mode.clone());
@@ -7429,6 +7970,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
     // project is full regardless (no cache yet).
     let mut audit_full_scan = use_signal(|| false);
+    // Spend limit (USD): blank = none. The run stops between passes once actual spend reaches
+    // it and lists what it did not run (the server twin of `camerata inspect --max-cost-usd`).
+    let mut audit_spend_limit =
+        use_signal(|| camerata_ui_core::scan::DEFAULT_SPEND_LIMIT_TEXT.to_string());
     // Deep compliance & security tier (#55): opt-in, the most expensive tier.
     // Runs three extra whole-repo passes (SOC-2 gap analysis, deep security audit,
     // threat model) after the standard audit and attaches the results as `report.deep`.
@@ -7447,7 +7992,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let feature_flags_res = use_resource(fetch_feature_flags);
     let feature_flags = feature_flags_res.read().clone().unwrap_or_default();
     // Live progress for an async job: (passes done, passes total, findings so far).
-    let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
+    let mut job_progress = use_signal(|| Option::<(usize, usize, usize, usize)>::None);
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered above the AI
     // agent-activity drawer. Primary progress view in deterministic-only mode (no AI drawer).
     let mut det_progress = use_signal(|| Option::<DetProgressView>::None);
@@ -7457,7 +8002,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut job_failed_message = use_signal(|| Option::<String>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
-    let active_audit_job = use_context::<Signal<Option<String>>>();
+    let mut active_audit_job = use_context::<Signal<Option<String>>>();
     // The audited repos whose source was deleted from this machine: audit, apply and open-PR
     // all need the source on disk, so they switch off and say why.
     let scan_blocked = crate::source_ui::use_scan_block()
@@ -7467,6 +8012,51 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // guaranteed — never resolved from inside `poll_job`'s own body, which runs detached inside
     // this `use_future`'s async block (see the BOMBE-SILENT-MISS note on `poll_job`).
     let loading_count = use_context::<crate::loading::LoadingCount>();
+    // "Run what remains": the plan is fetched first and shown with its estimate; confirming
+    // starts the resume job and polls it with the Bombe held for the whole run.
+    let mut resume_plan_shown = use_signal(|| Option::<ResumePlanView>::None);
+    let on_plan = EventHandler::new(move |run_id: String| {
+        spawn(async move {
+            match resume_plan(&run_id).await {
+                Ok(plan) => resume_plan_shown.set(Some(plan)),
+                Err(why) => resume_plan_shown.set(Some(ResumePlanView {
+                    text: String::new(),
+                    refusal: Some(why),
+                })),
+            }
+        });
+    });
+    let on_resume = EventHandler::new(move |run_id: String| {
+        resume_plan_shown.set(None);
+        job_failed_message.set(None);
+        auditing.set(true);
+        spawn(async move {
+            let result = run_what_remains(
+                loading_count,
+                || async { resume_start(&run_id).await },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    poll_job(
+                        jid,
+                        audit,
+                        auditing,
+                        job_progress,
+                        det_progress,
+                        active_audit_job,
+                        scan_idle_ms,
+                        job_failed_message,
+                        loading_count,
+                    )
+                    .await;
+                },
+            )
+            .await;
+            if let Err(why) = result {
+                auditing.set(false);
+                job_failed_message.set(Some(why));
+            }
+        });
+    });
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
@@ -7520,6 +8110,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
+    // Per-repo sizes for the estimate (several repos only): fetched once per mount.
+    let repo_sizes = {
+        let repos = report.repos.clone();
+        use_resource(move || {
+            let repos = repos.clone();
+            async move {
+                if repos.len() > 1 {
+                    fetch_repo_sizes(&repos).await
+                } else {
+                    None
+                }
+            }
+        })
+    };
     let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
     use_context_provider(|| viewed_repo);
     let mut viewed_repo = viewed_repo;
@@ -7660,6 +8264,23 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
     // for no curator benefit.
     let mut kind_view = use_signal(|| KindSurface::Queue);
+    // The "Patterns across services" tab of a multi-repo project. It is an observation, not a
+    // kind of finding, so it is a lens of its own beside the kind switch and not a fifth kind.
+    let mut patterns_open = use_signal(|| false);
+    // The rule library, for the titles the patterns tab prints (the report prints titles too).
+    let pattern_titles_res = use_resource(fetch_corpus_rules);
+    let pattern_titles = move || {
+        pattern_titles_res
+            .read()
+            .as_ref()
+            .and_then(|loaded| loaded.as_ref())
+            .map(|rules| {
+                rules
+                    .iter()
+                    .map(|r| (r.id.clone(), r.title.clone()))
+                    .collect::<std::collections::HashMap<String, String>>()
+            })
+    };
     // THE RULE HUB (design §8): which (repo, rule) the hub is open on, and the Queue jump it
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
@@ -7826,11 +8447,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // With a fifth disposition the duplicate became a real drift risk — a state the loop
     // forgot would show a permanent zero on its tab AND silently stop blocking the Process
     // gate — so the tally is now taken by core's own function, the one the unit tests cover.
-    let triage_counts: TriageCounts = TriageModel {
+    let triage_model = TriageModel {
         dispositions: dispositions.read().clone(),
         triage_view: triage_view(),
-    }
-    .counts(&queue_findings);
+    };
+    let triage_counts: TriageCounts = triage_model.counts(&queue_findings);
+    // The same tally per repo, shown under the tabs when the scan covers several repos.
+    let repo_counts: Vec<(String, TriageCounts)> = triage_model.counts_by_repo(&queue_findings);
 
     // THE RULE HUB's data for whichever rule is open, derived once per render from the scan's
     // own rows by core's `rule_hub`. A request for a rule with no rows in that repo resolves
@@ -8056,7 +8679,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             }
                             div { class: "rule-modal-meta",
                                 span { class: "rule-modal-tag", "severity · {f.severity}" }
-                                span { class: "rule-modal-tag", "{f.path}:{f.line}" }
+                                span { class: "rule-modal-tag", "{finding_location_label(&f)}" }
                                 span { class: "rule-modal-tag", "{f.status}" }
                                 // Authority: deterministic floor (stable, gateable) vs AI-advisory
                                 // (model-inferred, id/severity may vary run-to-run).
@@ -8268,7 +8891,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             }
 
             // ── Phase 1 result: the proposed ruleset to pick from ──────────────
-            p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
+            p {
+                class: "scan-section-h",
+                // The walkthrough points here for the stack rules.
+                "data-tour": camerata_ui_core::walkthrough::target::RULES,
+                "Step 1 — proposed starter ruleset"
+            }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
             p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
             // Per-repo view switch (multi-repo only): pick which repo's recommended-rule
@@ -8350,6 +8978,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // Full scan forces a clean pass; otherwise the scan is incremental
                             // (only files changed since the last scan cost AI tokens).
                             let incremental = !audit_full_scan();
+                            // A spend limit that is not a positive number stops the scan from
+                            // starting (and says why) rather than silently running unlimited.
+                            let max_cost = match camerata_ui_core::scan::parse_spend_limit(&audit_spend_limit()) {
+                                Ok(v) => v,
+                                Err(msg) => {
+                                    job_failed_message.set(Some(msg));
+                                    return;
+                                }
+                            };
                             // Deterministic-only is fast, but its PROGRESS is only pollable on
                             // the async job path (the sync path holds one request and returns
                             // the final report). So route a deterministic-ONLY scan through the
@@ -8390,7 +9027,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", thorough, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -8416,7 +9053,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await;
+                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det, max_cost).await;
                                     if result.is_none() {
                                         // The sync request itself failed (network error, server
                                         // unreachable) — the server-side crash path already
@@ -8554,15 +9191,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         disabled: auditing(),
                         value: "{audit_mode}",
                         onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "parallel", "Parallel" }
-                        option { value: "sequential", "Sequential (slower, gentlest)" }
-                        option { value: "job", "Background job (walk away)" }
-                        option { value: "batch", "Batch (50% off — async, API key required)" }
+                        option { value: "auto", "Default (batch on the API backend, else parallel)" }
+                        option { value: "parallel", "Parallel (real time)" }
+                        option { value: "sequential", "Sequential (real time, slower, gentlest)" }
+                        option { value: "job", "Background job (walk away, default mode)" }
+                        option { value: "batch", "Batch (50% off, async, API key required)" }
                     }
                     if audit_mode() == recommended_mode {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
-                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
+                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
                 // Thorough calibration (#51) — opt-in, costs more AI.
                 div { class: "audit-model-row",
@@ -8595,6 +9233,22 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                     span { class: "audit-model-hint",
                         "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
+                    }
+                }
+                // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
+                div {
+                    class: "audit-model-row",
+                    "data-tour": camerata_ui_core::walkthrough::target::SPEND_LIMIT,
+                    label { class: "audit-model-label", "Spend limit (USD)" }
+                    input {
+                        r#type: "text",
+                        placeholder: "no limit",
+                        value: "{audit_spend_limit}",
+                        disabled: auditing(),
+                        oninput: move |e| audit_spend_limit.set(e.value()),
+                    }
+                    span { class: "audit-model-hint",
+                        "Optional. The scan stops between passes once its actual AI spend reaches this amount, lists every pass it did not run, and marks the result incomplete. Passes already started finish, so it can end about one pass over the limit. Leave blank for no limit."
                     }
                 }
                 // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
@@ -8637,6 +9291,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         p { class: "section-hint", "You can file the CI-wiring stories (GitHub issues) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
                     }
                 }
+                // Inspection setup: who the inspection is for. Saved with the project, it fills
+                // the confidentiality line on every page and sheet of every export, and the
+                // export refuses to run while it is blank (2026-10-24 decision).
+                if let Some(p) = active_project.as_ref() {
+                    ClientNameSetup {
+                        project_id: p.id.clone(),
+                        initial: p.client_name.clone(),
+                    }
+                }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
                 // model + mode + ticked rules), and — once the audit has run — the ACTUAL
                 // billed usage beside it, so the estimate is verifiable, not a black box.
@@ -8654,10 +9317,21 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let ai_on = run_ai_review();
                         let (a_in, a_out) = if ai_on { price(&audit_model(), (3.0, 15.0)) } else { (0.0, 0.0) };
                         let (c_in, c_out) = if ai_on { price(&calibration_model(), (a_in, a_out)) } else { (0.0, 0.0) };
+                        // The fix stage runs on its default model (the server's `fix_on_haiku`
+                        // switch is on by default); priced when the model list prices it.
+                        let fix_model_id = camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
+                        let fix_price = if ai_on {
+                            models.as_ref().and_then(|m| m.models.iter().find(|o| o.id == fix_model_id).map(|o| (o.price_in, o.price_out)))
+                        } else {
+                            None
+                        };
+                        let scan_id = audit_model();
+                        let calibration_id = calibration_model();
                         let sel = selected_count();
                         // Mirror the request flags the audit will actually send: incremental
-                        // scope (only changed files cost tokens unless Full scan is ticked) and
-                        // the deep SOC-2/security tier (three extra whole-repo passes).
+                        // scope (only changed files cost tokens unless Full scan is ticked; the
+                        // estimate prices a full scan and the note below says so) and the deep
+                        // SOC-2/security tier (three extra whole-repo passes).
                         let incremental = !audit_full_scan();
                         // Deep tier only runs with AI; force it off in the estimate when AI is off.
                         let deep = audit_deep() && ai_on;
@@ -8671,13 +9345,82 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected);
+                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend).to_string();
+                        // THE run estimate (`camerata_ui_core::scan::cockpit_run_estimate`): the
+                        // same arithmetic the command line's pre-flight prints, over the inputs
+                        // the cockpit has (each repo as one routing group: the cockpit has no
+                        // file list to route, so its figure sits a little under the pre-flight's).
+                        fn priced(id: &str, price_in: f64, price_out: f64) -> camerata_ui_core::scan::PricedModel<'_> {
+                            camerata_ui_core::scan::PricedModel { id, price_in, price_out }
+                        }
+                        let flags = camerata_ui_core::scan::RunFlags {
+                            thorough: audit_thorough(),
+                            deep,
+                            backend,
+                            terse_output: true,
+                        };
+                        let run_estimate = |inputs: &[camerata_ui_core::scan::RunRepoInput]| {
+                            camerata_ui_core::scan::cockpit_run_estimate(
+                                inputs,
+                                &est_mode,
+                                priced(&scan_id, a_in, a_out),
+                                priced(&calibration_id, c_in, c_out),
+                                fix_price.map(|(i, o)| priced(fix_model_id, i, o)),
+                                flags,
+                            )
+                        };
+                        // Several repos: one estimate per repo, summed (the scan chunks and
+                        // calibrates each repo on its own). Single repo, or sizes not back yet:
+                        // the one-stream estimate, unchanged.
+                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { (*repo_sizes.read()).clone().flatten() } else { None };
+                        let mut repo_lines: Vec<String> = Vec::new();
+                        let (toks, dollars, passes) = match sizes {
+                            Some(sizes) => {
+                                let selection = repo_selection.read().clone();
+                                // A repo is priced only when its rule choice is known: a guessed
+                                // rule count would put a made-up figure in front of a spend decision.
+                                let inputs: Vec<camerata_ui_core::scan::RunRepoInput> = sizes
+                                    .iter()
+                                    .filter(|z| z.error.is_none())
+                                    .filter_map(|z| {
+                                        let ids = selection.get(&z.repo)?;
+                                        Some(camerata_ui_core::scan::RunRepoInput {
+                                            repo: z.repo.clone(),
+                                            code_chars: z.code_chars,
+                                            selected: ids.len(),
+                                            multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
+                                            routing_groups: 1,
+                                        })
+                                    })
+                                    .collect();
+                                let est = run_estimate(&inputs);
+                                for z in sizes.iter() {
+                                    match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
+                                        (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
+                                        (None, Some(row)) => repo_lines.push(camerata_ui_core::scan::repo_estimate_line(&z.repo, z.files, z.code_chars, row)),
+                                        (None, None) => repo_lines.push(camerata_ui_core::scan::unknown_rules_repo_line(&z.repo)),
+                                    }
+                                }
+                                (est.tokens, est.dollars, est.passes)
+                            }
+                            None => {
+                                let est = run_estimate(&[camerata_ui_core::scan::RunRepoInput {
+                                    repo: report.repos.first().cloned().unwrap_or_default(),
+                                    code_chars: report.code_chars,
+                                    selected: sel,
+                                    multi_option_selected,
+                                    routing_groups: 1,
+                                }]);
+                                (est.tokens, est.dollars, est.passes)
+                            }
+                        };
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
                         let actual = audited.as_ref().and_then(|a| a.actual_usage.clone()).filter(|u| u.calls > 0);
                         rsx! {
-                            div { class: "audit-cost",
+                            div {
+                                class: "audit-cost",
                                 if let Some(u) = actual {
                                     {
                                         let act_toks = u.input_tokens + u.output_tokens;
@@ -8715,6 +9458,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         span { class: "audit-cost-val", "{dollar_str}" }
                                         span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
                                     }
+                                    if !repo_lines.is_empty() {
+                                        ul { class: "audit-cost-repos",
+                                            for line in repo_lines.iter() {
+                                                li { key: "{line}", "{line}" }
+                                            }
+                                        }
+                                    }
                                     p { class: "audit-cost-note",
                                         // Approximate in both directions now, not uniformly "biased high": output
                                         // tokens (found issues) dominate findings-heavy scans regardless of backend,
@@ -8749,7 +9499,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 }
                 // Live progress for an async job: a determinate bar (it grows as repos are
                 // discovered) + a findings-so-far count, so a walk-away scan shows life.
-                if let Some((done, total, nf)) = job_progress() {
+                if let Some((done, total, nf, not_run)) = job_progress() {
                     {
                         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
                         let n_repos = report.repos.len();
@@ -8758,7 +9508,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 div { class: "job-progress-track",
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
-                                span { class: "job-progress-label", "{done}/{total} passes · {nf} finding(s) so far" }
+                                span { class: "job-progress-label", "{job_progress_label(done, total, nf, not_run)}" }
                                 // Multi-repo scans run ONE repo at a time, and the pass
                                 // denominator grows as each repo is reached — so the agent
                                 // activity below shows only the repo currently running, not all
@@ -8862,6 +9612,17 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     ai_blocked_reason: audited.as_ref().and_then(|a| a.ai_blocked_reason.clone()),
                     ai_error: audited.as_ref().and_then(|a| a.ai_error.clone()),
                 }
+                // Passes or stages that failed or did not run (spend limit, failures): the scan
+                // is INCOMPLETE and must say so wherever its results are read.
+                IncompletePassesBanner {
+                    failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
+                    compact: false,
+                    run_id: audited.as_ref().and_then(|a| a.run_id.clone()),
+                    plan: resume_plan_shown(),
+                    busy: auditing(),
+                    on_plan: Some(on_plan),
+                    on_resume: Some(on_resume),
+                }
 
                 // PRIMARY axis: the kind switcher. Flipping it flips the action vocabulary too,
                 // because the decisions genuinely differ — the Queue disposes rows, the three
@@ -8869,12 +9630,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 div { class: "kind-switch",
                     for (surface , count) in kind_counts.iter().copied() {
                         {
-                            let active = kind_view() == surface;
+                            let active = !patterns_open() && kind_view() == surface;
                             rsx! {
                                 button {
                                     key: "{surface.label()}",
                                     class: if active { "kind-tab active" } else { "kind-tab" },
-                                    onclick: move |_| kind_view.set(surface),
+                                    onclick: move |_| {
+                                        patterns_open.set(false);
+                                        kind_view.set(surface);
+                                    },
                                     "{surface.label()} "
                                     span { class: "triage-tab-count", "{count}" }
                                     // The alarm chip: rows that reached the UI with no kind at
@@ -8892,9 +9656,28 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             }
                         }
                     }
+                    // The observation tab, only for a project of several repos.
+                    if audited.as_ref().is_some_and(|a| a.patterns_across_services.is_present()) {
+                        button {
+                            class: if patterns_open() { "kind-tab active" } else { "kind-tab" },
+                            onclick: move |_| patterns_open.set(true),
+                            "Patterns across services "
+                            span { class: "triage-tab-count",
+                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count_with_titles(pattern_titles().as_ref()))}"
+                            }
+                        }
+                    }
                 }
 
-                if kind_view() == KindSurface::Queue {
+                if patterns_open() {
+                    PatternsPanel {
+                        view: audited
+                            .as_ref()
+                            .map(|a| a.patterns_across_services.clone())
+                            .unwrap_or_default(),
+                        titles: pattern_titles(),
+                    }
+                } else if kind_view() == KindSurface::Queue {
                     // Single-select over the triage tables, each with a live count. The set
                     // and its order come from `TriageState::all()` and the count from
                     // `TriageCounts::of`, so a disposition can never exist without a tab or
@@ -8912,6 +9695,19 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         "{st.label()} "
                                         span { class: "triage-tab-count", "{count}" }
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Several repos: how much is left to review in each, beside the total above.
+                    if repo_counts.len() > 1 {
+                        div { class: "triage-repo-counts",
+                            for (repo, counts) in repo_counts.iter() {
+                                span {
+                                    key: "{repo}",
+                                    class: "triage-repo-count",
+                                    "{repo_counts_line(repo, *counts)}"
                                 }
                             }
                         }
@@ -9037,7 +9833,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // since Pass 2 step 3, a Confirmed row is not: it is decided, just decided to
                 // be real. The gate's whole rule lives in `TriageCounts` (core, unit-tested);
                 // `ProcessGate` renders it and this closure performs the commit.
-                if kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
+                if !patterns_open() && kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
                     {
                     // QUEUE rows only. Process commits dispositions (baseline waivers,
                     // tickets); an informational row has no disposition to commit, and
@@ -9135,11 +9931,17 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // dispositions map come from this component's own state.
                 {
                     let pid_report = project_id.clone();
+                    let pid_remediation = project_id.clone();
                     rsx! {
+                        IncompletePassesBanner {
+                            failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
+                            compact: true,
+                        }
                         AuditReportExportPanel {
                             project_id: pid_report,
                             dispositions,
                         }
+                        super::remediation::RemediationPlanPanel { project_id: pid_remediation, dispositions }
                     }
                 }
 
@@ -9401,10 +10203,7 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
 pub(super) async fn export_product_zip(
     project_id: &str,
     dispositions: &std::collections::HashMap<String, Disposition>,
-    client_name: &str,
-    project_title: &str,
-    prepared_by: &str,
-    executive_summary_override: Option<String>,
+    options: &camerata_ui_core::product_export::ProductExportOptions,
 ) -> Result<(Vec<u8>, String), String> {
     let url = format!(
         "{}/api/projects/{}/product-export",
@@ -9413,15 +10212,12 @@ pub(super) async fn export_product_zip(
     );
     let resp = reqwest::Client::new()
         .post(url)
-        .json(&serde_json::json!({
-            "dispositions": dispositions,
-            "options": {
-                "client_name": client_name,
-                "project_title": project_title,
-                "prepared_by": prepared_by,
-                "executive_summary_override": executive_summary_override,
-            },
-        }))
+        // The client name is not sent: the server reads it from the project's inspection setup
+        // (`Project::client_name`), so every export names the same client.
+        .json(&camerata_ui_core::product_export::request_body(
+            dispositions,
+            options,
+        ))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -9448,6 +10244,67 @@ pub(super) async fn export_product_zip(
     Ok((bytes, filename))
 }
 
+/// The inspection setup's client-name field: who the inspection is for. Saved to the project
+/// when the field loses focus after an edit (`POST /api/projects/:id/client-name`); every export
+/// prints it in the confidentiality line, and the export refuses while it is blank, so the
+/// field says so until it is filled.
+#[component]
+pub(super) fn ClientNameSetup(project_id: String, initial: String) -> Element {
+    // The field keeps its own text while it is on screen, so it is keyed by the project it is
+    // for and by the name that project has saved. Switching projects (or the saved name
+    // changing under it) builds a fresh field, so one project's text can never be shown against
+    // another project's id, or posted to it.
+    //
+    // A `key` is only honoured among siblings in a list, so the one field is rendered as a list
+    // of one.
+    let key = format!("{project_id}/{initial}");
+    rsx! {
+        for key in [key] {
+            ClientNameField {
+                key: "{key}",
+                project_id: project_id.clone(),
+                initial: initial.clone(),
+            }
+        }
+    }
+}
+
+#[component]
+fn ClientNameField(project_id: String, initial: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut name = use_signal(|| initial.clone());
+    let blank = name().trim().is_empty();
+    rsx! {
+        div {
+            class: "audit-model-row inspection-client-row",
+            "data-tour": camerata_ui_core::walkthrough::target::CLIENT_NAME,
+            label { class: "audit-model-label", r#for: "inspection-client-name", "Client name" }
+            input {
+                id: "inspection-client-name",
+                class: "audit-export-input",
+                placeholder: "Required before export",
+                value: "{name}",
+                oninput: move |e| name.set(e.value()),
+                onchange: move |_| {
+                    let pid = project_id.clone();
+                    let value = name();
+                    spawn(async move {
+                        match super::set_client_name(&pid, &value).await {
+                            Ok(()) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Client name saved."),
+                            Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
+                        }
+                    });
+                },
+            }
+            if blank {
+                span { class: "section-hint",
+                    "Required before export. It fills the confidentiality line on every page of the report and every sheet of the workbook."
+                }
+            }
+        }
+    }
+}
+
 /// The product-export panel: client-editable report framing (all optional) + a single
 /// export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever it is
 /// right now — including any still-Unresolved findings; a draft mid-engagement report is
@@ -9464,10 +10321,10 @@ pub(super) fn AuditReportExportPanel(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut loading = use_signal(|| false);
-    let mut client_name = use_signal(String::new);
     let mut project_title = use_signal(String::new);
     let mut prepared_by = use_signal(String::new);
     let mut summary_override = use_signal(String::new);
+    let mut triage_log = use_signal(|| false);
 
     rsx! {
         div { class: "audit-export-panel",
@@ -9484,15 +10341,6 @@ pub(super) fn AuditReportExportPanel(
                  export (some findings still Unresolved) is fine."
             }
             div { class: "audit-export-fields",
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "Client name" }
-                    input {
-                        class: "audit-export-input",
-                        placeholder: "optional",
-                        value: "{client_name}",
-                        oninput: move |e| client_name.set(e.value()),
-                    }
-                }
                 div { class: "audit-model-row",
                     label { class: "audit-model-label", "Project title" }
                     input {
@@ -9522,21 +10370,41 @@ pub(super) fn AuditReportExportPanel(
                     }
                 }
             }
+            div { class: "audit-model-row",
+                label { class: "audit-model-label", r#for: "export-triage-log", "Triage log" }
+                input {
+                    id: "export-triage-log",
+                    r#type: "checkbox",
+                    checked: triage_log(),
+                    onchange: move |e| triage_log.set(e.checked()),
+                }
+                span { class: "section-hint",
+                    "Also export, per rule, what the AI pass proposed, what review kept and threw \
+                     out, and why: a Triage Log sheet in the workbook and csv/triage-log.csv. Off by default."
+                }
+            }
             button {
                 class: "btn-run",
+                "data-tour": camerata_ui_core::walkthrough::target::EXPORT_PACKAGE,
                 disabled: loading(),
                 onclick: move |_| {
                     let pid = project_id.clone();
                     let disp_snapshot = dispositions.read().clone();
-                    let cn = client_name();
                     let pt = project_title();
                     let pb = prepared_by();
                     let so = summary_override();
+                    let log = triage_log();
                     loading.set(true);
                     spawn(async move {
                         let _guard = crate::loading::LoadingGuard::new();
                         let override_opt = if so.trim().is_empty() { None } else { Some(so) };
-                        match export_product_zip(&pid, &disp_snapshot, &cn, &pt, &pb, override_opt).await {
+                        let options = camerata_ui_core::product_export::ProductExportOptions {
+                            project_title: pt,
+                            prepared_by: pb,
+                            executive_summary_override: override_opt,
+                            triage_log: log,
+                        };
+                        match export_product_zip(&pid, &disp_snapshot, &options).await {
                             Ok((bytes, filename)) => {
                                 if save_bytes(&filename, bytes).await {
                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
@@ -9550,6 +10418,108 @@ pub(super) fn AuditReportExportPanel(
                 if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
             }
         }
+    }
+}
+
+/// The export dialog offers the triage log as an unticked box (off by default).
+#[cfg(test)]
+mod export_dialog_triage_log_box {
+    use super::AuditReportExportPanel;
+    use dioxus::prelude::*;
+
+    fn app() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let dispositions = use_signal(std::collections::HashMap::new);
+        rsx! {
+            AuditReportExportPanel { project_id: "p1".to_string(), dispositions }
+        }
+    }
+
+    #[test]
+    fn the_dialog_has_an_unticked_triage_log_checkbox() {
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("export-triage-log"), "{html}");
+        assert!(html.contains(r#"type="checkbox""#), "{html}");
+        assert!(html.contains("Triage log"), "{html}");
+        assert!(!html.contains("checked=true"), "off by default: {html}");
+    }
+}
+
+/// The inspection setup's client-name field follows the project it is shown for. The field keeps
+/// its own text while it is on screen, so without a key a switch from one project to another
+/// reuses the first project's text and the next save posts it under the second project's id.
+#[cfg(test)]
+mod client_name_setup_follows_the_project {
+    use super::ClientNameSetup;
+    use dioxus::prelude::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SHOWN: RefCell<Option<Signal<(String, String)>>> = const { RefCell::new(None) };
+    }
+
+    fn app() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let shown = use_signal(|| ("p1".to_string(), "Acme Ltd".to_string()));
+        SHOWN.with(|s| *s.borrow_mut() = Some(shown));
+        let (project_id, initial) = shown();
+        rsx! {
+            span { class: "probe", "{project_id}" }
+            ClientNameSetup { project_id, initial }
+        }
+    }
+
+    fn show(vdom: &mut VirtualDom, project_id: &str, initial: &str) -> String {
+        let shown = SHOWN.with(|s| s.borrow().expect("the harness ran"));
+        let next = (project_id.to_string(), initial.to_string());
+        vdom.in_runtime(|| {
+            let mut shown = shown;
+            shown.set(next);
+        });
+        let _ = vdom.render_immediate_to_vec();
+        dioxus_ssr::render(vdom)
+    }
+
+    fn start() -> (VirtualDom, String) {
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        (vdom, html)
+    }
+
+    #[test]
+    fn it_shows_the_saved_name_of_the_project_it_starts_on() {
+        let (_vdom, html) = start();
+        assert!(html.contains("Acme Ltd"), "{html}");
+    }
+
+    #[test]
+    fn switching_projects_shows_the_new_projects_name_never_the_old_ones() {
+        let (mut vdom, _) = start();
+        let html = show(&mut vdom, "p2", "Beta Corp");
+        assert!(html.contains("Beta Corp"), "{html}");
+        assert!(
+            !html.contains("Acme Ltd"),
+            "the first project's name must not be carried to the second: {html}"
+        );
+    }
+
+    #[test]
+    fn a_project_with_no_name_yet_shows_an_empty_field_and_the_requirement() {
+        let (mut vdom, _) = start();
+        let html = show(&mut vdom, "p3", "");
+        assert!(!html.contains("Acme Ltd"), "{html}");
+        assert!(html.contains("Required before export."), "{html}");
+    }
+
+    #[test]
+    fn a_changed_saved_name_for_the_same_project_resets_the_field() {
+        let (mut vdom, _) = start();
+        let html = show(&mut vdom, "p1", "Acme Holdings");
+        assert!(html.contains("Acme Holdings"), "{html}");
+        assert!(!html.contains("Acme Ltd"), "{html}");
     }
 }
 
@@ -10494,12 +11464,12 @@ mod tests {
     }
 
     #[test]
-    fn recommend_scan_mode_parallel_for_small_single_repo() {
+    fn recommend_scan_mode_auto_for_small_single_repo() {
         let r = scan_report(serde_json::json!({
             "repos": ["a"], "files_scanned": 10,
             "findings": [], "proposed_rules": [], "gated": false
         }));
-        assert_eq!(super::recommend_scan_mode(&r), "parallel");
+        assert_eq!(super::recommend_scan_mode(&r), "auto");
     }
 
     // ── audit_rules_json (request serialization shape) ────────────────────────
@@ -10843,6 +11813,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "files_scanned": 4, "findings": [], "proposed_rules": [], "gated": false
@@ -10869,6 +11840,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 
@@ -10939,6 +11911,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -10966,6 +11939,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 
@@ -11804,6 +12778,402 @@ mod render_tests {
         );
     }
 
+    // ── The INCOMPLETE banner: a scan with passes that did not run must never look complete ──
+
+    fn failed_pass(pass: &str, reason: &str) -> FailedPassView {
+        FailedPassView {
+            repo: "acme/api".to_string(),
+            pass: pass.to_string(),
+            reason: reason.to_string(),
+            ..FailedPassView::default()
+        }
+    }
+
+    fn incomplete_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![
+                    failed_pass(
+                        "scan pass pass[all] chunk 2/3",
+                        "NOT RUN: the spend limit set for this run was reached before rule-batch 2 of 4 ran",
+                    ),
+                    failed_pass("calibration (verification and hour estimates)", "NOT RUN (in part): the spend limit set for this run was reached"),
+                ],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_incomplete_banner_names_the_count_the_cause_and_every_pass() {
+        let mut vdom = VirtualDom::new(incomplete_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Incomplete: 2 pass(es) or stage(s) did not run"),
+            "{html}"
+        );
+        assert!(html.contains("Stopped by the spend limit"), "{html}");
+        assert!(html.contains("scan pass pass[all] chunk 2/3"), "{html}");
+        assert!(
+            html.contains("calibration (verification and hour estimates)"),
+            "{html}"
+        );
+        assert!(html.contains("NOT RUN"), "{html}");
+        assert!(
+            html.contains("does NOT mean the missing parts are clean"),
+            "{html}"
+        );
+    }
+
+    fn incomplete_compact_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![failed_pass("hour estimation", "no estimate returned")],
+                compact: true,
+            }
+        }
+    }
+
+    #[test]
+    fn the_compact_form_beside_export_says_the_export_will_carry_it_too() {
+        let mut vdom = VirtualDom::new(incomplete_compact_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Incomplete: 1 pass(es) or stage(s) did not run"),
+            "{html}"
+        );
+        assert!(html.contains("The export will say so"), "{html}");
+        // A failed pass of ANY cause shows, not only the spend limit.
+        assert!(!html.contains("Stopped by the spend limit"), "{html}");
+    }
+
+    fn failure_detail_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "audit pass[all] 1/2".to_string(),
+                    reason: "Anthropic API HTTP 529: overloaded".to_string(),
+                    class: "transport".to_string(),
+                    files: vec!["src/a.rs".to_string()],
+                    attempts: vec![AttemptView {
+                        at: "2026-10-28T10:00:00Z".to_string(),
+                        backend: "api".to_string(),
+                        model: "claude-x".to_string(),
+                        http_status: Some(529),
+                        error_type: Some("overloaded_error".to_string()),
+                        request_id: Some("req_9".to_string()),
+                        retry_after_secs: Some(30),
+                        wait_secs: Some(5),
+                        message: "Overloaded".to_string(),
+                        ..AttemptView::default()
+                    }],
+                    scope_note: false,
+                }],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_failure_panel_lists_class_repo_part_files_and_every_attempt_field() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        for needle in [
+            "Class: transport",
+            "acme/api",
+            "audit pass[all] 1/2",
+            "src/a.rs",
+            "HTTP 529",
+            "overloaded_error",
+            "request req_9",
+            "retry-after 30s",
+            "waited 5s",
+            "claude-x",
+            "Copy as JSON",
+        ] {
+            assert!(html.contains(needle), "{needle} missing in {html}");
+        }
+        // One banner, not two.
+        assert_eq!(html.matches("scan-incomplete-banner").count(), 1, "{html}");
+    }
+
+    fn rejected_replies_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    reason: "gave up".to_string(),
+                    class: "content".to_string(),
+                    attempts: vec![AttemptView {
+                        at: "2026-10-30T10:00:00Z".to_string(),
+                        message: "no usable fix was returned".to_string(),
+                        rejections: vec![
+                            "src/db.ts:2 ARCH-1: named `rotateKey`, which is not in the finding's evidence"
+                                .to_string(),
+                        ],
+                        ..AttemptView::default()
+                    }],
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_failure_panel_shows_why_each_reply_was_turned_down() {
+        let mut vdom = VirtualDom::new(rejected_replies_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Turned down: src/db.ts:2 ARCH-1"), "{html}");
+        assert!(html.contains("rotateKey"), "{html}");
+        // A report written before the field existed still reads.
+        let old: AttemptView = serde_json::from_str(r#"{"at":"t","message":"m"}"#).unwrap();
+        assert!(old.rejections.is_empty());
+        let new: AttemptView =
+            serde_json::from_str(r#"{"at":"t","rejections":["a","b"]}"#).unwrap();
+        assert_eq!(new.rejections, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn failure_with_run_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    reason: "overloaded".to_string(),
+                    class: "transport".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("20261029T101500Z-ab12cd".to_string()),
+            }
+        }
+    }
+
+    fn failure_with_plan_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("r1".to_string()),
+                plan: Some(ResumePlanView {
+                    text: "Resume: what remains\n  - acme/api: fix text (failed)\n".to_string(),
+                    refusal: None,
+                }),
+            }
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "p".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("r2".to_string()),
+                plan: Some(ResumePlanView {
+                    text: String::new(),
+                    refusal: Some("repository acme/api is at commit 1234567890 now".to_string()),
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn run_what_remains_is_off_for_a_scan_that_was_not_saved_and_live_for_one_that_was() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Run what remains"), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("was not saved"), "{html}");
+
+        let mut vdom = VirtualDom::new(failure_with_run_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        let button = html
+            .split("scan-run-what-remains")
+            .nth(1)
+            .expect("the button");
+        let button = button.split("</button>").next().unwrap();
+        assert!(!button.contains("disabled"), "{button}");
+        assert!(
+            button.contains("Nothing is sent until you confirm"),
+            "{button}"
+        );
+        assert!(!html.contains("Resume is coming"), "{html}");
+    }
+
+    #[test]
+    fn the_plan_is_shown_with_its_estimate_before_anything_starts_and_a_refusal_has_no_start() {
+        let mut vdom = VirtualDom::new(failure_with_plan_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Resume: what remains"), "{html}");
+        assert!(html.contains("Start: run only these parts"), "{html}");
+        assert!(
+            html.contains("Cannot resume now: repository acme/api is at commit"),
+            "{html}"
+        );
+        // Only the plan without a refusal offers the start button.
+        assert_eq!(html.matches("scan-resume-confirm").count(), 1, "{html}");
+    }
+
+    thread_local! {
+        static RESUME_COUNT: std::cell::RefCell<Option<crate::loading::LoadingCount>> =
+            const { std::cell::RefCell::new(None) };
+        static RESUME_LOG: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn resume_harness() -> Element {
+        crate::loading::provide_loading_context();
+        let count = use_context::<crate::loading::LoadingCount>();
+        RESUME_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        spawn(async move {
+            // The start request and the whole job poll: the Bombe runs through both.
+            let _ = run_what_remains(
+                count,
+                || async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    RESUME_LOG.with(|l| l.borrow_mut().push(*count.peek()));
+                    Ok("job-1".to_string())
+                },
+                |_jid| async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    RESUME_LOG.with(|l| l.borrow_mut().push(*count.peek()));
+                },
+            )
+            .await;
+        });
+        rsx! { div {} }
+    }
+
+    /// "Run what remains" holds the Bombe from the start request to the end of the polling, the
+    /// way `loading.rs` tests every guard: a real spawned task with real suspensions.
+    #[tokio::test]
+    async fn run_what_remains_holds_the_bombe_from_the_start_request_to_the_end_of_the_poll() {
+        RESUME_LOG.with(|l| l.borrow_mut().clear());
+        let mut vdom = VirtualDom::new(resume_harness);
+        vdom.rebuild_in_place();
+        let count = RESUME_COUNT.with(|c| c.borrow_mut().take()).unwrap();
+        assert_eq!(*count.read(), 0);
+        vdom.process_events();
+        assert_eq!(*count.read(), 1, "running as the resume starts");
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            vdom.process_events();
+        }
+        assert_eq!(
+            RESUME_LOG.with(|l| l.borrow().clone()),
+            vec![1, 1],
+            "running at the start request and again during the poll"
+        );
+        assert_eq!(*count.read(), 0, "released when the polling ended");
+    }
+
+    fn refused_resume_harness() -> Element {
+        crate::loading::provide_loading_context();
+        let count = use_context::<crate::loading::LoadingCount>();
+        RESUME_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        spawn(async move {
+            let refused: Result<(), String> = run_what_remains(
+                count,
+                || async { Err("the repo moved on".to_string()) },
+                |_jid| async {},
+            )
+            .await;
+            assert!(refused.is_err());
+        });
+        rsx! { div {} }
+    }
+
+    #[tokio::test]
+    async fn a_refused_resume_releases_the_bombe() {
+        let mut vdom = VirtualDom::new(refused_resume_harness);
+        vdom.rebuild_in_place();
+        let count = RESUME_COUNT.with(|c| c.borrow_mut().take()).unwrap();
+        vdom.process_events();
+        assert_eq!(
+            *count.read(),
+            0,
+            "nothing runs, so nothing is left counting"
+        );
+    }
+
+    #[test]
+    fn an_old_report_without_the_new_fields_still_loads() {
+        let v: FailedPassView =
+            serde_json::from_str(r#"{"repo":"a/b","pass":"p","reason":"r"}"#).unwrap();
+        assert!(v.class.is_empty() && v.attempts.is_empty() && v.files.is_empty());
+    }
+
+    fn incomplete_none_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner { failed_passes: Vec::new(), compact: false }
+            IncompletePassesBanner { failed_passes: Vec::new(), compact: true }
+        }
+    }
+
+    #[test]
+    fn a_complete_scan_shows_no_incomplete_banner() {
+        let mut vdom = VirtualDom::new(incomplete_none_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("onboard-gate") && !html.contains("Incomplete"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_report_view_keeps_the_failed_passes_the_server_sends() {
+        let report: ScanReportView = serde_json::from_value(serde_json::json!({
+            "files_scanned": 3, "findings": [], "proposed_rules": [], "gated": false,
+            "failed_passes": [
+                { "repo": "acme/api", "pass": "scan pass pass[all] chunk 1/1", "reason": "NOT RUN: the spend limit set for this run was reached" }
+            ],
+            "message": "INCOMPLETE: the spend limit stopped this scan; 1 scan pass(es) and 0 stage(s) did not run"
+        }))
+        .unwrap();
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(
+            report.failed_passes[0].pass,
+            "scan pass pass[all] chunk 1/1"
+        );
+        assert!(report.message.as_deref().unwrap().starts_with("INCOMPLETE"));
+        // A report from before the field existed still loads, with nothing to show.
+        let old: ScanReportView = serde_json::from_value(serde_json::json!({
+            "files_scanned": 3, "findings": [], "proposed_rules": [], "gated": false
+        }))
+        .unwrap();
+        assert!(old.failed_passes.is_empty());
+    }
+
+    #[test]
+    fn progress_never_counts_a_refused_pass_as_done() {
+        assert_eq!(
+            job_progress_label(3, 6, 2, 0),
+            "3/6 passes \u{b7} 2 finding(s) so far"
+        );
+        let stopped = job_progress_label(3, 6, 2, 3);
+        assert!(stopped.starts_with("3/6 passes"), "{stopped}");
+        assert!(stopped.contains("3 NOT RUN (spend limit)"), "{stopped}");
+        // And the polled job carries the separate count.
+        let job: JobStateView = serde_json::from_value(serde_json::json!({
+            "status": "running", "done": 3, "total": 6, "not_run": 3
+        }))
+        .unwrap();
+        assert_eq!((job.done, job.not_run), (3, 3));
+    }
+
     // ── Tier-1 render: ScanJobFailedBanner (background-job silent-death fix) ───────────────
     // Regression for "the scan silently dies with no error": a background job that ends
     // `failed` (or that the poller loses contact with) must render a loud, visible banner —
@@ -12160,7 +13530,7 @@ mod render_tests {
         }
     }
 
-    /// P7 (docs/plans/2026-09-29_codebase-inspection-hardening.md): each rule's card must show
+    /// P7 (the codebase-inspection hardening notes): each rule's card must show
     /// the evidence `file:line` the pick was grounded in, and an applicability marker when the
     /// model judged the rule not applicable to this repo — "a wrong pick costs a glance, not a
     /// false finding".
@@ -12405,7 +13775,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 1: the Kind column + the three informational panels ──────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §11 step 1.
+    // the pass-2 curator UI design notes §11 step 1.
 
     fn kinded_finding(rule_id: &str, severity: &str, kind: serde_json::Value) -> FindingView {
         let mut row = serde_json::json!({
@@ -12796,6 +14166,134 @@ mod render_tests {
         );
     }
 
+    /// The "Patterns across services" tab is read-only: each service's cell as the server stated
+    /// it, "not applicable" and "not reviewed" printed as themselves, the fixed sentence for the
+    /// row, no severity and no control.
+    #[test]
+    fn the_patterns_panel_prints_each_cell_as_stated_and_is_read_only() {
+        fn harness() -> Element {
+            let view: camerata_ui_core::patterns::PatternsView =
+                serde_json::from_value(serde_json::json!({
+                    "repos": ["acme/web", "acme/api", "acme/worker", "acme/jobs"],
+                    "rows": [{
+                        "rule_id": "ARCH-PAGINATION-1",
+                        "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 2},
+                            {"repo": "acme/api", "state": "clean"},
+                            {"repo": "acme/worker", "state": "not_applicable", "reason": "no files"},
+                            {"repo": "acme/jobs", "state": "not_reviewed", "reason": "spend limit"}
+                        ]
+                    }],
+                    "themes": []
+                }))
+                .unwrap();
+            rsx! { PatternsPanel { view, titles: None } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("These services handle ARCH-PAGINATION-1 differently."),
+            "{html}"
+        );
+        for expected in [
+            "Violated, 2 sites",
+            "Clean",
+            "Not applicable: no files",
+            "Not reviewed: spend limit",
+        ] {
+            assert!(html.contains(expected), "{expected} missing from {html}");
+        }
+        assert!(!html.contains("<button"), "read-only: {html}");
+        // The panel says in a sentence that it carries no severity; it renders none.
+        assert!(
+            !html.contains("sev-") && !html.contains("severity-chip"),
+            "{html}"
+        );
+    }
+
+    /// With the rule library loaded the tab prints the rule's title (as the report does) and drops
+    /// a row whose rule is not in the library, so the two agree.
+    #[test]
+    fn the_patterns_panel_prints_the_rule_title_and_drops_an_unknown_rule() {
+        fn harness() -> Element {
+            let view: camerata_ui_core::patterns::PatternsView =
+                serde_json::from_value(serde_json::json!({
+                    "repos": ["acme/web", "acme/api"],
+                    "rows": [
+                        {"rule_id": "ARCH-PAGINATION-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 2},
+                            {"repo": "acme/api", "state": "clean"}]},
+                        {"rule_id": "GONE-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 1},
+                            {"repo": "acme/api", "state": "clean"}]}
+                    ],
+                    "themes": []
+                }))
+                .unwrap();
+            let titles: std::collections::HashMap<String, String> = [(
+                "ARCH-PAGINATION-1".to_string(),
+                "Cursor pagination".to_string(),
+            )]
+            .into();
+            rsx! { PatternsPanel { view, titles: Some(titles) } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("These services handle Cursor pagination differently."),
+            "{html}"
+        );
+        assert!(
+            !html.contains("ARCH-PAGINATION-1"),
+            "no raw rule id: {html}"
+        );
+        assert!(
+            !html.contains("GONE-1"),
+            "an unknown rule is dropped: {html}"
+        );
+    }
+
+    /// An empty section states its case in a sentence, never a blank area.
+    #[test]
+    fn the_patterns_panel_states_an_empty_case() {
+        fn harness() -> Element {
+            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default(), titles: None } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("kind-panel-empty"), "{html}");
+    }
+
+    /// The report the server sends carries the section under `patterns_across_services`; a
+    /// report without it (one repo, or an older server) has none and shows no tab.
+    #[test]
+    fn scan_report_view_reads_the_patterns_section_from_the_wire() {
+        let parse = |json: serde_json::Value| -> ScanReportView {
+            serde_json::from_value(json).expect("valid ScanReportView fixture")
+        };
+        let with = parse(serde_json::json!({
+            "repos": ["a/one", "a/two"], "files_scanned": 1,
+            "findings": [], "proposed_rules": [], "gated": false,
+            "patterns_across_services": {
+                "repos": ["a/one", "a/two"],
+                "rows": [{"rule_id": "R-1", "cells": [
+                    {"repo": "a/one", "state": "violated", "sites": 1},
+                    {"repo": "a/two", "state": "clean"}
+                ]}]
+            }
+        }));
+        assert!(with.patterns_across_services.is_present());
+        assert_eq!(with.patterns_across_services.count(), 1);
+        let without = parse(serde_json::json!({
+            "repos": ["a/one"], "files_scanned": 1,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert!(!without.patterns_across_services.is_present());
+    }
+
     /// req_pass2_6: each panel's empty state is a sentence, not a blank area — the curator has
     /// to be able to tell "nothing of this kind" from "this did not render".
     #[test]
@@ -12821,7 +14319,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 2: MANUAL column sorting over the curated default ────────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §5: "the default sort is a curated
+    // the pass-2 curator UI design notes §5: "the default sort is a curated
     // order ... the column headers still allow any manual re-sort chorale supports — the
     // default is opinionated, the table is not locked."
     //
@@ -12873,6 +14371,64 @@ mod render_tests {
     /// Mint `(RowId, FindingView)` pairs in the given order, as `FindingsTable` does.
     fn sort_rows(findings: &[FindingView]) -> Vec<(RowId, FindingView)> {
         findings.iter().map(|f| (RowId::new(), f.clone())).collect()
+    }
+
+    /// M10: eleven services each have a `src/index.ts`. Grouped by file, the Queue must show one
+    /// group per repo's file, not one merged `src/index.ts` group, and say which repo each is.
+    #[test]
+    fn m10_the_same_path_in_two_repos_is_two_file_groups() {
+        use chorale_core::{set_grouping, visible_grouped_view, GroupedRow};
+
+        fn in_repo(repo: &str, line: usize) -> FindingView {
+            serde_json::from_value(serde_json::json!({
+                "repo": repo, "path": "src/index.ts", "line": line, "rule_id": "R-1",
+                "severity": "high", "snippet": format!("s{line}"), "detail": "d",
+                "status": "active", "kind": "defect"
+            }))
+            .expect("fixture")
+        }
+        let rows = vec![
+            in_repo("acme/a", 1),
+            in_repo("acme/b", 1),
+            in_repo("acme/a", 2),
+            in_repo("acme/b", 2),
+        ];
+        let headers = |repos: Vec<String>| -> Vec<(String, usize)> {
+            let state = finding_table_state(sort_rows(&rows), repos, false);
+            let state = set_grouping(&state, vec![ColumnId("file")]);
+            visible_grouped_view(&state)
+                .into_iter()
+                .filter_map(|r| match r {
+                    GroupedRow::Header {
+                        label, row_count, ..
+                    } => Some((label, row_count)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            headers(vec!["acme/a".into(), "acme/b".into()]),
+            vec![
+                ("acme/a: src/index.ts".to_string(), 2),
+                ("acme/b: src/index.ts".to_string(), 2)
+            ]
+        );
+        // One repo in play: the bare path, as before.
+        let single: Vec<FindingView> = rows
+            .iter()
+            .filter(|f| f.repo == "acme/a")
+            .cloned()
+            .collect();
+        let state = finding_table_state(sort_rows(&single), vec!["acme/a".into()], false);
+        let state = set_grouping(&state, vec![ColumnId("file")]);
+        let labels: Vec<String> = visible_grouped_view(&state)
+            .into_iter()
+            .filter_map(|r| match r {
+                GroupedRow::Header { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["src/index.ts".to_string()]);
     }
 
     /// A `TableState` over the real findings columns, rows in the curated default order and
@@ -13492,7 +15048,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 2: the deviation group header ────────────────────────────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §2/§4/§11-step-2: "Group headers carry
+    // the pass-2 curator UI design notes §2/§4/§11-step-2: "Group headers carry
     // the Deviation sentence ... rendered from data: 'N of M sites deviate from
     // <convention_label>'. No prose parsing" and "Group headers carry rule-level bulk
     // actions for deviations ... because the natural unit of a deviation decision is the
@@ -17346,6 +18902,7 @@ mod order_preset_tests {
 
     /// The request that asks the server for the client's export carries the dispositions and the
     /// report options and nothing else, so the review log cannot ride along even by accident.
+    /// It carries no client name either: the server reads that from the project.
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial(process_env)]
     async fn the_product_export_request_carries_no_review_log() {
@@ -17366,7 +18923,13 @@ mod order_preset_tests {
                 ..Disposition::default()
             },
         );
-        export_product_zip("p1", &dispositions, "Client", "Title", "Me", None)
+        let options = camerata_ui_core::product_export::ProductExportOptions {
+            project_title: "Title".to_string(),
+            prepared_by: "Me".to_string(),
+            triage_log: true,
+            ..Default::default()
+        };
+        export_product_zip("p1", &dispositions, &options)
             .await
             .expect("the export answers");
         let requests = server.received_requests().await.expect("recorded");
@@ -17379,6 +18942,15 @@ mod order_preset_tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["dispositions", "options"]);
+        assert_eq!(
+            body["options"]["triage_log"],
+            serde_json::json!(true),
+            "the ticked triage-log box reaches the request"
+        );
+        assert!(
+            body["options"].get("client_name").is_none(),
+            "the client name comes from the project's inspection setup, never the request"
+        );
         let text = body.to_string();
         for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
             assert!(!text.contains(key), "{key} in the export request: {text}");

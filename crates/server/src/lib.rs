@@ -39,9 +39,12 @@ pub mod auto_fire;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
+pub mod client_lock;
 pub mod client_provenance;
 pub mod client_source;
 pub mod connections;
+/// H5: the three-pass consensus option (off by default).
+pub mod consensus;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
@@ -57,6 +60,7 @@ pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
+mod governed_rules;
 pub mod grounding;
 pub mod inspections;
 pub mod investigation_run;
@@ -65,9 +69,15 @@ pub mod jobs;
 // `camerata_app_core::lifecycle` (RUST-HEADLESS-CORE-1); re-exported so `crate::lifecycle::*` call
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
+pub mod cost_cap;
+pub mod failure_report;
+/// The failure classes and typed transport failure, re-exported for callers of the server.
+pub use camerata_llm::failure;
 pub mod dev_implement_run;
+pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
+mod native_units;
 pub mod notify;
 pub mod onboard;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
@@ -76,16 +86,29 @@ pub mod orchestrator_message;
 pub mod ownership;
 pub mod pr;
 pub mod pr_resolve_run;
+pub mod preflight;
 pub mod project;
+/// Delimiting client content for a model with a per-run random token (prompt-injection defense).
+pub mod prompt_frame;
 pub mod provider;
 pub mod reconcile;
+/// Inspection findings become units of work (roadmap 2c): the plan and create routes, the
+/// implementer's findings grounding and the delta retest evidence.
+pub mod remediation;
 /// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
 /// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
 /// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.
+pub mod remediation_plan;
+/// H5: compare two runs of the same scan (`camerata repeatability`, the consensus option).
+pub mod repeatability;
 pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod run_health;
+pub mod run_store;
+mod run_target;
+pub mod runtime_audit;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
@@ -121,7 +144,7 @@ pub mod release_gate;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as
 /// "verified clean" and a row that vanishes between pipeline stages can never go
-/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
+/// unnoticed. See the module doc comment and the hardening-cycle notes for the defects this closes.
 pub mod scan_ledger;
 pub mod settings;
 pub mod story_docs_gate;
@@ -140,6 +163,7 @@ pub mod usage_ledger;
 /// funnels through `vcs_choke` so a project's configured process rules are actually enforced
 /// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
 pub mod vcs_choke;
+pub mod vuln_intel;
 pub mod warm_schedule;
 pub mod workflow_gen;
 pub mod workitems;
@@ -273,7 +297,7 @@ pub struct AppState {
     /// The confidence engine's decision + outcome + calibration store (SQLite). Backs
     /// the Architect orchestrator's `orchestrator_decision` recording (the "measured
     /// override rate at max dial" moat metric — see
-    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+    /// the product-owner vibe-mode design notes,
     /// "Architect-orchestrator design"). Opened best-effort in [`AppState::from_env`],
     /// same fail-soft pattern as `governance_log`/`feedback_store`: `None` in tests and
     /// on open failure. NOT YET instrumented at any lifecycle site as of this phase —
@@ -395,6 +419,14 @@ impl AppState {
         &self,
         project: Option<&crate::project::Project>,
     ) -> Result<crate::llm::Llm, String> {
+        // A client engagement never runs a model step on the subscription. The models are
+        // chosen per call (and this transport only reaches Anthropic), so only the backend is
+        // checked here.
+        if let Some(p) = project {
+            if let Some(why) = crate::client_lock::refusal(p.client_engagement, p.backend, &[]) {
+                return Err(format!("{why} {APP_CLIENT_LOCK_FIX}"));
+            }
+        }
         let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
         let setting = project
             .map(|p| p.backend)
@@ -411,9 +443,43 @@ impl AppState {
         ))
     }
 
+    /// The client-engagement lock for a step whose model id comes from the request (the routine
+    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
+    /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
+    /// server default (a Claude model) and passes; with no active project there is no client
+    /// code in the step's context and nothing is refused.
+    pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let p = self.projects.active()?;
+        crate::client_lock::refusal(
+            p.client_engagement,
+            p.backend,
+            &[("this step".to_string(), model.to_string())],
+        )
+        .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
+    }
+
     /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
     /// project, so `settings.chat_backend` decides.
+    ///
+    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
+    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
+    /// carry that project's context, and the setting is global, not the project's own.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = self.projects.active() {
+            let backend = self.settings.chat_backend();
+            if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
+                return Err(format!(
+                    "{why} The chat assistant follows the Chat backend setting, which is `cli`. \
+                     Set the Chat backend to API in Settings, or turn off Client engagement in \
+                     this project's Settings if this is your own development."
+                ));
+            }
+        }
         self.llm_for_project(None)
     }
 
@@ -818,6 +884,10 @@ impl AppState {
     /// client's source on disk. A persistence failure is logged, never fatal: the in-memory
     /// copy still serves this session.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        // The patterns across services are derived from the ledger and the findings; rebuilt
+        // here so the stored report (and the cockpit tab that reads it) never lags them.
+        let mut report = report;
+        report.refresh_patterns_across_services();
         self.record_inspection(
             &project_id,
             &report,
@@ -835,6 +905,8 @@ impl AppState {
         project_id: String,
         report: crate::onboard::ScanReport,
     ) {
+        let mut report = report;
+        report.refresh_patterns_across_services();
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
@@ -854,9 +926,9 @@ impl AppState {
         project_id: &str,
         report: &crate::onboard::ScanReport,
         kind: crate::inspections::InspectionKind,
-    ) {
+    ) -> Option<crate::inspections::InspectionEntry> {
         if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
-            return;
+            return None;
         }
         // The stored report is the sealed artifact every export is built from, so it carries
         // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
@@ -864,12 +936,17 @@ impl AppState {
         let mut sealed = report.clone();
         sealed.sweep_secrets_before_seal();
         let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
-        if let Err(e) = self.inspections.append(entry) {
-            tracing::warn!(
-                project = project_id,
-                error = %e,
-                "could not persist the completed inspection; exports will not survive a restart"
-            );
+        match self.inspections.append(entry) {
+            Ok(stored) => Some(stored),
+            Err(e) => {
+                tracing::warn!(
+                    project = project_id,
+                    error = %e,
+                    "could not persist the completed inspection; exports will not survive a restart"
+                );
+                // The in-memory copy was updated before the write failed, so it is the newest.
+                self.inspections.latest(project_id)
+            }
         }
     }
 
@@ -896,6 +973,8 @@ impl AppState {
     /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
     /// the in-memory copy and the latest persisted entry in place.
     pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        let mut report = report;
+        report.refresh_patterns_across_services();
         // Same sweep as `record_inspection`: the stored report carries only redacted text.
         let mut sealed = report.clone();
         sealed.sweep_secrets_before_seal();
@@ -1268,6 +1347,7 @@ pub fn router(state: AppState) -> Router {
         // Designer (vision) band toggle: enable/disable the vision band for this project.
         .route("/api/projects/:id/vision-enabled", post(set_vision_enabled))
         .route("/api/projects/:id/product-brief", post(set_product_brief))
+        .route("/api/projects/:id/client-name", post(set_client_name))
         .route(
             "/api/projects/:id/operating-principles",
             post(set_operating_principles),
@@ -1281,6 +1361,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/step-models", post(set_step_model))
         // Per-project backend (docs/design/2026-09-22_per-project-backend.md): Cli | Api.
         .route("/api/projects/:id/backend", post(set_backend_handler))
+        .route(
+            "/api/projects/:id/client-engagement",
+            post(set_client_engagement_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -1335,8 +1419,20 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/audit/start",
             post(onboard_audit_start).layer(source_gate.clone()),
         )
+        .route(
+            "/api/onboard/preflight",
+            post(preflight::onboard_preflight).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        // Saved inspections: one namespace, distinct from the agent runs under /api/runs. The two
+        // `/api/runs/:id/plan|resume` paths the first cockpit build called stay as aliases of the
+        // same handlers for one release; the cockpit itself now calls /api/inspections.
+        .route("/api/inspections", get(list_saved_inspections))
+        .route("/api/inspections/:id/plan", get(run_resume_plan))
+        .route("/api/inspections/:id/resume", post(run_resume_start))
+        .route("/api/runs/:id/plan", get(run_resume_plan))
+        .route("/api/runs/:id/resume", post(run_resume_start))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
         .route(
             "/api/onboard/finding-context/batch",
@@ -1515,6 +1611,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
+        .route("/api/uow/native", post(native_units::uow_native_create))
         .route("/api/uow/:story_id/author", post(uow_author))
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
         .route(
@@ -1588,6 +1685,10 @@ pub fn router(state: AppState) -> Router {
         // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
         .route(
+            "/api/uow/:story_id/review-findings/:index/accept",
+            post(uow_accept_review_finding),
+        )
+        .route(
             "/api/uow/:story_id/investigation",
             get(uow_get_investigation),
         )
@@ -1652,6 +1753,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
         .route("/api/projects/:id/product-export", post(export_product))
+        // ── Remediation work: inspection findings become units of work (roadmap 2c) ──
+        .route(
+            "/api/projects/:id/remediation/plan",
+            post(remediation::remediation_plan_preview),
+        )
+        .route(
+            "/api/projects/:id/remediation/create",
+            post(remediation::remediation_create),
+        )
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
         // DELETE /api/credentials/:name — remove a saved credential
@@ -1661,6 +1771,12 @@ pub fn router(state: AppState) -> Router {
             "/api/credentials/:name",
             post(set_credential).delete(delete_credential),
         )
+        // A request about an unknown native-shaped (`uow-...`) unit is a 404, never a write
+        // that creates a phantom unit.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::native_units::unknown_native_unit_gate,
+        ))
         .with_state(state)
 }
 
@@ -1876,7 +1992,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                 let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) else {
                     continue;
                 };
-                let Some(repo) = repo_from_story_id(&uow.story_id) else {
+                let Some(repo) = uow.repo().map(str::to_string) else {
                     continue;
                 };
                 let override_path = settings.repo_path(&repo);
@@ -2110,6 +2226,24 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
+    // Repository pre-flight (live runs only; the scripted run writes no code): a unit that
+    // should work in a repository but cannot (no branch selected, no local clone, ...) is
+    // refused here with the reason, never silently handed to the greenfield scaffolder.
+    // Checked BEFORE the development gate so a refusal leaves the lifecycle stage untouched.
+    if live_mode_enabled() {
+        let uow = state.uow.get_or_create(&story_id);
+        if let crate::run_target::RunTarget::Refused { reason } =
+            crate::run_target::plan_run_target_for_state(&state, &story_id, &uow)
+        {
+            let body = Json(serde_json::json!({
+                "error": "no repository for this run",
+                "reason": reason,
+                "story_id": story_id,
+            }));
+            return (StatusCode::CONFLICT, body).into_response();
+        }
+    }
+
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
     // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
     // We block + surface exactly why, rather than silently starting a run that the
@@ -2243,23 +2377,20 @@ async fn revert_worktree(worktree_dir: &str, base_commit: Option<&str>) {
     // Drop the run's committed snapshots first: reset the branch back to the branch-point
     // commit so nothing the agent committed survives. Only when we actually have the base.
     if let Some(base) = base_commit.filter(|b| !b.trim().is_empty()) {
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["reset", "--hard", base])
-            .current_dir(dir)
             .output()
             .await;
     } else {
         // No base commit recorded: discard tracked changes (uncommitted-only fallback).
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["checkout", "--", "."])
-            .current_dir(dir)
             .output()
             .await;
     }
     // Remove any new untracked files the agent left behind (a reset --hard leaves these).
-    let _ = tokio::process::Command::new("git")
+    let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
         .args(["clean", "-fd"])
-        .current_dir(dir)
         .output()
         .await;
 }
@@ -2343,6 +2474,10 @@ async fn resume_governed_run(
     // so a resumed run never got provenance / evidence / a stage advance. Spawned BEFORE
     // handing `story_id` to the implement run; the watcher awaits the run's terminal state.
     spawn_provenance_watcher(state, &run_id, &story_id);
+    // A unit created from inspection findings also carries the findings it must close.
+    let extra_grounding =
+        crate::remediation::extra_grounding_for(&state.uow, &story_id, Some(directive_grounding))
+            .await;
     spawn_brownfield_dev_run(
         state,
         run_id.clone(),
@@ -2356,7 +2491,7 @@ async fn resume_governed_run(
         checkpoint.max_iterations,
         None,  // resume uses the checkpoint's single model, not a tier map
         false, // resume runs the full gates (no skip_layer2)
-        Some(directive_grounding),
+        extra_grounding,
     )
     .await;
     Ok((run_id, mode))
@@ -2424,6 +2559,11 @@ async fn spawn_brownfield_dev_run(
                 rules_prose,
                 model: l3_model,
                 llm,
+                on_error: proj.l3_review.on_error,
+                fix_rounds: proj
+                    .l3_review
+                    .fix_rounds
+                    .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
             })
         })
     };
@@ -2485,19 +2625,21 @@ async fn spawn_brownfield_dev_run(
             let workspace_root = state.settings.workspace_root();
             let mut worktrees = Vec::new();
             for scope in &intake_repos {
-                let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+                let scope_branch =
+                    crate::run_target::unit_branch_for_repo(&uow_data, &story_id, &scope.repo)
+                        .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
                 let override_path = state.settings.repo_path(&scope.repo);
                 if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
                     override_path.as_deref(),
                     workspace_root.as_deref(),
                     &scope.repo,
                     &scope_branch,
+                    active_project_repos(state).as_deref(),
                 )
                 .await
                 {
-                    let base = tokio::process::Command::new("git")
+                    let base = workspace::git_command(Some(&wt_dir), workspace::GitEnv::Isolated)
                         .args(["rev-parse", "HEAD"])
-                        .current_dir(&wt_dir)
                         .output()
                         .await
                         .ok()
@@ -2670,16 +2812,20 @@ async fn start_governed_run(
 
         // ── Brownfield vs. greenfield dispatch ────────────────────────────────
         //
-        // When the UoW's repo worktree is RESOLVABLE (a local clone exists on disk),
-        // use the brownfield in-place implement path: the agent edits the EXISTING
-        // codebase on the UoW's branch, and the server commits. The spec comes from
-        // the UoW's APPROVED decisions (the no-code-first gate already verified them).
+        // `run_target::plan_run_target` decides where the run writes:
+        //   - Repository: the unit's branch is set and its repo has a local clone. Use the
+        //     brownfield in-place implement path: the agent edits the EXISTING codebase on the
+        //     UoW's branch, and the server commits. The spec comes from the UoW's APPROVED
+        //     decisions (the no-code-first gate already verified them).
+        //   - Greenfield: the project has no repositories and the unit names none. Scaffold a
+        //     new app from a plan in a throwaway temp dir (execute_live_run / _tiered), and
+        //     say so in the run's events.
+        //   - Refused: the unit should work in a repository but cannot (no branch selected, no
+        //     local clone, ...). The run fails with the reason; it is NEVER silently handed to
+        //     the greenfield scaffolder. `start_run` refuses the same cases up front with a 409;
+        //     this arm covers the other callers (e.g. the orchestrator chat).
         //
-        // When the worktree is NOT resolvable (no local clone, no workspace root), fall
-        // back to the greenfield scaffolder (execute_live_run / _tiered) which builds a
-        // new app from a plan in a throwaway temp dir.
-        //
-        // GATE UNCHANGED in both paths: `ensure_development_gate` (the no-code-first
+        // GATE UNCHANGED in every path: `ensure_development_gate` (the no-code-first
         // check) runs above, and every agent spawned here uses `governed_role` +
         // `gated_write`-only tools regardless of which branch is taken.
         //
@@ -2687,138 +2833,152 @@ async fn start_governed_run(
         // early so the tokio::spawn closure can capture it as `'static`.
         let story_id_owned = story_id.to_string();
         let uow_data = state.uow.get_or_create(story_id);
-        let uow_branch = uow_data
-            .branch
-            .as_deref()
-            .filter(|b| !b.trim().is_empty())
-            .map(|b| b.to_string());
-
-        // Try to resolve the UoW's worktree from the active project's settings.
-        // We require an active project to have a resolvable workspace root / repo override.
-        let worktree =
-            if let (Some(branch), Some(_proj)) = (uow_branch.as_deref(), state.projects.active()) {
-                // Derive repo from story_id (owner/repo#num → owner/repo).
-                let repo_from_story = story_id
-                    .rsplit_once('#')
-                    .map(|(r, _)| r)
-                    .unwrap_or(story_id);
-                let override_path = state.settings.repo_path(repo_from_story);
-                let workspace_root = state.settings.workspace_root();
-                crate::workspace::resolve_uow_worktree(
-                    override_path.as_deref(),
-                    workspace_root.as_deref(),
-                    repo_from_story,
-                    branch,
-                )
-                .await
-            } else {
-                None
-            };
-
-        if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
-            // Brownfield: implement in-place in the UoW's worktree.
-            let dir = worktree.expect("is_brownfield guarantees Some");
-            let repo = story_id
-                .rsplit_once('#')
-                .map(|(r, _)| r.to_string())
-                .unwrap_or_else(|| story_id.to_string());
-            let branch = uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"));
-            // For the tiered path we pick the strongest model for the implementer; for
-            // the single-model path we use the caller's model (or the default).
-            let impl_model = match &tier_map {
-                Some(map) => map.strongest.clone(),
-                None => model
-                    .clone()
-                    .unwrap_or_else(crate::model_tier::default_strongest_model),
-            };
-            // Derive the project inputs + spawn the implement run. SHARED with the resume path
-            // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
-            spawn_brownfield_dev_run(
-                state,
-                rid,
-                story_id_owned,
-                title,
-                desc,
+        let target = match crate::run_target::plan_run_target_for_state(state, story_id, &uow_data)
+        {
+            crate::run_target::RunTarget::Repository {
                 repo,
-                dir,
                 branch,
-                impl_model,
-                max_iterations,
-                tier_map,
-                skip_layer2,
-                None,
-            )
-            .await;
-        } else {
-            // Greenfield fallback: scaffold a new app from the plan in a throwaway dir.
-            match tier_map {
-                // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
-                // strongest tier leading. The single `model` is ignored when a map is given.
-                Some(map) => {
-                    // Provider-dispatch context for the LEAD/orchestrator driver factory
-                    // (the lead runs on the strongest model's OWN provider).
-                    let live_registry = state.model_registry.clone();
-                    let live_policy = state.settings.provider_policy();
-                    let live_creds = state.credential_store.clone();
-                    let live_limiter = state.rate_limiter.clone();
-                    // The compliance-safety gate: the active project's backend setting,
-                    // threaded into the lead/child driver factory. No active project floors
-                    // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
-                    let live_backend = state
-                        .projects
-                        .active()
-                        .map(|p| p.backend)
-                        .unwrap_or_default();
-                    // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
-                    // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
-                    let runs_for_clear = state.runs.clone();
-                    let rid_for_clear = rid.clone();
-                    let rid_register = rid.clone();
-                    let handle = tokio::spawn(async move {
-                        live_fleet::execute_live_run_tiered(
-                            store,
-                            rid,
-                            title,
-                            desc,
-                            map,
-                            max_iterations,
-                            skip_layer2,
-                            vision_enabled,
-                            live_registry,
-                            live_policy,
-                            live_creds,
-                            live_limiter,
-                            live_backend,
-                        )
-                        .await;
-                        runs_for_clear.clear_abort(&rid_for_clear);
-                    });
-                    state
-                        .runs
-                        .register_abort(&rid_register, handle.abort_handle());
+                clone,
+            } => {
+                // One source of truth for the branch: the plan derived it from the Intake
+                // scope, so record it (the history says so when it changed) BEFORE the
+                // worktree and the implement run, which read the unit's recorded branch.
+                crate::run_target::record_run_branch(&state.uow, story_id, &branch);
+                match crate::run_target::ensure_target_worktree(&clone, &branch).await {
+                    Ok(dir) => Ok(Some((repo, branch, dir))),
+                    Err(reason) => Err(reason),
                 }
-                // Single-model path (back-compat): one operator-wide model for every agent.
-                None => {
-                    // LIFECYCLE-1: register the abort handle (see tiered arm above).
-                    let runs_for_clear = state.runs.clone();
-                    let rid_for_clear = rid.clone();
-                    let rid_register = rid.clone();
-                    let handle = tokio::spawn(async move {
-                        live_fleet::execute_live_run(
-                            store,
-                            rid,
-                            title,
-                            desc,
-                            model,
-                            max_iterations,
-                            skip_layer2,
-                        )
+            }
+            crate::run_target::RunTarget::Greenfield => Ok(None),
+            crate::run_target::RunTarget::Refused { reason } => Err(reason),
+        };
+
+        match target {
+            Err(reason) => {
+                state.runs.fail_with_reason(&rid, reason.clone());
+                state.uow.append_history(
+                    story_id,
+                    "dev_implement",
+                    &format!("Development run refused: {reason}"),
+                );
+            }
+            Ok(Some((repo, branch, dir))) => {
+                // Brownfield: implement in-place in the UoW's worktree.
+                // For the tiered path we pick the strongest model for the implementer; for
+                // the single-model path we use the caller's model (or the default).
+                let impl_model = match &tier_map {
+                    Some(map) => map.strongest.clone(),
+                    None => model
+                        .clone()
+                        .unwrap_or_else(crate::model_tier::default_strongest_model),
+                };
+                // Derive the project inputs + spawn the implement run. SHARED with the resume path
+                // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
+                // A unit created from inspection findings carries the findings it must close and
+                // the rules they violate into the implementer's and the reviewer's prose.
+                let extra_grounding =
+                    crate::remediation::extra_grounding_for(&state.uow, &story_id_owned, None)
                         .await;
-                        runs_for_clear.clear_abort(&rid_for_clear);
-                    });
-                    state
-                        .runs
-                        .register_abort(&rid_register, handle.abort_handle());
+                spawn_brownfield_dev_run(
+                    state,
+                    rid,
+                    story_id_owned,
+                    title,
+                    desc,
+                    repo,
+                    dir,
+                    branch,
+                    impl_model,
+                    max_iterations,
+                    tier_map,
+                    skip_layer2,
+                    extra_grounding,
+                )
+                .await;
+            }
+            Ok(None) => {
+                // Greenfield: scaffold a new app from the plan in a throwaway dir, announced in the
+                // run's events so it is never mistaken for work on a real repository.
+                state.runs.push_event(
+                    &rid,
+                    crate::run::GateEvent {
+                        seq: 0,
+                        layer: "run".to_string(),
+                        verdict: "info".to_string(),
+                        rule: None,
+                        detail: crate::run_target::GREENFIELD_NOTICE.to_string(),
+                        content_hash: None,
+                    },
+                );
+                match tier_map {
+                    // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
+                    // strongest tier leading. The single `model` is ignored when a map is given.
+                    Some(map) => {
+                        // Provider-dispatch context for the LEAD/orchestrator driver factory
+                        // (the lead runs on the strongest model's OWN provider).
+                        let live_registry = state.model_registry.clone();
+                        let live_policy = state.settings.provider_policy();
+                        let live_creds = state.credential_store.clone();
+                        let live_limiter = state.rate_limiter.clone();
+                        // The compliance-safety gate: the active project's backend setting,
+                        // threaded into the lead/child driver factory. No active project floors
+                        // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
+                        let live_backend = state
+                            .projects
+                            .active()
+                            .map(|p| p.backend)
+                            .unwrap_or_default();
+                        // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
+                        // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
+                        let runs_for_clear = state.runs.clone();
+                        let rid_for_clear = rid.clone();
+                        let rid_register = rid.clone();
+                        let handle = tokio::spawn(async move {
+                            live_fleet::execute_live_run_tiered(
+                                store,
+                                rid,
+                                title,
+                                desc,
+                                map,
+                                max_iterations,
+                                skip_layer2,
+                                vision_enabled,
+                                live_registry,
+                                live_policy,
+                                live_creds,
+                                live_limiter,
+                                live_backend,
+                            )
+                            .await;
+                            runs_for_clear.clear_abort(&rid_for_clear);
+                        });
+                        state
+                            .runs
+                            .register_abort(&rid_register, handle.abort_handle());
+                    }
+                    // Single-model path (back-compat): one operator-wide model for every agent.
+                    None => {
+                        // LIFECYCLE-1: register the abort handle (see tiered arm above).
+                        let runs_for_clear = state.runs.clone();
+                        let rid_for_clear = rid.clone();
+                        let rid_register = rid.clone();
+                        let handle = tokio::spawn(async move {
+                            live_fleet::execute_live_run(
+                                store,
+                                rid,
+                                title,
+                                desc,
+                                model,
+                                max_iterations,
+                                skip_layer2,
+                            )
+                            .await;
+                            runs_for_clear.clear_abort(&rid_for_clear);
+                        });
+                        state
+                            .runs
+                            .register_abort(&rid_register, handle.abort_handle());
+                    }
                 }
             }
         }
@@ -3310,7 +3470,7 @@ fn compute_feedback_fingerprint(report: &camerata_api_types::feedback::DefectRep
 /// same `{ ok: false, message }` shape.
 ///
 /// Fingerprint + dedupe fold (the "cheapest-now / most-expensive-later" fold — see
-/// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog): when
+/// the product-owner vibe-mode design notes' usability backlog): when
 /// the client did not already send a `fingerprint`, one is computed here
 /// ([`compute_feedback_fingerprint`]). If a recent OPEN report with the SAME
 /// fingerprint already exists for this project, this occurrence is folded into that
@@ -3575,6 +3735,25 @@ async fn sign_off_run(
         let _ = waive; // acknowledged above; used below when building the effective note.
     }
 
+    // ── Reviewer-finding sign-off gate (gap 4) ───────────────────────────────
+    // A HIGH or MEDIUM Layer-3 reviewer finding that is still open blocks sign-off. Unlike the
+    // critical-finding gate it has no waiver: the way past is to fix the finding or to accept
+    // it with a reason (`POST /api/uow/:id/review-findings/:index/accept`). LOW never blocks.
+    let open_review_findings = current_uow.open_blocking_review_findings();
+    if open_review_findings > 0 {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "sign-off blocked by open reviewer findings",
+                "reason": format!(
+                    "{open_review_findings} reviewer finding(s) are still open. Fix them or record a decision on each before signing off."
+                ),
+                "blocked": true,
+            })),
+        )
+            .into_response());
+    }
+
     // Build the effective note, folding in the waiver reason when present.
     let effective_note = {
         let waive = req.waive_reason.as_deref().filter(|r| !r.trim().is_empty());
@@ -3655,7 +3834,7 @@ async fn sign_off_run(
     let run_after_signoff = state.runs.get(&run.id).unwrap_or_else(|| run.clone());
     if run_after_signoff.done {
         if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
-            if let Some(repo) = repo_from_story_id(&run.story_id) {
+            if let Some(repo) = uow.repo().map(str::to_string) {
                 let override_path = state.settings.repo_path(&repo);
                 let workspace_root = state.settings.workspace_root();
                 if let Some(clone) = crate::workspace::resolve_repo_dir(
@@ -3707,7 +3886,9 @@ async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Cla
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    let clars = state.clarifications.all_open_for_project(&p.repos);
+    let clars = state
+        .clarifications
+        .all_open_for_project(&p.repos, |id| state.uow.repo_for(id));
     Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
@@ -3926,6 +4107,11 @@ async fn export_project(
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
+    // A project export is a backup file that moves between machines, not a client deliverable,
+    // and a client's name should not travel in a file by default: it is left blank here (the
+    // stored project keeps it) and the operator sets it again for the engagement on import.
+    let mut project = project;
+    project.client_name.clear();
     Ok(Json(ProjectExportDoc { project, routines }))
 }
 
@@ -4375,6 +4561,34 @@ async fn set_product_brief(
     }
 }
 
+/// Body for `POST /api/projects/:id/client-name`.
+#[derive(serde::Deserialize)]
+struct SetClientNameReq {
+    client_name: String,
+}
+
+/// `POST /api/projects/:id/client-name` — set who the inspection is for, part of the inspection
+/// setup saved with the project. Every export fills the confidentiality line from it
+/// (`Project::client_name`). Blank clears it (an export then refuses until it is set); a name
+/// that is too long or spans lines is refused with the reason
+/// (`report_export::validate_client_name`).
+async fn set_client_name(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetClientNameReq>,
+) -> Json<serde_json::Value> {
+    let name = match crate::report_export::validate_client_name(&req.client_name) {
+        Ok(name) => name,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+    };
+    match state.projects.update(&id, |p| {
+        p.client_name = name;
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/operating-principles`.
 #[derive(serde::Deserialize)]
 struct SetOperatingPrinciplesReq {
@@ -4514,14 +4728,42 @@ pub fn step_model_or(
     }
 }
 
+/// The active project's explicit fix-stage model, or `None` when it has none (or there is no
+/// active project). Unlike the other steps, the fix step is UNSET by default: an unset fix model
+/// lets the `fix_on_haiku` efficiency measure decide (see
+/// [`crate::ai_audit::resolve_fix_model`]), which a seeded default would silently override.
+pub fn fix_step_model(state: &AppState) -> Option<String> {
+    state
+        .projects
+        .active()
+        .map(|p| {
+            p.model_for_step(crate::project::StepKind::Fix)
+                .trim()
+                .to_string()
+        })
+        .filter(|m| !m.is_empty())
+}
+
+/// The clone judge's model for the active project: its fast (Haiku) band primary, or `None` when
+/// there is no active project (the built-in default then applies). The judge is classification
+/// over bounded input, the fast band's job; the project's tier map is where that band is set.
+pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
+    state
+        .projects
+        .active()
+        .map(|p| p.tier_map.fast_primary().trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
 /// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
 /// to bind to it. Patch semantics — one step per call, the others left untouched.
 #[derive(serde::Deserialize)]
 struct SetStepModelReq {
-    /// The step key: `audit` | `calibration` | `research_chat` | `story_authoring` |
+    /// The step key: `audit` | `calibration` | `fix` | `research_chat` | `story_authoring` |
     /// `decomposition` | `escalation` | `clarification`.
     step: String,
-    /// The model id to bind (e.g. `claude-opus-5`).
+    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix` only, where it
+    /// clears the setting back to the default (see [`fix_step_model`]).
     model: String,
 }
 
@@ -4537,6 +4779,7 @@ fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
     {
         "audit" => Some(StepKind::Audit),
         "calibration" => Some(StepKind::Calibration),
+        "fix" => Some(StepKind::Fix),
         "research_chat" => Some(StepKind::ResearchChat),
         "story_authoring" => Some(StepKind::StoryAuthoring),
         "decomposition" => Some(StepKind::Decomposition),
@@ -4548,8 +4791,8 @@ fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
 
 /// `POST /api/projects/:id/step-models` — set the model for ONE non-fleet AI step on this
 /// project. Patch semantics (one step per call); mirrors the tier-map write path —
-/// mutates only the named project and persists. A blank `model` or unknown `step` is a
-/// no-op error response (never silently mutates).
+/// mutates only the named project and persists. A blank `model` (except for `fix`, where it
+/// clears the setting) or unknown `step` is a no-op error response (never silently mutates).
 async fn set_step_model(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4559,7 +4802,7 @@ async fn set_step_model(
         return Json(serde_json::json!({ "ok": false, "message": "unknown step" }));
     };
     let model = req.model.trim().to_string();
-    if model.is_empty() {
+    if model.is_empty() && step != crate::project::StepKind::Fix {
         return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
     }
     match state.projects.set_step_model(&id, step, model) {
@@ -4599,6 +4842,32 @@ async fn set_backend_handler(
         }
     };
     match state.projects.set_backend(&id, backend) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/client-engagement`.
+#[derive(serde::Deserialize)]
+struct SetClientEngagementReq {
+    client_engagement: bool,
+    #[serde(default)]
+    client_tooling_opt_in: bool,
+}
+
+/// `POST /api/projects/:id/client-engagement` — mark a project as a client engagement or not,
+/// and set the operator's opt-in to run the client's own tooling (see `crate::client_lock`).
+/// Same `{ ok, project }` / `{ ok: false, message }` shape as `set_backend_handler`.
+async fn set_client_engagement_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetClientEngagementReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.set_client_engagement(
+        &id,
+        req.client_engagement,
+        req.client_tooling_opt_in,
+    ) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
@@ -4644,6 +4913,10 @@ struct AlternativeOverride {
 /// Body for `POST /api/projects/:id/rescan-alternatives`.
 #[derive(serde::Deserialize)]
 struct RescanAlternativesReq {
+    /// Go ahead when some of the project's repos have no local clone. Without it the rescan is
+    /// refused and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
     #[serde(default)]
     overrides: Vec<AlternativeOverride>,
 }
@@ -4764,6 +5037,25 @@ async fn rescan_alternatives_handler(
         .filter(|(rid, _)| alternatives_by_rule.contains_key(rid))
         .collect();
 
+    // The client-engagement lock, before any repository is read (the same check the main
+    // audit runs, over the same step models this rescan uses below).
+    if let Some(why) = client_lock_refusal_for_scan(
+        Some(&project),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Audit,
+            None,
+        )),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Calibration,
+            None,
+        )),
+        false,
+        fix_step_model(&state).as_deref(),
+    ) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     // The SAME compliance-safety gate the main audit uses.
     let backend_resolution = resolve_backend_for_project(&state, Some(&project));
     let llm_backend = match &backend_resolution {
@@ -4787,7 +5079,14 @@ async fn rescan_alternatives_handler(
         Some(state.usage_ledger.clone()),
     )
     .with_session_sink(model_sessions.clone());
-    let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
+    let LocalSources {
+        sources,
+        notes: source_notes,
+        unresolved,
+    } = resolve_local_sources(&state, &project.repos);
+    if let Some(why) = partial_run_refusal(&unresolved, project.repos.len(), req.allow_partial) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     run_notes.extend(source_notes);
 
     let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
@@ -4815,9 +5114,15 @@ async fn rescan_alternatives_handler(
         .unwrap_or(true)
     };
 
+    let rescan_meter =
+        crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::from_env());
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
+    // The same picks with the repo each was made for, one per (rule, repo): what the stored
+    // report's per-repo list is updated from, so a multi-repo workbook never prints the pick a
+    // rescan replaced.
+    let mut all_recs_by_repo: Vec<crate::ai_audit::RuleRecommendation> = Vec::new();
     // W6: a sub-pass (e.g. a nested alternative-recommendation call) failing here must never
     // be silent either — surfaced in `run_notes` below and merged into the stored report.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
@@ -4862,11 +5167,12 @@ async fn rescan_alternatives_handler(
                 (a.rule_id.clone(), directive)
             })
             .collect();
+        let audit_rules = crate::scan_routing::audit_rules(&selected_pairs, Some(&corpus));
         match crate::ai_audit::audit_repo(
             &llm,
             spec,
             &files,
-            &selected_pairs,
+            &audit_rules,
             &alt_slice,
             &forced,
             audit_model.as_deref(),
@@ -4875,15 +5181,20 @@ async fn rescan_alternatives_handler(
             false,
             Some((&state.transcripts, SCAN_AUDIT_KEY)),
             None,
-            None,
+            // A meter carries the efficiency switches from the environment (so
+            // `CAMERATA_EFFICIENCY=terse_output=off` reaches this endpoint too). Without one the
+            // terse scan output stays off: its detail regeneration must be metered.
+            Some(&rescan_meter),
             None,
         )
         .await
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
                 all_findings.extend(findings);
-                for r in recs {
-                    all_recs.insert(r.rule_id.clone(), r);
+                for mut r in recs {
+                    r.repo = spec.to_string();
+                    all_recs.insert(r.rule_id.clone(), r.clone());
+                    all_recs_by_repo.push(r);
                 }
                 for f in &failed {
                     run_notes.push(format!("{spec}: {} not computed ({})", f.pass, f.reason));
@@ -4911,9 +5222,7 @@ async fn rescan_alternatives_handler(
             .findings
             .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
         report.findings.extend(all_findings.clone());
-        for (rid, rec) in &all_recs {
-            report.recommendations.insert(rid.clone(), rec.clone());
-        }
+        report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
         report.failed_passes.extend(all_failed_passes.clone());
@@ -5014,6 +5323,15 @@ struct SetL3ReviewReq {
     /// The model id for the L3 reviewer. Empty string = use the balanced tier fallback.
     #[serde(default)]
     model: String,
+    /// What a run does when the reviewer cannot run. Absent keeps the project's current value.
+    #[serde(default)]
+    on_error: Option<crate::project::ReviewOnError>,
+    /// Extra implementer passes after a bounce. Absent keeps the project's current value.
+    #[serde(default)]
+    fix_rounds: Option<u8>,
+    /// The reviewer's model tier when no model is pinned. Absent keeps the current value.
+    #[serde(default)]
+    tier: Option<crate::project::ReviewTier>,
 }
 
 /// `POST /api/projects/:id/l3-review` — update the per-project L3 agentic code-review
@@ -5028,9 +5346,22 @@ async fn set_l3_review_handler(
     Path(id): Path<String>,
     Json(req): Json<SetL3ReviewReq>,
 ) -> Json<serde_json::Value> {
+    // The three reviewer-policy fields are optional on the wire, so a client that only knows
+    // `{ enabled, model }` never resets them: an absent field keeps the stored value.
+    let current = state
+        .projects
+        .get(&id)
+        .map(|p| p.l3_review)
+        .unwrap_or_default();
     let config = crate::project::L3ReviewConfig {
         enabled: req.enabled,
         model: req.model.trim().to_string(),
+        on_error: req.on_error.unwrap_or(current.on_error),
+        fix_rounds: req
+            .fix_rounds
+            .unwrap_or(current.fix_rounds)
+            .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
+        tier: req.tier.unwrap_or(current.tier),
     };
     match state.projects.set_l3_review(&id, config) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
@@ -5151,7 +5482,15 @@ async fn apply_model_profile(
         if let Some(ref a) = assignments {
             p.tier_map = a.tier_map.clone();
             p.step_models = a.step_models.clone();
-            p.l3_review = a.l3_review.clone();
+            // A profile assigns the reviewer's on/off and model. The reviewer POLICY (fail
+            // closed, fix rounds, tier) is the architect's own choice and is kept.
+            let policy = p.l3_review.clone();
+            p.l3_review = crate::project::L3ReviewConfig {
+                on_error: policy.on_error,
+                fix_rounds: policy.fix_rounds,
+                tier: policy.tier,
+                ..a.l3_review.clone()
+            };
         }
     });
 
@@ -5381,6 +5720,10 @@ struct ScanReq {
     /// Convenience single repo (folded into `repos`).
     #[serde(default)]
     repo: Option<String>,
+    /// Go ahead when some repos have no local clone; the report then lists them as not
+    /// inspected. Without it the scan is refused and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
 }
 
 /// Brownfield scan: audit a SET of existing repos against the content rules and
@@ -5393,13 +5736,9 @@ struct ScanReq {
 /// `<workspace_root>/<owner>/<repo>`. Repos with no local git clone are returned as NOTES
 /// (not sources) so the caller can surface "browse to the repo's folder" — onboarding reads
 /// code from disk, never from GitHub.
-fn resolve_local_sources(
-    state: &AppState,
-    repos: &[String],
-) -> (Vec<(String, std::path::PathBuf)>, Vec<String>) {
+pub(crate) fn resolve_local_sources(state: &AppState, repos: &[String]) -> LocalSources {
     let workspace_root = state.settings.workspace_root();
-    let mut sources = Vec::new();
-    let mut notes = Vec::new();
+    let mut resolved = LocalSources::default();
     for spec in repos {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -5411,17 +5750,95 @@ fn resolve_local_sources(
             workspace_root.as_deref(),
             spec,
         ) {
-            Some(dir) if dir.join(".git").exists() => sources.push((spec.to_string(), dir)),
-            Some(dir) => notes.push(format!(
-                "{spec}: {} is not a local git clone — browse to the repo's folder",
-                dir.display()
-            )),
-            None => notes.push(format!(
-                "{spec}: no local folder set — browse to the repo's folder"
-            )),
+            Some(dir) if dir.join(".git").exists() => {
+                resolved.sources.push((spec.to_string(), dir));
+            }
+            Some(dir) => {
+                resolved.unresolved.push((
+                    spec.to_string(),
+                    format!("{} is not a local git clone", dir.display()),
+                ));
+            }
+            None => resolved
+                .unresolved
+                .push((spec.to_string(), "no local folder is set".to_string())),
         }
     }
-    (sources, notes)
+    resolved.notes = resolved
+        .unresolved
+        .iter()
+        .map(|(spec, why)| format!("{spec}: {why}, browse to the repo's folder"))
+        .collect();
+    resolved
+}
+
+/// What [`resolve_local_sources`] found: the repos with a local clone, and the ones without.
+#[derive(Default)]
+pub(crate) struct LocalSources {
+    /// `(spec, folder)` for every repo that has a local git clone.
+    pub sources: Vec<(String, std::path::PathBuf)>,
+    /// One note per repo that has none, in the words the scan message uses.
+    pub notes: Vec<String>,
+    /// `(spec, reason)` for every repo that has none. A run that goes ahead without them must
+    /// say so in its report; one that cannot is refused ([`partial_run_refusal`]).
+    pub unresolved: Vec<(String, String)>,
+}
+
+/// The refusal for a run that would inspect fewer repos than it was asked to, or `None` when
+/// every repo resolved or the caller said it accepts a partial run. A project of eleven repos
+/// must never produce a report for ten without anyone having said so: the default is to stop and
+/// name the repos, and `allow_partial` is the explicit way to go ahead and have the report list
+/// them as not inspected.
+fn partial_run_refusal(
+    unresolved: &[(String, String)],
+    total: usize,
+    allow_partial: bool,
+) -> Option<String> {
+    if unresolved.is_empty() || allow_partial {
+        return None;
+    }
+    let list = unresolved
+        .iter()
+        .map(|(spec, why)| format!("{spec} ({why})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Cannot inspect {} of {total} repositories: {list}. Set the folder for each one, or run \
+         again with allow_partial to inspect the rest; the report then lists these as not inspected.",
+        unresolved.len()
+    ))
+}
+
+/// Record every repo that could not be resolved on `report` as a repo not inspected: a failed
+/// `repository read` pass, a not-run row for every rule selected for it, and an entry in
+/// [`crate::onboard::ScanReport::repos_not_inspected`]. Used by a run that went ahead without
+/// them (`allow_partial`).
+fn record_unresolved_repos(
+    report: &mut crate::onboard::ScanReport,
+    unresolved: &[(String, String)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    for (spec, why) in unresolved {
+        report.note_repo_not_inspected(spec, why, selected, corpus);
+    }
+}
+
+/// [`record_unresolved_repos`] for a run that has just built its incremental manifest. The
+/// manifest was stamped complete or not before these repos were known, so it is corrected here,
+/// before it is stored: a manifest that says the AI review covered everything, from a run that
+/// never read a repo, would be reused as a complete baseline by the next scan.
+fn record_unresolved_repos_before_storing(
+    report: &mut crate::onboard::ScanReport,
+    manifest: &mut crate::scan_cache::ScanManifest,
+    unresolved: &[(String, String)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    record_unresolved_repos(report, unresolved, selected, corpus);
+    if !report.ai_review_complete() {
+        manifest.ai_covered = false;
+    }
 }
 
 async fn onboard_scan(
@@ -5446,8 +5863,21 @@ async fn onboard_scan(
         .projects
         .active()
         .map(|p| state.source_ops.begin_scan(&p.id));
-    let (sources, notes) = resolve_local_sources(&state, &repos);
-    let report = crate::onboard::scan_repos(&sources, notes).await;
+    let LocalSources {
+        sources,
+        notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
+    }
+    let mut report = crate::onboard::scan_repos(&sources, notes).await;
+    for (spec, why) in &unresolved {
+        report.note_repo_not_inspected(spec, why, &[], None);
+    }
     // Populate the per-project last-scan store so the chat assistant sees deterministic
     // results immediately. The async audit path (`onboard_audit_start`) and the sync audit
     // (`onboard_audit`) already do this; without it here, a floor-only `/api/onboard/scan`
@@ -5463,7 +5893,7 @@ async fn onboard_scan(
 /// `repos` means PROJECT-LEVEL (scanned against every repo); a non-empty `repos` scopes the
 /// rule to just those repos. The UI sends each repo's selections plus the project-level set,
 /// and the audit scopes each repo to the rules that apply to it.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct AuditRuleReq {
     #[serde(default)]
     id: String,
@@ -5475,8 +5905,18 @@ struct AuditRuleReq {
     repos: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct AuditReq {
+    /// Go ahead when some repos have no local clone; the report then lists them as not
+    /// inspected and the release gate refuses to package it. Without it the audit is refused
+    /// and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
+    /// The scan settings' spend limit in US dollars (`camerata inspect --max-cost-usd`'s twin).
+    /// `None` = no limit. The run stops between passes once actual spend reaches it and says
+    /// what it did not run; see [`crate::cost_cap`].
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
     #[serde(default)]
     repos: Vec<String>,
     #[serde(default)]
@@ -5707,6 +6147,8 @@ pub async fn load_corpus_for_scan(
         return (None, Vec::new());
     }
     let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    // The failure report's scrubber keeps a long rule id out of its credential redaction.
+    camerata_llm::failure::register_rule_ids(set.iter().map(|r| r.id.0.clone()));
     let failures = errors
         .into_iter()
         .map(|(path, error)| CorpusLoadFailure {
@@ -5776,6 +6218,8 @@ pub fn record_corpus_load_failures(
         );
         report.ledger.record_corpus_load_failure(&failure.rule_id);
         report.coverage_notes.push(crate::onboard::CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: RULE_CORPUS_COVERAGE_TOOL.to_string(),
             // Operator-facing detail. See this function's doc comment, point 3, for why this
             // text reaches the UI and the ledger but never a client artifact.
@@ -5860,6 +6304,7 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
+    let run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -5871,8 +6316,47 @@ async fn onboard_audit(
         r.message = Some("No repos to audit.".to_string());
         return Json(r);
     }
+    // An unknown scan mode is refused before anything runs (never a silent fallback).
+    let requested_mode = match crate::ai_audit::ScanMode::parse(req.mode.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(e.clone());
+            r.message = Some(e);
+            return Json(r);
+        }
+    };
+    // The client-engagement lock, before any repository is located or read.
+    if let Some(why) = client_lock_refusal_for_scan(
+        state.projects.active().as_ref(),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Audit,
+            req.model.as_deref(),
+        )),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Calibration,
+            req.calibration_model.as_deref(),
+        )),
+        req.deep,
+        fix_step_model(&state).as_deref(),
+    ) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
-    let (sources, notes) = resolve_local_sources(&state, &repos);
+    let LocalSources {
+        sources,
+        mut notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -5908,7 +6392,6 @@ async fn onboard_audit(
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
-    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
@@ -5933,6 +6416,16 @@ async fn onboard_audit(
     // `backend` setting and whether an Anthropic key is present. See
     // `resolve_backend_for_project`'s doc comment.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // Rank 2: with no mode forced, the API backend runs the scan as a Message Batch.
+    let mode = scan_mode_for_run(
+        requested_mode,
+        &backend_resolution,
+        run_controls.efficiency,
+        &mut notes,
+    );
+    // This request has no job to record a batch id on, and a batch can run for hours: a dropped
+    // connection would orphan a running, billed batch. Batch runs on the job path only.
+    let mode = synchronous_scan_mode(mode, &mut notes);
 
     // PANIC GUARD: this handler has no background job to fail into (unlike
     // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
@@ -5947,7 +6440,7 @@ async fn onboard_audit(
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, manifest) = crate::onboard::audit_repos(
+        let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -5970,8 +6463,18 @@ async fn onboard_audit(
                 .as_ref()
                 .map(project_chosen_options)
                 .unwrap_or_default(),
+            run_controls,
         )
         .await;
+        // A repo that could not be read is on the report as not inspected, never just absent,
+        // and the manifest is corrected for it before it is stored.
+        record_unresolved_repos_before_storing(
+            &mut report,
+            &mut manifest,
+            &unresolved,
+            &selected,
+            corpus.as_ref(),
+        );
         // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
         // incremental. Only when there's an active project to key it to.
         if let Some(id) = &project_id {
@@ -5983,12 +6486,24 @@ async fn onboard_audit(
         // client line and the operator log. Before this, those errors were discarded at the
         // load site and a rule with a typo'd enum value vanished from the scan silently.
         record_corpus_load_failures(&mut report, &corpus_load_failures);
+        // The engagement this scan ran under, with the models that actually ran.
+        report
+            .ledger
+            .record_engagement(engagement_record_for_scan(active_project.as_ref(), &report));
         // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
         // and fold their findings into triage as preview findings (advisory, not enforced).
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
+            merge_scan_preview(
+                &mut report,
+                &sources,
+                &preview_rules,
+                corpus.as_ref(),
+                None,
+                project_client_tooling(active_project.as_ref()),
+            )
+            .await;
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
@@ -6001,7 +6516,13 @@ async fn onboard_audit(
             // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
             // stage entry (a no-op when every repo's dep-audit found nothing new) — see
             // `crate::scan_ledger::record_addition_stage`'s doc comment.
+            // Runtime and framework end of life and known runtime vulnerabilities: the rows join
+            // the enrichment range below, so a known-exploited runtime vulnerability is labelled
+            // and floored exactly like a dependency one.
+            let runtime_rows_in = report.findings.len();
+            crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
             let dep_audit_rows_in = report.findings.len();
+            let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -6010,6 +6531,8 @@ async fn onboard_audit(
                     Err(_elapsed) => (
                         Vec::new(),
                         Some(crate::onboard::CoverageNote {
+                            tool_failed: false,
+                            repo: None,
                             tool: "osv-scanner".to_string(),
                             message: format!(
                                 "dependency audit (osv-scanner) timed out after 60 s for {spec}"
@@ -6017,6 +6540,14 @@ async fn onboard_audit(
                         }),
                     ),
                 };
+                let dep_note = dep_note.map(|mut note| {
+                    note.repo.get_or_insert_with(|| spec.to_string());
+                    note
+                });
+                osv_runs.push(crate::vuln_intel::OsvRun::from_note(
+                    spec,
+                    dep_note.as_ref(),
+                ));
                 if !dep_findings.is_empty() {
                     report.findings.extend(dep_findings);
                 }
@@ -6024,6 +6555,13 @@ async fn onboard_audit(
                     report.coverage_notes.push(note);
                 }
             }
+            // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run over
+            // the rows this loop added (the one implementation, shared with the CLI).
+            // ORDER: this MUST stay before `apply_scan_severity_bounds` below. The KEV floor to
+            // critical is written first and the corpus bounds get the last word; see
+            // `vuln_intel::apply` and `tests/vuln_intel_call_order.rs`.
+            crate::vuln_intel::enrich_dependency_findings(&mut report, runtime_rows_in, &osv_runs)
+                .await;
             crate::scan_ledger::record_addition_stage(
                 &mut report.ledger,
                 "dependency-audit-merge",
@@ -6594,14 +7132,19 @@ pub async fn merge_scan_preview(
     // on the synchronous path. When set, each preview tool registers + streams running → done
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
+    // Whether a preview tool that executes the repository's code (`cargo clippy`) may run: the
+    // engagement's client-tooling decision (see `crate::client_lock`).
+    tooling: crate::client_lock::ClientTooling,
 ) {
     // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
     // (regardless of whether each attempt then succeeded or failed) — fed to
     // `reconcile_external_tool_ledger` so it can tell "the tool ran and found nothing" apart
     // from "the tool was never invoked this scan at all" (empty `preview_rules`/no corpus, or
     // no selected rule this scan routed to it). See `scan_tools::run_scan_tools`'s doc comment.
-    let mut tools_attempted: std::collections::HashSet<&'static str> =
-        std::collections::HashSet::new();
+    let mut tools_attempted: std::collections::HashMap<
+        String,
+        std::collections::HashSet<&'static str>,
+    > = std::collections::HashMap::new();
     // Pass-1 W1 seal fix: this pass runs AFTER `onboard::audit_repos`'s own merge stages and
     // strictly APPENDS findings — the exact "row-adding pass that ran outside the ledger's
     // view" shape this fixes (see `crate::scan_ledger::StageAccounting::added`'s doc comment).
@@ -6640,9 +7183,14 @@ pub async fn merge_scan_preview(
                     &lookup,
                     Some(&present_languages),
                     job,
+                    tooling,
+                    sources.len() > 1,
                 )
                 .await;
-                tools_attempted.extend(attempted);
+                tools_attempted
+                    .entry(spec.clone())
+                    .or_default()
+                    .extend(attempted);
                 // Dedup preview findings that overlap the deterministic floor or other preview
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
@@ -6746,38 +7294,66 @@ fn pass_label_for_tool(tool_name: &str) -> String {
     }
 }
 
+/// Which external tools were invoked for which repo. [`merge_scan_preview`] builds the per-repo
+/// map; the flat set is the shape callers had before the ledger was per repo, and answers for
+/// every repo at once.
+pub(crate) trait ToolsAttempted {
+    /// Whether `tool` was invoked for `repo`. An empty `repo` (an entry that names no repo) asks
+    /// whether it was invoked for any repo.
+    fn invoked(&self, repo: &str, tool: &str) -> bool;
+}
+
+impl ToolsAttempted for std::collections::HashSet<&str> {
+    fn invoked(&self, _repo: &str, tool: &str) -> bool {
+        self.contains(tool)
+    }
+}
+
+impl ToolsAttempted for std::collections::HashMap<String, std::collections::HashSet<&'static str>> {
+    fn invoked(&self, repo: &str, tool: &str) -> bool {
+        if repo.is_empty() {
+            self.values().any(|tools| tools.contains(tool))
+        } else {
+            self.get(repo).is_some_and(|tools| tools.contains(tool))
+        }
+    }
+}
+
+/// The repos named in a pass disclosure: the one repo an entry is about, or every repo of the
+/// scan for an entry that names none.
+fn repo_for_disclosure(report: &crate::onboard::ScanReport, repo: &str) -> String {
+    if repo.is_empty() {
+        report.repos.join(", ")
+    } else {
+        repo.to_string()
+    }
+}
+
 pub(crate) fn reconcile_external_tool_ledger(
     report: &mut crate::onboard::ScanReport,
-    tools_attempted: &std::collections::HashSet<&str>,
+    tools_attempted: &impl ToolsAttempted,
     corpus: Option<&camerata_rules::RuleSet>,
 ) {
-    // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
-    // tool-execution failure — never treated as evidence the tool itself didn't run.
-    let failed_tools: std::collections::HashSet<&str> = report
-        .coverage_notes
-        .iter()
-        .filter(|n| n.tool != "unrouted")
-        .map(|n| n.tool.as_str())
-        .collect();
-
-    let external_tool_rule_ids: Vec<String> = report
+    // Decided per (rule, repo): a tool that failed or was never invoked on one repo says nothing
+    // about the rule on another repo, and a finding on one repo is no evidence for another.
+    let external: Vec<(String, String)> = report
         .ledger
         .rules()
         .filter(|r| r.tier == crate::scan_ledger::RuleTier::ExternalTool)
-        .map(|r| r.rule_id.clone())
+        .map(|r| (r.rule_id.clone(), r.repo.clone()))
         .collect();
 
-    for rule_id in external_tool_rule_ids {
+    for (rule_id, repo) in external {
         let emitted = report
             .findings
             .iter()
-            .filter(|f| finding_grounds_to(f, &rule_id))
+            .filter(|f| (repo.is_empty() || f.repo == repo) && finding_grounds_to(f, &rule_id))
             .count();
 
         if emitted > 0 {
             report
                 .ledger
-                .correct_rule_after_external_pass(rule_id, true, None, emitted);
+                .correct_rule_after_external_pass(&repo, rule_id, true, None, emitted);
             continue;
         }
 
@@ -6786,44 +7362,94 @@ pub(crate) fn reconcile_external_tool_ledger(
         let tool_name = external_tool_name_for_ledger_rule(&rule_id, corpus);
         let pass_label = pass_label_for_tool(tool_name);
 
-        if failed_tools.contains(tool_name) {
-            let reason = report
-                .coverage_notes
-                .iter()
-                .find(|n| n.tool == tool_name)
-                .map(|n| n.message.clone())
-                .unwrap_or_else(|| format!("{tool_name} did not run this scan"));
+        // A note for this tool that names this repo, or names no repo at all. "unrouted" is a
+        // ROUTING gap (a selected rule with no tool to drive it), never a tool-execution failure.
+        let failure = report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool != "unrouted" && n.tool == tool_name)
+            .find(|n| match n.repo.as_deref() {
+                Some(note_repo) => repo.is_empty() || note_repo == repo,
+                None => true,
+            })
+            .map(|n| (n.message.clone(), n.tool_failed));
+
+        if let Some((reason, invoked_and_failed)) = failure {
             report.ledger.correct_rule_after_external_pass(
+                &repo,
                 rule_id.clone(),
                 false,
                 Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
-            report.failed_passes.push(crate::ai_audit::FailedPass {
-                repo: report.repos.join(", "),
-                pass: pass_label.clone(),
-                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
-            });
+            if invoked_and_failed {
+                // The tool was started and then crashed or wrote nothing usable: a failed part.
+                // It locks a client export and is re-run on resume. One entry per repo and
+                // pass, however many rules the tool was asked to check.
+                let repo_name = repo_for_disclosure(report, &repo);
+                let already = report
+                    .failed_passes
+                    .iter()
+                    .any(|f| !f.scope_note && f.repo == repo_name && f.pass == pass_label);
+                if !already {
+                    report.failed_passes.push(crate::ai_audit::FailedPass {
+                        repo: repo_name,
+                        pass: pass_label.clone(),
+                        reason: format!("{pass_label} failed: {reason}"),
+                        files_not_reviewed: 0,
+                        class: crate::ai_audit::FailureClass::Io,
+                        files: Vec::new(),
+                        attempts: Vec::new(),
+                        scope_note: false,
+                    });
+                }
+            } else {
+                report.failed_passes.push(crate::ai_audit::FailedPass {
+                    repo: repo_for_disclosure(report, &repo),
+                    pass: pass_label.clone(),
+                    reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+                    files_not_reviewed: 0,
+                    class: crate::ai_audit::FailureClass::Content,
+                    files: Vec::new(),
+                    attempts: Vec::new(),
+                    // A mechanical tool that was not run (by policy, not installed for this
+                    // stack, or no rule routed to it) is a disclosed limit of the scope, not a
+                    // failed part.
+                    scope_note: true,
+                });
+            }
             continue;
         }
 
-        if !tools_attempted.contains(tool_name) {
+        if !tools_attempted.invoked(&repo, tool_name) {
             // Outcome 3: a pass-level skip with no per-finding failure note to key off of.
+            let scope = if repo.is_empty() {
+                "any scanned repo".to_string()
+            } else {
+                repo.clone()
+            };
             let reason = format!(
-                "{tool_name} was never invoked for any scanned repo this scan (no selected \
-                 rule routed to it, no supported language was present, or the preview pass \
-                 did not run at all)"
+                "{tool_name} was never invoked for {scope} this scan (no selected rule routed to \
+                 it, no supported language was present, or the preview pass did not run at all)"
             );
             report.ledger.correct_rule_after_external_pass(
+                &repo,
                 rule_id.clone(),
                 false,
                 Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
             report.failed_passes.push(crate::ai_audit::FailedPass {
-                repo: report.repos.join(", "),
+                repo: repo_for_disclosure(report, &repo),
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+                files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
+                // A mechanical tool that was not run (by policy, not installed for this stack, or
+                // no rule routed to it) is a disclosed limit of the scope, not a failed part.
+                scope_note: true,
             });
             continue;
         }
@@ -6831,7 +7457,7 @@ pub(crate) fn reconcile_external_tool_ledger(
         // Attempted, no hard failure, genuinely zero findings — a real clean result.
         report
             .ledger
-            .correct_rule_after_external_pass(rule_id, true, None, 0);
+            .correct_rule_after_external_pass(&repo, rule_id, true, None, 0);
     }
 
     // Grading-cycle fix (2026-10-07): the loop above only CORRECTS rule ids `onboard::
@@ -6843,11 +7469,12 @@ pub(crate) fn reconcile_external_tool_ledger(
     // selected at all, and so was NEVER pre-registered as `RuleTier::ExternalTool` in the
     // first place. Before this fix, such a finding shipped in the export while contributing
     // ZERO to every ledger total (`render_ledger_summary`'s per-family `findings_emitted`
-    // sum only ever iterates `ledger.rules()`, which never contained that id) — the exact
+    // sum only ever iterates the ledger's rules, which never contained that id) — the exact
     // "family reports findings=0 while preview rows ARE present in the export" defect.
     // This second pass discovers any such row and records it fresh, so the ledger's
     // per-family counts always equal the rows actually exported, never a strict subset of
-    // them keyed off selection alone.
+    // them keyed off selection alone. It is keyed by (rule, repo), so a repo the rule was
+    // tracked for does not hide a finding of the same rule in another repo.
     // Discovery is deliberately scoped to the GROUNDING MAPS only (`external_tool_floor_category`
     // — Semgrep's `semgrep_floor_category` plus ESLint's `eslint_floor_category`, each a
     // closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
@@ -6859,10 +7486,8 @@ pub(crate) fn reconcile_external_tool_ledger(
     // `no-var`, `prefer-const` among them — so exactly the same "the tool ran its whole
     // baseline, not just the selected subset" shape Semgrep's whole-ruleset behavior already
     // required this discovery pass for applies to ESLint too.
-    let already_tracked: std::collections::HashSet<String> =
-        report.ledger.rules().map(|r| r.rule_id.clone()).collect();
-    let mut newly_discovered: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut newly_discovered: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
     for f in &report.findings {
         if !f.preview {
             continue;
@@ -6875,14 +7500,19 @@ pub(crate) fn reconcile_external_tool_ledger(
             std::iter::once(f.rule_id.as_str()).chain(f.also_matches.iter().map(String::as_str));
         for candidate in candidates {
             if let Some(grounded) = external_tool_floor_category(candidate) {
-                if !already_tracked.contains(grounded) {
-                    *newly_discovered.entry(grounded.to_string()).or_insert(0) += 1;
+                let tracked = report.ledger.rule_for_repo(grounded, &f.repo).is_some()
+                    || report.ledger.rule_for_repo(grounded, "").is_some();
+                if !tracked {
+                    *newly_discovered
+                        .entry((grounded.to_string(), f.repo.clone()))
+                        .or_insert(0) += 1;
                 }
             }
         }
     }
-    for (rule_id, emitted) in newly_discovered {
+    for ((rule_id, repo), emitted) in newly_discovered {
         report.ledger.record_rule(
+            &repo,
             rule_id,
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -6913,16 +7543,302 @@ pub(crate) fn finding_grounds_to(f: &crate::onboard::Finding, rule_id: &str) -> 
         .any(|m| m == rule_id || external_tool_floor_category(m) == Some(rule_id))
 }
 
+/// The scan mode a desktop scan runs in ([`crate::ai_audit::resolve_scan_mode`]), with the one
+/// notice the resolution may carry (the CLI backend cannot batch) added to the scan's notes.
+fn scan_mode_for_run(
+    requested: Option<crate::ai_audit::ScanMode>,
+    backend: &crate::llm::BackendResolution,
+    efficiency: crate::efficiency::EfficiencyConfig,
+    notes: &mut Vec<String>,
+) -> crate::ai_audit::ScanMode {
+    let choice = crate::ai_audit::resolve_scan_mode(requested, backend, efficiency);
+    if let Some(notice) = choice.notice {
+        eprintln!("[camerata-server] {notice}");
+        notes.push(notice);
+    }
+    choice.mode
+}
+
+/// The note a synchronous scan carries when it ran in real time although the resolved mode was
+/// Message Batch.
+pub const SYNCHRONOUS_SCAN_REALTIME_NOTICE: &str = "This scan ran in real time (parallel), not \
+     as a Message Batch: a batch can run for hours, and this request has no job to record its \
+     batch id on, so a dropped connection would leave a running, billed batch nobody can find. \
+     Start the scan as a background job to use batches.";
+
+/// The mode the SYNCHRONOUS desktop endpoint (`onboard_audit`, no job) actually runs. A Message
+/// Batch there would have no persisted batch id, so a resolved `Batch` runs in real time instead
+/// and says so once in the report notes; every other mode is unchanged. Batch runs only on the
+/// job path ([`start_audit_job`]), where the batch id is recorded on the job.
+fn synchronous_scan_mode(
+    mode: crate::ai_audit::ScanMode,
+    notes: &mut Vec<String>,
+) -> crate::ai_audit::ScanMode {
+    if mode != crate::ai_audit::ScanMode::Batch {
+        return mode;
+    }
+    eprintln!("[camerata-server] {SYNCHRONOUS_SCAN_REALTIME_NOTICE}");
+    notes.push(SYNCHRONOUS_SCAN_REALTIME_NOTICE.to_string());
+    crate::ai_audit::ScanMode::Parallel
+}
+
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
 /// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
 /// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
 /// final report. The work is decoupled from this request — it survives a dropped poll.
+/// The repos one project holds, by name and by folder, for deciding which project a saved run
+/// belongs to.
+struct ProjectRepoSet {
+    id: String,
+    names: std::collections::HashSet<String>,
+    dirs: Vec<std::path::PathBuf>,
+}
+
+impl ProjectRepoSet {
+    /// Whether every repo the run inspected is one of this project's repos (by name or folder).
+    fn holds_all_repos_of(&self, record: &crate::run_store::RunRecord) -> bool {
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        !record.repos.is_empty()
+            && record.repos.iter().all(|repo| {
+                self.names.contains(&repo.name)
+                    || self.dirs.contains(&canon(std::path::Path::new(&repo.dir)))
+            })
+    }
+}
+
+/// The repo set of every project.
+fn project_repo_sets(state: &AppState) -> Vec<ProjectRepoSet> {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    state
+        .projects
+        .list()
+        .into_iter()
+        .map(|project| ProjectRepoSet {
+            id: project.id.clone(),
+            names: project.repos.iter().cloned().collect(),
+            dirs: resolve_local_sources(state, &project.repos)
+                .sources
+                .iter()
+                .map(|(_, dir)| canon(dir))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Whether the saved run `record` belongs to the project `project_id`.
+///
+/// A cockpit run belongs to the project it was started in and to no other, whatever repos two
+/// projects share: a consultant's second client must never be offered (or resume) the first
+/// client's inspection. A cockpit run saved before runs recorded their project is placed by its
+/// repos, and only when exactly one project holds all of them (with several holders it is listed
+/// nowhere rather than guessed). The command line's runs match by repos.
+fn run_belongs_to_project(
+    sets: &[ProjectRepoSet],
+    project_id: &str,
+    record: &crate::run_store::RunRecord,
+) -> bool {
+    use crate::run_store::RunOrigin;
+    match (record.origin, record.project_id.as_deref()) {
+        (RunOrigin::Cockpit, Some(owner)) => owner == project_id,
+        (RunOrigin::Cockpit, None) => {
+            let holders: Vec<&ProjectRepoSet> = sets
+                .iter()
+                .filter(|set| set.holds_all_repos_of(record))
+                .collect();
+            holders.len() == 1 && holders[0].id == project_id
+        }
+        (RunOrigin::Cli, _) => sets
+            .iter()
+            .any(|set| set.id == project_id && set.holds_all_repos_of(record)),
+    }
+}
+
+/// The refusal for resuming `record` while the open (active) project is not the one it belongs
+/// to, or `None` when it belongs to the open project. A resume runs the run's saved request under
+/// the open project and can land the report in it, so it must be the project that started the run.
+fn resume_project_refusal(
+    state: &AppState,
+    record: &crate::run_store::RunRecord,
+) -> Option<String> {
+    let Some(open) = state.projects.active() else {
+        return Some("open the project this inspection belongs to before resuming it".to_string());
+    };
+    let sets = project_repo_sets(state);
+    if run_belongs_to_project(&sets, &open.id, record) {
+        return None;
+    }
+    Some(match record.project_id.as_deref() {
+        Some(owner) => {
+            let name = state.projects.get(owner).map_or_else(
+                || "another project".to_string(),
+                |p| format!("\"{}\"", p.name),
+            );
+            format!(
+                "this inspection was started in {name}, not in the open project \"{}\"; open \
+                 {name} to run what remains, so its report lands in the right project",
+                open.name
+            )
+        }
+        None => format!(
+            "this inspection was saved before runs recorded their project and cannot be placed \
+             in the open project \"{}\"; run it again from the scan screen",
+            open.name
+        ),
+    })
+}
+
+/// The query of `GET /api/inspections`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct InspectionsQuery {
+    /// The project to list for; the open (active) project when absent.
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+/// `GET /api/inspections`: the saved inspections of the open project, newest first, each with its
+/// id, when it started, its repos, where it stands (complete, incomplete, interrupted or live),
+/// how many parts remain and what finishing it should cost. The cockpit offers the newest
+/// unfinished one on the scan screen ("This inspection was interrupted"). A run belongs to the
+/// project when every repo it inspected is one of the project's repos (by name or by folder).
+async fn list_saved_inspections(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<InspectionsQuery>,
+) -> impl IntoResponse {
+    let project = query
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
+    let Some(project) = project else {
+        return Json(serde_json::json!({ "project_id": null, "inspections": [] }));
+    };
+    let sets = project_repo_sets(&state);
+    let project_id = project.id.clone();
+    let listed_for = project_id.clone();
+    let listed = tokio::task::spawn_blocking(move || {
+        crate::run_store::list_inspections_in(&crate::run_store::runs_dir(), |record| {
+            run_belongs_to_project(&sets, &listed_for, record)
+        })
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "project_id": project_id, "inspections": listed }))
+}
+
+/// What "Run what remains" would do for a saved run: the parts that remain, what they should
+/// cost, and the plain reason the resume cannot start now when it cannot.
+/// A run is previewed only in the project that started it, as it is resumed (409 otherwise, in
+/// the same words).
+async fn run_resume_plan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Ok(record) = crate::run_store::read_record(&id) {
+        if let Some(why) = resume_project_refusal(&state, &record) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": why })),
+            )
+                .into_response();
+        }
+    }
+    match crate::run_store::preview_resume(&id) {
+        Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Start the saved run `id` again as a background job that runs only the parts that are not
+/// done. The same job the scan button starts, with the saved request and `resume_run` set, so a
+/// refusal (the repo moved on, the rules changed, the run is in use) fails the job with the reason.
+async fn run_resume_start(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let record = match crate::run_store::read_record(&id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    if let Some(why) = resume_project_refusal(&state, &record) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response();
+    }
+    let req: AuditReq =
+        match serde_json::from_value(record.args) {
+            Ok(r) => r,
+            Err(_) => return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "this run was not started from the app, so the app cannot resume it; \
+                              use `camerata inspect --resume` instead"
+                })),
+            )
+                .into_response(),
+        };
+    let job_id = start_audit_job(
+        &state,
+        req,
+        AuditJobOptions {
+            resume_run: Some(id),
+            ..AuditJobOptions::default()
+        },
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "job_id": job_id })),
+    )
+        .into_response()
+}
+
 async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
     let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
     Json(serde_json::json!({ "job_id": job_id }))
+}
+
+impl AuditReq {
+    /// How this scan executes: the environment's efficiency switches, the request's spend
+    /// limit and the project's fix model (`fix_model`, from [`fix_step_model`]). A limit that is
+    /// not a positive number cannot be honored as written, so it becomes the smallest possible
+    /// limit (one pass runs, the rest are reported as not run), never "no limit": a typo must
+    /// not remove the guard.
+    fn run_controls(
+        &self,
+        fix_model: Option<String>,
+        clone_judge_model: Option<String>,
+    ) -> crate::cost_cap::RunControls {
+        crate::cost_cap::RunControls {
+            clone_judge_model,
+            max_cost_usd: self.max_cost_usd.map(|cap| {
+                crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
+            }),
+            fix_model,
+            ..crate::cost_cap::RunControls::from_env()
+        }
+    }
+
+    /// [`Self::run_controls`] for the app's active project: its fix step model (unset unless the
+    /// operator picked one) is what the run's fix stage is told. The one place the project's
+    /// fix setting becomes run controls; both audit entry points come through it.
+    fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
+        self.run_controls(fix_step_model(state), clone_judge_step_model(state))
+    }
 }
 
 /// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
@@ -6940,6 +7856,9 @@ pub(crate) struct AuditJobOptions {
     /// Set for a delta retest: the finished report is recorded as a `DeltaRetest` inspection
     /// entry instead of a full one.
     pub delta: Option<DeltaRetest>,
+    /// The saved run to resume instead of starting a new one ("Run what remains"). The job then
+    /// runs only the parts that are not done, through [`crate::run_store::open_for_resume`].
+    pub resume_run: Option<String>,
 }
 
 /// The commits a delta retest ran between.
@@ -6959,6 +7878,10 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
+    let run_controls = req.run_controls_for(&state);
+    // What the run was asked, saved with the run so it can be resumed with the same request.
+    let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
+    let resume_run = options.resume_run.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -6998,16 +7921,12 @@ pub(crate) async fn start_audit_job(
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
-    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
+    let requested_mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     let thorough = req.thorough;
     let deep = req.deep;
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
-    // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, mut notes) = resolve_local_sources(&state, &repos);
-    notes.extend(options.extra_notes);
-    let delta = options.delta;
 
     // Capture the project up front (the named one, else the active one): the job is stamped
     // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
@@ -7018,12 +7937,55 @@ pub(crate) async fn start_audit_job(
         .and_then(|id| state.projects.get(id))
         .or_else(|| state.projects.active());
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // The client-engagement lock, before any repository is located or read: the job fails at
+    // once with the reason, and nothing is spawned.
+    if let Some(why) = client_lock_refusal_for_scan(
+        active_project.as_ref(),
+        model.as_deref(),
+        calibration_model.as_deref(),
+        deep,
+        fix_step_model(&state).as_deref(),
+    ) {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
+    // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
+    let LocalSources {
+        sources,
+        mut notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
+    notes.extend(options.extra_notes);
+    let delta = options.delta;
+    let client_tooling = project_client_tooling(active_project.as_ref());
+    // Moved into the spawned task, which records the engagement in the scan's ledger.
+    let engagement_project = active_project.clone();
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
     // The compliance-safety gate: resolved up front (same as the synchronous `onboard_audit`
     // handler) from this project's `backend` setting and key presence, then moved into the
     // spawned task below.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // An unknown scan mode fails the job before anything runs (never a silent fallback); with
+    // no mode forced, the API backend runs the scan as a Message Batch (rank 2).
+    let mode = match requested_mode {
+        Ok(requested) => scan_mode_for_run(
+            requested,
+            &backend_resolution,
+            run_controls.efficiency,
+            &mut notes,
+        ),
+        Err(e) => {
+            state.jobs.fail(&job_id, e);
+            return job_id;
+        }
+    };
     // Audit-integrated alternative recommendation: this project's persisted chosen options,
     // computed up front (like `backend_resolution`) and moved into the spawned task below.
     let chosen_options = active_project
@@ -7087,67 +8049,200 @@ pub(crate) async fn start_audit_job(
             // "1/2 tools" while the other two are still invisible.
             if run_deterministic {
                 let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
-                // Derive the UNION of all languages present across every source repo.
-                // Stack-gating uses this union so the pre-declared tool count matches the
-                // tools that `merge_scan_preview` will actually run (which gates per-repo
-                // but adds to the same job). Using the union is conservative: a tool
-                // present in ANY repo stays in the denominator.
-                let mut union_languages = std::collections::HashSet::<String>::new();
-                for (_, dir) in &sources {
-                    let dir_clone = dir.clone();
-                    if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
-                        crate::onboard::files::read_local_repo_files(&dir_clone)
-                    })
-                    .await
-                    {
-                        union_languages
-                            .extend(crate::scan_tools::languages_from_files(&extracted.files));
-                    }
-                }
-                let lang_gate = if union_languages.is_empty() {
-                    None
-                } else {
-                    Some(&union_languages)
-                };
-                let mut tool_ids: Vec<String> = vec!["floor".to_string()];
-                let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
-                    &preview_rules,
-                    &lookup,
-                    lang_gate,
-                );
-                tool_ids.extend(preview_ids);
                 let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
                     .map(|v| !v.is_empty())
                     .unwrap_or(false);
-                if !dep_audit_disabled {
-                    tool_ids.push("dep-audit".to_string());
+                if sources.len() > 1 {
+                    // Several repos: every repo gets its own rows (`owner/repo:tool`), declared
+                    // from that repo's own languages and the rules bound to it, so a tool that
+                    // will not run on a repo is not left waiting in the denominator.
+                    for (spec, dir) in &sources {
+                        let dir_clone = dir.clone();
+                        let languages = tokio::task::spawn_blocking(move || {
+                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                                .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                                .unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+                            .iter()
+                            .filter(|r| r.applies_to(spec))
+                            .cloned()
+                            .collect();
+                        let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                        tool_ids.extend(crate::scan_tools::preview_tool_ids_for_rules(
+                            &for_repo,
+                            &lookup,
+                            (!languages.is_empty()).then_some(&languages),
+                        ));
+                        if !dep_audit_disabled {
+                            tool_ids.push("dep-audit".to_string());
+                        }
+                        let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                        body_jobs.declare_repo_tools(&body_jid, spec, &id_refs);
+                    }
+                } else {
+                    // Derive the UNION of all languages present across every source repo.
+                    // Stack-gating uses this union so the pre-declared tool count matches the
+                    // tools that `merge_scan_preview` will actually run (which gates per-repo
+                    // but adds to the same job). Using the union is conservative: a tool
+                    // present in ANY repo stays in the denominator.
+                    let mut union_languages = std::collections::HashSet::<String>::new();
+                    for (_, dir) in &sources {
+                        let dir_clone = dir.clone();
+                        if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
+                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                        })
+                        .await
+                        {
+                            union_languages
+                                .extend(crate::scan_tools::languages_from_files(&extracted.files));
+                        }
+                    }
+                    let lang_gate = if union_languages.is_empty() {
+                        None
+                    } else {
+                        Some(&union_languages)
+                    };
+                    let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                    let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
+                        &preview_rules,
+                        &lookup,
+                        lang_gate,
+                    );
+                    tool_ids.extend(preview_ids);
+                    if !dep_audit_disabled {
+                        tool_ids.push("dep-audit".to_string());
+                    }
+                    let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                    body_jobs.declare_tools(&body_jid, &id_refs);
                 }
-                let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
-                body_jobs.declare_tools(&body_jid, &id_refs);
             }
 
-            let (mut report, manifest) = crate::onboard::audit_repos(
-                state.credential_store.as_ref(),
-                &sources,
+            // The run is saved from the start, so a failed part or an interruption costs only
+            // that part (see `crate::run_store`); a resume ("Run what remains") opens the saved run
+            // through the same function the command line uses.
+            use crate::run_store as rs;
+            let source_dirs: Vec<std::path::PathBuf> =
+                sources.iter().map(|(_, dir)| dir.clone()).collect();
+            let project_key = if source_dirs.len() == 1 {
+                crate::scan_cache::state_dir::repo_state_key(&source_dirs[0])
+            } else {
+                crate::scan_cache::state_dir::project_state_key(&source_dirs)
+            };
+            let audit_model = crate::ai_audit::resolve_audit_model(model.as_deref());
+            let ai_scan_key = crate::scan_cache::AiScanKey::new(
+                &audit_model,
+                calibration_model.as_deref(),
                 &selected,
-                notes,
+            );
+            // The resolved ids (what each stage calls), so a resume notices a changed default.
+            let models_record = rs::ModelsRecord::from_picks(
                 model.as_deref(),
                 calibration_model.as_deref(),
-                mode,
-                thorough,
-                Some((&transcripts, SCAN_AUDIT_KEY)),
-                Some((&body_jobs, &body_jid)),
-                prior.as_ref(),
-                deep,
-                soc2_enabled,
-                run_ai_review,
-                run_deterministic,
+                &run_controls,
+                match &backend_resolution {
+                    crate::llm::BackendResolution::Api => "api",
+                    _ => "cli",
+                },
+                &format!("{mode:?}").to_ascii_lowercase(),
+            );
+            let mut prior = prior;
+            let run_store = match &resume_run {
+                Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
+                    Ok((store, _estimate)) => {
+                        // The baseline the run started from, not one an attempt since replaced.
+                        prior = store.load_prior_manifest();
+                        Some(store)
+                    }
+                    Err(e) => {
+                        body_jobs.fail(&body_jid, e.to_string());
+                        return;
+                    }
+                },
+                None => match rs::RunStore::create(rs::NewRun {
+                    project_key: project_key.clone(),
+                    repos: sources.clone(),
+                    models: models_record,
+                    ai_scan_key,
+                    args: request_json,
+                    estimate_usd: None,
+                    include_alternatives: corpus.is_some(),
+                    origin: rs::RunOrigin::Cockpit,
+                    project_id: project_id.clone(),
+                }) {
+                    Ok(store) => {
+                        if let Some(p) = &prior {
+                            store.save_prior_manifest(p);
+                        }
+                        let _ = rs::prune_runs(&project_key, rs::DEFAULT_KEEP_RUNS);
+                        Some(store)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[camerata-server] this scan cannot be saved ({e}); it runs, but it \
+                             cannot be resumed"
+                        );
+                        None
+                    }
+                },
+            };
+            // The run's own delimiter seed, carried with the audit future below (never global).
+            let token_seed = run_store.as_ref().map(|s| s.nonce_seed());
+            let sessions = crate::llm::SessionSink::new();
+            let llm_backend = match &backend_resolution {
+                crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+                _ => crate::llm::Backend::Cli,
+            };
+            let real = crate::onboard::build_llm(
+                state.credential_store.as_ref(),
+                llm_backend,
                 Some(usage_ledger.clone()),
-                backend_resolution,
-                corpus.as_ref(),
-                &chosen_options,
+            )
+            .with_session_sink(sessions.clone());
+            let journaled = run_store
+                .as_ref()
+                .map(|s| rs::journal::wrap(&real, s.clone()));
+            let model_seam: &dyn crate::llm::LlmPort = match &journaled {
+                Some(j) => j.as_ref(),
+                None => &real,
+            };
+            let (mut report, mut manifest) = crate::prompt_frame::with_seed(
+                token_seed,
+                crate::onboard::audit_repos_with_llm_controlled(
+                    model_seam,
+                    &sources,
+                    &selected,
+                    notes,
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    mode,
+                    thorough,
+                    Some((&transcripts, SCAN_AUDIT_KEY)),
+                    Some((&body_jobs, &body_jid)),
+                    prior.as_ref(),
+                    deep,
+                    soc2_enabled,
+                    run_ai_review,
+                    run_deterministic,
+                    backend_resolution,
+                    corpus.as_ref(),
+                    &chosen_options,
+                    run_controls,
+                ),
             )
             .await;
+            report.provenance.model_sessions = sessions.snapshot();
+            // A repo that could not be read is on the report as not inspected, never just
+            // absent, and the manifest is corrected for it before it is stored.
+            record_unresolved_repos_before_storing(
+                &mut report,
+                &mut manifest,
+                &unresolved,
+                &selected,
+                corpus.as_ref(),
+            );
             // Persist the fresh manifest so the next scan can be incremental.
             if let Some(id) = &project_id {
                 scan_cache.put(id, manifest);
@@ -7157,6 +8252,10 @@ pub(crate) async fn start_audit_job(
             // corpus file that would not parse into the ledger, the integrity gate, one
             // concise client line and the operator log.
             record_corpus_load_failures(&mut report, &corpus_load_failures);
+            report.ledger.record_engagement(engagement_record_for_scan(
+                engagement_project.as_ref(),
+                &report,
+            ));
             // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
             // the deterministic selection; reports per-tool progress into the job so the cockpit's
             // deterministic progress view shows each preview tool start/run/done live.
@@ -7167,6 +8266,7 @@ pub(crate) async fn start_audit_job(
                     &preview_rules,
                     corpus.as_ref(),
                     Some((&body_jobs, &body_jid)),
+                    client_tooling,
                 )
                 .await;
             }
@@ -7185,7 +8285,11 @@ pub(crate) async fn start_audit_job(
                 let dep_audit_timeout = Duration::from_secs(60);
                 // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
                 // path — one ledger stage entry for the whole loop's net additions.
+                // Runtime end of life and runtime vulnerabilities (see `onboard_audit`).
+                let runtime_rows_in = report.findings.len();
+                crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
                 let dep_audit_rows_in = report.findings.len();
+                let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -7194,6 +8298,8 @@ pub(crate) async fn start_audit_job(
                         Err(_elapsed) => (
                             Vec::new(),
                             Some(crate::onboard::CoverageNote {
+                                tool_failed: false,
+                                repo: None,
                                 tool: "osv-scanner".to_string(),
                                 message: format!(
                                     "dependency audit (osv-scanner) timed out after 60 s for {spec}"
@@ -7201,16 +8307,39 @@ pub(crate) async fn start_audit_job(
                             }),
                         ),
                     };
+                    let dep_note = dep_note.map(|mut note| {
+                        note.repo.get_or_insert_with(|| spec.to_string());
+                        note
+                    });
                     let dep_count = dep_findings.len();
-                    body_jobs.det_tool_running(&body_jid, "dep-audit");
-                    body_jobs.det_tool_done(&body_jid, "dep-audit", dep_count);
+                    let dep_key =
+                        crate::jobs::progress_tool_key(spec, "dep-audit", sources.len() > 1);
+                    body_jobs.det_tool_running(&body_jid, &dep_key);
+                    body_jobs.det_tool_done(&body_jid, &dep_key, dep_count);
+                    osv_runs.push(crate::vuln_intel::OsvRun::from_note(
+                        spec,
+                        dep_note.as_ref(),
+                    ));
                     if !dep_findings.is_empty() {
-                        body_jobs.add_findings(&body_jid, dep_findings.clone());
                         report.findings.extend(dep_findings);
                     }
                     if let Some(note) = dep_note {
                         report.coverage_notes.push(note);
                     }
+                }
+                // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run
+                // (see the identical call in `onboard_audit`). The job receives the dependency
+                // rows only after enrichment, so the live view never shows an unlabelled row. The
+                // wait is bounded: both feeds share `vuln_intel::ENRICHMENT_BUDGET` (45 s), after
+                // which a feed counts as failed (cache, or not checked) and the rows are released.
+                crate::vuln_intel::enrich_dependency_findings(
+                    &mut report,
+                    runtime_rows_in,
+                    &osv_runs,
+                )
+                .await;
+                if report.findings.len() > runtime_rows_in {
+                    body_jobs.add_findings(&body_jid, report.findings[runtime_rows_in..].to_vec());
                 }
                 crate::scan_ledger::record_addition_stage(
                     &mut report.ledger,
@@ -7237,6 +8366,16 @@ pub(crate) async fn start_audit_job(
                 corpus.as_ref(),
             );
 
+            // The run is complete when no part failed or was left out; a scan that is not can be
+            // resumed with "Run what remains". The export is the operator's own later step.
+            if let Some(store) = &run_store {
+                report.run_id = Some(store.run_id());
+                crate::run_store::finish_run(store, &report, true);
+                // What the run wants the operator to know (a model call made with no prompt
+                // seed in scope, say) goes on the report the cockpit shows, not run.json alone.
+                crate::run_store::note_report(store, &mut report);
+            }
+
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
             // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
             // handler. If you add ledger capture here in the future, follow the same
@@ -7252,7 +8391,16 @@ pub(crate) async fn start_audit_job(
                 // A delta retest is recorded as its own kind of inspection, naming the
                 // inspection it was computed from and the two commits between.
                 (Some(id), Some(d)) => {
-                    scan_state.record_inspection(
+                    // The rule fingerprint of the inspection this retest was computed from, so a
+                    // unit's evidence can say when the rule selection changed in between.
+                    let base_rules_fingerprint = scan_state
+                        .inspections
+                        .list(id)
+                        .into_iter()
+                        .find(|e| e.id == d.base_inspection_id)
+                        .map(|e| e.rules_fingerprint)
+                        .unwrap_or_default();
+                    if let Some(entry) = scan_state.record_inspection(
                         id,
                         &report,
                         crate::inspections::InspectionKind::DeltaRetest {
@@ -7260,7 +8408,15 @@ pub(crate) async fn start_audit_job(
                             from_sha: d.from_sha.clone(),
                             to_sha: d.to_sha.clone(),
                         },
-                    );
+                    ) {
+                        // Units created from findings learn which of their findings are gone.
+                        crate::remediation::record_retest_evidence(
+                            &scan_state.uow,
+                            id,
+                            &entry,
+                            &base_rules_fingerprint,
+                        );
+                    }
                     scan_state.set_last_scan_in_memory(id.clone(), report.clone());
                 }
                 (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
@@ -7466,8 +8622,9 @@ async fn detect_repo(
     State(state): State<AppState>,
     Json(req): Json<DetectRepoReq>,
 ) -> Json<serde_json::Value> {
-    match crate::workspace::detect_remote_repo(std::path::Path::new(&req.path)).await {
-        Ok(repo) => {
+    match crate::workspace::detect_inspection_repo(std::path::Path::new(&req.path)).await {
+        Ok(found) => {
+            let repo = found.name;
             // #50: onboarding is one-time per repo. Report whether this repo is ALREADY onboarded
             // (in any project's onboarded list) so the UI can block a re-onboard and route the
             // user to the workspace instead of producing a duplicate set of issues + branch.
@@ -7482,6 +8639,9 @@ async fn detect_repo(
                 "repo": repo,
                 "onboarded": onboarded_in.is_some(),
                 "onboarded_project": onboarded_in,
+                // A folder not on GitHub is added for inspection only; the UI says so.
+                "github": found.github,
+                "note": found.note,
             }))
         }
         Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
@@ -8321,7 +9481,7 @@ async fn project_suppressions(
         })
         .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
-    let (sources, _notes) = resolve_local_sources(&state, &project.repos);
+    let sources = resolve_local_sources(&state, &project.repos).sources;
     // Read-only, as a GET must be: this used to fast-forward `git pull` every repo first, which
     // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
     // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
@@ -8385,6 +9545,10 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     struct DraftScan {
         #[serde(default)]
         repos: Vec<String>,
+        /// Repos the scan could not read (`(repo, reason)`). They belong to the project all
+        /// the same, so completing onboarding keeps them rather than saving the survivors.
+        #[serde(default)]
+        repos_not_inspected: Vec<(String, String)>,
         #[serde(default)]
         proposed_rules: Vec<DraftRule>,
     }
@@ -8436,7 +9600,13 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
                 _ => selections.push(sel),
             }
         }
-        (d.scan.repos, selections, cross_repo, process, d.custom)
+        let mut repos = d.scan.repos;
+        for (repo, _) in d.scan.repos_not_inspected {
+            if !repos.contains(&repo) {
+                repos.push(repo);
+            }
+        }
+        (repos, selections, cross_repo, process, d.custom)
     } else {
         (
             active.repos.clone(),
@@ -10131,9 +11301,20 @@ async fn draft_routine_prompt(
     let Ok(llm) = state.step_llm() else {
         return scaffold();
     };
+    // The model the form picked, else the open project's setting (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::ResearchChat,
+        Some(&req.model),
+    );
+    // A client engagement never sends client context to a non-Anthropic model: the form gets
+    // the scaffold and no model is called.
+    if state.client_lock_step_model_refusal(&model).is_some() {
+        return scaffold();
+    }
     let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         llm.clone(),
@@ -10144,7 +11325,7 @@ async fn draft_routine_prompt(
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await
@@ -10306,8 +11487,17 @@ async fn chat_escalation(
     // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
     // refuses rather than downgrading.
     let chat_llm = state.step_llm().map_err(backend_refused)?;
+    // The model the chat picked, else the open project's escalation model (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::Escalation,
+        Some(&req.model),
+    );
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(chat_llm.clone()),
@@ -10318,7 +11508,7 @@ async fn chat_escalation(
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await
@@ -10854,6 +12044,9 @@ async fn chat(
     // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
     // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
     let chat_llm = state.chat_llm().map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
@@ -10923,6 +12116,106 @@ fn resolve_backend_for_project(
     let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
     let backend = project.map(|p| p.backend).unwrap_or_default();
     crate::llm::resolve_backend(backend, has_api_key)
+}
+
+/// What the app tells the operator to change when the client-engagement lock refuses a run.
+const APP_CLIENT_LOCK_FIX: &str = "In this project's Settings, set the backend to API and the \
+     audit and calibration models to Claude models, or turn off Client engagement if this is \
+     your own development and not client work.";
+
+/// The client-engagement lock ([`crate::client_lock::refusal`]) for a scan of `project` with
+/// these (already resolved) models: the refusal text with the app's fix appended, or `None` when
+/// the scan may run. A scan with NO project is refused: there is no inspection setup to say it is
+/// not client work, so it is a client engagement with no opt-in (the lock is default-on), and the
+/// project-less backend floors to `Cli`, which that lock refuses anyway.
+fn client_lock_refusal_for_scan(
+    project: Option<&crate::project::Project>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    deep: bool,
+    fix_model: Option<&str>,
+) -> Option<String> {
+    let Some(project) = project else {
+        return Some(
+            "There is no active project, and a scan without one is treated as a client \
+             engagement, which runs only on the Anthropic API with Anthropic models. Create or \
+             select a project first (in its Settings, turn off Client engagement if this is your \
+             own development and not client work). Nothing was read and no model was called."
+                .to_string(),
+        );
+    };
+    // The clone judge runs on the project's fast band.
+    let models = crate::client_lock::models_a_scan_may_use(
+        model,
+        calibration_model,
+        deep,
+        fix_model,
+        Some(project.tier_map.fast_primary()),
+    );
+    crate::client_lock::refusal(project.client_engagement, project.backend, &models)
+        .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
+}
+
+/// The client-engagement lock for a run that has only the `claude -p` CLI driver (the
+/// investigation, branch update and PR feedback runs): such a run always uses the Claude Code
+/// subscription, whatever the project's backend, so the ACTIVE project being a client engagement
+/// refuses it, and so does having no active project (no setup says it is not client work, so it
+/// is a client engagement with no opt-in, like a scan). `run` names the run in the message.
+/// `None` when it may start.
+fn cli_only_run_client_lock_refusal(state: &AppState, run: &str) -> Option<String> {
+    let Some(project) = state.projects.active() else {
+        return Some(format!(
+            "There is no active project, and {run} without one is treated as a client engagement. \
+             It runs only on the Claude Code subscription (the `cli` backend), which client work \
+             refuses. Nothing was run. Create or select a project first (in its Settings, turn \
+             off Client engagement if this is your own development)."
+        ));
+    };
+    crate::client_lock::refusal(
+        project.client_engagement,
+        crate::project::ProjectBackend::Cli,
+        &[],
+    )
+    .map(|_| {
+        format!(
+            "This is a client engagement, and {run} runs only on the Claude Code subscription \
+             (the `cli` backend), which client work refuses. Nothing was run. Turn off Client \
+             engagement in this project's Settings if this is your own development."
+        )
+    })
+}
+
+/// The report a scan refused by the client-engagement lock returns: nothing ran, under the same
+/// "Scan blocked" state the UI renders for the compliance gate.
+fn client_lock_blocked_report(repos: &[String], why: String) -> crate::onboard::ScanReport {
+    let mut r = crate::onboard::ScanReport::gated(repos);
+    r.gated = false;
+    r.blocked = true;
+    r.ai_blocked_reason = Some(why.clone());
+    r.message = Some(why);
+    r
+}
+
+/// The client-tooling decision for a scan of `project` (see [`crate::client_lock`]). A
+/// project-less scan is not a client engagement.
+fn project_client_tooling(
+    project: Option<&crate::project::Project>,
+) -> crate::client_lock::ClientTooling {
+    project.map_or(crate::client_lock::ClientTooling::INTERNAL, |p| {
+        crate::client_lock::ClientTooling::new(p.client_engagement, p.client_tooling_opt_in)
+    })
+}
+
+/// The engagement record a scan of `project` writes into its ledger, with the models the scan
+/// recorded as having run.
+fn engagement_record_for_scan(
+    project: Option<&crate::project::Project>,
+    report: &crate::onboard::ScanReport,
+) -> crate::client_lock::EngagementRecord {
+    let model = ModelRecord::anthropic(project.map(|p| p.backend).unwrap_or_default())
+        .with_client_engagement(project.is_some_and(|p| p.client_engagement))
+        .with_models_from(&report.provenance);
+    crate::client_lock::EngagementRecord::new(&model, project_client_tooling(project))
 }
 
 /// Every rule's PROJECT-level chosen alternative option, keyed by uppercased rule id —
@@ -12148,45 +13441,37 @@ async fn workitems_set_parent(
     }
 }
 
-/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)`.
-/// Errors when the provider is not `github` or the shape is malformed.
+/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)` through
+/// the GitHub adapter ([`crate::workitems::parse_github_work_item_id`]). A 400 when the
+/// provider is not `github` or the shape is malformed.
 fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
-    let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
-        AppError::bad_request(anyhow::anyhow!(
-            "work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`"
-        ))
-    })?;
-    let (repo, num) = rest.rsplit_once('#').ok_or_else(|| {
-        AppError::bad_request(anyhow::anyhow!(
-            "work_item_id missing `#NUMBER`: `{work_item_id}`"
-        ))
-    })?;
-    if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "work_item_id repo is not `owner/repo`: `{repo}`"
-        )));
-    }
-    let number: u64 = num.parse().map_err(|_| {
-        AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`"))
-    })?;
-    Ok((repo.to_string(), number))
+    crate::workitems::parse_github_work_item_id(work_item_id)
+        .map_err(|reason| AppError::bad_request(anyhow::anyhow!(reason)))
 }
 
 /// A UoW with the WorkItem it references and its lifecycle stage, for `GET /api/uows`.
 #[derive(serde::Serialize)]
 struct UowView {
-    /// The UoW id (its story id, e.g. `OWNER/REPO#123`, or `draft-<token>` for an
-    /// AI-authoring draft).
+    /// The UoW id: an opaque key (`uow-<token>` for a native unit, `OWNER/REPO#123` for a
+    /// unit created from a GitHub issue, `draft-<token>` for an AI-authoring draft).
     id: String,
-    /// The work item this UoW references, when it maps to one (a GitHub-sourced
-    /// spine story). `None` for native/legacy stories with no external ref AND for a
-    /// blank/authoring DRAFT UoW that has not been published to the board yet.
+    /// The work item this UoW references, when it maps to one: a GitHub-sourced spine
+    /// story, or a native unit's own spine story (provider `native`). `None` for legacy
+    /// stories with no tracker and no native number AND for a blank/authoring DRAFT UoW
+    /// that has not been published to the board yet.
     work_item: Option<crate::workitems::WorkItem>,
+    /// Where the unit is tracked: `native` (Camerata itself, no board) or the tracker.
+    provider: camerata_worktracker::Provider,
+    /// The repository the unit works in ([`crate::uow::UnitOfWork::repo`]), if any.
+    repo: Option<String>,
     /// The lifecycle stage as a snake_case wire string (`intake`, `development`, …).
     stage: String,
     /// `true` when this is a blank/authoring DRAFT UoW (it has an authoring state and no
     /// work item yet). The UI renders the authoring panel instead of the dev controls.
     authoring: bool,
+    /// What the unit was created from (`"findings"` for a unit made from an inspection's
+    /// findings), so the console list can badge it. `None` for every other unit.
+    source_kind: Option<String>,
 }
 
 /// `GET /api/uows` — list all Units of Work, each with the WorkItem it references
@@ -12205,13 +13490,20 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
             // normal UoW's key IS the work-item story id. Resolve against the spine by
             // whichever applies.
             let lookup_id = u.work_item.clone().unwrap_or_else(|| u.story_id.clone());
-            let work_item = stories
-                .iter()
-                .find(|s| s.id == lookup_id)
-                .and_then(crate::workitems::WorkItem::from_canonical_story);
+            let work_item = stories.iter().find(|s| s.id == lookup_id).and_then(|s| {
+                match (u.provider(), u.native_number) {
+                    (camerata_worktracker::Provider::Native, Some(n)) => Some(
+                        crate::workitems::WorkItem::from_native_story(s, u.repo(), n),
+                    ),
+                    _ => crate::workitems::WorkItem::from_canonical_story(s),
+                }
+            });
             // A draft is one with an authoring state and no published work item yet.
             let authoring = u.authoring.is_some() && work_item.is_none();
             UowView {
+                provider: u.provider(),
+                repo: u.repo().map(str::to_string),
+                source_kind: u.source.as_ref().map(|s| s.kind_str().to_string()),
                 id: u.story_id,
                 work_item,
                 stage: u.stage.wire_str().to_string(),
@@ -12724,9 +14016,9 @@ async fn uow_publish(
 // Attachments are stored inline in the UoW JSON, travel with the project export,
 // and are embedded in the published GitHub issue body as collapsed `<details>` blocks.
 //
-// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body.
-// The gist/CDN and repo-commit paths are deferred for Zach to confirm (see
-// .overnight-decisions_needed.md entry #1).
+// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body: the
+// content stays searchable and needs no extra GitHub scope. The gist/CDN and
+// repo-commit paths were deferred.
 
 /// `GET /api/uow/:story_id/attachments` -- list all attachments on a UoW
 /// (name + mime; content is omitted from the list for bandwidth). Returns
@@ -13939,14 +15231,48 @@ struct UowBranchReq {
     branch: Option<String>,
 }
 
-/// Set (or clear) the branch for a story's UoW.
+/// A 400 for a branch name that fails [`camerata_api_types::uow::validate_branch_name`].
+fn invalid_branch_response(reason: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "invalid branch name", "reason": reason })),
+    )
+        .into_response()
+}
+
+/// Set (or clear) the branch for a story's UoW. A name is validated with the ref-format
+/// rules first (it becomes a directory under the worktrees root), so `.`, `..` and the like
+/// are refused with a 400 and nothing is recorded.
 async fn uow_set_branch(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowBranchReq>,
-) -> Json<crate::uow::UnitOfWork> {
+) -> Response {
+    if let Some(branch) = req.branch.as_deref() {
+        if let Err(reason) = camerata_api_types::uow::validate_branch_name(branch) {
+            return invalid_branch_response(reason);
+        }
+    }
+    // The unit must belong to the active project: a story id from another project is refused
+    // rather than given a branch in this project's repositories.
+    let project = state.projects.active();
+    if let Some(reason) = crate::run_target::project_membership_refusal(
+        &story_id,
+        state.uow.repo_for(&story_id).as_deref(),
+        project.as_ref().map(|p| p.repos.as_slice()),
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "unit not in the active project",
+                "reason": reason,
+                "story_id": story_id,
+            })),
+        )
+            .into_response();
+    }
     state.uow.set_branch(&story_id, req.branch);
-    Json(state.uow.get_or_create(&story_id))
+    Json(state.uow.get_or_create(&story_id)).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -14001,6 +15327,12 @@ async fn uow_set_intake_context(
     Json(state.uow.set_intake_context(&story_id, &req.context))
 }
 
+/// The active project's repositories (`None` with no active project), for the membership
+/// check every worktree resolution goes through.
+pub(crate) fn active_project_repos(state: &AppState) -> Option<Vec<String>> {
+    state.projects.active().map(|p| p.repos)
+}
+
 #[derive(serde::Deserialize)]
 struct UowIntakeReposReq {
     /// The full in-scope repo/branch set (replaces the prior scope). Out-of-scope repos
@@ -14014,8 +15346,57 @@ async fn uow_set_intake_repos(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowIntakeReposReq>,
-) -> Json<crate::uow::UnitOfWork> {
-    Json(state.uow.set_intake_repos(&story_id, req.repos))
+) -> Response {
+    // A branch name typed into the scope becomes a worktree directory name: validate every
+    // explicit name before anything is recorded. (A blank name derives `camerata/<story>`,
+    // which the run target validates when it is used.)
+    for scope in &req.repos {
+        if let Some(name) = scope.branch.explicit_name() {
+            if let Err(reason) = camerata_api_types::uow::validate_branch_name(name) {
+                return invalid_branch_response(format!("Repo `{}`: {reason}", scope.repo));
+            }
+        }
+    }
+    // A scoped repository becomes a directory under the workspace root and a push URL, so each
+    // one must be an `OWNER/REPO` coordinate (the one shared validator) before anything is
+    // recorded.
+    for scope in &req.repos {
+        if let Err(reason) = camerata_api_types::uow::validate_repo_name(&scope.repo) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid repository", "reason": reason })),
+            )
+                .into_response();
+        }
+    }
+    // Every in-scope repository must belong to the active project (the same check as the run
+    // and the branch record), so a scope cannot pull another project's clones into this unit.
+    let project_repos = active_project_repos(&state);
+    for scope in &req.repos {
+        if let Some(reason) = crate::run_target::scope_membership_refusal(
+            &story_id,
+            &scope.repo,
+            project_repos.as_deref(),
+        ) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "repository not in the active project",
+                    "reason": reason,
+                    "story_id": story_id,
+                })),
+            )
+                .into_response();
+        }
+    }
+    match state.uow.set_intake_repos(&story_id, req.repos) {
+        Ok(uow) => Json(uow).into_response(),
+        Err(reason) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid repository", "reason": reason })),
+        )
+            .into_response(),
+    }
 }
 
 /// Per-repo Ship result for one in-scope repo. Part of the [`UowIntakeShipResponse`].
@@ -14088,15 +15469,22 @@ async fn uow_intake_ship(
 
     // GAP-2: Camerata authors these Ship PRs, so make their title/body COMPLIANT with the
     // project's active process rules and HARD-BLOCK gate them at each PR-open site.
-    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let vcs_config = crate::vcs_choke::config_for_unit(
+        &process_rule_config_for(&state, &active_project_id(&state)),
+        &uow,
+    );
+    let numeric_id = uow.commit_reference();
 
     // ── Multi-repo path: intake.repos has explicit selections ─────────────────
     if !uow.intake.repos.is_empty() {
         let mut results: Vec<RepoShipResult> = Vec::new();
 
         for scope in &uow.intake.repos {
-            let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+            // The same branch the run works on (the unit's recorded branch for its own
+            // repository; the scope's branch for the others).
+            let scope_branch =
+                crate::run_target::unit_branch_for_repo(&uow, &story_id, &scope.repo)
+                    .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
             let override_path = state.settings.repo_path(&scope.repo);
 
             // Resolve the worktree for this repo + branch.
@@ -14105,6 +15493,7 @@ async fn uow_intake_ship(
                 workspace_root.as_deref(),
                 &scope.repo,
                 &scope_branch,
+                active_project_repos(&state).as_deref(),
             )
             .await
             {
@@ -14220,10 +15609,8 @@ async fn uow_intake_ship(
                 .to_string(),
         );
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let Some(dir) = crate::workspace::resolve_uow_worktree(
@@ -14231,6 +15618,7 @@ async fn uow_intake_ship(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15009,6 +16397,112 @@ async fn uow_set_decisions(
     Json(state.uow.set_decisions(&story_id, decisions))
 }
 
+/// Body for `POST /api/uow/:story_id/review-findings/:index/accept`.
+#[derive(serde::Deserialize)]
+struct AcceptReviewFindingReq {
+    /// Why the finding is acceptable as is. Required and non-blank.
+    #[serde(default)]
+    reason: String,
+}
+
+/// A short lowercase slug of `text` for a decision artifact id (letters and digits, dashes
+/// between, at most 40 characters).
+fn decision_slug(text: &str) -> String {
+    let mut slug = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    slug.truncate(40);
+    slug.trim_end_matches('-').to_string()
+}
+
+/// `POST /api/uow/:story_id/review-findings/:index/accept` body `{ "reason": "..." }`: the
+/// architect accepts one Open Layer-3 reviewer finding as is. The reason is required. The
+/// finding becomes `Accepted`, the unit's history gets a line, and an Approved decision record
+/// is written through `set_decisions` so the acceptance is in the decision history the next run
+/// reads. 400 for a blank reason, 404 for an unknown unit or index, 409 when the finding is
+/// already fixed or accepted.
+async fn uow_accept_review_finding(
+    State(state): State<AppState>,
+    Path((story_id, index)): Path<(String, usize)>,
+    Json(req): Json<AcceptReviewFindingReq>,
+) -> Response {
+    use crate::uow::AcceptReviewFindingError;
+    let reason = req.reason.trim();
+    if reason.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "reason required",
+                "reason": "Say why this finding is acceptable as is. A reason is required to accept a reviewer finding.",
+            })),
+        )
+            .into_response();
+    }
+    let accepted = match state
+        .uow
+        .accept_review_finding(&story_id, index, "architect", reason)
+    {
+        Ok(f) => f,
+        Err(AcceptReviewFindingError::NotFound) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "no such finding",
+                    "reason": "That reviewer finding does not exist on this unit.",
+                })),
+            )
+                .into_response();
+        }
+        Err(AcceptReviewFindingError::NotOpen) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "finding not open",
+                    "reason": "That reviewer finding is already fixed or accepted.",
+                })),
+            )
+                .into_response();
+        }
+    };
+    state.uow.append_history(
+        &story_id,
+        "review_finding_accepted",
+        &format!(
+            "Reviewer finding accepted: {}. Reason: {reason}",
+            accepted.title
+        ),
+    );
+    // The acceptance is also a decision, so the decision history the run reads carries it.
+    let label = format!("Reviewer finding accepted: {}", accepted.title);
+    let record = camerata_worktracker::investigation::DecisionRecord::ai_proposed(
+        story_id.clone(),
+        format!(
+            "{story_id}/decision/reviewer-accepted-{index}-{}",
+            decision_slug(&accepted.title)
+        ),
+        label,
+        // A finding recorded without a scenario still gives the decision a question.
+        if accepted.scenario.trim().is_empty() {
+            accepted.title.clone()
+        } else {
+            accepted.scenario.clone()
+        },
+        reason.to_string(),
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .approve(chrono::Utc::now());
+    let mut decisions = state.uow.decisions_for(&story_id);
+    decisions.push(record);
+    state.uow.set_decisions(&story_id, decisions);
+    Json(state.uow.get_or_create(&story_id)).into_response()
+}
+
 /// The decisions-review payload for a story (`GET /api/uow/:story_id/investigation`): the
 /// investigation note (or `None` when none has been recorded) and the current decision
 /// records. Powers the cockpit's decisions-review surface so the architect can read the
@@ -15187,6 +16681,12 @@ async fn spawn_investigation_agent_run(
     let run_id = state
         .runs
         .create(story_id, "investigation", crate::run::RunKind::Watched);
+    // The client-engagement lock: this run has only the Claude Code CLI driver, so on a client
+    // engagement it fails at once with the reason and no agent starts.
+    if let Some(why) = cli_only_run_client_lock_refusal(state, "the investigation") {
+        state.runs.fail_with_reason(&run_id, why);
+        return run_id;
+    }
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
@@ -15320,19 +16820,6 @@ async fn uow_rerun_investigation(
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
 
-/// Derive `owner/repo` from a UoW story id (`owner/repo#num`). The UoW story id is the
-/// GitHub-sourced id WITHOUT the `github:` prefix (see [`UowView`]); the repo is the part
-/// before the last `#`. Returns `None` when the id has no `#` or the repo part is not a
-/// valid `owner/repo`.
-pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
-    let (repo, _num) = story_id.rsplit_once('#')?;
-    if camerata_worktracker::RepoCoord::parse(repo).is_some() {
-        Some(repo.to_string())
-    } else {
-        None
-    }
-}
-
 /// Derive the story branch for one in-scope repo given its [`BranchMode`] and the
 /// current story id. Used during per-repo worktree setup (R6 multi-repo path).
 ///
@@ -15439,30 +16926,28 @@ fn walk_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// The branch an in-scope repo works on for `story_id`; delegates to the shared
+/// [`crate::uow::BranchMode::branch_for_story`] so the console's run start agrees.
 pub(crate) fn derive_scope_branch(mode: &crate::uow::BranchMode, story_id: &str) -> String {
-    match mode {
-        crate::uow::BranchMode::Existing { branch_name } if !branch_name.trim().is_empty() => {
-            branch_name.clone()
-        }
-        crate::uow::BranchMode::NewFromBase { new_name, .. } if !new_name.trim().is_empty() => {
-            new_name.clone()
-        }
-        _ => format!("camerata/{story_id}"),
-    }
+    mode.branch_for_story(story_id)
 }
+
+/// The 4xx reason when a repository action is asked of a unit that names no repository.
+const NO_UNIT_REPO: &str = "this unit of work names no repository: set it under Intake, Repos \
+     in scope (a unit created from a GitHub issue works in the issue's repository)";
 
 /// `POST /api/uow/:story_id/branches` → `{ "local": [...], "origin": [...] }`.
 ///
 /// Lists the branches this UoW can merge FROM, populating the "Update branch" picker.
-/// Resolves the repo (from the story id) and its local clone dir; `local` are the
-/// working copy's branches, `origin` are the `origin/*` remote-tracking branches (prefix
-/// stripped). Token-less / no-clone / unresolvable repo → empty lists (graceful, never an
+/// Resolves the unit's repository ([`crate::uow::UnitOfWork::repo`]) and its local clone
+/// dir; `local` are the working copy's branches, `origin` are the `origin/*`
+/// remote-tracking branches (prefix stripped). Token-less / no-clone / unresolvable repo → empty lists (graceful, never an
 /// error) so the UI renders an empty picker rather than breaking.
 async fn uow_list_branches(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<crate::workspace::MergeSourceBranches> {
-    let Some(repo) = repo_from_story_id(&story_id) else {
+    let Some(repo) = state.uow.repo_for(&story_id) else {
         return Json(crate::workspace::MergeSourceBranches::default());
     };
     let override_path = state.settings.repo_path(&repo);
@@ -15512,6 +16997,10 @@ async fn uow_update_branch(
         )
             .into_response()
     };
+    // The client-engagement lock: this run has only the Claude Code CLI driver.
+    if let Some(why) = cli_only_run_client_lock_refusal(&state, "the branch update") {
+        return bad(why);
+    }
 
     let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source)
     else {
@@ -15526,17 +17015,15 @@ async fn uow_update_branch(
 
     // The UoW must have a working branch to update.
     let uow = state.uow.get_or_create(&story_id);
-    let Some(target_branch) = uow.branch.filter(|b| !b.trim().is_empty()) else {
+    let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad(
             "this UoW has no branch yet — start development first so there is a branch to update"
                 .to_string(),
         );
     };
 
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -15550,6 +17037,7 @@ async fn uow_update_branch(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15663,10 +17151,8 @@ async fn uow_pr_open(
                 .to_string(),
         );
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -15675,6 +17161,7 @@ async fn uow_pr_open(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15694,8 +17181,11 @@ async fn uow_pr_open(
     // GAP-2 chokepoint. Camerata authors this PR's title + body, so it makes them COMPLIANT
     // with the project's active process rules and HARD-BLOCK gates them. A non-compliant
     // machine PR surfaces as an error here rather than opening an ungated PR.
-    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let vcs_config = crate::vcs_choke::config_for_unit(
+        &process_rule_config_for(&state, &active_project_id(&state)),
+        &uow,
+    );
+    let numeric_id = uow.commit_reference();
     let summary = uow
         .work_item
         .as_deref()
@@ -15752,12 +17242,12 @@ async fn uow_pr_get(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info.",
         ));
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return Json(empty("Could not derive owner/repo from the story id."));
-    };
     // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
     // so the "No PR" path fires without persisting a junk UoW.
     let uow = state.uow.get_or_default(&story_id);
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return Json(empty(NO_UNIT_REPO));
+    };
     let Some(info) =
         crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
@@ -15804,12 +17294,10 @@ async fn uow_pr_comment(
     if req.body.trim().is_empty() {
         return bad("comment body must not be empty".to_string());
     }
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
-    };
     let uow = state.uow.get_or_create(&story_id);
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
+    };
     let Some(info) =
         crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
@@ -15847,6 +17335,10 @@ async fn uow_pr_resolve(
         )
             .into_response()
     };
+    // The client-engagement lock: this run has only the Claude Code CLI driver.
+    if let Some(why) = cli_only_run_client_lock_refusal(&state, "PR feedback resolution") {
+        return bad(why);
+    }
     let Some(token) = state.github_token() else {
         return bad(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string(),
@@ -15856,10 +17348,8 @@ async fn uow_pr_resolve(
     let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad("this UoW has no branch yet — nothing to resolve".to_string());
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     // Resolve the PR (stored → else head-search + store) so we have the feedback to feed.
     let Some(info) =
@@ -15887,6 +17377,7 @@ async fn uow_pr_resolve(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -16862,6 +18353,23 @@ async fn export_audit_report(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
     req.options.chosen_options = project_chosen_options(&project);
+    // Confidentiality: the client name comes from the project's inspection setup, and a blank
+    // one blocks the export before anything is built.
+    req.options.client_name = project.client_name.clone();
+    if let Err(e) = crate::report_export::require_client_name(&req.options) {
+        return client_name_required_response(&e);
+    }
+    // And no report for fewer repos than the project holds.
+    req.options.expected_repos = project.repos.clone();
+    // A project that is not a client engagement is the operator's own review: its exports may
+    // come from a run that did not complete, marked as such.
+    req.options.internal = !project.client_engagement;
+    if let Err(e) = crate::report_export::require_all_repos(&report, &req.options) {
+        return repositories_missing_response(&e);
+    }
+    if let Err(e) = crate::report_export::require_complete_run(&report, &req.options) {
+        return run_incomplete_response(&e);
+    }
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -16882,7 +18390,7 @@ async fn export_audit_report(
     };
     // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
     // ships a PDF outside any zip, and `data.json` is the only data the template reads.
-    let stem = report_filename_stem(&report);
+    let stem = report_filename_stem_for(&report, &req.options.project_title);
     if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
         return release_blocked_response(&failure);
     }
@@ -16925,6 +18433,27 @@ async fn export_audit_report(
 /// `camerata-cli/src/inspect_cmd.rs`) so its zip's filename stem can never drift from this
 /// HTTP handler's — same function, not a re-derived copy.
 pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+    report_filename_stem_for(report, "")
+}
+
+/// [`report_filename_stem`] for a project titled `project_title`. A project of several repos is
+/// named for the project and the number of repos (`camerata-inspection-acme-shop-3-repos`), not
+/// for its first repo and that repo's commit, which would label three services' report with one
+/// of them. A blank title falls back to the owner the repos share, then to `multi`. A project of
+/// one repo keeps the repo and commit name it always had.
+pub fn report_filename_stem_for(
+    report: &crate::onboard::ScanReport,
+    project_title: &str,
+) -> String {
+    if report.repos.len() > 1 {
+        let slug = slugify_for_filename(project_title);
+        let slug = if slug.is_empty() {
+            shared_owner_slug(&report.repos).unwrap_or_else(|| "multi".to_string())
+        } else {
+            slug
+        };
+        return format!("camerata-inspection-{slug}-{}-repos", report.repos.len());
+    }
     let repo_slug = report
         .repos
         .first()
@@ -16939,6 +18468,34 @@ pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
         .map(|s| s.chars().take(7).collect::<String>())
         .unwrap_or_else(|| "nosha".to_string());
     format!("camerata-inspection-{repo_slug}-{short_sha}")
+}
+
+/// Lower-case letters and digits of `text`, joined by single hyphens: a filename-safe slug.
+fn slugify_for_filename(text: &str) -> String {
+    let mut out = String::new();
+    let mut pending_hyphen = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_hyphen && !out.is_empty() {
+                out.push('-');
+            }
+            pending_hyphen = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    out
+}
+
+/// The owner every `owner/repo` in `repos` shares, slugified, when there is one.
+fn shared_owner_slug(repos: &[String]) -> Option<String> {
+    let mut owners = repos.iter().filter_map(|r| r.split('/').next());
+    let first = owners.next()?;
+    owners
+        .all(|o| o == first)
+        .then(|| slugify_for_filename(first))
+        .filter(|s| !s.is_empty())
 }
 
 /// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
@@ -16997,9 +18554,26 @@ async fn export_product(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied. Covers all three artifacts built below.
     req.options.chosen_options = project_chosen_options(&project);
-    // The backend the project's scans ran on, recorded in the manifest and README. Server-
-    // populated, never client-supplied.
-    req.options.model = Some(ModelRecord::anthropic(project.backend));
+    // The backend the scan ran on and whether it was a client engagement, recorded in the
+    // manifest and README. Server-populated, never client-supplied. The scan's own ledger record
+    // wins (the project's settings may have changed since); the project is the fallback for a
+    // scan recorded before the ledger carried it.
+    req.options.model = Some(match report.ledger.engagement() {
+        Some(e) => ModelRecord {
+            backend: e.backend.clone(),
+            provider: e.provider.clone(),
+            models: Vec::new(),
+            client_engagement: e.client_engagement,
+        },
+        None => ModelRecord::anthropic(project.backend)
+            .with_client_engagement(project.client_engagement),
+    });
+    // Confidentiality: the client name comes from the project's inspection setup. The package
+    // assembly refuses a blank one (mapped to a 422 below).
+    req.options.client_name = project.client_name.clone();
+    // The repos the project holds: the package assembly refuses a report that covers fewer.
+    req.options.expected_repos = project.repos.clone();
+    req.options.internal = !project.client_engagement;
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -17019,6 +18593,15 @@ async fn export_product(
             if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
                 return release_blocked_response(failure);
             }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
+                return client_name_required_response(missing);
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>() {
+                return repositories_missing_response(missing);
+            }
+            if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
+                return run_incomplete_response(incomplete);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
@@ -17026,7 +18609,11 @@ async fn export_product(
                 .into_response();
         }
     };
-    let released = match crate::release_gate::release(package) {
+    let released = match if req.options.internal {
+        crate::release_gate::release_internal(package)
+    } else {
+        crate::release_gate::release(package)
+    } {
         Ok(released) => released,
         Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
             return release_blocked_response(&failure);
@@ -17072,6 +18659,57 @@ async fn export_product(
         .into_response()
 }
 
+/// The 422 the export routes return when the inspection setup has no client name:
+/// `{ ok: false, gate: "client_name", message }`, the message saying where to enter it.
+fn client_name_required_response(missing: &crate::report_export::ClientNameRequired) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "client_name",
+            "message": missing.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the run did not complete and the export is for a client:
+/// `{ ok: false, gate: "incomplete_run", message, reasons }`. The message carries the same
+/// reasons the CLI prints, so the cockpit shows the operator why nothing was exported.
+fn run_incomplete_response(incomplete: &crate::report_export::RunIncomplete) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "incomplete_run",
+            "message": incomplete.to_string(),
+            "reasons": incomplete.reasons,
+        })),
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the report covers fewer repos than the project holds:
+/// `{ ok: false, gate: "repositories", message, repos }`.
+fn repositories_missing_response(missing: &crate::report_export::RepositoriesMissing) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "repositories",
+            "message": missing.to_string(),
+            "repos": missing.repos,
+        })),
+    )
+        .into_response()
+}
+
 /// The 422 the export routes return when the release gate refuses: `{ ok: false, gate:
 /// "release", stem, message, problems: [{check, file, location, message, evidence}] }`. The
 /// message is the gate's own fail-loud block and every field is already redacted, so the body
@@ -17106,6 +18744,16 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.
 pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
+    // A project of several repos gets one more paragraph: where the services differ on a rule.
+    let patterns = if provenance.repos.len() > 1 {
+        "Patterns across services\n\
+         \x20 Where the services of this project differ on a rule: a sheet of that name in the\n\
+         \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+         \x20 An observation, not a finding: it has no severity and is in no count.\n\
+         \n"
+    } else {
+        ""
+    };
     format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
@@ -17135,10 +18783,12 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
          \x20 from the same pass over the scan.\n\
          \n\
          {}\
+         {}\
          \n\
          {}\n",
+        patterns,
         provenance.readme_lines(),
-        crate::report_export::AUDIT_REPORT_DISCLAIMER,
+        crate::report_export::audit_report_disclaimer(provenance.repos.len()),
     )
 }
 
@@ -17196,6 +18846,12 @@ pub struct ModelRecord {
     pub backend: String,
     /// The model provider, e.g. [`ModelRecord::ANTHROPIC`].
     pub provider: String,
+    /// Every model the inspection actually ran, by role, in a stable order. Filled from the
+    /// scan's own provenance by [`ModelRecord::with_models_from`] when the package is built, so
+    /// it states what ran, never what was configured. Empty when no model ran.
+    pub models: Vec<crate::client_lock::ModelRole>,
+    /// The inspection was a client engagement ([`crate::client_lock`]).
+    pub client_engagement: bool,
 }
 
 impl ModelRecord {
@@ -17206,12 +18862,40 @@ impl ModelRecord {
         Self {
             backend: backend.provenance_name().to_string(),
             provider: provider.to_string(),
+            models: Vec::new(),
+            client_engagement: false,
         }
     }
 
     /// `backend` served by Anthropic: today's only provider.
     pub fn anthropic(backend: crate::llm::ProjectBackend) -> Self {
         Self::new(backend, Self::ANTHROPIC)
+    }
+
+    /// This record, marked as a client engagement or not.
+    pub fn with_client_engagement(mut self, client_engagement: bool) -> Self {
+        self.client_engagement = client_engagement;
+        self
+    }
+
+    /// This record with `models` replaced by the models the scan recorded as having run: the
+    /// scan pass, calibration and the clone judge, each only when present.
+    pub fn with_models_from(mut self, provenance: &crate::onboard::ScanProvenance) -> Self {
+        self.models = [
+            ("the scan", &provenance.audit_model),
+            ("calibration", &provenance.calibration_model),
+            ("the clone judge", &provenance.clone_judge_model),
+        ]
+        .into_iter()
+        .filter_map(|(role, model)| {
+            let model = model.as_deref()?.trim();
+            (!model.is_empty()).then(|| crate::client_lock::ModelRole {
+                role: role.to_string(),
+                model: model.to_string(),
+            })
+        })
+        .collect();
+        self
     }
 }
 
@@ -17240,6 +18924,41 @@ pub struct ManifestProvenance {
     /// The model backend and provider that ran the inspection. `None` when the caller did not
     /// record one (an honest absence: `null` in the manifest, no README line).
     pub model: Option<ModelRecord>,
+    /// True when the operator's spend limit stopped part of this inspection, so it is
+    /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
+    /// operator-only). What was not run is listed in the report's failed-pass section.
+    pub cost_cap_reached: bool,
+    /// True when the spend limit stopped work because a call's cost could not be determined (the
+    /// limit could not be enforced), not because it was reached. Meaningful only with
+    /// [`Self::cost_cap_reached`]; it selects the README line ([`COST_CAP_UNENFORCED_README_LINE`]
+    /// instead of [`COST_CAP_README_LINE`]).
+    pub cost_cap_unenforced: bool,
+    /// "Vulnerability data as of": per feed (CISA KEV, FIRST EPSS, OSV), the date the data
+    /// behind the dependency findings was current as of, or plainly that the feed was not
+    /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
+    /// `ScanProvenance::vulnerability_data`; rendered by [`crate::vuln_intel`].
+    pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
+    /// 22c: who the inspection was prepared for (the inspection setup's client name, the same
+    /// name the confidentiality marking prints). `None` only for a caller that set none.
+    pub client_name: Option<String>,
+    /// 22c: how many corpus rules the inspection applied (the distinct audited rule ids found
+    /// in the loaded corpus). `None` when no corpus was loaded.
+    pub corpus_rules_applied: Option<usize>,
+    /// 22c: the non-blank lines the inspection read, the figure `camerata count` reports and a
+    /// quote is priced on (same file filter, same line definition). `None` when the run read
+    /// no local files.
+    pub counted_lines: Option<usize>,
+    /// 22c: the files the noise filter excluded (build output, lockfiles, vendored and
+    /// generated code). `None` when the run read no local files.
+    pub excluded_noise_files: Option<usize>,
+    /// 22c: the non-blank lines in those excluded files. `None` for a run that did not record
+    /// it (a report from before 22c).
+    pub excluded_noise_lines: Option<usize>,
+    /// Why the inspection did not run to completion (see
+    /// [`crate::onboard::ScanReport::incomplete_reasons`]); empty for a complete run. Recorded
+    /// only on an internal package: the release gate refuses a package that records any, and a
+    /// complete run's manifest and README are unchanged.
+    pub incomplete: Vec<String>,
 }
 
 impl ManifestProvenance {
@@ -17272,10 +18991,15 @@ impl ManifestProvenance {
     }
 
     /// Camerata's own version as the manifest and README both state it, so a finding can always
-    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`,
-    /// never supplied by a caller, so it cannot drift from the binary that built the package.
+    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`
+    /// and the git commit the binary was built from ([`ENGINE_COMMIT`]), never supplied by a
+    /// caller, so it cannot drift from the binary that built the package. A build outside a git
+    /// checkout records no commit, and the version then names the package version alone.
     pub fn engine_version(&self) -> String {
-        format!("camerata {}", env!("CARGO_PKG_VERSION"))
+        match ENGINE_COMMIT {
+            Some(commit) => format!("camerata {} (commit {commit})", env!("CARGO_PKG_VERSION")),
+            None => format!("camerata {}", env!("CARGO_PKG_VERSION")),
+        }
     }
 
     /// The `manifest.json` `inspection` block. An absent optional value is an explicit JSON
@@ -17293,15 +19017,36 @@ impl ManifestProvenance {
                 })
             })
             .collect();
-        serde_json::json!({
+        let mut inspection = serde_json::json!({
             "repos": repos,
             "engine_version": self.engine_version(),
             "corpus_version": self.corpus_version,
             "rules_last_reviewed": self.rules_last_reviewed,
             "model_backend": self.model.as_ref().map(|m| &m.backend),
             "model_provider": self.model.as_ref().map(|m| &m.provider),
+            "models": self.model.as_ref().map(|m| {
+                m.models
+                    .iter()
+                    .map(|r| serde_json::json!({ "role": r.role, "model": r.model }))
+                    .collect::<Vec<_>>()
+            }),
+            "client_engagement": self.model.as_ref().map(|m| m.client_engagement),
+            "cost_cap_reached": self.cost_cap_reached,
+            "cost_cap_unenforced": self.cost_cap_reached && self.cost_cap_unenforced,
+            "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
+            "client_name": self.client_name,
+            "corpus_rules_applied": self.corpus_rules_applied,
+            "counted_lines": self.counted_lines,
+            "excluded_noise_files": self.excluded_noise_files,
+            "excluded_noise_lines": self.excluded_noise_lines,
             "release_checks": Self::release_checks(),
-        })
+        });
+        // Present only for an incomplete run, so a complete run's manifest is unchanged.
+        if !self.incomplete.is_empty() {
+            inspection["run_incomplete"] = serde_json::json!(true);
+            inspection["incomplete_reasons"] = serde_json::json!(self.incomplete);
+        }
+        inspection
     }
 
     /// The release gate's check names, in run order. The README line and the manifest's
@@ -17321,11 +19066,15 @@ impl ManifestProvenance {
     /// manifest.
     pub fn readme_lines(&self) -> String {
         let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some(client) = &self.client_name {
+            out.push_str(&format!("Prepared for: {client}\n"));
+        }
+        out.push_str(&format!(
             "Repos inspected: {}\nGenerated: {}\n",
             names.join(", "),
             self.generated_at
-        );
+        ));
         for repo in &self.repos {
             if let Some(commit) = &repo.commit {
                 let note = if repo.dirty {
@@ -17343,10 +19092,48 @@ impl ManifestProvenance {
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
         }
+        if let Some(applied) = self.corpus_rules_applied {
+            out.push_str(&format!("Corpus rules applied: {applied}\n"));
+        }
+        if let Some(lines) = self.counted_lines {
+            out.push_str(&format!("Counted lines: {lines}\n"));
+        }
+        if let Some(files) = self.excluded_noise_files {
+            match self.excluded_noise_lines {
+                Some(lines) => out.push_str(&format!(
+                    "Excluded as noise: {files} files, {lines} lines\n"
+                )),
+                None => out.push_str(&format!("Excluded as noise: {files} files\n")),
+            }
+        }
         if let Some(model) = &self.model {
             out.push_str(&format!("Model backend: {}\n", model.backend));
             out.push_str(&format!("Model provider: {}\n", model.provider));
+            for r in &model.models {
+                out.push_str(&format!("Model ({}): {}\n", r.role, r.model));
+            }
+            out.push_str(&format!(
+                "Client engagement: {}\n",
+                if model.client_engagement { "yes" } else { "no" }
+            ));
         }
+        if self.cost_cap_reached {
+            let line = if self.cost_cap_unenforced {
+                COST_CAP_UNENFORCED_README_LINE
+            } else {
+                COST_CAP_README_LINE
+            };
+            out.push_str(&format!("{line}\n"));
+        }
+        if !self.incomplete.is_empty() {
+            out.push_str(&format!("{INTERNAL_INCOMPLETE_README_LINE}\n"));
+            for reason in &self.incomplete {
+                out.push_str(&format!("Not complete: {reason}\n"));
+            }
+        }
+        out.push_str(&crate::vuln_intel::readme_lines(
+            self.vulnerability_data.as_ref(),
+        ));
         out.push_str(&format!(
             "Release checks: {} (all passed)\n",
             Self::release_checks().join(", ")
@@ -17354,6 +19141,27 @@ impl ManifestProvenance {
         out
     }
 }
+
+/// The git commit this binary was built from, recorded by `build.rs` (`CAMERATA_GIT_COMMIT`).
+/// `None` for a build outside a git checkout: an honest absence, never a placeholder. Stated in
+/// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
+/// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
+pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
+
+/// The README line of an internal package made from a run that did not complete.
+pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
+     run to completion and is not for a client.";
+
+/// The README line that states the inspection was stopped by the operator's spend limit. Printed
+/// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.
+pub const COST_CAP_README_LINE: &str = "Spend limit: reached. This inspection is INCOMPLETE; the \
+     report lists the passes that were not run.";
+
+/// The README line when the spend limit stopped work because a call's cost could not be
+/// determined, so the limit could not be enforced (it was not reached). Printed instead of
+/// [`COST_CAP_README_LINE`]; the release gate parses both.
+pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enforced. This \
+     inspection is INCOMPLETE; the report lists the passes that were not run.";
 
 /// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
 /// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).
@@ -17591,6 +19399,12 @@ impl From<anyhow::Error> for AppError {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod lib_multirepo_tests;
+
+#[cfg(test)]
+mod cockpit_resume_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -17644,6 +19458,46 @@ mod tests {
             serde_json::from_str(r#"{"repos":["me/api"],"run_ai_review":false}"#).unwrap();
         assert!(!req.run_ai_review);
         assert!(req.run_deterministic, "the other flag stays true");
+    }
+
+    /// B3: the synchronous desktop endpoint has no job to record a batch id on, so a resolved
+    /// Batch (the API default, or a forced one) runs in real time and says so ONCE in the notes.
+    /// Every other mode, and no note, otherwise.
+    #[test]
+    fn the_synchronous_endpoint_never_runs_a_batch() {
+        use crate::ai_audit::{resolve_scan_mode, ScanMode};
+        let mut notes = Vec::new();
+        // The API-default resolution is Batch; the synchronous endpoint turns it into real time.
+        let resolved = resolve_scan_mode(
+            None,
+            &crate::llm::BackendResolution::Api,
+            crate::efficiency::EfficiencyConfig::default(),
+        )
+        .mode;
+        assert_eq!(
+            resolved,
+            ScanMode::Batch,
+            "the premise: batch is the default"
+        );
+        assert_eq!(
+            synchronous_scan_mode(resolved, &mut notes),
+            ScanMode::Parallel
+        );
+        assert_eq!(notes, vec![SYNCHRONOUS_SCAN_REALTIME_NOTICE.to_string()]);
+        assert!(!SYNCHRONOUS_SCAN_REALTIME_NOTICE.contains('\u{2014}'));
+        // A forced batch is real time here too.
+        let mut notes = Vec::new();
+        assert_eq!(
+            synchronous_scan_mode(ScanMode::Batch, &mut notes),
+            ScanMode::Parallel
+        );
+        assert_eq!(notes.len(), 1);
+        // Other modes pass through with no note.
+        for mode in [ScanMode::Parallel, ScanMode::Sequential] {
+            let mut notes = Vec::new();
+            assert_eq!(synchronous_scan_mode(mode, &mut notes), mode);
+            assert!(notes.is_empty());
+        }
     }
 
     /// `effective_scan_modes`: both-false is never a no-op — it coerces back to both-true and
@@ -17945,14 +19799,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/api", Some("/Users/z/Repos/api".to_string()));
+            .set_repo_path("me/api", Some("/Users/auditor/Repos/api".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/api".to_string(), "me/other".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -17962,14 +19816,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/second", Some("/Users/z/Repos/second".to_string()));
+            .set_repo_path("me/second", Some("/Users/auditor/Repos/second".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/first".to_string(), "me/second".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -18219,6 +20073,79 @@ mod tests {
         );
     }
 
+    /// H2: the same rescan on a client engagement's cli project is refused before any
+    /// repository is read.
+    #[tokio::test]
+    async fn client_engagement_rescan_refuses_the_cli_backend() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false, "{json:?}");
+        assert!(
+            json["message"].as_str().unwrap().contains("`cli` backend"),
+            "{json:?}"
+        );
+    }
+
+    /// A project with a repo that has no local folder is not rescanned for the repos that do:
+    /// the request is refused and names the repo, unless it says it accepts a partial run.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn rescan_alternatives_refuses_a_project_with_a_repo_that_has_no_local_folder() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string(), "me/web".to_string()])
+            .unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        state.projects.set_client_engagement(&p.id, false, false);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false, "{json:?}");
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("2 of 2 repositories"), "{message}");
+        assert!(
+            message.contains("me/api") && message.contains("me/web"),
+            "{message}"
+        );
+    }
+
     /// A `Cli`-backend project's rescan is never blocked, regardless of key presence — no
     /// silent downgrade path exists anymore (the removed `CliFallbackWarn`), just a plain
     /// `Cli` resolution that proceeds straight to the (in this test env, failing) model call.
@@ -18236,6 +20163,9 @@ mod tests {
         state
             .projects
             .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        // The maintainer's own project: a client engagement refuses the cli backend (see
+        // `client_engagement_rescan_refuses_the_cli_backend` below).
+        state.projects.set_client_engagement(&p.id, false, false);
         let app = router(state);
 
         let resp = app
@@ -18245,7 +20175,7 @@ mod tests {
                     .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                        r#"{"allow_partial":true,"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -18296,6 +20226,7 @@ mod tests {
                 (
                     rule_id.to_string(),
                     crate::ai_audit::RuleRecommendation {
+                        repo: String::new(),
                         rule_id: rule_id.to_string(),
                         recommended_option_id: option_id.to_string(),
                         recommendation_reasoning: "test reasoning".to_string(),
@@ -19186,6 +21117,49 @@ mod tests {
         );
     }
 
+    /// A project export is a backup file Zach moves between machines, not a client deliverable,
+    /// and a client's name should not travel in a file by default: the export carries every
+    /// project setting except the client name, which is left blank (and so is blank again on
+    /// import, where the operator sets it for that engagement).
+    #[tokio::test]
+    async fn a_project_export_file_does_not_carry_the_client_name() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["acme/portal".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |p| p.client_name = "Example Client Ltd".to_string())
+            .expect("project updated");
+        let app = router(state.clone());
+
+        let exp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{}/export", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exp.status(), StatusCode::OK);
+        let doc = body_json(exp).await;
+        assert_eq!(doc["client_name"], "", "{doc}");
+        assert!(
+            !doc.to_string().contains("Example Client Ltd"),
+            "the client name must not appear anywhere in the export: {doc}"
+        );
+        // The rest of the project still travels.
+        assert_eq!(doc["name"], "Acme");
+        assert_eq!(doc["repos"][0], "acme/portal");
+        // The stored project is untouched: only the file is redacted.
+        assert_eq!(
+            state.projects.get(&p.id).expect("project").client_name,
+            "Example Client Ltd"
+        );
+    }
+
     /// End-to-end THROUGH THE HTTP ROUTER: the design-page hierarchy round-trips — GET returns the
     /// seeded default ladder, POST replaces it with a custom graph, a second GET reflects the change,
     /// and the project export carries the schema (portability). Exercises routing + (de)serialization
@@ -19851,9 +21825,9 @@ mod tests {
         assert_eq!(json["calls"], 2);
         assert_eq!(json["rate_limited"], false);
         assert!(json["last_rate_limit"].is_null());
-        // 0.05 (reported) + 18.0 (derived sonnet) = 18.05.
+        // 0.05 (reported) + 12.0 (derived sonnet, $2/$10) = 12.05.
         let cost = json["total_cost_usd"].as_f64().unwrap();
-        assert!((cost - 18.05).abs() < 1e-6, "got {cost}");
+        assert!((cost - 12.05).abs() < 1e-6, "got {cost}");
         // by_model array of {model,tokens,cost,calls}, sorted by descending cost (sonnet first).
         let by_model = json["by_model"].as_array().unwrap();
         assert_eq!(by_model.len(), 2);
@@ -21479,6 +23453,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// H2 review: the dev loop's git calls go through `workspace::git_command`, which switches off
+    /// `core.fsmonitor`, so a repository whose own git configuration names a program never gets it
+    /// run by the revert (`reset --hard`, `clean`). Needs a git that honours `core.fsmonitor`: the
+    /// control step at the end prints SKIPPED when it does not, and the assertion above it then
+    /// proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_dev_loop_revert_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base_commit = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        crate::test_git::commit_all(&dir, "camerata: snapshot iteration 0");
+        std::fs::write(dir.join("untracked.txt"), "x\n").unwrap();
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        revert_worktree(&dir.to_string_lossy(), Some(&base_commit)).await;
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the revert"
+        );
+        assert!(!dir.join("untracked.txt").exists(), "the revert still ran");
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
+    }
+
     /// Without a base_commit (older checkpoints), revert_worktree falls back to the
     /// uncommitted-only revert: committed work survives, only uncommitted changes are dropped.
     #[tokio::test]
@@ -22178,6 +24198,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Approved,
             provenance: RevisionProvenance::new(RevisionActor::Ai, chrono::Utc::now()),
+            option_descriptions: vec![],
         };
         uow.set_decisions(story, vec![decision]);
         uow.begin_investigation(story).expect("→ Investigating");
@@ -25455,6 +27476,8 @@ mod tests {
     #[test]
     fn render_scan_results_includes_coverage_notes() {
         let notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: "ruff".to_string(),
             message: "ruff not installed; Python rules skipped".to_string(),
         }];
@@ -25677,6 +27700,7 @@ mod tests {
     fn reconcile_marks_rule_ran_with_real_count_when_tool_succeeded() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -25710,6 +27734,7 @@ mod tests {
     fn reconcile_marks_rule_not_run_and_discloses_when_tool_absent() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -25717,7 +27742,9 @@ mod tests {
             3,
             0,
         );
-        report.coverage_notes = vec![crate::onboard::CoverageNote {
+        report.coverage_notes =
+            vec![crate::onboard::CoverageNote { tool_failed: false,
+            repo: None,
             tool: "semgrep".to_string(),
             message:
                 "could not preview 1 rule(s) with semgrep: base interpreter not available: python3"
@@ -25786,6 +27813,7 @@ mod tests {
     fn reconcile_discovery_pass_never_double_counts_an_already_tracked_rule() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -25839,6 +27867,7 @@ mod tests {
     fn reconcile_marks_rule_not_run_when_tool_never_attempted_this_scan() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -25955,7 +27984,15 @@ mod tests {
         )
         .await;
         report.excluded_mechanical_rules = excluded_mechanical;
-        merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
+        merge_scan_preview(
+            &mut report,
+            &sources,
+            &preview_rules,
+            Some(&corpus),
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
 
         let entry = report
             .ledger
@@ -26018,6 +28055,7 @@ mod tests {
     fn reconcile_does_not_treat_unrouted_note_as_tool_failure() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26026,6 +28064,8 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: "unrouted".to_string(),
             message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
                 .to_string(),
@@ -26052,6 +28092,7 @@ mod tests {
     fn reconcile_leaves_non_external_tool_entries_untouched() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -26093,6 +28134,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26134,6 +28176,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26142,6 +28185,8 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: "eslint".to_string(),
             message: "could not preview 1 rule(s) with eslint: base interpreter not available: \
                       npm"
@@ -26181,6 +28226,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26219,6 +28265,7 @@ mod tests {
     fn reconcile_without_corpus_keeps_original_semgrep_wording() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26240,11 +28287,17 @@ mod tests {
     /// Helper: build a minimal ScanReport with one active finding.
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
         crate::onboard::ScanReport {
+            run_id: None,
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 1,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             code_chars: 100,
             code_lines: 10,
             code_lines_by_language: Vec::new(),
@@ -26335,12 +28388,7 @@ mod tests {
     /// gate) — the PDF-compile stage of the happy-path product-export test skips
     /// gracefully rather than hard-failing CI environments without Typst installed.
     fn typst_on_path() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some()
+        camerata_test_env::typst_on_path()
     }
 
     #[tokio::test]
@@ -26400,6 +28448,12 @@ mod tests {
             .projects
             .create("Acme", vec!["owner/repo".to_string()])
             .expect("project created");
+        let project = state
+            .projects
+            .update(&project.id, |p| {
+                p.client_name = "Example Client Ltd".to_string()
+            })
+            .expect("project exists");
         state.set_last_scan(
             project.id.clone(),
             make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
@@ -26791,6 +28845,12 @@ mod tests {
                 .projects
                 .create("Acme", vec!["owner/repo".to_string()])
                 .expect("project created");
+            let project = state
+                .projects
+                .update(&project.id, |p| {
+                    p.client_name = "Example Client Ltd".to_string()
+                })
+                .expect("project exists");
             state.set_last_scan(
                 project.id.clone(),
                 make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
@@ -26945,6 +29005,160 @@ mod tests {
     /// manifest lists every ZIP member except itself, and each listed sha256 equals the actual
     /// hash of that member. The corruption clause (that a flipped byte is caught) lives in
     /// `tests/product_export_manifest_gates.rs`.
+    /// The scan settings' spend limit reaches the run as a cap. A limit the server cannot read
+    /// as a positive number must not become "no limit" (a typo would remove the guard).
+    #[test]
+    fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
+        let req = |body: serde_json::Value| -> AuditReq { serde_json::from_value(body).unwrap() };
+        assert_eq!(
+            req(serde_json::json!({}))
+                .run_controls(None, None)
+                .max_cost_usd,
+            None,
+            "no field, no cap"
+        );
+        assert_eq!(
+            req(serde_json::json!({ "max_cost_usd": null }))
+                .run_controls(None, None)
+                .max_cost_usd,
+            None
+        );
+        assert_eq!(
+            req(serde_json::json!({ "max_cost_usd": 25.0 }))
+                .run_controls(None, None)
+                .max_cost_usd,
+            Some(25.0)
+        );
+        for bad in [0.0, -4.0] {
+            let cap = req(serde_json::json!({ "max_cost_usd": bad }))
+                .run_controls(None, None)
+                .max_cost_usd;
+            assert_eq!(
+                cap,
+                Some(f64::MIN_POSITIVE),
+                "{bad} is the tightest cap, not none"
+            );
+        }
+        // The project's fix model rides along; none set leaves the fix stage to the switch.
+        let empty = req(serde_json::json!({}));
+        assert_eq!(empty.run_controls(None, None).fix_model, None);
+        assert_eq!(
+            empty
+                .run_controls(Some("claude-opus-5".to_string()), None)
+                .fix_model
+                .as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    /// The clone judge follows the open project's fast (Haiku) band: the run's controls carry the
+    /// band's primary model (default Haiku 5.5), a project that moves the band moves the judge,
+    /// and with no project the built-in default applies. The environment has no say.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_clone_judge_follows_the_projects_fast_band() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
+        let state = AppState::seeded();
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        // No project: the built-in default.
+        assert_eq!(clone_judge_step_model(&state), None);
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-5-5"
+        );
+
+        let project = state
+            .projects()
+            .create("Judge wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        assert_eq!(
+            clone_judge_step_model(&state).as_deref(),
+            Some("claude-haiku-5-5"),
+            "a new project's fast band is Haiku 5.5"
+        );
+        state
+            .projects()
+            .update(&project.id, |p| {
+                p.tier_map.fast = vec!["claude-haiku-4-5-20251001".to_string()];
+            })
+            .unwrap();
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-4-5-20251001",
+            "the project's fast band chooses the judge; the older id stays selectable"
+        );
+    }
+
+    /// Rank 10, the wiring the desktop audit takes: the active project's fix step model becomes
+    /// the run's fix model through the same function both audit entry points call
+    /// (`AuditReq::run_controls_for`), and from there the model the fix stage resolves. Not a
+    /// hand-built `RunControls`: the project is set through its store, as the settings screen's
+    /// `POST /step-models` does.
+    #[test]
+    fn the_projects_fix_model_reaches_the_audit_runs_controls() {
+        let state = AppState::seeded();
+        let project = state
+            .projects()
+            .create("Fix wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        let resolved = |state: &AppState| {
+            let controls = req.run_controls_for(state);
+            let fix_model = controls
+                .fix_model_for(Some("scan-model"), Some("calibration-model"))
+                .map(str::to_string);
+            (controls.fix_model.clone(), fix_model)
+        };
+
+        // New project: no fix model, so the switch decides (Haiku by default).
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // The operator picks a model for the fix step: it is the run's fix model.
+        state
+            .projects()
+            .set_step_model(
+                &project.id,
+                crate::project::StepKind::Fix,
+                "claude-opus-5".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                Some("claude-opus-5".to_string()),
+                Some("claude-opus-5".to_string())
+            )
+        );
+
+        // Cleared back to Default (a blank id): unset again.
+        state
+            .projects()
+            .set_step_model(&project.id, crate::project::StepKind::Fix, String::new())
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // No active project at all: nothing set.
+        assert_eq!(
+            resolved(&AppState::seeded()),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+    }
+
     #[test]
     fn manifest_lists_and_hashes_every_file_except_itself() {
         use sha2::{Digest, Sha256};
@@ -27258,6 +29472,43 @@ mod tests {
             "RULE-X",
             "recent_scan must mirror the report passed to set_last_scan"
         );
+    }
+
+    /// The patterns across services are rebuilt when a scan is stored, so the cockpit tab never
+    /// reads a stale or empty matrix; a scan of one repo stores none.
+    #[test]
+    fn storing_a_scan_rebuilds_its_patterns_across_services() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let mut report = make_scan_report("RULE-X");
+        report.repos = vec!["acme/a".to_string(), "acme/b".to_string()];
+        report.findings[0].repo = "acme/a".to_string();
+        report.ledger.record_rule(
+            "acme/a",
+            "RULE-X",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            3,
+            1,
+        );
+        report.ledger.record_rule(
+            "acme/b",
+            "RULE-X",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            3,
+            0,
+        );
+        assert!(report.patterns_across_services.rows.is_empty());
+        state.set_last_scan("proj-multi".to_string(), report);
+        let stored = state.get_last_scan("proj-multi").unwrap();
+        assert_eq!(stored.patterns_across_services.rows.len(), 1);
+        assert_eq!(stored.patterns_across_services.rows[0].rule_id, "RULE-X");
+
+        state.set_last_scan("proj-one".to_string(), make_scan_report("RULE-X"));
+        let one = state.get_last_scan("proj-one").unwrap();
+        assert!(!one.patterns_across_services.is_present());
     }
 
     /// When two projects are scanned in sequence, recent_scan reflects the LATEST one.
@@ -27640,24 +29891,6 @@ mod tests {
             derive_scope_branch(&mode, "acme/api#7"),
             "camerata/acme/api#7",
         );
-    }
-
-    // ── repo_from_story_id (also verifies the helper is stable) ─────────────────
-
-    /// `repo_from_story_id` extracts `owner/repo` from a `owner/repo#num` story id.
-    #[test]
-    fn repo_from_story_id_parses_owner_repo() {
-        assert_eq!(
-            repo_from_story_id("acme/api#42"),
-            Some("acme/api".to_string())
-        );
-    }
-
-    /// `repo_from_story_id` returns None for a malformed story id.
-    #[test]
-    fn repo_from_story_id_returns_none_for_invalid_id() {
-        // No '#' → None.
-        assert_eq!(repo_from_story_id("not-a-story-id"), None);
     }
 
     // ── uow_intake_ship single-repo fallback (no-token 4xx) ─────────────────────
@@ -28614,7 +30847,358 @@ mod tests {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("StepLlm", vec![]).unwrap();
         state.projects.set_backend(&p.id, backend).unwrap();
+        // These tests are about backend resolution, not the client lock: internal development.
         state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        state
+    }
+
+    /// H2 review: with no active project there is no setup to say the work is not client work, so
+    /// the cli-only runs (investigation, branch update, PR feedback) are refused like a scan.
+    #[tokio::test]
+    async fn the_cli_only_runs_are_refused_with_no_active_project() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        for run in [
+            "the investigation",
+            "the branch update",
+            "PR feedback resolution",
+        ] {
+            let why = cli_only_run_client_lock_refusal(&state, run)
+                .unwrap_or_else(|| panic!("{run} with no project must be refused"));
+            assert!(why.contains("no active project"), "{why}");
+        }
+        let run_id = spawn_investigation_agent_run(&state, "story-1", None).await;
+        let run = state.runs.get(&run_id).expect("the run exists");
+        assert!(run.done);
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no active project"),
+            "{:?}",
+            run.failure_reason
+        );
+    }
+
+    /// H2 review: the chat assistant follows the chat backend setting, which may be `cli`. When
+    /// the active project is a client engagement, a chat that would run on a backend the lock
+    /// forbids is refused with the lock's message; the maintainer's own project is not locked,
+    /// and neither is a chat with no active project (no client context).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        // No project: the chat is not part of any engagement.
+        assert!(state.chat_llm().is_ok());
+
+        let p = state.projects.create("Client", vec![]).unwrap();
+        assert!(p.client_engagement);
+        let why = state
+            .chat_llm()
+            .expect_err("cli chat refused on client work");
+        assert!(why.contains("`cli` backend"), "{why}");
+
+        // Over HTTP the chat answers 409 with that message.
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_json(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`cli` backend"));
+
+        // On the API backend the lock passes; off client work the cli chat passes.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
+        assert!(state.chat_llm().is_ok());
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert!(state.chat_llm().is_ok());
+    }
+
+    /// H2: the investigation run has only the CLI driver, so a client engagement fails it at
+    /// once with the reason; the maintainer's own project is not locked.
+    #[tokio::test]
+    async fn a_client_engagement_refuses_the_cli_only_runs() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        let why = cli_only_run_client_lock_refusal(&state, "the investigation")
+            .expect("a new project is a client engagement");
+        assert!(why.contains("Claude Code subscription"), "{why}");
+
+        let run_id = spawn_investigation_agent_run(&state, "story-1", None).await;
+        let run = state.runs.get(&run_id).expect("the run exists");
+        assert!(run.done);
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("client engagement"),
+            "the run failed with the lock's reason: {:?}",
+            run.failure_reason
+        );
+
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert_eq!(
+            cli_only_run_client_lock_refusal(&state, "the investigation"),
+            None
+        );
+    }
+
+    /// H2: a client engagement's model steps never run on the subscription.
+    #[test]
+    fn a_client_engagement_refuses_model_steps_on_the_cli_backend() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        assert!(p.client_engagement, "a new project is a client engagement");
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
+        let refusal = state
+            .step_llm()
+            .expect_err("cli is refused for client work");
+        assert!(refusal.contains("`cli` backend"), "{refusal}");
+        assert!(refusal.contains("Client engagement"), "{refusal}");
+    }
+
+    /// H2 review: the model steps that take a model id from the request (the routine prompt
+    /// draft, the escalation review chat, the chat) check it against the active project's lock.
+    /// `llm_for_project` cannot (it is handed no model), so on a client engagement a non-Anthropic
+    /// id would otherwise reach OpenRouter. A blank id means the server default (a Claude model)
+    /// and passes; a project that is not a client engagement is never refused.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        assert!(p.client_engagement, "a new project is a client engagement");
+        // The chat backend must pass the lock first (see the cli chat test); then the model.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
+
+        // The shared check.
+        let why = state
+            .client_lock_step_model_refusal("deepseek/deepseek-chat")
+            .expect("an OpenRouter id is refused on a client engagement");
+        assert!(why.contains("`deepseek/deepseek-chat`"), "{why}");
+        assert_eq!(state.client_lock_step_model_refusal(""), None);
+        assert_eq!(state.client_lock_step_model_refusal("  "), None);
+        assert_eq!(
+            state.client_lock_step_model_refusal("claude-sonnet-5"),
+            None
+        );
+
+        // Each site.
+        let app = router(state.clone());
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: "routine-1".to_string(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let post = |uri: String, body: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let chat = post(
+            "/api/chat".to_string(),
+            r#"{"prompt":"hi","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(chat.status(), StatusCode::CONFLICT, "the chat");
+        assert!(body_json(chat).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`deepseek/deepseek-chat`"));
+        let review = post(
+            format!("/api/escalations/{}/chat", esc.id),
+            r#"{"message":"hi","model":"qwen/qwen3-coder:free"}"#,
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::CONFLICT, "the review chat");
+        assert!(body_json(review).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`qwen/qwen3-coder:free`"));
+        // The draft has no error channel: a refused model gets the deterministic scaffold and no
+        // model call is made.
+        let draft = post(
+            "/api/routines/draft-prompt".to_string(),
+            r#"{"intent":"tidy the docs","scope":"read","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(draft.status(), StatusCode::OK);
+        assert_eq!(body_json(draft).await["authored_by"], "scaffold");
+
+        // Not a client engagement: never refused.
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert_eq!(
+            state.client_lock_step_model_refusal("deepseek/deepseek-chat"),
+            None
+        );
+    }
+
+    /// H2 review: a scan with no active project is not waved through. There is no inspection
+    /// setup to say it is not client work, so it is a client engagement with no opt-in (the lock
+    /// is default-on), and it is refused before any repository is read.
+    #[tokio::test]
+    async fn a_scan_with_no_active_project_is_refused_as_a_client_engagement() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        let why = client_lock_refusal_for_scan(None, None, None, false, None)
+            .expect("no project means a client engagement");
+        assert!(why.contains("no active project"), "{why}");
+
+        let req = || AuditReq {
+            repos: vec!["acme/never-read".to_string()],
+            ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+        };
+        let Json(report) = onboard_audit(State(state.clone()), Json(req())).await;
+        assert!(report.blocked, "{:?}", report.message);
+        assert!(report
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("no active project"));
+        assert_eq!(report.files_scanned, 0);
+
+        let job_id = start_audit_job(&state, req(), AuditJobOptions::default()).await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{:?}", job.message);
+        assert!(job
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no active project"));
+    }
+
+    /// H2: a client engagement's audit on the cli backend, or with an OpenRouter audit model, is
+    /// refused before any repository is located or read (the repo here does not even exist, so
+    /// reaching the scan would produce a "not found" note, not this refusal); on the API with
+    /// Claude models the lock lets it through.
+    #[tokio::test]
+    async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Client", vec!["acme/never-read".to_string()])
+            .unwrap();
+        let req = |model: Option<&str>| AuditReq {
+            repos: vec!["acme/never-read".to_string()],
+            model: model.map(str::to_string),
+            ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+        };
+
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
+        let Json(report) = onboard_audit(State(state.clone()), Json(req(None))).await;
+        assert!(report.blocked, "{:?}", report.message);
+        assert!(report.message.as_deref().unwrap().contains("`cli` backend"));
+        assert_eq!(report.files_scanned, 0);
+
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        let Json(report) = onboard_audit(
+            State(state.clone()),
+            Json(req(Some("deepseek/deepseek-chat"))),
+        )
+        .await;
+        assert!(report.blocked);
+        assert!(
+            report
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("`deepseek/deepseek-chat`"),
+            "{:?}",
+            report.message
+        );
+
+        // The async job path refuses the same way: the job fails at once with the reason.
+        let job_id = start_audit_job(
+            &state,
+            req(Some("deepseek/deepseek-chat")),
+            AuditJobOptions::default(),
+        )
+        .await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{:?}", job.message);
+        assert!(
+            job.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("`deepseek/deepseek-chat`"),
+            "{:?}",
+            job.message
+        );
+
+        // API with Claude models: the lock passes.
+        assert_eq!(
+            client_lock_refusal_for_scan(
+                state.projects.active().as_ref(),
+                Some("claude-sonnet-5"),
+                Some("claude-sonnet-5"),
+                false,
+                None,
+            ),
+            None
+        );
     }
 
     /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)
@@ -31406,7 +33990,7 @@ mod tests {
         let mut report = crate::onboard::ScanReport::gated(&["me/api".to_string()]);
         let failures = vec![CorpusLoadFailure {
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
-            path: std::path::PathBuf::from("/Users/someone/corpus/supabase/rls/x.toml"),
+            path: std::path::PathBuf::from("/Users/auditor/corpus/supabase/rls/x.toml"),
             error: "TOML parse error in x.toml: unknown variant `architectual`".to_string(),
         }];
 
@@ -31444,13 +34028,13 @@ mod tests {
         // 4. the operator detail: on the note (UI + ledger), never in the ledger's reason.
         let note = &report.coverage_notes[0].message;
         assert!(
-            note.contains("/Users/someone/corpus/supabase/rls/x.toml")
+            note.contains("/Users/auditor/corpus/supabase/rls/x.toml")
                 && note.contains("architectual"),
             "the operator must be able to find the file and the parse error: {note}"
         );
         let reason = entry.skip_reason.clone().unwrap_or_default();
         assert!(
-            !reason.contains("/Users/someone") && !reason.contains("architectual"),
+            !reason.contains("/Users/auditor") && !reason.contains("architectual"),
             "the client-facing reason must carry NEITHER the path nor the parser text: {reason}"
         );
     }

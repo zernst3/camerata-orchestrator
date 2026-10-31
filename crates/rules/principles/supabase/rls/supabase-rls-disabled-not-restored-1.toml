@@ -1,6 +1,6 @@
 id = "SUPABASE-RLS-DISABLED-NOT-RESTORED-1"
-version = 1
-title = "Row Level Security explicitly disabled on a table must be restored — never left off by omission"
+version = 4
+title = "Row Level Security explicitly disabled on a table must be restored, never left off by omission"
 domain = "supabase:rls"
 # General Postgres, not just Supabase: an explicit `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`
 # that is never correctly restored is exploitable against ANY Postgres database reachable by an
@@ -17,6 +17,11 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 # Severity floor. Rationale: an explicit DISABLE that nobody restored is unambiguous in a way a
 # never-considered table is not — something deliberately turned protection off and the matching
 # re-enable was dropped or landed on the wrong object. That conclusion does not soften with the
@@ -30,11 +35,11 @@ qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-altertable.html"
-title = "PostgreSQL docs — ALTER TABLE: ENABLE/DISABLE ROW LEVEL SECURITY"
+title = "PostgreSQL docs: ALTER TABLE: ENABLE/DISABLE ROW LEVEL SECURITY"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
-title = "Supabase docs — Row Level Security guide (ENABLE/DISABLE ROW LEVEL SECURITY semantics)"
+title = "Supabase docs: Row Level Security guide (ENABLE/DISABLE ROW LEVEL SECURITY semantics)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/284.html"
@@ -82,7 +87,7 @@ use) and this rule's `extra_domains = ["sql"]` arming both follow that same prec
 id = "flag-disabled-not-restored-as-critical"
 label = "Every table whose RLS was explicitly disabled is re-enabled on that same table before the migrations end"
 directive = """
-Turning Row Level Security off on a table is sometimes necessary mid-migration — a backfill, a
+Turning Row Level Security off on a table is sometimes necessary mid-migration: a backfill, a
 hotfix, a data repair. When it happens, the matching
 `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` is written in the same change, and it names the
 SAME table that was disabled. A migration that disables and re-enables several tables in one file
@@ -91,10 +96,10 @@ comes back for one table while another is left open with nothing in the diff to 
 
 So the end state of the migration history has no table sitting disabled as the residue of an
 explicit `DISABLE ROW LEVEL SECURITY`. Restoration is done forward, in a new migration, rather than
-by editing the migration that disabled it — the goal is protection now, not a rewritten history.
+by editing the migration that disabled it: the goal is protection now, not a rewritten history.
 """
 remediation = """
-For `<table>`, add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration — do not
+For `<table>`, add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration: do not
 edit the old migration that disabled it, since the goal is to restore protection going forward,
 not to rewrite history. If a wrong-table re-enable statement was identified, leave it in place
 (it may be intentionally protecting that other table) and add the missing statement for `<table>`
@@ -109,5 +114,5 @@ why = "An explicit disable that is never restored is a distinct, higher-signal a
 id = "table-rls-disabled-and-never-restored"
 violates = true
 label = "A table's RLS was explicitly disabled in a migration and never re-enabled by the timeline's end"
-directive = "The ordered migration timeline's end-state leaves a table with `ALTER TABLE … DISABLE ROW LEVEL SECURITY` and no later `ENABLE` on that same table — RLS turned off for a backfill or hotfix and never turned back on."
+directive = "The ordered migration timeline's end-state leaves a table with `ALTER TABLE … DISABLE ROW LEVEL SECURITY` and no later `ENABLE` on that same table: RLS turned off for a backfill or hotfix and never turned back on."
 why = "Rejected: a table left RLS-disabled at the end of the timeline is unprotected regardless of PostgREST exposure, and the common cause is a disable whose matching re-enable targets a different table."

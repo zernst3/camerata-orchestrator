@@ -27,6 +27,7 @@
 mod ancestry;
 pub mod clone;
 pub mod ecma;
+pub(crate) mod ecma_walk;
 pub mod enclosing;
 pub mod highlight;
 pub mod nesting;

@@ -85,6 +85,10 @@ pub struct JobState {
     pub done: usize,
     /// Total passes known so far (grows as repos are fetched + chunked).
     pub total: usize,
+    /// Passes that were refused and did NOT run (the spend limit). Counted separately from
+    /// `done` so a stopped scan never reads as 100% complete.
+    #[serde(default)]
+    pub not_run: usize,
     /// Findings discovered so far — a live preview (pre-final calibration).
     pub findings: Vec<Finding>,
     /// Live progress of the DETERMINISTIC pass (the always-on floor + the scan-preview
@@ -122,6 +126,18 @@ pub struct JobStore {
     inner: Arc<Mutex<HashMap<String, JobState>>>,
     counter: Arc<AtomicU64>,
     job_meta: Arc<Mutex<HashMap<String, JobMeta>>>,
+}
+
+/// The key a deterministic tool is tracked under in a job's progress. A one-repo scan keeps the
+/// tool's own name. A scan over several repos keys it by repo and tool (`owner/repo:eslint`), so
+/// the second repo's run of a tool starts its own row instead of overwriting the first's count.
+#[must_use]
+pub fn progress_tool_key(repo: &str, tool: &str, multi_repo: bool) -> String {
+    if multi_repo && !repo.is_empty() {
+        format!("{repo}:{tool}")
+    } else {
+        tool.to_string()
+    }
 }
 
 impl JobStore {
@@ -194,6 +210,11 @@ impl JobStore {
     /// Mark `n` passes complete.
     pub fn inc_done(&self, id: &str, n: usize) {
         self.with(id, |j| j.done += n);
+    }
+
+    /// Record `n` passes that were refused and did not run. NOT counted in `done`.
+    pub fn inc_not_run(&self, id: &str, n: usize) {
+        self.with(id, |j| j.not_run += n);
     }
 
     /// Register (or, with `None`, clear) the rule corpus the job's scan runs against. From then
@@ -299,6 +320,15 @@ impl JobStore {
     pub fn declare_tools(&self, id: &str, tools: &[&str]) {
         for tool in tools {
             self.det_register_tool(id, tool);
+        }
+    }
+
+    /// [`Self::declare_tools`] for one repo of a multi-repo scan: each tool is declared under the
+    /// key [`progress_tool_key`] gives it for that repo, so the denominator counts a tool once
+    /// per repo it will run on.
+    pub fn declare_repo_tools(&self, id: &str, repo: &str, tools: &[&str]) {
+        for tool in tools {
+            self.det_register_tool(id, &progress_tool_key(repo, tool, true));
         }
     }
 

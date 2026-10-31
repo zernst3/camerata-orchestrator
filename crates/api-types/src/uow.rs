@@ -211,6 +211,110 @@ pub struct ChatTurn {
     pub text: String,
 }
 
+/// Check `name` against git's ref-format rules for a branch name (`git check-ref-format
+/// --branch`), plus the rule that matters most for Camerata: a branch name becomes a
+/// directory name under the worktrees root, so `.`, `..` and any `..` segment must never get
+/// through (they would point the worktree at the root itself or at its parent).
+///
+/// The ONE validator for every place a branch name enters: the unit's recorded branch, the
+/// Intake repo scope, the run target and the worktree itself. Rejects: empty names, a leading
+/// `-` (read as an option), a leading or trailing `/`, `//`, a trailing `.`, `..` anywhere,
+/// `@{`, a bare `@`, any segment that starts with `.` or ends in `.lock`, whitespace and
+/// control characters, and `~ ^ : ? * [ \`.
+///
+/// # Errors
+///
+/// A one-line reason naming what is wrong with the name.
+pub fn validate_branch_name(name: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        Err(format!(
+            "`{}` is not a valid branch name: {why}.",
+            name.escape_debug()
+        ))
+    };
+    if name.is_empty() {
+        return bad("it is empty");
+    }
+    if name.len() > 255 {
+        return bad("it is longer than 255 bytes");
+    }
+    if name.starts_with('-') {
+        return bad("it starts with `-`");
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return bad("it has an empty path segment");
+    }
+    if name.ends_with('.') {
+        return bad("it ends with `.`");
+    }
+    if name.contains("..") {
+        return bad("it contains `..`");
+    }
+    if name.contains("@{") || name == "@" {
+        return bad("it contains `@{` or is a bare `@`");
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(*c))
+    {
+        return bad(&format!("it contains the character `{}`", c.escape_debug()));
+    }
+    for segment in name.split('/') {
+        if segment.starts_with('.') {
+            return bad("a path segment starts with `.`");
+        }
+        if segment.ends_with(".lock") {
+            return bad("a path segment ends with `.lock`");
+        }
+    }
+    Ok(())
+}
+
+/// Check `repo` is an `OWNER/REPO` coordinate that is safe to use as a path under the
+/// workspace root and as a path in a push URL (`https://github.com/OWNER/REPO.git`).
+///
+/// The ONE validator for every place a repository name enters a unit of work: native unit
+/// creation, the Intake repo scope, a unit's repository fallback, and the workspace helpers
+/// that turn a repository into a directory or a remote URL. Exactly one `/` separates two
+/// non-empty segments; each segment is ASCII letters, digits, `-`, `_` or `.`, and is not `.`
+/// or `..`. Whitespace, extra separators, backslashes, `:`, `@`, `#` and the like are refused.
+/// This is the same shape as `camerata_worktracker::RepoCoord::parse` (this crate cannot
+/// depend on it) with the path-escaping characters closed off.
+///
+/// # Errors
+///
+/// A one-line reason naming what is wrong with the name.
+pub fn validate_repo_name(repo: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        Err(format!(
+            "`{}` is not a valid repository: {why}. Use the form OWNER/REPO.",
+            repo.escape_debug()
+        ))
+    };
+    if repo.len() > 201 {
+        return bad("it is too long");
+    }
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return bad("it needs exactly one `/` between the owner and the repository");
+    };
+    for segment in [owner, name] {
+        if segment.is_empty() {
+            return bad("the owner or the repository is empty");
+        }
+        if segment == "." || segment == ".." {
+            return bad("a segment is `.` or `..`");
+        }
+        if let Some(c) = segment
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        {
+            return bad(&format!("it contains the character `{}`", c.escape_debug()));
+        }
+    }
+    Ok(())
+}
+
 /// The branch mode for one in-scope repo (R6): either work off an EXISTING branch in
 /// that repo, or create a NEW UoW-specific branch from a chosen base. Both are
 /// first-class options (3-phase doc §3, fleet doc R6).
@@ -239,6 +343,31 @@ impl Default for BranchMode {
         Self::NewFromBase {
             base: String::new(),
             new_name: String::new(),
+        }
+    }
+}
+
+impl BranchMode {
+    /// The branch name the architect typed for this repo, trimmed, or `None` when it is blank
+    /// (the branch is then derived from the story id).
+    pub fn explicit_name(&self) -> Option<&str> {
+        let name = match self {
+            Self::Existing { branch_name } => branch_name,
+            Self::NewFromBase { new_name, .. } => new_name,
+        };
+        Some(name.trim()).filter(|n| !n.is_empty())
+    }
+
+    /// The branch the unit of work `story_id` works on in this repo: the named existing
+    /// branch, the requested new branch name, or `camerata/<story_id>` when neither is
+    /// given. The ONE derivation shared by the server's run target, multi-repo worktree
+    /// setup and Ship, and the console's run start, so they can never pick different
+    /// branches for the same repo. The result is not validated: pass it through
+    /// [`validate_branch_name`] before it names a directory.
+    pub fn branch_for_story(&self, story_id: &str) -> String {
+        match self.explicit_name() {
+            Some(name) => name.to_string(),
+            None => format!("camerata/{story_id}"),
         }
     }
 }
@@ -364,6 +493,64 @@ pub struct SignOff {
     pub note: Option<String>,
 }
 
+// ── Layer-3 reviewer findings recorded on the unit ─────────────────────────────
+
+/// What became of one recorded reviewer finding.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewFindingStatus {
+    /// Reported and not yet resolved. An open HIGH or MEDIUM blocks sign-off.
+    #[default]
+    Open,
+    /// A later review re-checked it against the diff and confirmed it gone (a `[FIXED]` line).
+    /// Merely not being reported again is NOT enough. `run_id` and `iteration` name the review
+    /// that confirmed it ("Fixed in run R, pass P").
+    Fixed {
+        #[serde(default)]
+        run_id: String,
+        iteration: usize,
+    },
+    /// The architect accepted it as is, with a reason (also written as a decision).
+    Accepted {
+        by: String,
+        reason: String,
+        /// RFC 3339 timestamp of the acceptance.
+        at: String,
+    },
+}
+
+/// One Layer-3 reviewer finding recorded on a unit of work, so nothing the reviewer found is
+/// dropped silently: each is fixed, accepted with a reason, or still open at sign-off.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct RecordedReviewFinding {
+    /// The run whose review reported it.
+    pub run_id: String,
+    /// The pass (iteration) in which it was reported.
+    pub iteration: usize,
+    /// `"high"`, `"medium"` or `"low"`.
+    pub severity: String,
+    pub title: String,
+    /// The concrete way it fails.
+    #[serde(default)]
+    pub scenario: String,
+    /// The rule id or acceptance criterion the reviewer quoted.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// The file or `file:line` in the diff.
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub status: ReviewFindingStatus,
+}
+
+impl RecordedReviewFinding {
+    /// True for a finding that stops sign-off: still open and ranked high or medium.
+    pub fn blocks_sign_off(&self) -> bool {
+        matches!(self.status, ReviewFindingStatus::Open)
+            && matches!(self.severity.as_str(), "high" | "medium")
+    }
+}
+
 // ── `GET /api/uows` list view (Phase D: `camerata-client`) ─────────────────────
 
 /// One row of `GET /api/uows`'s response (mirrors the server's private `UowView` in
@@ -394,9 +581,160 @@ pub struct UowListResponse {
     pub uows: Vec<UowListItem>,
 }
 
+/// The findings a unit of work was created from (roadmap 2c). Declared here, ahead of the unit
+/// aggregate gaining its `source` field, because the remediation planner's traceable PR body
+/// (`camerata_server::remediation_plan::pr_body`) renders it.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct FindingsSource {
+    /// The inspection the findings were taken from (`InspectionEntry::id`).
+    pub inspection_id: String,
+    /// The commit the inspection read, per repository (`AuditedRef.repo`, `.sha`).
+    #[serde(default)]
+    pub audited: Vec<AuditedCommit>,
+    /// The rule ids this unit must satisfy, the primary rule first. One id in the common case;
+    /// several when one fix closes findings under several rules.
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
+    /// The rule fingerprint of the inspection the findings came from (`rules_fingerprint`), so a
+    /// later retest can say whether the rule selection changed since. Empty when unknown.
+    #[serde(default)]
+    pub rules_fingerprint: String,
+    /// The planner's area label when a rule was split by directory (`None` when not split).
+    #[serde(default)]
+    pub area: Option<String>,
+    /// Every finding this unit is expected to close.
+    #[serde(default)]
+    pub findings: Vec<SourceFinding>,
+    /// Unit ids (story ids) this unit should land after. Advisory: shown in the console and
+    /// named in the PR body, not enforced.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+/// The commit an inspection read in one repository.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct AuditedCommit {
+    pub repo: String,
+    #[serde(default)]
+    pub sha: Option<String>,
+}
+
+/// One finding a unit is expected to close, with both identities.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct SourceFinding {
+    /// `report_export::finding_key` of the finding at plan time (exact identity).
+    pub key: String,
+    /// `fingerprint(rule_id, snippet)` (line-shift tolerant identity; what a retest matches on).
+    pub fingerprint: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    pub severity: String,
+    /// The snippet after `camerata_secrets::redact_str`. Never the raw line.
+    #[serde(default)]
+    pub snippet: String,
+    /// Set on a finding that a shared-fix group absorbed: the `key` of the finding at the same
+    /// location that stands for the group. The unit closes both; the PR body lists this one
+    /// straight under the other.
+    #[serde(default)]
+    pub merged_into: Option<String>,
+}
+
+/// Where a unit of work came from. `None` on every unit created before this existed and on
+/// units created from an issue or typed by hand.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UowSource {
+    /// Created from an inspection's findings (roadmap 2c).
+    Findings(FindingsSource),
+}
+
+impl UowSource {
+    /// The wire word for the kind of source (`"findings"`), for list badges.
+    #[must_use]
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Findings(_) => "findings",
+        }
+    }
+}
+
+/// One delta retest's verdict on a findings unit (roadmap 2c, last bullet).
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RetestEvidence {
+    /// The delta inspection that produced this (`InspectionEntry::id`, kind `DeltaRetest`).
+    pub inspection_id: String,
+    pub from_sha: String,
+    pub to_sha: String,
+    /// RFC 3339.
+    pub recorded: String,
+    /// Finding fingerprints absent from the retest report (gone at `to_sha`).
+    #[serde(default)]
+    pub resolved: Vec<String>,
+    /// Finding fingerprints still present (same repo, path, rule, fingerprint; any line).
+    #[serde(default)]
+    pub still_open: Vec<String>,
+    /// Fingerprints whose repository this retest did not cover.
+    #[serde(default)]
+    pub not_rechecked: Vec<String>,
+    /// The retest ran with a different rule selection than the base inspection
+    /// (`rules_fingerprint` differs), so "resolved" may mean "no longer selected".
+    #[serde(default)]
+    pub rules_changed: bool,
+    /// The retest's AI review did not finish (an error, a block or a failed pass), so findings
+    /// from the semantic tier are in `not_rechecked`, never in `resolved`.
+    #[serde(default)]
+    pub ai_incomplete: bool,
+    /// Findings reported at a different file than the unit recorded (a rename is not a fix):
+    /// fingerprint to the new path. Each is also in `still_open`.
+    #[serde(default)]
+    pub moved: std::collections::BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uow_source_is_tagged_and_retest_evidence_loads_from_partial_json() {
+        let src = UowSource::Findings(FindingsSource {
+            inspection_id: "insp-1".into(),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&src).expect("serialises");
+        assert_eq!(json["kind"], "findings");
+        assert_eq!(json["inspection_id"], "insp-1");
+        let back: UowSource = serde_json::from_value(json).expect("round trip");
+        assert_eq!(back, src);
+        assert_eq!(src.kind_str(), "findings");
+        let r: RetestEvidence = serde_json::from_str(r#"{"inspection_id":"d1"}"#).expect("partial");
+        assert_eq!(r.inspection_id, "d1");
+        assert!(r.resolved.is_empty() && !r.rules_changed);
+        assert!(!r.ai_incomplete && r.moved.is_empty());
+        // Records written before these fields existed still load.
+        let f: SourceFinding = serde_json::from_str(r#"{"path":"a"}"#).unwrap();
+        assert_eq!(f.merged_into, None);
+        let s: FindingsSource = serde_json::from_str(r#"{"inspection_id":"i"}"#).unwrap();
+        assert_eq!(s.rules_fingerprint, "");
+    }
+
+    #[test]
+    fn findings_source_shapes_load_from_partial_json() {
+        let s: FindingsSource = serde_json::from_str("{}").expect("empty source");
+        assert_eq!(s, FindingsSource::default());
+        let a: AuditedCommit = serde_json::from_str(r#"{"sha":"abc"}"#).expect("no repo");
+        assert_eq!(a.sha.as_deref(), Some("abc"));
+        let f: SourceFinding = serde_json::from_str(r#"{"path":"src/a.rs"}"#).expect("path only");
+        assert_eq!(
+            (f.path.as_str(), f.line, f.key.as_str()),
+            ("src/a.rs", 0, "")
+        );
+    }
 
     #[test]
     fn bug10_gate_provenance_new_enforces_invariant() {
@@ -429,6 +767,134 @@ mod tests {
     }
 
     #[test]
+    fn branch_names_that_escape_a_directory_or_break_git_ref_rules_are_rejected() {
+        for bad in [
+            "",
+            " ",
+            ".",
+            "..",
+            "a/../b",
+            "../x",
+            "x/..",
+            "a/./b",
+            "-x",
+            "-",
+            "/x",
+            "x/",
+            "a//b",
+            "a b",
+            "a\tb",
+            "a\u{7f}b",
+            "a\nb",
+            "x.lock",
+            "a/x.lock/b",
+            "a.",
+            ".hidden",
+            "a/.hidden",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[b",
+            "a\\b",
+            "a@{b",
+            "@",
+            "a..b",
+        ] {
+            assert!(
+                validate_branch_name(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_and_camerata_default_branch_names_are_accepted() {
+        for good in [
+            "main",
+            "feature/x",
+            "camerata/fix-7",
+            "camerata/acme/api#7",
+            "camerata/orchestrator/1761600000000",
+            "release-1.2.3",
+            "a_b/c-d",
+            "caf\u{e9}",
+        ] {
+            assert!(
+                validate_branch_name(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_names_must_be_owner_slash_repo_and_never_escape() {
+        for good in [
+            "acme/api",
+            "Acme/API",
+            "a-b/c_d.e",
+            "zernst3/camerata-orchestrator",
+            "o/.github",
+        ] {
+            assert!(
+                validate_repo_name(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
+        for bad in [
+            "",
+            "api",
+            "/api",
+            "acme/",
+            "acme/api/extra",
+            "../../other",
+            "acme/..",
+            "../api",
+            "./api",
+            "acme/.",
+            "acme /api",
+            "acme/ api",
+            " acme/api",
+            "acme/api ",
+            "acme/a\tpi",
+            "acme\\api",
+            "acme/api\n",
+            "acme/api#7",
+            "acme:x/api",
+            "git@github.com/api",
+            "acme/api?x",
+            "acme//api",
+            "a\u{7f}/b",
+        ] {
+            assert!(validate_repo_name(bad).is_err(), "{bad:?} must be rejected");
+        }
+        assert!(validate_repo_name(&format!("{}/x", "a".repeat(300))).is_err());
+    }
+
+    #[test]
+    fn branch_for_story_uses_the_named_branch_or_falls_back_to_the_story_slug() {
+        let existing = BranchMode::Existing {
+            branch_name: "feature/x".into(),
+        };
+        assert_eq!(existing.branch_for_story("acme/api#7"), "feature/x");
+        let new = BranchMode::NewFromBase {
+            base: "main".into(),
+            new_name: "camerata/fix-7".into(),
+        };
+        assert_eq!(new.branch_for_story("acme/api#7"), "camerata/fix-7");
+        // Blank names (the console sends `new_name: ""`) fall back to the story slug.
+        for blank in [
+            BranchMode::Existing {
+                branch_name: "  ".into(),
+            },
+            BranchMode::default(),
+        ] {
+            assert_eq!(blank.branch_for_story("acme/api#7"), "camerata/acme/api#7");
+        }
+    }
+
+    #[test]
     fn phase_tab_from_wire_round_trips() {
         assert_eq!(PhaseTab::from_wire("intake"), Some(PhaseTab::Intake));
         assert_eq!(
@@ -440,5 +906,60 @@ mod tests {
             Some(PhaseTab::Development)
         );
         assert_eq!(PhaseTab::from_wire("bogus"), None);
+    }
+
+    #[test]
+    fn a_recorded_review_finding_loads_with_defaults_and_open_status() {
+        let f: RecordedReviewFinding =
+            serde_json::from_str(r#"{"run_id":"r1","iteration":0,"severity":"high","title":"t"}"#)
+                .unwrap();
+        assert_eq!(f.status, ReviewFindingStatus::Open);
+        assert!(f.scenario.is_empty() && f.rule.is_none() && f.location.is_none());
+        assert!(f.blocks_sign_off());
+    }
+
+    #[test]
+    fn only_an_open_high_or_medium_finding_blocks_sign_off() {
+        let mut f: RecordedReviewFinding =
+            serde_json::from_str(r#"{"run_id":"r","iteration":0,"severity":"low","title":"t"}"#)
+                .unwrap();
+        assert!(!f.blocks_sign_off(), "LOW never blocks");
+        f.severity = "medium".into();
+        assert!(f.blocks_sign_off());
+        f.status = ReviewFindingStatus::Fixed {
+            run_id: "r".into(),
+            iteration: 1,
+        };
+        assert!(!f.blocks_sign_off());
+        f.status = ReviewFindingStatus::Accepted {
+            by: "architect".into(),
+            reason: "ok".into(),
+            at: "t".into(),
+        };
+        assert!(!f.blocks_sign_off());
+    }
+
+    #[test]
+    fn review_finding_status_uses_a_state_tag() {
+        let json = serde_json::to_string(&ReviewFindingStatus::Fixed {
+            run_id: "run-3".into(),
+            iteration: 2,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"state":"fixed","run_id":"run-3","iteration":2}"#);
+        // A record written before the run id was kept still loads.
+        let old: ReviewFindingStatus =
+            serde_json::from_str(r#"{"state":"fixed","iteration":1}"#).unwrap();
+        assert_eq!(
+            old,
+            ReviewFindingStatus::Fixed {
+                run_id: String::new(),
+                iteration: 1
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewFindingStatus::Open).unwrap(),
+            r#"{"state":"open"}"#
+        );
     }
 }

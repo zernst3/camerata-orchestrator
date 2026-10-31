@@ -1,6 +1,6 @@
 id = "SQL-DB-INDEX-2"
-version = 1
-title = "Index WHERE-clause columns based on query frequency, selectivity, and access pattern, not indiscriminately"
+version = 3
+title = "Index WHERE-clause columns based on query frequency, selectivity and access pattern, not indiscriminately"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/indexes-intro.html"
-title = "PostgreSQL — 11.1 Introduction to Indexes: WHERE-clause columns and JOIN-condition columns benefit from indexes"
+title = "PostgreSQL: 11.1 Introduction to Indexes: WHERE-clause columns and JOIN-condition columns benefit from indexes"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/pgstatstatements.html"
-title = "PostgreSQL — pg_stat_statements module: tracks planning and execution statistics for identifying slow queries"
+title = "PostgreSQL: pg_stat_statements module: tracks planning and execution statistics for identifying slow queries"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/using-explain.html"
-title = "PostgreSQL — 14.1 Using EXPLAIN: detect sequential scans on columns that should be index-backed"
+title = "PostgreSQL: 14.1 Using EXPLAIN: detect sequential scans on columns that should be index-backed"
 
 [decision]
 question = "What position does the project take on: which WHERE-clause columns get a supporting index, and how are composite indexes ordered?"
@@ -30,7 +30,7 @@ why = "After missing FK indexes, missing indexes on columns that are actually ho
 [[option]]
 id = "every-where-clause-column-has-a-supporting-index"
 label = "Index WHERE-clause columns that are frequently queried and selective, or serve real join/lookup volume"
-directive = "Columns used in WHERE predicates, ORDER BY, or JOIN keys get a supporting index when they are frequently queried AND selective (the predicate filters out most rows), or when they anchor a join/lookup pattern with real, measured query volume. Low-cardinality columns (e.g. a boolean or a small enum) queried alone, or columns that appear in a WHERE clause but are rarely queried in practice, are not automatically indexed just because they appear in a WHERE clause — every index has a write-side cost (slower INSERT/UPDATE/DELETE, extra storage) that has to be justified by real read-side benefit. For composite (multi-column) indexes, column order follows the actual query patterns that will use the index: the leading column must appear in the query's WHERE clause for the index to be used at all, equality-filter columns are generally ordered before range-filter columns, and 'most selective column first' is a reasonable starting heuristic for equality-only lookups but is not a universal rule once range predicates or ORDER BY requirements are involved."
+directive = "Columns used in WHERE predicates, ORDER BY or JOIN keys get a supporting index when they are frequently queried AND selective (the predicate filters out most rows) or when they anchor a join/lookup pattern with real, measured query volume. Low-cardinality columns (e.g. a boolean or a small enum) queried alone, or columns that appear in a WHERE clause but are rarely queried in practice, are not automatically indexed just because they appear in a WHERE clause: every index has a write-side cost (slower INSERT/UPDATE/DELETE, extra storage) that has to be justified by real read-side benefit. For composite (multi-column) indexes, column order follows the actual query patterns that will use the index: the leading column must appear in the query's WHERE clause for the index to be used at all, equality-filter columns are generally ordered before range-filter columns, and 'most selective column first' is a reasonable starting heuristic for equality-only lookups but is not a universal rule once range predicates or ORDER BY requirements are involved."
 remediation = """
 Add a supporting index for the WHERE/ORDER BY/JOIN-key column now, based on its actual or expected query frequency and selectivity, rather than waiting until production queries are already slow. Skip indexing low-cardinality columns that wouldn't meaningfully narrow a scan. Verify by running EXPLAIN on the slow query and confirming the planner now uses the new index instead of a full table scan.
 """
@@ -39,5 +39,5 @@ why = "After missing FK indexes, missing indexes on genuinely hot, selective WHE
 [[option]]
 id = "indexes-on-where-clause-order-by-and-join-key-co"
 label = "WHERE/ORDER BY/JOIN indexes added reactively"
-directive = "indexes on WHERE-clause, ORDER BY, and JOIN-key columns are added reactively in later migrations after queries get slow, rather than alongside the schema that introduces the columns"
+directive = "indexes on WHERE-clause, ORDER BY and JOIN-key columns are added reactively in later migrations after queries get slow, rather than alongside the schema that introduces the columns"
 why = "Avoids over-indexing columns that turn out to be low-cardinality or rarely queried, but surfaces slowdowns in production after users are already affected. Missing WHERE-column indexes are invisible at development data sizes and degrade linearly with table growth, so reactive discovery consistently arrives too late."

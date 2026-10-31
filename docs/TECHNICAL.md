@@ -16,9 +16,10 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace. The shipped app is 26 crates under
-`crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
-dependency of any app crate), so 27 workspace members in total. All load-bearing
+Camerata is a single Rust workspace: 29 crates under `crates/` plus one
+maintainer-only tool, `tools/corpus-verifier`, that is NOT a dependency of any app
+crate, so 30 workspace members in total (`crates/rules/tests/docs_crate_graph.rs`
+holds these counts to `Cargo.toml`). All load-bearing
 code is Rust; the only optional non-Rust piece is a future TypeScript AST sidecar
 described in `docs/ARCHITECTURE.md` that does not exist yet.
 
@@ -51,6 +52,9 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
 | `camerata-deploy` | lib | Tier-2 BYO-infra publish: `DeployTarget` seam + local + Azure adapter. |
 | `camerata-linter-registry` | lib | Citation validator: canonical linter rule-id lists per tool, plus a corpus-scan report used to ground `mechanical` rules to real linter ids (`Verification::Grounded`). |
+| `camerata-secrets` | lib | Leaf crate: the one secret-shape detector and redactor shared by the gateway, the scan floor, the chat scrubber and the export release gate. No `camerata-*` dependencies. |
+| `camerata-source-check` | lib | Corpus source freshness: fetches every rule's `[[sources]]` url, records ok / redirected / dead / unreachable, hashes cited sections against a sidecar and renders the report. Never edits a rule. Depends on `camerata-rules`. |
+| `camerata-test-env` | lib | TEST SUPPORT ONLY: the `EnvGuard` env-var override and the `process_env` serial-key discipline test. A dev-dependency of the suites that change environment variables; no app crate depends on it. |
 | `camerata-liveness` | lib | Run-liveness / stall detection primitive (progress-based, not wall-clock) shared by the agent runtime, the layer-2 runner, and the server for the watched/routine stall thresholds and cancellation. |
 
 > The maintainer-only `tools/corpus-verifier` (a separate workspace member,
@@ -60,119 +64,39 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 
 ### The crate dependency graph (the real DAG)
 
-This is the actual `[dependencies]` graph between the library crates (test-only
-`[dev-dependencies]` are excluded — those can point "back up" for integration tests
-without forming a real cycle).
-
-```mermaid
-graph TD
-    %% Binaries (thin entry points / adapters)
-    ui["camerata-ui<br/>Dioxus desktop · bin<br/>(spawns server as subprocess)"]
-    cli["camerata-cli<br/>HTTP adapter + demos · bin"]
-    mcp["camerata-mcp<br/>MCP adapter (rmcp stdio) · bin"]
-    client["camerata-client<br/>typed HTTP client over /api/*"]
-
-    %% Composition root
-    server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
-
-    %% Headless cores
-    appcore["camerata-app-core<br/>headless backend orchestration · no axum"]
-    uicore["camerata-ui-core<br/>headless UI logic/state (incl. GovDevState) · no dioxus"]
-    llm["camerata-llm<br/>LlmPort seam + provider stack"]
-
-    %% Capabilities
-    fleet["camerata-fleet<br/>tiered governed run"]
-    gateway["camerata-gateway<br/>Layer-1 gate / MCP · lib+bin"]
-    agent["camerata-agent<br/>claude -p driver"]
-    checks["camerata-checks<br/>Layer-2 runner"]
-    intake["camerata-intake<br/>lead-engineer / clarify"]
-    maintenance["camerata-maintenance<br/>standing ops · staged"]
-
-    %% Infrastructure / adapters
-    persistence["camerata-persistence<br/>versioned store + governance_events"]
-    worktracker["camerata-worktracker<br/>board adapter · port"]
-    deploy["camerata-deploy<br/>cloud deploy seam · staged"]
-
-    %% Domain + utilities (the floor)
-    core["camerata-core<br/>domain types + ports · ZERO model calls"]
-    rules["camerata-rules<br/>rule corpus"]
-    liveness["camerata-liveness<br/>stall detection"]
-    linter["camerata-linter-registry<br/>linter-id map"]
-
-    %% Pure contract leaf (bottom of everything)
-    apitypes["camerata-api-types<br/>pure serde wire-contract leaf · ZERO camerata deps"]
-
-    ui -.->|spawns as subprocess, no crate dep| server
-    ui --> worktracker
-    ui --> uicore
-
-    cli --> client
-    cli -.->|only for the eval subcommand| server
-    cli -.-> maintenance
-    cli -.-> deploy
-
-    mcp --> client
-    client --> apitypes
-
-    server --> gateway
-    server --> fleet
-    server --> intake
-    server --> agent
-    server --> checks
-    server --> persistence
-    server --> worktracker
-    server --> rules
-    server --> liveness
-    server --> core
-    server --> appcore
-    server --> llm
-
-    appcore --> apitypes
-    uicore --> apitypes
-    llm --> apitypes
-
-    fleet --> agent
-    fleet --> checks
-    fleet --> gateway
-    fleet --> intake
-    fleet --> rules
-    fleet --> core
-
-    gateway --> agent
-    gateway --> rules
-    gateway --> core
-
-    agent --> worktracker
-    agent --> liveness
-    agent --> core
-
-    checks --> rules
-    checks --> liveness
-    checks --> core
-
-    intake --> core
-    persistence --> core
-    rules --> core
-```
+The real `[dependencies]` graph between the workspace members (test-only
+`[dev-dependencies]` are excluded: those can point "back up" for integration tests
+without forming a real cycle) is drawn once, in
+[`PLATFORM.md`](../PLATFORM.md#the-crate-dependency-graph). That diagram is generated
+from `cargo metadata`, and `crates/rules/tests/docs_crate_graph.rs` fails when it
+disagrees with the manifests, so it is not repeated here. The README carries a compact
+version of the same graph.
 
 Read it bottom-up. `camerata-api-types` is the true floor: a pure-serde leaf with zero
-`camerata-*` dependencies, so `camerata-app-core`, `camerata-ui-core`, `camerata-llm`, and
+`camerata-*` dependencies, so `camerata-app-core`, `camerata-ui-core`, `camerata-llm` and
 `camerata-client` can all depend on it directly with no cycle between each other.
-`camerata-core` and the leaf utilities (`liveness`, `linter-registry`) also depend on
-nothing. Adapters (`persistence`, `worktracker`, `deploy`) and capabilities (`agent`,
-`gateway`, `checks`, `intake`, `fleet`) build on the floor. `camerata-server` is the
-**composition root** that wires them behind the Axum BFF, re-exporting the DTOs/provider
-stack it handed off to `api-types`/`llm` via shims so old call sites keep compiling.
-`camerata-client` is the shared typed-HTTP plumbing under both new adapters:
-`camerata-mcp` (an MCP server exposing the same verbs as tools) and `camerata-cli` (now an
-HTTP adapter, `-.->` since it only touches `camerata-server` for its `eval` subcommand).
-`camerata-ui` no longer depends on the `camerata-server` crate at all: it spawns the
-`camerata-server` binary as a subprocess (dashed edge) rather than linking it. Every solid
-arrow points down the stack: the graph is a DAG, and the compiler enforces it (a cycle
-between library crates does not compile). (`camerata-linter-registry` is consumed by the
-maintainer-only `corpus-verifier` tool, so it carries no app-crate edge.)
+`camerata-core`, `camerata-secrets` and the leaf utilities (`liveness`, `linter-registry`,
+`preview`, `deploy`, `maintenance`) also depend on nothing in the workspace. Adapters
+(`persistence`, `worktracker`) and capabilities (`agent`, `gateway`, `checks`, `intake`,
+`fleet`) build on the floor. `camerata-server` is the **composition root** that wires them
+behind the Axum BFF, re-exporting the DTOs/provider stack it handed off to
+`api-types`/`llm` via shims so old call sites keep compiling. `camerata-client` is the
+shared typed-HTTP plumbing under both adapters, `camerata-mcp` (an MCP server exposing the
+same verbs as tools) and the CLI's HTTP subcommands; the CLI also links `camerata-server`
+directly for the in-process `eval` and `inspect` commands. `camerata-ui` does not depend
+on the `camerata-server` crate at all: it spawns the `camerata-server` binary as a
+subprocess. Every arrow points down the stack: the graph is a DAG, and the compiler
+enforces it (a cycle between library crates does not compile). `camerata-linter-registry`
+has no workspace dependencies and no app crate depends on it; the maintainer-only
+`corpus-verifier` tool depends on `camerata-core` and `camerata-rules`.
 
 ### Process and runtime model
+
+Dev builds on macOS are signed with a local self-signed "Camerata Dev" certificate
+(`scripts/sign-dev.sh`), so the Keychain's "Always Allow" survives a rebuild. `cargo run` does it
+through `scripts/cargo-runner.sh` (set in `.cargo/config.toml`); after `cargo build --release`, run
+`scripts/sign-dev.sh target/release/camerata target/release/camerata-ui` yourself. It is a no-op
+off macOS, on CI or without the certificate, and it is not release signing.
 
 When you run `cargo run -p camerata-ui`:
 
@@ -848,11 +772,82 @@ Key design points:
 - **Per-model provider coupling**: a model always runs on its own provider's transport.
   When the fleet mixes models from different providers, each model is dispatched through
   the provider it belongs to rather than being forced onto one shared transport.
-- **Model registry**: `crates/agent/src/model_registry.rs` combines a static
+- **Model registry**: `crates/llm/src/model_registry.rs` combines a static
   list of Claude model entries with live OpenRouter discovery
   (`GET /api/v1/models`). Each entry is tagged with capability flags:
   `free`, `tool_use`, `caching`, `vision`, plus `input_price`/`output_price`
-  (per-million-token). The registry is fetched once per session and cached.
+  (per-million-token). The registry is fetched once per session and cached. Every
+  model picker is populated from it, so adding a row to `CLAUDE_REGISTRY_MODELS`
+  adds it to every picker.
+
+  The Claude catalog (first-party list prices, USD per million tokens, reference
+  dated 2026-10-06; `weight` is the relative subscription-quota cost the profile
+  cascade uses):
+
+  | id | input | output | cache read | context | max output | weight |
+  |---|---|---|---|---|---|---|
+  | `claude-fable-5-1` | 10.00 | 50.00 | 0.25 | 1M | 128K | 15 |
+  | `claude-fable-5` | 10.00 | 50.00 | 1.00 (0.1x) | 1M | 128K | 15 |
+  | `claude-opus-5-5` | 4.00 | 20.00 | 0.20 | 1M | 128K | 8 |
+  | `claude-opus-5` | 5.00 | 25.00 | 0.50 (0.1x) | 1M | 128K | 10 |
+  | `claude-sonnet-5-5` | 2.00 | 10.00 | 0.20 | 1M | 128K | 3 |
+  | `claude-sonnet-5` | 2.00 | 10.00 | 0.20 (0.1x) | 1M | 128K | 3 |
+  | `claude-haiku-5-5` | 0.10 / 0.50 | 0.50 / 2.50 | 0.01 / 0.05 (0.1x) | 1M | 128K | 1 |
+  | `claude-haiku-4-5-20251001` | 1.00 | 5.00 | 0.10 (0.1x) | 200K | n/a | 1 |
+
+  Haiku 5.5 has a long-prompt tier: the first figure applies to prompts up to
+  100K tokens, the second to the whole request once the prompt is above 100K.
+  Cache writes are 1.25x input (5 minute) or 2x input (1 hour); the Batch API is
+  0.5x input and output. A per-model cache-read price (`cache_read_price`) and the
+  Haiku tier (`long_prompt`) are data on the entry; `rates_for(model, prompt_tokens)`
+  returns the per-token rates for a request. ASSUMPTION (not confirmed against a bill):
+  the prompt size that picks Haiku 5.5's tier is the folded total (input plus cache
+  reads plus cache writes), and the higher tier's input rate also drives the cache
+  read (0.1x) and cache write (1.25x / 2x) rates. The reference lists the tier on
+  input and output only.
+
+  **Cost accounting.** One function, `usage_cost_usd`, prices every call (the response
+  parser, the usage ledger's fallback, the spend cap's meter). A refused call is billed:
+  the refusal error carries the usage (`ModelRefusal.billed`), a refused batch row keeps
+  it (`BatchResults.billed`), and the spend-cap meter counts both. With a cap set, a call
+  that reports no dollar figure is priced from its tokens; if that is impossible the cap
+  is unenforceable, a note says so, and nothing further is admitted. Dollars feeding a cap
+  are converted to micro-dollars rounding up. `is_priced` (the spend-cap gate for an
+  unpriced model) needs non-zero input and output prices.
+
+  **Request shape.** All of the 5.x models answer HTTP 400 to `thinking` with
+  `budget_tokens`, non-default `temperature` / `top_p` / `top_k`, and assistant
+  prefill. They differ on the rest:
+
+  | model | `thinking: disabled` | forced `tool_choice` | effort default |
+  |---|---|---|---|
+  | Fable 5.1, Sonnet 5.5 | rejected (omit it) | rejected | high |
+  | Haiku 5.5 | only at effort high or below | accepted | medium (set to `high`) |
+  | Opus 5.5 | rejected (omit it) | rejected | medium (set to `high`) |
+  | Fable 5 | rejected (omit it) | accepted | high |
+  | Opus 5 | only at effort high or below | accepted | high |
+  | Sonnet 5 | accepted | accepted | high |
+  | Haiku 4.5 and older | accepted | accepted | n/a (nothing is stripped) |
+
+  All of that is data on the registry entry (`shape`), applied by ONE function,
+  `conform_messages_body(model, &mut body)`, which every Messages body passes
+  through (`Llm::complete_api`, the batch `params`, `count_tokens`, and the agentic
+  driver in `api_agent_driver.rs`; `count_tokens` drops the `output_config` the
+  function adds, since effort cannot change a token count). An effort the caller set
+  is kept. An id absent from the catalog gets the stripping but no effort. The first
+  time the function removes something a caller sent, it logs one `tracing` warning
+  per model and field set.
+
+  **Refusals.** A response with `stop_reason: "refusal"` (HTTP 200, no content) is an
+  error (`ModelRefusal`, via `refusal_error`), so the pass lands in FAILED PASSES
+  instead of reading as "no findings". Batch items keep their per-item reason, the
+  refused call's usage is recorded in the ledger, a refusal mid-way through an agent
+  run ends it with an `INCOMPLETE:` outcome that keeps the cost and the assistant
+  text so far, and the CLI backend treats a `result` event with
+  `stop_reason: "refusal"` the same way (not yet confirmed against a live refusal; see
+  the master sequence ledger). Every pass runner returns each failed pass by name;
+  the scan rounds and the resolution round both disclose them as one FAILED PASSES row
+  per failed pass, with how many passes in the round answered.
 - **Prompt caching + geological layering**: every agent prompt is assembled in a
   strict, prefix-cache-optimal order (static at the top, volatile at the bottom) so
   the cacheable prefix stays byte-identical across calls that differ only in the tail.
@@ -1812,34 +1807,98 @@ god objects, etc.
 call so the whole repo is covered regardless of size. A file larger than the
 budget becomes its own chunk.
 
-**Digest format:** each chunk is rendered via `build_digest`, which emits
-`// ===== FILE: <path> =====` headers with every line numbered as `NNNN| line`
-so the model can cite accurate line numbers.
+**Digest format:** each chunk is rendered via `build_digest`, which numbers every
+line as `NNNN| line` so the model can cite accurate line numbers and wraps each file
+in `<<<UNTRUSTED <token> "<path>">>>` and `<<<END UNTRUSTED <token>>>` lines
+(`prompt_frame::frame_untrusted`). The token is 128 bits from the operating system's
+random source, drawn once per run and named in that run's system prompt, so a file
+cannot print a line that passes for the end of its own frame or the start of another
+file. The repo map and the quoted evidence sent to calibration and fix generation are
+framed the same way. The detail-regeneration pass, the candidate-site digests of the
+candidate prefilter and the clone-advisory judge frame their client excerpts under the run's
+token and carry the same clause. A token is drawn through `FrameNonce::generate_avoiding`, which
+draws again (at most 8 times) if the token happens to occur in any text it will frame.
+
+**Cost of the per-run token.** The system prompt leads every cached prefix, and it now names a
+token that is new each run. Within one run every pass shares one prefix as before, so the
+warm-then-fan-out cache schedule is unchanged. Across runs the prefix never matches, so a run no
+longer reads cache entries written by an earlier one. The prompt change also bumped
+`AUDIT_PROMPT_SCHEMA_VERSION`, which is part of the incremental cache key: the first scan of each
+repository after the upgrade re-runs the AI pass for files whose findings were carried, once.
+After that the carried findings are reused as before.
 
 **Repo map:** every chunk also receives the whole-repo symbol map from
 `build_repo_map` (every file path + its public symbols, from a cheap line scan).
 This gives every chunk architectural context (which dirs are repositories vs.
 services) without needing every file body.
 
-**Scan modes.** The audit picker offers THREE choices, but they are two orthogonal
-dimensions — the `ScanMode` enum has only two variants (the batching algorithm), and
-"Background job" is a separate EXECUTION dimension (foreground vs detached), not a third
-`ScanMode`. This is the common point of confusion.
+**Scan modes.** Two orthogonal dimensions: the `ScanMode` enum (how the LLM calls are made)
+and, in the app, "Background job" (foreground vs detached execution, not a `ScanMode`).
 
-`ScanMode` (`ai_audit.rs`) — how the LLM calls are batched; `tuning()` returns
+`ScanMode` (`ai_audit.rs`); `tuning(efficiency)` returns
 `(max_concurrent_calls, rules_per_batch)`:
-- `Sequential` — `(1, usize::MAX)`: one call per file-chunk with ALL rules at once,
-  chunks one after another. Simplest, gentlest on rate limits — the debug/fallback floor.
-- `Parallel` (default) — `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`: rule-batches ×
+- `Sequential`: `(1, usize::MAX)`, one call per file-chunk with ALL rules at once,
+  chunks one after another. Simplest, gentlest on rate limits; the debug/fallback floor.
+- `Parallel`: `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`, rule-batches x
   file-chunks run concurrently (capped). Wall-clock is the slowest batch, not the sum.
+- `Batch`: every (chunk, rule-batch) pair is an item of an Anthropic Message Batch, half
+  price on every token, results when the batch ends. 15 rules per item
+  (`BATCH_RULE_BATCH_SIZE`, the graded parallel shape); `CAMERATA_BATCH_RULE_BATCH_SIZE`
+  overrides it. With `batch_default` off, all rules go in one item per chunk (the pre-rank-2
+  shape).
 
-The picker's third option, **"Background job"**, runs the audit (Parallel batching)
-SERVER-SIDE as a detached `JobStore` job instead of inline in the request: the UI gets a
-job id and polls `JobState` (status / done / total / live `findings` preview / final
-`report`), so the architect can leave and watch findings stream in. Best for huge /
-multi-repo scans where a foreground request would be long-lived. Foreground Parallel and
-Sequential block until the audit returns. `from_wire("sequential") -> Sequential`, else
-`Parallel`; the "job" choice selects detached execution and still uses Parallel batching.
+**Which mode a run uses** (`resolve_scan_mode`, rank 2). A mode forced by the caller always
+wins: `camerata inspect --batch` or `--realtime`, or the app's picker set to Parallel,
+Sequential or Batch. Otherwise (neither flag, or the picker's "Default", which sends
+`auto`): on the API backend the scan is a `Batch`; on the CLI backend (a `claude`
+subprocess, no batches endpoint) it is `Parallel` and the run says so once (the CLI prints
+`CLI_BACKEND_REALTIME_NOTICE` before the scan, the app adds it to the scan notes); with
+`batch_default` off it is `Parallel` (batch is opt-in, as before rank 2). `ScanMode::parse`
+accepts `auto`, `parallel`, `sequential` and `batch` (blank or absent means `auto`); any
+other value is an error naming the choices, never a silent fallback (the app returns it as
+the scan's error, the background job fails with it). The SYNCHRONOUS desktop endpoint
+(`onboard_audit`, no job) never runs a batch, whatever the mode resolved to: it runs in real
+time and adds `SYNCHRONOUS_SCAN_REALTIME_NOTICE` to the scan notes once, because a batch can
+run for hours and that request has no job to record the batch id on; batch runs on the job
+path, where `JobStore::set_batch_id` records it. "Background job" sends `auto` and runs
+detached: the UI gets a job id and polls `JobState` (status / done / total / live `findings`
+preview / final `report`). The cockpit's estimate prices `auto` and `job` as batch on the
+API backend and parallel on the CLI backend (`camerata_ui_core::scan::estimate_mode`).
+
+**Batch mode, made safe to be the default** (`run_passes_batch` and
+`ai_audit/batch_mode.rs`; all of it behind `batch_default`):
+- **Resubmission rule.** Every item that errored, expired or is missing from the results the
+  API returned is resubmitted ONCE, all such items together in ONE follow-up batch (never real
+  time: the follow-up keeps the discount and passes the same spend check as the first
+  submission). Only a failed SUBMIT (nothing was accepted) fails just that sub-batch's items and
+  lets them be resubmitted. A poll or fetch that fails AFTER a successful submit is retried a
+  bounded number of times (`POST_SUBMIT_ATTEMPTS`); if it still fails, the batch is never
+  submitted again (it may still be running and billed, and a second copy would be outside the
+  cap's sight and orphan the id): its items are failed passes whose reason names the batch id,
+  and a meter note says the batch was not resubmitted. An item that fails again is a failed
+  scan pass. A follow-up the spend limit refuses is NOT RUN on the meter, and a note records
+  that the item had already failed once.
+- **Failed scan passes** (real-time and batch alike, one shape: `PassFailure`, turned into
+  `FailedPass` rows by `failed_pass_rows`). A real-time pass whose call errored, or a batch item
+  that failed twice, is returned by the pass runner and becomes a `FailedPass` ("audit {group}
+  c/n · rules b/m", with how many passes in the round answered), which reaches the export's
+  failed-pass disclosure (executive summary and methodology) and the `camerata inspect` FAILED
+  PASSES block. The reason carries only the provider error's TYPE and MESSAGE
+  (`batch_mode::disclosable_error`), never a response body. When every pass failed the repo is
+  reported as "AI audit skipped" instead (unchanged).
+- **Truncation retry.** A batch item that stopped on `max_tokens` goes through
+  `retry_truncated_scan_reply`, the same function a real-time pass uses (one retry at twice
+  the output cap, sent in real time, admitted under the spend limit; `truncation_retry=off`
+  still turns it off).
+- **Cache TTL rule** (`batch_mode::batch_cache_ttl`, per submission): 1 hour from two items
+  up, 5 minutes for a single item. That is what the price comparison reduces to, per token of
+  the cached prefix every item of a submission shares (the repo map), at the multipliers
+  `PriceBasis` bills at: 5 minutes costs `n x 1.25` on the assumption (a worst case, not a
+  measurement) that the entry expired before each next item; 1 hour costs one write and
+  `n - 1` reads, `2 + 0.1 (n - 1)`; the second is cheaper exactly when `n >= 2`. A test
+  recomputes the comparison from the live multipliers so a price change that moves the
+  threshold fails there. `batch_long_cache=off` forces 5 minutes; `batch_default=off` keeps the 1-hour
+  batch TTL of rank 3. Each row is priced at the TTL its submission asked for.
 
 **Resolution round:** passes may defer a judgment by returning `needs_files`. A
 single bounded resolution round re-runs those requested files together. The
@@ -2152,8 +2211,11 @@ content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model,
 version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
 single-source candidate, every copy's decision tokens), so a moved
 file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
-the project's fast tier (`resolve_clone_judge_model`: explicit pick, then `CAMERATA_CLONE_JUDGE_MODEL`,
-then `fleet::tier::default_fast_model()`; stamped in `ScanProvenance.clone_judge_model` when the judge
+the project's fast tier (`resolve_clone_judge_model`: the run's pick, which is the open project's
+fast band primary in the cockpit (`clone_judge_step_model`) or `--clone-judge-model` on the command
+line (`RunControls::clone_judge_model`), then `fleet::tier::default_fast_model()`, Haiku 5.5; the
+older Haiku stays selectable and priced; the model is in the pre-flight's priced list and the
+client lock's check; stamped in `ScanProvenance.clone_judge_model` when the judge
 made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
 `MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
 folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict
@@ -2407,8 +2469,8 @@ PR (catching non-Camerata changes too). See
 > corrected a large number of them. So treat any specific count of rules or flags
 > below as a dated snapshot rather than a current fact, and read the TOMLs when an
 > exact number matters. The live state of that work is tracked in
-> `docs/plans/2026-10-09_audit-findings-tracker.md` and
-> `docs/plans/2026-10-09_rule-kind-classification.md`. None of it changes the
+> the audit findings tracker and the rule-kind classification notes (both private working
+> notes). None of it changes the
 > mechanisms described here.
 >
 > **Division of authority with `docs/RULES_REFERENCE.md`.** That document is the
@@ -2424,7 +2486,7 @@ PR (catching non-Camerata changes too). See
 > separately names shapes that are faults under all of them. It permits `violates`
 > flags and is denied the no-convention escape. `RUST-DOMAIN-6` is its sole member,
 > asserted as an equality. Second, **not every selected rule is scanned any more.**
-> `Rule::inspectable` (W16) is required on all 417 corpus rules, and the 26 that
+> `Rule::inspectable` (W16) is required on every corpus rule, and the 26 that
 > declare `false` are removed from the selected set BEFORE arming, by
 > `inspectable_rules_for_scan` plus a `selected` shadow in `audit_repos`
 > (`crates/server/src/onboard.rs:944-961, 1254-1255`). Those rules are still emitted
@@ -2496,9 +2558,11 @@ being allowed to default - the content-rule floor and the reason-less-waiver row
 - `conventions_observed_findings` ships one row per decided non-`violates` rule
   with zero trace of a violation: no own row, no `also_matches` demotion, no
   absorbed site.
-- `run_routed_passes` reports every armed rule whose routing group matched zero
-  files, and `audit_repo` synthesises one `NotAssessed` row each. The Batch path
-  applies no routing, so it cannot skip a rule this way.
+- `run_routed_passes` and `run_routed_passes_batch` (both read `runnable_units`)
+  report every armed rule whose routing group matched zero files, and
+  `audit_repo` synthesises one `NotAssessed` row each. A rule scoped by
+  `applies_to` is reported the same way when no file in the scan matches its
+  scope.
 
 Each synthesised emission records its own ADDITION-side ledger stage
 (`convention-observed-emission`, `no-convention-emission`,
@@ -2545,7 +2609,7 @@ Two things about this are worth internalising because both have already bitten:
 
 - **A mechanism with no data is inert, and a green test suite will not tell you.**
   `max_severity`, its clamp, and all four `req_e2_*` unit tests shipped against a
-  corpus in which ZERO of 417 rules declared a ceiling. Every test passed and the
+  corpus in which ZERO rules declared a ceiling. Every test passed and the
   feature did nothing. The fix is the anti-inertness gate:
   `rules_declaring_max_severity` / `rules_declaring_min_severity` /
   `rules_declaring_deviation_ceiling` must be NON-empty for the real corpus, so a
@@ -2607,11 +2671,769 @@ cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
 Flags: `--backend cli|api` (the same compliance-safety setting a project's
-`backend` field carries; `cli` is the default), `--batch` (the Anthropic Message
-Batches path, roughly 50% cheaper, latency not returned until the whole batch
-completes, requires `--backend api`), `--model` and `--calibration-model`
-overrides, `--full` to ignore the on-disk incremental-scan cache, and `--verbose`
-to print the ledger's per-rule detail alongside the default concise summary.
+`backend` field carries; `api` is the default), `--batch` (force the Anthropic
+Message Batches path, roughly 50% cheaper, latency not returned until the whole
+batch completes, requires `--backend api`; on the API backend this is already the
+default unless `batch_default` is off), `--realtime` (force real-time parallel calls;
+exclusive with `--batch`), `--model` and `--calibration-model`
+overrides, `--full` to ignore the on-disk incremental-scan cache, `--verbose`
+to print the ledger's per-rule detail alongside the default concise summary,
+`--max-cost-usd <USD>` (the spend limit) and `--efficiency <name>=on|off`
+(repeatable). Those last two, the pre-flight estimate and the cost arithmetic are
+described in "Token efficiency: switches, cost arithmetic, estimate and spend
+limit" below.
+
+#### Token efficiency: switches, cost arithmetic, estimate and spend limit
+
+`SPIKE_TOKEN_EFFICIENCY_RESULTS.md` ranks the savings; this is how the product
+exposes them. Everything here is operator-side. None of it changes what a scan
+finds, and none of it puts a cost figure in the client export.
+
+**Per-measure switches** (`crates/server/src/efficiency.rs`). One
+`EfficiencyConfig`, one boolean per built measure, default ON. A later measure adds
+one line to the `efficiency_measures!` list and reads
+`meter.efficiency().<name>` at its code path.
+
+| Name | Measure | When off |
+|---|---|---|
+| `warm_schedule` | rank 3: a chunk's first pass warms the prompt cache before its siblings start | every pass is dispatched as soon as a slot is free (`warm_schedule::run_unscheduled`) |
+| `label_after_prefix` | rank 3: the group label stays out of the cached prefix | the label leads the digest segment again (`build_pass_prompt_with`) |
+| `batch_long_cache` | rank 3: batch items ask for the 1-hour cache | they ask for the 5-minute cache |
+| `result_cache` | rank 5: unchanged files reuse the previous scan's AI findings | a full AI re-scan, like `--full` |
+| `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
+| `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
+| `fix_on_haiku` | rank 10: with no fix model set, the fix stage runs on `claude-haiku-5-5` at effort `low` | the fix stage runs on the calibration model, else the scan model, with no effort sent (the pre-rank-10 request) |
+| `terse_output` | rank 4: scan passes write a one-sentence `detail` and no `proposed_rules` (the advisory pass keeps them); the full `detail` is regenerated for the findings that survive the first merge | the scan prompts and the pipeline are exactly what they were before rank 4 |
+| `batch_default` | rank 2: on the API backend a scan with no forced mode runs as a Message Batch; failed items are resubmitted once; a cut-off item gets the truncation retry; 15 rules per item; the batch cache TTL by the price arithmetic (see "Scan modes") | batch is opt-in and runs exactly as before rank 2: one submission, all rules per item, the rank-3 TTL, no resubmission and no truncation retry (a failed batch item is still disclosed as a failed pass) |
+| `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to; batch mode is routed like real-time | `applies_to` is ignored, real-time routes by rule-id language prefix only, and batch mode is the old single unrouted batch (every rule with every file) |
+| `candidates_prefilter` | rank 8: a rule that declares `candidates` is sent only the sites its locator finds in a chunk, with 8 lines of context, plus the repo map | `candidates` is ignored entirely; every prompt is the rank-7 prompt |
+
+Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
+name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
+error, never ignored: a typo that leaves a measure on while the operator believes it
+is off would defeat the switch. The server's own scans read the environment variable
+only (a bad value is logged and every measure stays on). The resolved set is
+recorded on the operator ledger (`ScanLedger::efficiency`), carried in the per-stage
+telemetry snapshot and printed above its table, and printed in the `camerata inspect`
+summary, so any two runs can be compared knowing what differed. The key rank 5 fix
+(the AI findings are keyed by model, prompt version and rule wording) is a
+correctness fix, not a switch.
+
+**Rule routing and `applies_to`** (`crates/server/src/scan_routing.rs`,
+`crates/rules/src/applies_to.rs`). The rule router sends each rule only with the
+files it can apply to. Two sources of scope, both decided per FILE before
+chunking (a group's files are re-chunked on their own, so a chunk only holds
+files its rules can apply to):
+
+- the rule id's language prefix (`RUST-`, `REACT-`, ...): always on;
+- the rule's declared `applies_to` in its TOML, honoured only with
+  `applies_to_routing` on: `applies_to = { paths = ["**/*.sql"], languages =
+  ["rust"], contains_any = ["create policy"] }`. `paths` are repo-relative globs
+  (`*` inside one segment, a whole `**` segment; nothing else is accepted),
+  `languages` come from the closed list
+  `camerata_rules::applies_to::ROUTING_LANGUAGES`, and `contains_any` are
+  case-insensitive substrings: a file whose text contains one is in scope
+  whatever its path (this is how a rule about SQL statements still reaches SQL
+  embedded in a TypeScript, Python or Ruby migration; the router reads file text
+  the scan already holds). A file is in scope when it matches ANY listed glob
+  (case-insensitive), is in ANY listed language, or contains ANY marker, and a
+  file whose language cannot be determined counts as in scope for the language
+  part: an unknown or ambiguous attribute SENDS the rule. A rule with both an id
+  prefix and `applies_to` needs both to hold. Absent `applies_to` means every
+  file, so unscoped rules behave exactly as before.
+
+Validation is at corpus load and is loud: an unknown language, an unknown key,
+an empty scope, or a glob using unsupported syntax (`?`, `[..]`, `{..}`, `!`, an
+absolute or `..` path) fails that rule's file (`RulesError::TomlParse`), never a
+scope that silently matches nothing. `applies_to` is part of `Rule::content_hash`,
+so scoping a rule is a revision of it (version bump, `camerata corpus lock`).
+
+`AuditRule { id, directive, applies_to }` is the rule metadata `audit_repo`,
+`plan_routes` and `run_routed_passes` pass around (not `(id, directive)` pairs),
+so a further per-rule routing field is one more field on it. Rules in the same
+scope share a group. `routed_units` turns the plan into the units that run and is
+the ONE place that decides which (chunk, rule) pairs a scan sends: the real-time
+path (`run_routed_passes`), the batch path (`run_routed_passes_batch`, one Message
+Batch per route group, submitted in turn so the spend cap sees earlier groups'
+cost; with the switch OFF, `batch_units` returns the old single unrouted batch, so
+OFF isolates routing completely) and the routing telemetry all read it. A group
+that matches no file is not dropped: its rules come back as `NotAssessed` rows,
+unless the full repo (`map_files`; on an incremental scan `files` is only the
+changed files) has a file in the rule's scope. The ledger records such a rule as
+not run, with the reason, never as fired or run clean
+(`split_fired_and_not_assessed`). The incremental-scan cache key
+(`rules_fingerprint_with_content`) includes each rule's corpus content hash, so
+editing a rule (its scope included) forces a full rescan. The advisory "flag novel
+issues" pass is disabled in a scoped group only when a cross-cutting `All` group
+also runs; when every selected rule is scoped, each scoped group keeps it, and the
+rare duplicate (two declared scopes overlapping on a file) collapses in the
+cross-chunk dedup and location merge.
+
+Telemetry: the per-stage table prints `rule routing: N of M (chunk, rule) pairs
+not sent`, where M is every rule with every chunk and N is what routing (id
+prefix, plus `applies_to` when on) did not send; compare a run with
+`--efficiency applies_to_routing=off` to see the saving `applies_to` itself buys.
+It is operator-only, like the rest of the table. The corpus rules that declare
+`applies_to` are pinned by `crates/server/tests/applies_to_corpus.rs`: adding a
+scope to another rule fails that test until the rule is reviewed.
+
+**Candidate prefilter and `candidates`** (`crates/server/src/ai_audit/candidate_passes.rs`,
+`crates/checks/src/candidates.rs`, `crates/rules/src/candidates.rs`). Routing decides
+which files a rule is sent; `candidates` decides what a chunk of those files looks
+like to it. A rule declares a deterministic locator, `candidates = { locator =
+"sql_routines" }`, from the closed list `camerata_rules::CANDIDATE_LOCATORS`
+(`sql_routines`, `sql_policies`, `sql_policies_routines_and_views`, `sql_tables`). Each
+locator is a statement filter over the SQL statement splitter the Supabase checkers
+use (`supabase::splitter`), so a site is a whole top-level statement (a function
+arrives with its whole dollar-quoted body), and the filter is a keyword mention, not
+a judgment, so it is wide. What each one selects:
+
+- `sql_routines`: any statement that mentions a `FUNCTION`, `PROCEDURE` or `ROUTINE`
+  (create, alter, drop, comment, grant, revoke, default privileges, a trigger's
+  `EXECUTE FUNCTION`), and every `DO` block;
+- `sql_policies`: any statement that mentions a `POLICY` or `POLICIES`;
+- `sql_policies_routines_and_views`: both of those plus any statement that mentions a
+  `VIEW` (a policy reads a claim through a view as readily as through a function);
+- `sql_tables`: any statement that mentions a `TABLE`, `TYPE`, `DOMAIN` or `VIEW`, plus
+  any `INTO` outside an `INSERT` or `MERGE` (`SELECT ... INTO new_table` creates a
+  table with none of those words). Not selected: a column definition list in a
+  query's `FROM` clause (`... AS t(col timestamp)`) in a plain `SELECT`, and a cast in
+  a plain `SELECT` or `INSERT ... SELECT`. Neither declares a column of the schema.
+
+Each locator's shapes, and the shapes it must not select, are tables in
+`crates/checks/src/candidates.rs`; a new way a rule's subject can be written is a new
+line there. A backslash directly before a quote outside an `E'...'` string is
+ambiguous (its meaning depends on `standard_conforming_strings`), so the strict
+splitter rejects the file and the rule gets whole files; inside `E'...'` the escape is
+honoured. With `candidates_prefilter` on, per (chunk, locator):
+
+- every file parses and has sites: the rule leaves the chunk's whole-file prompt and
+  gets a candidate prompt (`pass[...] candidates[<locator>]`): the repo map, then each
+  site with 8 lines of context and the file's real line numbers, then every file the
+  locator does not read (any non-`.sql` file, e.g. `supabase/config.toml`) in full.
+  The advisory pass never runs on it;
+- the locator errors, panics, takes longer than 20s, the chunk holds more than 8 MiB of
+  text, or a `.sql` file does not parse (a string, quoted identifier, dollar quote or
+  block comment open at end of file, or an ambiguous backslash,
+  `split_statements_strict`): the rule stays in the chunk's whole-file prompt, which
+  is exactly the switch-off prompt (a chunk narrowed for one rule and not another
+  sends each its own prompt), and the fallback is recorded and printed. A chunk over
+  the size cap is never handed to the locator; at the time limit the scan raises a
+  cancel flag that the splitter polls every few thousand characters, so the blocking
+  thread stops rather than running to the end of the file;
+- the candidate section would be more than half the whole digest (a chunk mostly of
+  files the locator cannot read): the rule stays in the whole-file prompt;
+- every file was read and none has a site: no pass is sent for the rule there.
+
+Rules sharing a locator share one candidate prompt per chunk. A chunk whose every
+rule was narrowed still gets its whole-file advisory pass when its group runs
+advisory. That pass reads the whole chunk, so in a group that runs advisory the
+whole-file prompt is still sent and each narrowed locator ADDS an excerpt prompt: the
+scan costs more than it did without `candidates` unless taking the rule out of the
+whole-file prompt drops a whole rule batch (15 rules) from it. The saving is real for
+a group that does not run advisory (a scoped group beside an `All` group, which is
+where the shipped rules sit) or a rule batch that empties. Read the per-stage token
+rows, not the digest-byte line, for the net. `plan_pass_sets` is the one planner;
+`run_routed_passes` and `run_routed_passes_batch` both run its pass sets, so real-time and batch mode send
+the same prompts. Validation is at corpus load (unknown locator or key: the rule's
+file fails), and `candidates` is part of `Rule::content_hash`. The rules that
+declare it are pinned, each with a synthetic violating fixture whose violating line
+its locator must return, by `crates/server/tests/candidates_corpus.rs`, along with
+the other ways the same subject is written (a column type declared by a cast in a
+view or by `SELECT ... INTO`, a claim read through a view a policy selects from).
+
+Telemetry: the per-stage table prints `candidate prefilter: N rules, X of Y digest
+bytes not sent`, then one line per rule (chunks narrowed, without sites, not
+narrowed, fallen back; bytes saved) and one line per fallback naming the repo,
+group, chunk, locator and reason. Operator-only. The bytes are what each rule's
+prompts no longer carry; the bill falls when a group loses a whole rule-batch
+(real-time mode, 15 rules per batch), so read the per-stage token rows alongside
+them.
+
+The controls travel on the run's `UsageMeter` (`UsageMeter::with_controls`), which
+every model-calling stage already receives, so no stage signature grew. The
+`audit_repos*` entry points keep their signatures and read the environment; the
+`*_controlled` variants take an explicit `RunControls`.
+
+**Fix stage model and effort** (rank 10, `crates/server/src/ai_audit.rs`). The fix
+stage writes one concrete fix per finding, and every fix it writes is re-checked
+(identifier grounding, non-contradiction, no methodology leak) before it ships, so it
+is the stage where a cheaper model risks the least. Its model is decided in one place,
+`ai_audit::resolve_fix_model`, in this order:
+
+1. an explicit fix model: the project's `fix` step model (`StepModels::fix`, set from
+   the desktop app's helper-agent model list or `POST /api/projects/:id/step-models`
+   with `step: "fix"`) or `camerata inspect --fix-model`. It travels on
+   `RunControls::fix_model`. Blank means unset;
+2. with `fix_on_haiku` on (the default): `FIX_STAGE_HAIKU_MODEL` (`claude-haiku-5-5`,
+   defined in `camerata-api-types` beside `DEFAULT_MODEL`; the cockpit hint and the
+   `--fix-model` help print its display name derived from that constant);
+3. with it off: `calibration_model.or(model)`, exactly the pre-rank-10 choice.
+
+Unlike the other steps, `StepModels::fix` is empty on a new project and a model
+profile never sets it: a seeded model id would read as an explicit choice and silently
+override the switch. The spend-limit check (`models_the_run_will_use`) resolves the
+fix model through the same function, so the model checked for a price is the model
+called. `claude-haiku-5-5` is priced in the model registry, so a spend-limited run with
+no explicit fix model is admitted and its fix spend is counted at Haiku 5.5 rates.
+
+The model is a parameter of `generate_fix_specifics` and `run_fix_specifics_round`
+(`fix_model`), never read from the environment inside them. **Effort:** Haiku 5.5
+thinks adaptively at effort `medium` unless the request says otherwise, so the fix
+call sets `output_config.effort` explicitly: `FIX_STAGE_EFFORT` = `low`. The task is
+narrow and bounded by the evidence in the prompt, and the self-check plus the
+bounded retries catch a weak answer, so the lowest effort is the starting point; raise
+it only if the live sweep's give-up rate or fix-quality sample says the fixes need
+more. One rule (`ai_audit::fix_effort`): the fix call uses `low` on every fix model,
+because the effort belongs to the stage and not to the model (see "Effort per stage"
+below). `LlmRequest::effort`
+is written into `output_config.effort` by `apply_request_effort` BEFORE
+`conform_messages_body`, which keeps a caller-chosen effort and only fills the model's
+default (`high` on Opus 5.5 and Haiku 5.5) when none is present. The setting reaches the
+wire only for a model that takes one (`model_registry::accepts_effort`: the 5.x line).
+Both the real-time body
+(`messages_request_body`) and the Message Batches item (`build_batch_item`) take it
+through that one helper; the CLI backend does not send it. The no-code pre-filter
+(`fix_prefilter`) and the scan's truncation retry are unchanged on the Haiku path.
+
+**Effort per stage, output caps, streaming and the spend limit's reserve** (retry fixes
+F2, `docs/audits/2026-10-29_retry-diagnosis.md` in camerata-internal). Four rules, each
+with its tests in `crates/server/src/ai_audit/output_caps_tests.rs`:
+
+1. *Effort belongs to the stage.* The scan keeps `high` (its judgment is the product and
+   is never lowered without an answer-key comparison); detail regeneration, calibration
+   and alternatives ask for `medium`; the fix stage asks for `low`. The registry's
+   per-model default (`EffortPolicy::SetHigh` on Opus 5.5 and Haiku 5.5) only fills a
+   request that names no effort, so the choice holds on every model.
+2. *A cap covers the work plus the thinking.* The 5.x models think before they write and
+   the thinking counts against `max_tokens`. `camerata_ui_core::scan::output_cap_tokens`
+   is `2 x the stage's text budget + thinking allowance`, within a floor of 4,096 and a
+   runaway ceiling of 64,000 (the transport clamps again to the model's own limit). The
+   allowance is 12,000 tokens at `high`, 4,000 at `medium` and 2,000 at `low`, measured
+   from the stored replies of the two efficiency runs (output tokens billed minus the
+   reply text: Haiku 5.5's scan replies thought 5,154 tokens on average and 7,218 at the
+   90th percentile; its detail replies 865 and at most 2,402; its fix replies, already at
+   `low`, 382 and at most 2,973). The API bills what a reply generates, so a generous cap
+   costs nothing on a reply that finishes; a tight one turns a long reply into a cut-off
+   and a second payment.
+3. *The API leg streams.* `Llm::complete_api_streaming` sends `stream: true` and reads
+   the server-sent events under the idle window (`CAMERATA_LLM_IDLE_SECS`, 120 seconds)
+   instead of a fixed 600-second total; the same window bounds the wait for the response
+   headers. Text that arrived before a late failure is kept as a reply cut off at the limit
+   (billed at the request's cap, the most it could have generated); a stall with nothing
+   delivered is a Transport failure retried once. Because a 5.x model's thinking phase
+   sends nothing down the stream under the API's default display, the streamed body asks
+   for `thinking: {type: "adaptive", display: "summarized"}`: the summary deltas are
+   progress the idle window sees (they are never stored or shown; only text deltas are
+   kept), so a long think is not mistaken for a stall and paid for twice. The truncation
+   retry stays for a true runaway, raises the cap, and is not sent when the cap is already
+   at the ceiling.
+4. *The spend limit reserves what a request may cost.* Admission uses
+   `spent + in_flight x reserve < limit` where the reserve is the larger of the most any
+   call has cost and the most any request built so far could cost (its input at the full
+   rate plus `max_tokens` at the output rate, `ai_audit::request_ceiling_usd`). The
+   overshoot is therefore at most one request's ceiling, whatever the cap. With no limit
+   set nothing is reserved or refused, and a real inspection runs with no limit unless the
+   operator sets one (the command line has no default, and the cockpit's field opens blank).
+
+A calibration reply cut off at its cap is salvaged: the verdicts written out in full are
+kept and only the unanswered findings are asked again, once. ONE run estimate exists
+(`camerata_ui_core::scan::estimate_run_cost_bounds`): it counts the fix stage, the clone
+judge, the routing groups, the alternatives digest re-send and a per-model output scale.
+The command line's pre-flight, the cockpit's cost readout
+(`cockpit_run_estimate`, with each repo as one routing group because the cockpit has no
+file list to route, and without the clone judge) and the batch gate's fallback projection
+(`ai_audit::batch_estimate_usd`) all price from it.
+
+**Structured replies** (retry fixes F3, `crates/server/src/ai_audit/reply_schemas.rs`).
+Every JSON stage (scan, alternatives, calibration, detail, fix) sends a JSON Schema as
+`output_config.format` on the API backend, to a model the registry says accepts one
+(`model_registry::accepts_structured_output`: every Claude model of the catalog), so a
+reply's shape and field types cannot be wrong. The Anthropic structured-outputs page says
+the grammar constrains the final answer only, so it works with the streamed leg, the
+adaptive thinking the 5.x models are asked for, the effort setting and the Message Batches
+API; the schemas keep to its limits (closed objects, no length or range constraints, at most
+24 optional properties), checked by a test. The CLI backend, OpenRouter and a model without
+structured output never see the schema and reply as they always did, so every stage keeps its
+tolerant parser (first `{` to last `}`, salvage of a cut-off reply) as the fallback. The
+schema is part of the request's identity (the run store's request key), and each stored
+call carries `output_path`: `schema` when the reply was produced under the schema,
+`tolerant` when the request carried one the backend or model could not take. The API caches
+a prompt per schema, so the stages that send a cached digest (scan, alternatives) use one
+schema for every request of a run; calibration, detail and fix, which send no cached prefix,
+name the ids of their batch in the schema. A schema cannot make a reply cover every id (the
+API allows `minItems` of 0 or 1 only), so a finding the reply leaves out is handled as before.
+
+*Ids Camerata knows are never echoed.* The detail reply is `{"details":[{"id","detail"}]}`:
+the finding's path and line are attached by Camerata from the finding, so the reply no
+longer echoes them (an echo from a backend that never saw the schema is ignored, and the
+old "wrong place" rejection is gone; `DetailRejections::mismatch` stays in the ledger as a
+zero so older ledgers read). The fix stage moved from the batch position to the same kind
+of opaque id: each fix block opens `[a1b2c3] rule ...`, the reply is
+`{"fixes":[{"id","fix"}]}`, and the schema's `id` is an enum of the batch's ids. A finding
+keeps its id across rounds (it hashes the finding's place in the run, not its place in the
+batch), and a position is no address, so a reply numbered from 0 or 1 lands on no finding.
+Prompt schema version 4.
+
+*The prompt says what the check requires.* Each detail block carries a `Names to keep:`
+line (`detail_regen::names_to_keep`: every path or identifier the one-sentence statement
+names, a compound such as `audit_log.action` as its parts) and the acceptance check reads
+the same function, so the sentence and the check cannot differ. Each fix block ends with a
+`Names you may use:` line (`fix_names_available`: the file-like words and chosen-shaped
+identifiers of the evidence the grounding check looks a name up in); anything else is
+introduced as a new name in plain words.
+
+*`why` and `fix_direction`.* The detail reply is `{"id","why","fix_direction"}`. The text
+that is written is the two joined with a space (a test pins that a client reads exactly
+what one `detail` field of the same words gave), the named-token check reads the joined
+text, and the exploit-precondition check reads `why` alone, so a fix direction that says
+what the fix needs ("make sure the endpoint requires a session") is no longer mistaken for
+a condition on the problem. A reply with a single `detail` field (a backend that never saw
+the schema) is still read by sentence (`precondition_scope`). The fix stage sees the fix
+direction as part of the finding's `Detail:` in its evidence; it has no separate input.
+
+*The precondition check names exploit preconditions.* With `why` its own field, the detail
+acceptance check no longer fires on every bare "depends on" or "requires": a sentence of
+`why` is an invented precondition when it carries one of the shared phrases AND is about
+exploitation (`detail_regen::why_makes_exploit_precondition`: an attacker, who must be logged
+in or hold a valid session or token, what must be enabled). "Depends on the runtime's
+locale" and "requires a trailing slash" now pass; "exploitation requires a valid session
+cookie" and "an attacker must be logged in" are still turned down. Calibration's own guard
+(`mentions_exploit_precondition`, which blocks an upward move when the written text holds
+any of the phrases) is unchanged and still reads the written text.
+
+*A resume does not pay again for an answer already judged wrong.* The run store used to
+re-ask, identically, a fix or detail reply every entry of which the stage had turned down (or
+that was cut off or held no JSON), because only a good reply was replayed. The live run had
+already moved on to the changed request (the feedback line, the smaller batch), so a resume
+paid twice for the first request and then replayed the rest. For these two stages
+(`journal::replays_on_resume`, the only ones whose own rounds change the request after a reply
+they turned down) the stored reply is now replayed: the stage judges it again, turns it down
+for the same reason, and its next round is the changed request the live run stored. A give-up
+replays to the same give-up at no cost. Scan, calibration and alternatives keep their policy
+(a rejected stage is set aside whole and asked again). `calls_done` and the resume estimate
+count a replayable reply as stored.
+
+*The fix checker knows the repository.* A fix's names were grounded only in the finding's
+own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
+outside it (`actor_id`, `bucket_id`, `tsconfig.json`, `.env.example`) were rejected, about 28
+of 185 fixes in the Sonnet run. `RepoNames` (built once per repo from the file set the stage
+holds) now backs the check: a path-like name is grounded when it is a file or directory of
+the set (exact, a trailing part of a path, a dotfile read with or without its dot) or is
+written in some file; any other name is grounded when every identifier word in it is one the
+repository spells. A name found nowhere in the repository (a constraint name nobody wrote,
+a proposed file) is still rejected, and the retry's feedback says the name is neither in the
+evidence nor anywhere in the repository. `stored_replay_tests` (ignored; set
+`CAMERATA_STORED_RUNS`) replays the stored fix replies of the two efficiency runs against a
+repository rebuilt from their scan calls' paths and quoted code, and asserts that
+`billing_accounts_user_id_fkey` and `app/api/charge/route.ts` are still flagged.
+
+*The alternatives digest is a cached prefix.* The stage re-sent the whole file digest (25k
+to 40k input tokens) uncached with every rule batch. Its prompt is now the repo map and the
+digest, then the batch's rules, with cache breakpoints (`alternatives_cache_breakpoints`):
+after the digest when the stage sends more than one rule batch, after the repo map when it
+asks about more than one file-chunk digest, none when one request over one digest repeats
+nothing. The system prompt and the response schema are the same on every request of the
+stage, so the prefix is one cache entry. The pre-flight estimate still prices the digest
+re-send at the full input rate, so it is an upper bound for a run with several rule batches.
+
+**Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
+model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
+The API backend reports the model that served each call; the CLI backend does not (its
+response carries the id it was asked for), so CLI calls are keyed `<id> (requested)`
+and the table reads `fix model: claude-haiku-5-5 (requested) x12`. `StageTelemetry::fix_outcome`
+(`FixOutcome`) is tallied per finding and summed over every repo in the run:
+`sent_to_model` (findings a call was actually made for; a finding the spend limit
+refused every batch for is not counted), `answered` (of those, findings that received
+at least one parsed response), `gave_up` (of the answered, findings with no fix that
+passed the self-check after every retry, so the rule's authored remediation shipped
+instead), `cap_stopped` and `transport_failed` (findings left without a fix and never
+answered: stopped by the spend limit, or every call failed in transport), and
+`authored_without_model` (the pre-filter's count). The give-up rate is `gave_up /
+answered`, so a stage cut short by the limit or by a flaky network does not read as a
+quality signal about the model. The table prints `fix give-up rate: 7.5% (3 of 40
+answered by the fix model; 2 not answered: 1 stopped by the spend limit, 1 failed in
+transport; ...)`. Both are on the operator ledger, never in the client export.
+
+**Cost arithmetic** (`camerata_llm::llm::compute_cost_usd`, the one function every
+dollar figure comes from: the printed cost, the telemetry, the spend limit). The
+caller states how the call was billed (`PriceBasis { batch, cache_ttl }`) and the
+function applies the published ratios: cache read 0.1x input, cache write 1.25x
+(5-minute TTL) or 2x (1-hour TTL), and a Message Batch item 0.5x on everything.
+Real-time calls use `CacheTtl::from_env()`, the TTL the request carried; batch rows
+are priced at the TTL their submission asked for (rank 2's TTL rule under "Scan
+modes"; `BATCH_CACHE_TTL` with `batch_default` off, 5 minutes with `batch_long_cache`
+off). Per-model cache-read prices are a later change to the
+model registry; the 0.1x here is the default.
+
+**Pre-flight estimate** (`camerata inspect`, before the first model call). The
+arithmetic is `camerata_ui_core::scan::estimate_audit_cost`, the cockpit's
+estimator; there is no second one. `camerata_server::preflight` gathers the facts
+it needs with the scan's own functions (the same file collection, the same rule
+selection and alternatives join). On the API backend the exact input size of one
+representative scan pass is counted through `count_tokens` (free, not billed), built
+by the same `representative_scan_sample` the batch path samples with. With
+`terse_output` on, the estimate adds the detail regeneration step
+(`camerata_ui_core::scan::regeneration_expected`): the findings are sized from the
+scan's output, and the step is priced as the usual run (10 findings to a call, 450 output
+tokens per finding, every finding back in the first round), in real time with no batch
+discount. The ceiling (`regeneration_estimate`: every round on every finding at the request
+cap) is carried beside it (`estimate_audit_cost_bounds`) and printed as "at most"; it warns,
+it never refuses. The batch spend-limit gate's fallback estimate and the hint
+`camerata inspect` hands the meter use the expected figure. `applies_to` routing is NOT modelled: it
+only ever sends fewer (chunk, rule) pairs, so leaving it out keeps the estimate an
+over-estimate, the safe side. The output
+states it is an estimate and gives its basis; an unpriced model prints "unavailable"
+rather than $0; a run that will make no model call (the compliance gate blocked the
+AI review) prints none.
+
+**Spend limit** (`--max-cost-usd`, `crates/server/src/cost_cap.rs`). A guard
+against a runaway bill, not a saving, so it fails loudly:
+
+- Before each (chunk, rule-batch) pass starts, the run asks
+  `UsageMeter::admit`. A pass is admitted only while
+  `spent + in_flight * reserve < cap`, where `reserve` is the most any single call
+  has cost so far; until one call has reported a cost, exactly one pass is
+  admitted and the rest wait (so `warm_schedule=off` cannot let every pass slip
+  under the limit at once). An admitted pass always finishes (its truncation retry
+  included), so nothing is cut off mid-response. A refused pass is recorded as a
+  `NotRunPass`; the job's progress counts it as NOT RUN, never as done.
+- Later stages (alternative recommendation, detail regeneration, calibration, fix
+  generation, the clone judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
+  limit AND once the limit has already stopped anything (a refused pass or an
+  earlier stage): nothing starts after the limit has bitten. Inside calibration,
+  fix generation and the deep tier each batch or call is admitted separately
+  (`admit_for_stage`); the remainder of a stage stopped part way is recorded as a
+  partial stage. Findings the scan produced are never dropped; they continue
+  uncalibrated, and findings still awaiting a fix fall back to the rule's authored
+  remediation.
+- **Overshoot bound.** If every call costs about the same, the run ends at most ONE
+  pass's cost over the limit (the pass that crosses it). The honest bound is wider
+  than that in three ways: the reserve is per call while a pass can be two calls (a
+  truncation retry), so a retried pass can cost about twice the reserve; a call
+  larger than every earlier call adds the difference; and thorough calibration runs
+  three calls per batch under one admission. The first pass is always admitted, so a
+  limit smaller than one pass still lets that pass finish. The limit must be a
+  positive finite number; the server treats an unreadable one as the tightest
+  possible limit, never as none.
+- **Every model must be priced.** With a limit set, a run whose scan, calibration, fix,
+  deep-tier or clone-judge model has no list price in the model registry would count
+  nothing for its calls, so the limit could not hold. `models_the_run_will_use` lists the
+  models exactly as the stages resolve them and `RunControls::refuse_if_cap_unenforceable`
+  refuses the run before any file is read or model called, naming each unpriced model
+  (`camerata inspect` exits 1 before the estimate; the app gets a blocked report carrying
+  the same message). With no limit set nothing changes.
+- **Batch mode** checks before every submission (`batch_refusal_reason`), against
+  spend so far plus the larger of (a) what remains of the pre-flight estimate
+  (estimate minus spend, floored at zero, so later sub-batches are not charged the
+  whole-run estimate again) and (b) the exact-token input projection at the batch
+  price, or, if the token count is unavailable, the shared estimator's figure. If
+  NO projection can be made at all, the submission is refused with a note saying
+  the limit could not be enforced (a limit that silently does nothing is worse than
+  a refused run). A submitted batch is not cancelled, so the check cannot be later.
+  A refused batch records every pair as not run. The resubmission batch of failed
+  items (rank 2) is a submission like any other and is checked the same way, after the
+  first round's spend has been counted; the real-time truncation retry of a batch item
+  is admitted like a real-time pass.
+- **Reporting.** The ledger carries a `CostCapRecord` (limit, spend, the not-run
+  pairs and stages, notes). `CostCapRecord::failed_passes` turns it into the
+  existing failed-pass list, one entry per (repo, group, chunk) naming its
+  rule-batches, text "NOT RUN ... This inspection is incomplete" with no dollar
+  figure, so it reaches the client report like any other incomplete pass. A rule
+  no pass checked is recorded in the rule ledger as not run; a rule checked on only
+  part of the code is recorded as run with a `partial_reason`, which is never
+  "verified clean", is listed in the export's rules-not-run section with that
+  reason, and fails the integrity gate as `partial_coverage` (incomplete coverage,
+  not a contradiction: its findings are real). `camerata inspect` prints the limit block and exits **4**
+  after writing the (incomplete) export.
+- **Export.** The manifest's `inspection` block gains one boolean,
+  `cost_cap_reached` (always present), and the README gains one line
+  (`COST_CAP_README_LINE`) only when it is true. The release gate checks the two
+  agree (`verify_readme_provenance`). No cost number is exported;
+  `tests/stage_telemetry_not_exported.rs` pins that the efficiency set and the cap
+  record change nothing in `report.json` or `findings.json`.
+- **Desktop app.** The scan settings have a "Spend limit (USD)" field (blank = none),
+  sent as `max_cost_usd` on the audit request. A value that is not a positive number
+  stops the scan from starting and says why. The results screen shows an
+  `IncompletePassesBanner` whenever the report's `failed_passes` is non-empty (a spend
+  limit stop, a failed pass, a skipped stage), with the list and a compact form beside
+  the export button; the job progress counts refused passes as NOT RUN, not done; and
+  the server adds an "INCOMPLETE" note to the report message.
+
+**Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
+
+1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the
+   advisory pass (a chunk's first rule-batch, the one told to flag issues no adopted rule
+   covers) can propose a rule, so it gets the array back through its own instruction line
+   (`pass_task_line`), which sits in the uncached suffix. The system prompt
+   (`audit_system_prompt_with(true)`) is ONE string for every pass of the scan, not one
+   for advisory passes and another for the rest: the system prompt leads the cache
+   prefix, so two different ones would stop the sibling passes reading the entry the
+   first pass wrote (the whole `warm_schedule` saving). `parse_ai_findings` is unchanged
+   and still accepts a response with `proposed_rules` and a long `detail`; a test pins
+   both formats. The deep-tier security lens (`deep_security_system_prompt_with`) drops
+   its always-empty, never-read `proposed_rules` and follows part 2.
+2. *Protected part.* The scan asks for a `detail` of one sentence, at most 25 words,
+   naming every other file or symbol the judgment depends on, beginning "Borderline:"
+   when the case is borderline (the prompt still says recall over precision). After
+   `merge_by_location` and before calibration, `audit_repo` calls
+   `detail_regen::regenerate_full_details`, which writes the full `detail` of the
+   findings that survived, in batches of 25 (one call per batch, `Stage::DetailRegeneration`,
+   shown as "detail" in the telemetry table, `STAGE_DETAIL` for the spend limit and for the
+   failed-pass name). The headline (the scan's `title`, before the first `HEADLINE_SEP`; the
+   parser keeps the title free of one) is kept and only the explanation after it is replaced.
+   The call sees the rule's directive, the short statement, the snippet, the captures, six
+   lines of code either side of the finding and, for every file or symbol the headline or
+   statement names, a bounded excerpt (the first match per token, three lines either side, at
+   most 20 lines per finding) with that file's repo-map line, resolved in the WHOLE redacted
+   file set of the repo (`map_files.unwrap_or(files)`), so on an incremental run a file that
+   was not rescanned is still shown. It runs on the scan model. Nothing in `onboard.rs`
+   changed for this except one line in the cache key.
+   **Without a meter the measure is off.** `terse_output_of(meter)` is false for a path that
+   passes no `UsageMeter` (the spend limit, the telemetry row and the operator's opt-out all
+   live on the meter), so such a path scans exactly as before rank 4 and says so on stderr.
+   The rescan-alternatives endpoint builds a meter from the environment
+   (`RunControls::from_env`) so `CAMERATA_EFFICIENCY=terse_output=off` reaches it.
+
+**The reply is not trusted.** The regenerated text feeds severity decisions, so each entry is
+accepted on its own and only when all of these hold (`detail_regen::accept_entry`, tests in
+`detail_regen_tests.rs`):
+
+- It is addressed by an opaque id (six hex digits of a hash of the finding's place in the run,
+  not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
+  in another order, an id the batch does not have, an id used twice, a wrong echo: none of
+  these can land a text on a neighbour; the entry is simply not written.
+- Every path or identifier the short statement names appears in the text, spelled as given: a
+  token with a known file extension or one that resolves in the file set (a file, or a
+  directory holding one), a `::`, `_` or CamelCase symbol. A slash-joined pair of plain words
+  (`collisions/overwrites`) is prose and is not asked for. A compound name that is not a file
+  and has a symbol-shaped part (`audit_log.action`, `created_by/modified_by`,
+  `getAuthenticatorAssuranceLevel/aal2`) is asked for as its parts: each part of three or more
+  characters must appear, not the spelling that joined them. A dotted name of plain words
+  (`supabase.from`, `req.json`) is a member access, one symbol asked for whole: split, its parts
+  are words every text has. A dropped real file name is still rejected.
+- It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
+  calibration's raise-block and the D5 cap already use; one list, unchanged) that neither the
+  short statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check is skipped for a statement
+  that starts "Borderline:" (the prompt orders the explanation to say what would settle it).
+  It reads the explanation sentences and not a fix-direction sentence (one that opens with a
+  fix verb and says nothing about exploiting the problem), and a "requires" whose object is a
+  backticked code construct ("the policy requires a `to authenticated` clause") is not a
+  condition on exploiting it. A sentence about exploiting, attacking or abusing the problem is
+  always read in full. The check can still reject a harmless "depends on" in an explanation
+  sentence, which costs a marker and not a wrong severity; the sweep reports the rate.
+- A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
+  front when it lost it.
+
+An entry that fails is treated exactly like one the model left out: it stays pending, the
+repeat round runs it again in a batch of half the size (5), a third round sends whatever is
+still pending one finding to a call, and what is still unwritten then gets the marker. Every
+call passes the spend-limit check first. The output budget is 450 tokens a finding (a full
+detail with its JSON wrapping was measured at about 280, and 160 cut off 4 of 10 calls on a
+real run). A reply cut off at the output limit is still counted as waste in the telemetry (whole; a reply that was not cut off counts the share of its entries that were rejected, so the stage's waste figure is no longer zero when checks turned entries down),
+but its complete entries are kept: the entries are read one by one with the same walker the
+scan uses to salvage a cut-off reply (`complete_array_objects`), and only the findings the
+cut-off lost go to the next round. The echoed path is compared after dropping a leading `./`
+or `/` (the line must still be exactly the finding's), and the kept-name check redacts the
+short statement the same way the written text is redacted. Why entries were turned down
+(wrong place, a dropped name, an added condition, a missing id, cut off, left out) is counted
+per reason in the operator-only stage telemetry; the failed pass carries only the total.
+
+**Who reads `detail`, and on which text.** `detail` is evidence text for several
+consumers. Each one's choice, and the test that pins it (all in
+`ai_audit/detail_regen_tests.rs`):
+
+| Consumer | Runs on | Why | Test |
+|---|---|---|---|
+| `merge_by_location` (exact `(path, line)` merge, `primary_rank`) | short | reads path, line, snippet, rule id, severity; never `detail`, so it decides identically on either | `merge_by_location_reads_no_detail_so_it_runs_on_the_short_one` |
+| calibration prompt (`verify_findings`) and `apply_verdicts` precondition check | full | the verdict (severity, confidence, needs-review) is judged from the explanation; the one-sentence statement drops the reasoning the verdict rests on | `audit_repo_hands_calibration_and_everything_after_it_the_full_detail` |
+| D5 severity floor and D6 ceiling (`calibration_floor_scan_text`) | full | phrase tables scan the detail; "unauthenticated" in the explanation raises a finding to a critical floor, absent from a one-sentence statement | `calibration_and_the_severity_floor_read_detail_so_they_run_on_the_full_one` |
+| `merge_semantic_groups` (`semantic_pair_merges`: prose overlap, object veto, captured objects) | full | the signals are word overlap and the objects named in the prose; on one sentence two real duplicates share too little to merge, and two different objects are not named for the veto | `the_semantic_merge_decision_differs_between_short_and_full_so_it_runs_on_the_full_one`, `the_object_veto_reads_detail_so_it_runs_on_the_full_one` |
+| `fix_evidence_blob` (the fix self-check's grounding set) | full | a fix may name anything the explanation names; the blob must be what the model saw | `the_fix_evidence_blob_carries_the_detail_so_the_fix_stage_sees_the_full_one` |
+
+The placement follows from the table: regeneration is the earliest point where "the
+survivors" is known and the latest point before the first consumer that needs the full
+text. Calibration, the cross-family merge (which runs in `onboard.rs`, after `audit_repo`
+returns) and the fix stage all receive the full text without any change to them. The cost
+of that placement is that a finding the cross-family merge later absorbs was already
+regenerated. That waste is expected to be small (the first merge already collapsed the
+same-location duplicates), but it is not measured; the sweep's `cross-family-merge` row
+counts show it.
+
+**Never short, never dropped.** A finding whose regeneration did not happen (the call
+failed twice, the model left it out or failed a check twice, or the spend limit stopped the
+step) keeps the
+scan's one-sentence detail, gets the visible marker `[detail incomplete]` appended, and
+the run records a `FailedPass` named "detail regeneration" with the count. That is the
+existing failed-pass path, so the export's methodology and summary disclose it (the
+export test below reads it from the JSON). In the deep tier the marker is on the finding
+and the lens's `error` note carries the same text. `tests/terse_output_export_e2e.rs` pins
+both ends through `audit_repo`, `merge_semantic_groups` and `build_report_json`: with
+regeneration working, the full text is in the export and the one-sentence statement is
+nowhere; with it down, the finding is in the export with the marker beside the short
+detail and the disclosure in the report. The marker is two words on purpose: it enters
+`description_overlap_score`, and a longer string shared by two failed findings would raise
+their overlap. The job's live preview (`JobStore::add_findings`, polled by the app while a
+scan runs) shows the short detail until the scan ends; the export is built from the final
+report only.
+
+**Cost arithmetic** (rank 9's `input_cost_usd` and the registry list price, Sonnet 5 at
+$3 in and $15 out per million tokens). Batched against one call per finding, for 140
+survivors, with about 425 tokens of system prompt, 350 tokens of evidence and 100 tokens
+of output per finding: a call per finding repeats the system prompt and frame 140 times,
+about 815 input tokens each, $0.0039 per finding and $0.55 in all; 14 batches of 10 repeat
+it 14 times, about $0.38 in all. Output is identical either way. Batching is about a third
+cheaper on this step and makes 14 calls instead of 140; the price is that a failed batch
+leaves 10 findings to the repeat round (and, if that fails, to the marker), which the
+failure path covers. `batching_beats_one_call_per_finding` pins the input arithmetic.
+The whole-measure economics are NOT a given: with an assumed 100-token full detail and a
+35-token short one, the scan saves about $0.001 per raw row and the regeneration costs
+about $0.0026 per survivor, so on detail alone the measure pays only where raw rows
+outnumber survivors by roughly 2.7 to 1 or more (the
+location merge collapsing one defect reported under several rule names is where that
+comes from). Dropping `proposed_rules` from non-advisory passes is a saving regardless.
+Whether the scan's output is dominated by `detail` at all is unmeasured; the per-stage
+telemetry (scan "out" tokens against the new "detail" row) is how the API sweep decides.
+
+**Prompt pins.** The terse scan prompt, the deep security lens's terse prompt and the
+regeneration prompt are hashed next to `AUDIT_PROMPT_SCHEMA_VERSION` in
+`scan_cache::ai_key_tests::the_terse_prompts_are_pinned_to_the_prompt_schema_version`, so
+editing one fails until the version is bumped and the pin updated.
+
+**Cache key.** `AiScanKey` gained `terse_output` (absent in a key stored before it, read
+as false): findings written under the other setting answered a different question, so a
+baseline from one setting is not reused under the other. This is what lets the sweep flip
+the switch without `--full`. `AUDIT_PROMPT_SCHEMA_VERSION` is unchanged because
+`audit_system_prompt()` (the OFF form) is byte-identical; the pin test still holds.
+`AiScanKey` also carries `applies_to_routing` (rank 7; absent in a key stored before it,
+read as false), so findings produced with `applies_to` routing on are not reused by a
+scan with it off, and the reverse. The first scan after this change re-scans in full.
+
+**What the API sweep must compare** (switch on against the sweep5b grades, per fixture):
+recall per fixture and the decoy numbers (a borderline finding the one-sentence rule
+suppressed would show as lost recall); the duplicate-merge counts at `ai-location-merge`
+and `cross-family-merge` (rows in, rows out, `also_matches` sizes), since the cross-family
+merge decides on the regenerated text; the calibration verdict distribution (severity
+moves, `needs-review` share, floor and ceiling rationales fired); the share of findings
+carrying `[detail incomplete]` (it should be zero; a high rate means the grounding or
+precondition checks are rejecting good text); and the cost split, scan output tokens
+and the "detail" stage against the previous run's scan output.
+
+#### Repeatability: measuring run-to-run drift
+
+A model is not a pure function, so two inspections of the same commit can
+disagree. `camerata repeatability` measures by how much:
+
+```
+cargo run -p camerata -- repeatability --repo <PATH> --max-cost-usd <USD> [--format text|json]
+```
+
+It runs the same Phases 1 to 3 as `camerata inspect` (stack detection, the
+curated rule selection, the corpus, `audit_repos` with the deterministic floor
+and the AI review) twice, applies the corpus severity bounds to each run and
+compares the two finding sets with `camerata_server::repeatability::diff_runs`:
+counts by tier (`deterministic`, `ai`, `preview`), by rule and by severity in
+each run, plus every finding one run reported and the other did not. Findings
+are matched by `finding_match_key`: repo, path and the content fingerprint
+baselines use (rule id plus whitespace-collapsed snippet), so a finding quoted
+at a neighbouring line still matches; repeats are matched one for one. The
+deterministic floor is the control: its counts never change between runs.
+
+**The client lock applies.** Like `inspect`, every run is a client engagement
+unless `--internal` is passed: the `cli` backend and non-Anthropic models are
+refused before the estimate and before any model call.
+
+**Every answer cache is bypassed.** The incremental-scan manifest is never
+loaded (and never written), and `result_cache` is forced off whatever the
+flags or `CAMERATA_EFFICIENCY` say. The provider's prompt cache is left as
+configured: it stores the processed prompt prefix, not an answer, so it cannot
+make two runs agree.
+
+**Spend guards.** The pre-flight estimate is printed first, before any model
+call, with a line for the two runs together. The command then refuses without
+an explicit `--max-cost-usd`. The limit covers both runs and each run gets
+half, so the first cannot starve the second. When one run's estimate is above
+its half it refuses too, naming the limit that would be enough: a run the limit
+stops part way turns coverage into apparent drift. Nothing is written to disk.
+
+**Output and exit code.** Text by default, `--format json` for the same data
+as JSON (`RepeatabilityOutcome`). A run is incomplete when the AI review
+failed, the spend limit stopped anything or a pass that can change which
+findings exist failed; only the effort-estimate and fix-text stages are
+treated as unable to (`FINDING_NEUTRAL_PASSES`), so an unknown failure flags
+the comparison. Every failed pass is listed either way. Exit 0 when both runs
+completed (whether or not they agree), 4 when either was incomplete, 1 on a
+refusal.
+
+`crates/cli/tests/repeatability_e2e.rs` drives the whole command with a fake
+completer whose answers drift between runs; it is never run against a live
+model in CI.
+
+**Trying it on the sample-report repo.** To see the command work end to end,
+point `--repo` at a local checkout of the small repo the sample report was
+modelled on and start with `--max-cost-usd 10`. The pre-flight estimate prints
+first. If one run is estimated above half the limit the command refuses and
+names the limit that would be enough, so a first attempt costs nothing. This
+is a manual check for a person with an API key and a spend limit they are
+happy with; no test or CI job runs it.
+
+#### Drift reduction: temperature, input order and the consensus option
+
+Three measures make two runs of the same scan agree more often. The first two
+are always on; the third is an option for client work and is off by default.
+
+**Temperature 0 where the model accepts it.** `LlmRequest` carries an optional
+`temperature`. It is put on the wire (the Messages body and a batch item) only
+when the model's catalog request shape accepts sampling parameters
+(`camerata_llm::model_registry::accepts_sampling_params`, which presumes an
+unknown model strict), and `conform_messages_body` still runs last. Every
+current Claude model in the catalog is strict except one: Haiku 4.5
+(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is still
+selectable but is no longer a default (the fast tier and the clone judge now
+default to Haiku 5.5), accepts sampling parameters and so gets temperature 0
+when a project picks it. Nothing is sent to the strict models, so the "a call
+site sent something this model rejects" warning never fires; Haiku 4.5 and any
+future permissive model get the least random answer they offer. The passes that
+decide which findings exist ask for `ai_audit::AUDIT_TEMPERATURE` (0): the scan
+passes (real time and batch), the alternatives choice, calibration and the deep
+security pass. Fix text and the prose lenses keep the provider default because
+they word findings rather than choose them. The CLI backend (`claude -p` has no
+temperature flag) and OpenRouter ignore the field.
+
+**One canonical input order.** `ai_audit::audit_repo` sorts the model-facing
+files and the repo-map files by path and the rules by id before building any
+prompt, so the same files and rules always produce the same prompts whatever
+order the caller handed them in (a reversed order used to reorder both the
+digest and the rule list). The repo walk
+(`onboard::files::read_local_repo_files`) is sorted by path, so neither the file
+list nor the `HARD_CAP_FILES` cut on a very large repo depends on the
+filesystem's directory order. The fallback walk for a directory with no `.git`
+is unchanged; its prompts are still ordered by `audit_repo`.
+
+**Three-pass consensus (`camerata inspect --consensus`, off by default).** With
+`RunControls::consensus` on, `audit_repos` runs each repo's whole AI audit
+(`audit_repo`: scan passes, alternatives, calibration and fixes) three times in
+sequence through `consensus::run_audit_passes` and keeps a finding only when at
+least two audits reported it, matched by the same `finding_match_key`
+`camerata repeatability` uses; repeats are counted, so a site two audits saw
+twice is kept twice. Proposed rules and alternative recommendations come from
+the first audit that answered, so every kept finding was judged against one
+set of options. The vote is recorded as a `consensus` ledger stage whose
+removed rows are accounted as agreeing copies (`deduped`) or
+`consensus_minority_dropped`, so the integrity gate reconciles. An audit that
+errors is disclosed as a failed pass ("consensus audit N of 3") and the vote
+runs over the audits that answered: two must still agree and a lone answer
+stands and says so. If none answers, the error is returned as a single audit's
+would be. It costs about three times the AI spend (the pre-flight estimate
+triples and says so; the spend limit is checked between the audits as between
+any passes) and it trades recall for stability: a real issue the model notices
+one time in three is dropped. Use it for a client deliverable where a finding
+that comes and goes between runs does more harm than one that is missed. The
+desktop app does not expose it.
+
+Tests: `ai_audit::drift_tests`, `llm::temperature_tests`,
+`consensus::tests` and `crates/server/tests/consensus_e2e.rs`.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:
@@ -2620,12 +3442,140 @@ thing:
   a PDF fault. `report_export::build_report_json` produces `AuditReportJson`;
   `compile_pdf` shells `typst compile` over
   `crates/server/templates/audit_report.typ`. No model call is made in the export
-  path, so it is deterministic and reproducible.
+  path, so it is deterministic and reproducible. Styling follows the W27 brand guide
+  (`docs/design/2026-10-27_pdf-brand-guide.md`): the colour, type and size tokens sit
+  at the top of the template. The fonts (Inter for text, JetBrains Mono for code, SIL
+  OFL, licence files beside them in `templates/fonts/`) and the two logo marks
+  (`docs/design/brand/`) are compiled into the binary (`TEMPLATE_ASSETS`), written next
+  to the template on every compile, and passed with `--font-path`, which Typst searches
+  before system fonts. The logo mark renders only when the resolved brand is the brand
+  kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
+  gets the text wordmark alone. A test compiles with system fonts ignored to prove the
+  bundle alone renders the report. Production does not ignore system fonts: a character the
+  bundled fonts lack (a CJK or emoji path or snippet) would otherwise be dropped from the
+  PDF, so installed fonts reach the output only for such a character.
+- **Confidentiality marking** (2026-10-24 decision): `report_export::confidentiality_marking`
+  is the one producer of "Confidential, prepared for <client> on <date>" (the scan date) and
+  the first page's handling note; the PDF prints them from `AuditReportJson::confidentiality`
+  and `xlsx_export::build_workbook` puts the same line in every sheet's footer. The client name
+  is `Project::client_name` (inspection setup, `POST /api/projects/:id/client-name`, not
+  carried by project import, and left blank in a project export file, so a client's name does
+  not travel in a backup); `validate_client_name` strips zero-width characters (one cleaned
+  string for the PDF, workbook and manifest) and refuses a name whose workbook footer would
+  pass Excel's 255-character limit, counting each `&` twice; the export routes fill `ReportOptions::client_name` from it
+  (`serde(skip)`, never client-supplied), and `require_client_name` refuses a blank one in
+  `build_product_package_with_stem` and the PDF-only route (HTTP 422, `gate: "client_name"`).
+  `camerata inspect` takes `--client`. The release gate scans sheet headers and footers for
+  secrets, and its `confidentiality marking` check holds every sheet footer to a line naming the
+  client and equal to the PDF's.
+- **`manifest.json` `inspection` block** (22c): beyond repos and commits, engine version,
+  corpus version, rules last reviewed (null until `CORPUS_FRESHNESS.toml` has a confirmed
+  date for every domain the scan used), model backend and provider, and the spend-limit flag,
+  it carries `client_name`, `corpus_rules_applied`, `counted_lines`, `excluded_noise_files`
+  and `excluded_noise_lines`. The counts come from the scan's own record: `audit_repos` reads
+  each repo through `read_local_repo_files` and `count::excluded_noise_lines`, the functions
+  `camerata count` uses, and stores `ScanReport::excluded_noise_lines` beside `code_lines` and
+  `files_excluded`, so the export never reads the repository. Filled in
+  `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
+  it back.
+- **Release gate check "severity and kind counts"** (22d): before this, the gate checked
+  row IDENTITY (PDF rows vs `findings.json`) and CSV vs JSON cell parity, but no count by
+  severity and kind. `release_gate::consistency::count_reconciliation_problems` (archive pass)
+  holds `csv/all-findings.csv`, the workbook's All Findings rows (for the kinds that sheet lists,
+  `xlsx_export::ALL_FINDINGS_SHEET_KINDS`), the Index "Statement types" counts
+  (`STATEMENT_TYPES`, the labels the writer uses) and the Index category Total row to
+  `json/all-findings.json`'s tally by `(severity, kind)`;
+  `pdf_count_reconciliation_problems` (in-memory release) does the same for the PDF's rendered
+  rows and its cover severity summary. A difference names the cell and both counts. The gate
+  now runs eight checks.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
   reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
 - **`README.txt`**, the orientation note.
+
+**Vulnerability intelligence on dependency rows** (`crates/server/src/vuln_intel.rs`). After the
+osv-scanner pass over every repo, `onboard_audit`, `onboard_audit_start` and `camerata inspect`
+each call `vuln_intel::enrich_dependency_findings` once over the rows that pass added (one
+implementation for the desktop app and the CLI). It fetches two deterministic feeds, nothing
+scraped: the CISA KEV catalog (JSON) and the FIRST.org EPSS API, queried by CVE in batches of
+100. Matching is by CVE: `dep_audit::parse_osv_json` records each advisory's own CVE id plus its
+CVE aliases in the `osv_cve_ids` capture, so a GHSA or RUSTSEC advisory matches through its alias.
+Only the advisory's own `aliases` list is read, and ids are compared upper-cased. **Owner decision
+(logged): a GHSA that aliases a KEV CVE counts as known exploited even when its package differs
+from the product KEV lists for that CVE.** KEV names a vendor and product, but OSV treats an
+advisory and its aliases as the same vulnerability, and matching on the vendor's free-text product
+name would miss real hits (the same flaw ships under many package names), so identity is the CVE
+alone.
+A KEV hit is labelled "Known exploited" in `detail` (capture `vuln_known_exploited`) and its
+severity is floored to `critical`; an EPSS score and percentile are appended to `detail` (captures
+`vuln_epss_*`). Each feed is fetched once per run and cached under `<data dir>/camerata/vuln-intel/`
+with its fetch time. A failed fetch falls back to a cache fetched within `MAX_CACHE_AGE_DAYS` (7);
+otherwise nothing is labelled from that feed, a `vulnerability-intel` coverage note is recorded,
+and the stamp says the feed was not checked. A body that downloads but is not believable counts as
+a failed fetch too: a KEV catalog that yields fewer than `KEV_MIN_ENTRIES` (100) usable rows (the
+real one has over a thousand), or an EPSS page whose rows all fail to parse, never becomes an
+empty catalog marked as checked. KEV and EPSS are fetched concurrently under one
+`ENRICHMENT_BUDGET` (45 s); a feed that has not answered by then is a failed fetch, which bounds
+how long a scan, and the live view of a background audit job (it receives the dependency rows only
+after enrichment), waits on the network. Cache files are written to a temp file and renamed, so a
+crash never leaves a torn cache. The EPSS cache is kept per CVE, each entry on its own clock, and
+a successful run merges into it (entries past the age limit are dropped), so an offline run for
+another project can use scores an earlier run fetched; the stamp is dated by the oldest entry it
+used. Every date derived from a fetch time is a UTC date and the stamp text says "UTC". When FIRST
+returns no rows at all, the EPSS line says plainly that no scores were published for these CVEs as
+of the request date (UTC) rather than presenting a score date that was never returned. Ordering:
+the enrichment runs before `apply_scan_severity_bounds`, which has the last word on severity, so
+the "Severity raised to critical" sentence stays true only while no rule governing `DEP-AUDIT-1`
+findings declares a `max_severity`; `vuln_intel/tests.rs` and `tests/vuln_intel_call_order.rs`
+pin both the order and the absence of such a ceiling. The stamp (`ScanProvenance::vulnerability_data`)
+carries, per feed (KEV `dateReleased`, the EPSS score date, the OSV query date), either "as of
+<date>" or "not checked (<reason>)". It reaches `README.txt` as `Vulnerability data (<feed>) ...`
+lines and `manifest.json` as `inspection.vulnerability_data.<feed>` (`status`, `as_of`, `stamp`);
+the release gate's README/manifest agreement check compares the two. A report with no stamp
+(no dependency audit, or persisted before the stamp existed) renders every feed as not checked.
+Tests use fixture feeds under `crates/server/tests/fixtures/vuln_intel/` and no network.
+
+**Runtime and framework end of life, and runtime vulnerabilities** (`crates/server/src/runtime_audit.rs`
+and its `detect`, `eol` and `nvd` modules). The dependency audit cannot see the runtime the
+packages run on, so a second deterministic pass reads the versions a repository declares: Dockerfile
+`FROM` lines, `.nvmrc` and `.node-version`, `engines.node`, `.python-version`, `runtime.txt`,
+`requires-python`, `require.php`, `.ruby-version` and the Gemfile `ruby` line, `go.mod`,
+`global.json` and `TargetFramework`, `.tool-versions` and framework versions from
+lockfiles (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). Only the image the final
+stage of a Dockerfile is built on is a declaration (an earlier build stage is `Version::Excluded` and
+listed under Coverage, and so is a final image that is itself a build argument such as
+`FROM ${BASE}`, because its product cannot be named), and a lockfile framework counts only when the
+manifest in the same folder lists it as a direct, non-dev dependency (`package.json`
+`dependencies`, read from the workspace `package.json` files too when the root lists `workspaces`
+or a `pnpm-workspace.yaml` does; `composer.json` `require`; a Gemfile `gem` outside development and
+test groups; `pyproject.toml` or a Pipfile; a Gradle build file with an `implementation`, `api`,
+`compile` or `runtimeOnly` dependency on `org.springframework.boot`, or that plugin applied, comments
+and test configurations ignored); anything else is `Excluded` too. A JavaScript framework listed
+only under `optionalDependencies` or only under `peerDependencies` is excluded with that reason. Folders named `test`, `tests`, `__tests__`, `examples`,
+`samples`, `docs`, `e2e`, `fixtures` and `testdata` are not read. Rust is not read at all: Rust
+supports only its newest release, so every pinned toolchain would be a finding. Each declaration records
+its file and line. A declaration is exact (three or more numeric parts), a release line (`18`,
+`3.11`) or loose (a range, a moving tag, a build argument); a loose one is never guessed and is
+listed under Coverage. endoflife.date (`https://endoflife.date/api/<product>.json`, one fetch per
+product) gives a high finding under `SEC-NO-END-OF-LIFE-RUNTIME-1` once the release line's end date
+has passed and a low advisory within `WARN_DAYS` (90). The NVD CVE API 2.0 (by CPE name, only for a
+runtime declared with a patch version; nginx under both its vendor names, merged) gives one finding per runtime version under
+`SEC-NO-KNOWN-VULNERABLE-RUNTIME-1`, rated by its highest CVSS score with the dependency audit's own
+scorer; `vuln_intel::enrich_dependency_findings` then adds KEV and EPSS to those rows exactly as for
+dependency rows (a known-exploited runtime CVE is floored to critical). The pass uses the same
+fetch seam (`FeedFetcher`), per-item cache and `MAX_CACHE_AGE_DAYS` as KEV and EPSS, and
+`VulnDataStamp` carries two more feeds (`endoflife`, `nvd`), which reach `README.txt` and
+`manifest.json` as `Vulnerability data (End-of-life, endoflife.date)` and `Vulnerability data (NVD,
+runtimes)` lines. NVD's anonymous rate limit is respected (`NvdPolicy`: requests six seconds apart,
+back-off on 403, 429 and 503 honouring `Retry-After`, one shared 75 s budget) and exhausting it is an
+ordinary failed fetch, never a failed scan. A feed that cannot be fetched produces the Coverage
+lines "Runtime end-of-life data unavailable in this scan" and "Runtime vulnerability data
+unavailable in this scan", and a clean runtime produces no finding and no claim. The two rules are
+emit-only (`inspectable = false`): they never enter the AI pass or the scan ledger, so they can
+never be listed as verified clean. The pass runs before `enrich_dependency_findings` at each of the
+three scan call sites (`onboard_audit`, `onboard_audit_start`, `camerata inspect`). Tests use the
+recorded fixtures under `crates/server/tests/fixtures/runtime_audit/` and no network.
 
 **The workbook is partitioned by finding KIND**, which replaced a single flat
 findings sheet on 2026-10-11. A row renders where its own columns mean something,
@@ -2668,6 +3618,42 @@ Three coverage-honesty properties are easy to lose and are each pinned by a test
   because the single-template version produced "0 found something to look at; the
   other 3 were checked and found clean" on exactly the healthy-codebase case a
   client sees most often.
+
+#### Related standards: what a keyword-matched citation claims
+
+The AI tier invents its own rule id for each finding, so no corpus rule carries
+its citation. `report_export::classify_ai_finding` sorts such a finding into a
+small closed set of defect classes (RLS, XSS, open redirect, weak token
+randomness, query-grammar injection, permissive CORS) by rule-id tokens, its
+`category` field and keywords in its text, and `citation_for_finding` then
+borrows the sources of that class's corpus rule. The sources are real, but the
+match is a keyword match: no Camerata rule checked the code against that
+standard. Until 2026-10-28 the borrowed citation went out as `grounded`, the
+same kind a checked rule gets, and the workbook's Provenance column then read
+"Deterministic" for a model finding.
+
+Such a citation now has its own kind, `related`, and its label starts with
+"Related standard (matched by keyword, not a rule check): ". The kind and label
+are computed once in `citation_for_finding`, so the PDF (which prints that
+heading over the source list), the workbook's Citation column and
+`findings.json`'s `citation_label` all say the same thing, and the workbook's
+Provenance column reads "AI-advisory" for these rows. The Methodology section
+carries one plain sentence explaining the term (`MethodologyJson::citation_note`)
+and the Index sheet defines it. A finding whose OWN rule id is a cited corpus
+rule (a deterministic finding, or an AI finding reported against a rule the
+pass was asked to check) keeps its `grounded` citation. A `related` citation
+still counts as cited for the curation gate (`is_uncited_ai_finding`) and keeps
+the sort rank `grounded` had, so the change relabels findings without moving or
+dropping any.
+
+The brief offered a second option: hold the citation back until triage
+confirms it. It was rejected because triage is optional in the desktop flow
+(audit, triage, apply and wire-CI are all optional steps after a scan). An
+export made before anyone triages would lose the standard on every
+keyword-matched finding, and the curation gate would then move those findings,
+which are often the most serious ones, out of the curated set. Labelling is
+honest in every export, triaged or not. Tests:
+`xlsx_export::tests::related_citation` covers both directions.
 
 ## 6b. Self-measurement: the integrity gate and the in-repo harness
 
@@ -3469,7 +4455,7 @@ an undo.
 
 **The review timer, the reviewed record, the stats view and the time-left estimate** (code viewer
 step 7a; work orders `WORK_ORDER_REVIEW_TIME.md` item 2 and `WORK_ORDER_REVIEW_SPEED.md` B.7, as
-ruled on by Zach on 2026-10-23, item 2 of the protected-area answers in `OVERNIGHT_DECISIONS.md`,
+ruled on by Zach on 2026-10-23, item 2 of the protected-area answers in the private decision log,
 which overrides the work order where they differ). **INTERNAL ONLY**: none of this is in any client
 export. Pure logic in `camerata_ui_core::review_timer` and `::review_stats`, the name deny-list in
 `camerata_api_types::review_timing`, the window side in `cockpit/review.rs`, hooks in `scan.rs`.
@@ -4077,8 +5063,9 @@ model from the `TierMap` via `tier::model_for_task`, then:
    (`orchestrator::lead_stage_index`).
 2. Prepares an **orchestrator session** for the lead stage only
    (`orchestrator::prepare_orchestrator_session`): the lead's MCP config carries
-   `CAMERATA_DELEGATE_ENABLED=1` and the tier→model JSON so the gateway boots in orchestrator mode
-   and the `delegate` tool is live.
+   `CAMERATA_DELEGATE_ENABLED=1` and, as the `--delegate-models` argument, the tier→model JSON taken
+   from the project's tier map, so the gateway boots in orchestrator mode and the `delegate` tool is
+   live. The models travel as an argument, never as an environment variable.
 3. All other stages (including delegate children) receive a standard non-orchestrator MCP config.
    Their `--allowedTools` excludes `delegate`.
 
@@ -4400,10 +5387,35 @@ non-orchestrator (it can never re-delegate).
 Every non-fleet AI step (audit, calibration, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
 `StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
-at project creation: `DEFAULT_MODEL` (`claude-sonnet-5`) for every slot.
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.
+
+#### Where a model comes from
+
+A model is never read from the environment or a `.env` file. The sources, in order:
+
+1. The open project's model configuration in the cockpit (`StepModels`, the tier map, the L3
+   review model). A project file written before a setting existed loads with the built-in
+   defaults (`#[serde(default)]`).
+2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`,
+   `--clone-judge-model`.
+3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5), with Haiku 5.5
+   (`claude-haiku-5-5`) for the fix stage and the clone judge and Opus 5.5 (`claude-opus-5-5`) for
+   the tier map's strongest band (`fleet::tier::default_strongest_model`). Older ids stay
+   selectable and priced.
+
+`ai_audit::resolve_audit_model`, `resolve_calibration_model`, `stage_model` and
+`clone_advisory::resolve_clone_judge_model` apply that order and are shared by the cockpit and the
+command line. The transport (`Llm::complete` and `complete_streaming`) has no default of its own: a
+request that names no model is refused with an error that names the caller as the bug, so the model
+the pre-flight prices, the ledger records and the spend limit checks is the model that runs.
+The delegate tool's tier
+models reach the gateway as the `--delegate-models` argument written into the lead's MCP config
+from the project's tier map. Tests set each variable that used to pick a model and prove it is
+ignored (`crates/server/tests/model_source_e2e.rs`, `crates/cli/tests/inspect_model_source.rs`,
+and unit tests beside each resolver).
 
 **No runtime env fallback once a project exists.** The project's per-step value is
 authoritative; call sites resolve it via `step_model(state, step)` or
@@ -5105,6 +6117,146 @@ severity ceiling in section 6a, where four green tests guarded a mechanism that 
 because no corpus rule authored a ceiling for them to clamp.
 
 ---
+
+## 14. Saved runs and resume (`run_store`)
+
+**Why.** A client deliverable never contains a failed or unfinished part, so a failure must cost
+only that part. Every inspection (the `camerata inspect` pipeline and the cockpit's scan job) is
+saved in `<state dir>/runs/<run-id>/` (mode 0700, because it holds model answers derived from
+client code). Every file is written to a temporary name and renamed, so a process killed at any
+instant leaves the old file or the new one, whole.
+
+**Layout.** `run.json` holds the record: per repo the commit and a digest of the tree state at the
+start and at the end of the last attempt; the models and mode; the rules fingerprint and the
+`AiScanKey`; the engine version (crate version plus the prompt schema version); the seed the
+prompt delimiter tokens are drawn from; the arguments the run started with; and the plan of parts
+with their status (`pending`, `running`, `done`, `failed`). The plan is written, every part pending,
+before any work starts: per repo the tools, scan, calibration, alternatives, detail and fix stages,
+then merge and export. `calls/<digest>.json` holds every model answer for one request, by
+occurrence. `batches/<digest>-<n>.json` holds a submitted Message Batch (its id the moment the
+submit returned, its results once fetched). `lock.json` is the lock (below) and holds the process id and a heartbeat time.
+`prior_manifest.json` is the incremental baseline the run started from.
+
+**Granularity.** Parts are tracked at the stage level in the plan, and individual model calls are
+recorded as the stage reaches them, because how many calls a stage makes depends on the stage
+before it. A call is stored as good when the model finished (the reply was not cut off) and the
+text holds a JSON object that parses. A malformed or cut off reply is never stored as good. A
+reply that parses but that a later step rejected (the pass is then a failed part of class
+`content`) is set aside at the end of the attempt: all good replies of that repo and stage, or for
+a scan pass only the calls over the files it names. A call that failed is stored as failed.
+
+**Resume.** The pipeline is deterministic given the same model answers. A resume runs it again
+with the model seam (`run_store::journal`) answering from the store: a good reply is returned
+without a model call (and at no cost to this attempt), anything else goes to the model, through
+the same retries, outage stop and spend limit. Merging, ranking, ordering and the report are
+therefore always recomputed from stored plus new results, and a run resumed after a failure
+gives the export an uninterrupted run gives (a test compares them, for a failed scan pass, a
+failed sub pass, a malformed answer and two repos). Prompt delimiter tokens are drawn from the
+run's own random seed and the framed text (`prompt_frame::with_seed`), so a prompt is the same
+text on a resume and a stored answer matches it; the seed never leaves the run folder.
+
+**Interrupted runs.** The lock on a run is the operating system's lock on `lock.json`
+(`File::try_lock`), held for as long as the process keeps the file open: the kernel releases it
+the instant the process ends, however it ends (SIGKILL, a crash, a power loss), and keeps it
+through a laptop's sleep. A run whose status is running but whose lock file is missing or no
+longer held is Interrupted, at once, not after a timeout. A resume takes such a lock over; a held
+lock refuses a second worker, in another process or in the same one, and two takers cannot both
+win because the lock is one system call. The file's content (process id, heartbeat every 5
+seconds) is for the operator, and the fallback when the lock cannot be probed: then a process
+that is gone (`kill -0`) or a heartbeat older than 45 seconds means Interrupted. Batches: an
+already submitted batch is polled and fetched, never submitted again.
+
+**One resume.** `run_store::open_for_resume` checks and opens a run; `camerata inspect --resume`
+and the server's `POST /api/inspections/:id/resume` (the cockpit's **Run what remains**, after
+`GET /api/inspections/:id/plan` shows the plan and estimate) both use it. The command line and the
+cockpit's scan job are two pipelines that call the same steps; the resume logic, the journal, the
+checks and the estimate are shared, not copied.
+
+**Saved inspections in the cockpit.** `GET /api/inspections` lists the open project's saved runs
+(`run_store::list_inspections_in`): id, start time, repos, status (`complete`, `incomplete`,
+`interrupted` or `live`), the number of parts that remain, the expected cost of finishing it, the
+origin and whether the cockpit can resume it. A cockpit run records the id of the project it was
+started in (`RunRecord.project_id`) and belongs to that project only, however many repos two
+projects share; `POST /api/inspections/:id/resume` and `GET /api/inspections/:id/plan` refuse (409,
+naming both projects) when the open project is not that one. A command line run belongs to the project that holds every repo it
+inspected, by name or by folder. A cockpit run saved before the project id was recorded is placed
+by its repos only when exactly one project holds all of them; otherwise it is listed under no
+project, and `RunSummary.note` says why. `live` means a process holds the
+run's lock: it is never offered. The routes live under `/api/inspections` so they are not confused
+with the agent runs under `/api/runs`; the first cockpit build called `/api/runs/:id/plan` and
+`/api/runs/:id/resume`, and those two paths remain as aliases of the same handlers for one
+release (the cockpit itself now calls the new ones). The scan screen offers the newest unfinished
+one on app start and when a project is opened (`cockpit/saved_inspections.rs`), through the same
+plan preview, resume request and `LoadingGuard` (`run_what_remains`) as the incomplete-scan banner.
+
+**Where a run is resumed.** A run records its origin (`RunOrigin`): the arguments saved with a cockpit
+run are the scan request (`AuditReq`), those of a command line run are the flags (`InspectArgs`),
+and each is read back only where it was written. The cockpit restores the request from `run.json`
+and starts the same job with `resume_run` set. `camerata inspect --resume <id>` of a cockpit run
+refuses in plain words that name the cockpit (and `--resume latest` picks the newest unfinished run
+started from the command line). The other choice, resuming a cockpit run from the command line,
+would need the project's settings (repo folders, backend, rules) that only the app holds.
+
+**The prompt-token seed is per run.** `prompt_frame::with_seed` runs a future with the run's seed
+in a task local, so two audit jobs in one server each draw tokens from their own seed however
+they interleave, and one ending cannot clear the other's. Work handed to another task
+(`spawn_blocking`) does not inherit it and must be given a token already drawn (the candidate
+locator is). The journal checks for the seed before it journals a call or submits a batch: a call
+with none in scope would carry a random token, its stored reply could never match on a resume and
+it would be paid for again. In the test builds that is an error; in production the call goes ahead
+(the money is spent either way), `[camerata-server] WARNING` is printed once and the run record
+keeps the note (`RunRecord.notes`). The note is not left in `run.json` alone: `run_store::note_report`
+puts the run's notes on the finished report's `message` (the cockpit shows it under the scan
+result), and `camerata inspect` prints each as `run note: ...` in its summary (and on stderr with the
+failure lines when the export is refused as incomplete). The test build's refusal applies to the
+server crate's own unit tests (`cfg!(test)`); the end-to-end tests under `tests/` link the
+production build and see the warning and the note instead.
+
+**Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
+resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
+
+**Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
+attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An
+attempt of a part whose replies came back and were turned down lists why in `rejections`, one line
+per finding (its place, and the name the fix invented or the name the detail dropped); the
+cockpit's failure panel shows the same lines under the attempt.
+
+**Why a stored reply was set aside.** Each call entry in the run store (`calls/<key>.json`) has an
+optional `reason`, set at the point of rejection and only on the reply that was rejected: a reply
+cut off at the output limit or holding no JSON (status `unusable`), a fix reply with a fix that
+named something not in the evidence or that contradicted the detail, a detail reply with an entry
+that dropped a name or added a condition. A reply EVERY entry of which was turned down is set aside
+(status `rejected`), so a resume asks again. A reply only part of which was turned down stays
+`done` and carries the reason: the entries it got right are replayed on a resume instead of being
+paid for again, and the ones turned down were re-asked by the stage's own rounds with a changed
+request, stored under their own keys. A reply every entry of which was accepted stays `done` with
+no reason. The stages reach the store through `LlmPort::note_rejected_reply(request_key, reason,
+whole)`, a no-op on every completer but the journal.
+The stage-wide set-aside at the end of an attempt (`quarantine_rejected`) now applies to the other
+content-failed stages only, with the failed part named as the reason.
+
+**End-of-run second try.** A part that failed gets one more try at the end of its stage only when the
+failure was transport trouble (a dropped connection, a timeout, a 429, a 5xx), the one case where the
+same request can succeed. A reply the model gave and that was unusable (cut off, malformed, refused, or
+turned down by a check) is a content failure: a retry of it must change the request, which the stages'
+own rounds do (a doubled output cap, a smaller batch, a feedback line naming the problem, a note on
+the scan's malformed-reply retry saying the previous reply held no JSON), and the same request is
+never sent a further time. `FailureClass::is_retried_at_end` is the one rule; the detail and fix
+stages re-send only the findings whose last attempt failed in transport.
+
+**Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
+
+**Estimates.** Two figures. `regeneration_expected` (ui-core) is the usual run: every finding
+back in the first round, priced at 450 output tokens a finding; it is the estimate the operator
+reads and the one a spend limit is checked against before anything starts (a batch submit is
+refused only when the expected cost would pass the limit). `regeneration_estimate` is the ceiling
+by the detail stage's own limits: the three rounds on every finding (`n/10 + n/5 + n` calls) and
+the second try (`n` more), each call priced at its own `max_tokens` (never less than 4,096); the
+pre-flight prints it as "at most" and notes when it alone is above the limit. The limit itself is
+enforced per call either way.
+
+**Cleanup.** The newest five runs per project are kept. A run that is not complete is deleted only
+when a newer complete run exists for the same commits; a run a live process works on never is.
 
 ## Appendix: key invariants
 

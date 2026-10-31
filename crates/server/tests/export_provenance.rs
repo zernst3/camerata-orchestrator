@@ -27,11 +27,17 @@ const RULE_B: &str = "RUST-DOMAIN-2";
 
 fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string(), "acme/web".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -70,6 +76,7 @@ fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
             audited_rule_ids: audited.iter().map(ToString::to_string).collect(),
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: None,
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -417,5 +424,271 @@ fn an_unrecorded_backend_is_null_in_the_manifest_and_absent_from_the_readme() {
     let (manifest, readme) = manifest_and_readme(&provenance);
     assert!(manifest["inspection"]["model_backend"].is_null());
     assert!(!readme.contains("Model backend"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+// ---- the spend limit: the export states THAT the run was capped, never how much ----
+
+#[test]
+fn a_capped_run_is_stated_in_the_manifest_and_the_readme_and_they_agree() {
+    let mut provenance = provenance_with(None);
+    provenance.cost_cap_reached = true;
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], true);
+    assert!(readme.contains("Spend limit: reached"), "{readme}");
+    assert!(readme.contains("INCOMPLETE"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+    assert!(!manifest.to_string().contains("usd") && !readme.contains('$'));
+}
+
+#[test]
+fn an_uncapped_run_says_false_in_the_manifest_and_nothing_in_the_readme() {
+    let provenance = provenance_with(None);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], false);
+    assert!(!readme.contains("Spend limit"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+#[test]
+fn the_gate_catches_a_readme_that_hides_or_invents_the_spend_limit() {
+    let mut capped = provenance_with(None);
+    capped.cost_cap_reached = true;
+    let (manifest, readme) = manifest_and_readme(&capped);
+    // A README with the incompleteness line removed disagrees with the manifest.
+    let hidden: String = readme
+        .lines()
+        .filter(|l| !l.starts_with("Spend limit"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let problems = camerata_server::release_gate::verify_readme_provenance(&hidden, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+
+    // And one that claims a cap the manifest does not record.
+    let (clean_manifest, clean_readme) = manifest_and_readme(&provenance_with(None));
+    let invented = clean_readme.replace(
+        "Release checks:",
+        &format!("{}\nRelease checks:", camerata_server::COST_CAP_README_LINE),
+    );
+    let problems =
+        camerata_server::release_gate::verify_readme_provenance(&invented, &clean_manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+}
+
+// ---- 22c: client name, corpus rules applied, counted lines, excluded noise ---------------------
+
+/// The scan's recorded quote basis and the corpus rule count reach the manifest and the README,
+/// and the two agree; the client name rides in when the export sets it.
+#[test]
+fn the_manifest_and_readme_carry_the_client_rule_count_and_quote_basis() {
+    let mut report = default_report();
+    report.files_excluded = 7;
+    report.excluded_noise_lines = Some(1234);
+    // One audited id the corpus does not hold: it is not a corpus rule, so it is not counted.
+    report
+        .provenance
+        .audited_rule_ids
+        .push("AI-INVENTED-1".to_string());
+    report.provenance.audited_rule_ids.push(RULE_A.to_string());
+    let json = cover_of(&report);
+    let mut provenance = export_provenance_with(&report, &json.cover, Some(&corpus()), None);
+    provenance.client_name = Some("Example Client Ltd".to_string());
+    let (manifest, readme) = manifest_and_readme(&provenance);
+
+    let inspection = &manifest["inspection"];
+    assert_eq!(inspection["client_name"], "Example Client Ltd");
+    assert_eq!(inspection["corpus_rules_applied"], 2);
+    assert_eq!(inspection["counted_lines"], 400);
+    assert_eq!(inspection["excluded_noise_files"], 7);
+    assert_eq!(inspection["excluded_noise_lines"], 1234);
+    for line in [
+        "Prepared for: Example Client Ltd\n",
+        "Corpus rules applied: 2\n",
+        "Counted lines: 400\n",
+        "Excluded as noise: 7 files, 1234 lines\n",
+    ] {
+        assert!(readme.contains(line), "{line:?} missing from {readme}");
+    }
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+
+    // 22c also asks that these are populated: the corpus version, the inspected commit and
+    // the engine version.
+    assert!(inspection["corpus_version"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("sha256:")));
+    assert_eq!(inspection["repos"][0]["commit"], "abcdef1234567890");
+    assert!(inspection["engine_version"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("camerata ")));
+}
+
+/// A value the scan did not record is null in the manifest and absent from the README, never a
+/// fabricated zero: no corpus, no recorded noise lines, a run that read no files.
+#[test]
+fn unrecorded_22c_values_are_null_and_absent() {
+    let mut report = default_report();
+    report.code_lines = 0;
+    report.code_lines_by_language.clear();
+    report.excluded_noise_lines = Some(9);
+    let json = cover_of(&report);
+    let provenance = export_provenance_with(&report, &json.cover, None, None);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    for key in [
+        "client_name",
+        "corpus_rules_applied",
+        "counted_lines",
+        "excluded_noise_files",
+        "excluded_noise_lines",
+    ] {
+        assert!(manifest["inspection"][key].is_null(), "{key}: {manifest}");
+    }
+    for label in [
+        "Prepared for",
+        "Corpus rules applied",
+        "Counted lines",
+        "Excluded as noise",
+    ] {
+        assert!(!readme.contains(label), "{label} in {readme}");
+    }
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+/// The gate holds each new README line to the manifest.
+#[test]
+fn the_gate_catches_a_readme_that_disagrees_on_a_22c_value() {
+    let mut report = default_report();
+    report.files_excluded = 7;
+    report.excluded_noise_lines = Some(1234);
+    let json = cover_of(&report);
+    let mut provenance = export_provenance_with(&report, &json.cover, Some(&corpus()), None);
+    provenance.client_name = Some("Example Client Ltd".to_string());
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    for (from, to, label) in [
+        (
+            "Prepared for: Example Client Ltd",
+            "Prepared for: Other Ltd",
+            "Prepared for",
+        ),
+        (
+            "Corpus rules applied: 2",
+            "Corpus rules applied: 3",
+            "Corpus rules applied",
+        ),
+        ("Counted lines: 400", "Counted lines: 401", "Counted lines"),
+        (
+            "7 files, 1234 lines",
+            "7 files, 1 lines",
+            "Excluded as noise",
+        ),
+    ] {
+        let tampered = readme.replace(from, to);
+        assert_ne!(tampered, readme, "anti-vacuity: {from}");
+        let problems =
+            camerata_server::release_gate::verify_readme_provenance(&tampered, &manifest);
+        assert!(
+            problems.iter().any(|p| format!("{p:?}").contains(label)),
+            "{label}: {problems:?}"
+        );
+    }
+}
+
+// ---- the spend limit's cause: "reached" or "could not be enforced" ----
+
+/// A provenance made the way the export makes it, from a report whose spend limit stopped work
+/// (`cost_unknown` says whether the stop was an unknown cost).
+fn provenance_stopped_by_the_limit(cost_unknown: bool) -> camerata_server::ManifestProvenance {
+    let mut report = default_report();
+    report
+        .ledger
+        .record_cost_cap(camerata_server::cost_cap::CostCapRecord {
+            cap_usd: 10.0,
+            spent_usd: if cost_unknown { 0.02 } else { 10.0 },
+            repos_not_finished: vec!["acme/portal".to_string()],
+            cost_unknown,
+            ..Default::default()
+        });
+    let json = cover_of(&report);
+    export_provenance_with(&report, &json.cover, None, None)
+}
+
+#[test]
+fn a_stop_caused_by_an_unknown_cost_says_the_limit_could_not_be_enforced() {
+    let provenance = provenance_stopped_by_the_limit(true);
+    assert!(provenance.cost_cap_reached && provenance.cost_cap_unenforced);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], true);
+    assert_eq!(manifest["inspection"]["cost_cap_unenforced"], true);
+    assert!(
+        readme.contains("Spend limit: could not be enforced"),
+        "{readme}"
+    );
+    assert!(!readme.contains("Spend limit: reached"), "{readme}");
+    assert!(readme.contains("INCOMPLETE"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+    assert!(!manifest.to_string().contains("usd") && !readme.contains('$'));
+}
+
+#[test]
+fn a_stop_caused_by_reaching_the_limit_still_says_reached() {
+    let provenance = provenance_stopped_by_the_limit(false);
+    assert!(provenance.cost_cap_reached && !provenance.cost_cap_unenforced);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_unenforced"], false);
+    assert!(readme.contains("Spend limit: reached"), "{readme}");
+    assert!(!readme.contains("could not be enforced"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+/// The gate reads both lines and catches a README whose line names the other cause than the
+/// manifest records.
+#[test]
+fn the_gate_parses_both_spend_limit_lines_and_catches_the_wrong_one() {
+    let (manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(true));
+    let wrong = readme.replace(
+        camerata_server::COST_CAP_UNENFORCED_README_LINE,
+        camerata_server::COST_CAP_README_LINE,
+    );
+    assert_ne!(wrong, readme, "the unenforced line was in the README");
+    let problems = camerata_server::release_gate::verify_readme_provenance(&wrong, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+
+    let (manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(false));
+    let wrong = readme.replace(
+        camerata_server::COST_CAP_README_LINE,
+        camerata_server::COST_CAP_UNENFORCED_README_LINE,
+    );
+    let problems = camerata_server::release_gate::verify_readme_provenance(&wrong, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+}
+
+/// A package built before the cause was recorded has no `cost_cap_unenforced` key; with the
+/// "reached" line it still verifies.
+#[test]
+fn a_package_without_the_cause_key_still_verifies_as_reached() {
+    let (mut manifest, readme) = manifest_and_readme(&provenance_stopped_by_the_limit(false));
+    manifest["inspection"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cost_cap_unenforced");
     assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
 }

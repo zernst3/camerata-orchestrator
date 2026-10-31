@@ -48,11 +48,17 @@ fn report() -> ScanReport {
         ..Finding::default()
     }];
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string(), "acme/web".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -88,6 +94,7 @@ fn report() -> ScanReport {
             audited_rule_ids: vec!["SEC-NO-RAW-SQL-CONCAT-1".to_string()],
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: None,
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),

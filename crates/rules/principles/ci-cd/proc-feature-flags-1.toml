@@ -1,5 +1,5 @@
 id = "PROC-FEATURE-FLAGS-1"
-version = 1
+version = 4
 title = "Feature flags via env var or runtime config; no long-lived feature branches"
 domain = "ci-cd"
 layer = "universal"
@@ -11,20 +11,20 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/feature-toggles.html"
-title = "Pete Hodgson (martinfowler.com) — Feature Toggles (aka Feature Flags)"
+title = "Pete Hodgson (martinfowler.com): Feature Toggles (aka Feature Flags)"
 
 [[sources]]
 url = "https://trunkbaseddevelopment.com/feature-flags/"
-title = "Trunk Based Development — Feature Flags"
+title = "Trunk Based Development: Feature Flags"
 
 [decision]
-question = "What position does the project take on: Feature flags via env var or runtime config; no long-lived feature branches?"
+question = "How does unfinished work reach the main branch without being exposed to users?"
 why = "Long-lived feature branches drift from main and the merge cost grows superlinearly with the branch's age. Flag-gating lets the work merge incrementally while keeping the feature dark in production until it is ready, which collapses the integration risk into many small reviews rather than one large one. A flag is also testable in production: it can be enabled for an internal user, a small percentage, or a canary environment without redeploying. Long-lived feature branches drift from main and the merge cost grows with branch age, with integration bugs all surfacing at once at merge time rather than incrementally. Defaulting flags on with a kill switch flips the failure mode: a regression is on for everyone until someone notices and trips the switch, which defeats the safety property the flag is supposed to provide. Shipping conditional code based on environment without a gate couples release shape to environment topology, and staging and prod diverge in ways that are hard to test and hard to roll back."
 
 [[option]]
 id = "feature-flags-via-env-var-or-runtime-config-no-long-lived-feature-branches"
 label = "Feature flags via env var or runtime config; no long-lived feature branches"
-directive = "Incomplete features ship behind a per-environment gate (an env var, a config-service flag, or a runtime configuration entry) checked at runtime via a single helper. The code lives on the trunk but user-visible behavior stays off until the gate is configured to allow it. Long-lived feature branches are not used; work merges incrementally behind a gate instead. When the feature is shipped, the gate and its check are removed in a follow-up cleanup change rather than left behind as permanent infrastructure."
+directive = "Incomplete features ship behind a per-environment gate (an env var, a config-service flag or a runtime configuration entry) checked at runtime via a single helper. The code lives on the trunk but user-visible behavior stays off until the gate is configured to allow it. Long-lived feature branches are not used; work merges incrementally behind a gate instead. When the feature is shipped, the gate and its check are removed in a follow-up cleanup change rather than left behind as permanent infrastructure."
 remediation = """
 Gate the incomplete feature behind a single runtime-checked flag (an env var or config-service entry read through one shared helper) instead of a long-lived branch, and merge the code to trunk with the flag off until it's ready. Remove the flag once the feature has been fully rolled out. Verify by confirming the feature's code lives on trunk today and is inert unless the flag is explicitly turned on.
 """

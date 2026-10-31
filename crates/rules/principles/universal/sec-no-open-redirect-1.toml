@@ -1,5 +1,5 @@
 id = "SEC-NO-OPEN-REDIRECT-1"
-version = 1
+version = 2
 title = "A redirect target derived from user input is checked against an allowlist before the response is issued"
 domain = "universal"
 layer = "universal"
@@ -35,7 +35,7 @@ a substring/prefix check on the raw string.
 [[option]]
 id = "allowlist-redirect-targets"
 label = "Validate every redirect target against an allowlist before redirecting"
-directive = "Every redirect target sourced from user input (query parameters, form fields, or a stored callback URL) is checked against an allowlist of internal relative paths or explicitly registered external hosts before the redirect response is issued; anything that fails the check redirects to a fixed, safe default instead."
+directive = "Every redirect target sourced from user input (query parameters, form fields or a stored callback URL) is checked against an allowlist of internal relative paths or explicitly registered external hosts before the redirect response is issued; anything that fails the check redirects to a fixed, safe default instead."
 remediation = """
 Replace the raw redirect target with a lookup against an allowlist of internal paths (or
 registered OAuth callback hosts); if the requested target is not on the allowlist, redirect to a

@@ -11,12 +11,12 @@ into that file was remapped; a citation that still looks wrong should be resolve
 FUNCTION or FIELD NAME named next to it, which is the stable anchor. Where source comments are
 quoted, any dash characters in the original have been rendered as hyphens per house style.
 
-Corpus counts quoted here were measured on 2026-10-14 against 417 rule files. Where a count is
+Corpus counts quoted here were measured on 2026-10-14 against the rule files as they stood that day. Where a count is
 pinned by a test, the test is named; where it is not, it is a measurement and will drift.
 
 Scope note: this document describes the schema and the engine. It deliberately does not
 snapshot the per-rule classification values of rules still on the owner's A5.7 reclassification
-hold (`docs/plans/2026-10-09_rule-kind-classification.md`). The `kind` distribution on
+hold (the rule-kind classification notes, private working notes). The `kind` distribution on
 2026-10-14 was `decision` 154, `defect` 152, `default_with_exceptions` 110,
 `decision_with_floor` 1. The authoritative count is always the TOMLs:
 `git grep -h '^kind = ' -- crates/rules/principles | sort | uniq -c`.
@@ -193,7 +193,7 @@ fastest way to predict what changing it does.
   `[[stack_exception]]` (`lib.rs:2155`), and an option's `escalation` inline table
   (`lib.rs:2158`). The build gate is `req_w14_no_corpus_rule_carries_an_unknown_field`
   (`crates/rules/tests/w14_corpus_schema_gates.rs:435`), with a fire proof at five nesting
-  levels (`:455`). Measured: zero offenders over 417 files; 865 before `layer`, `[[emits]]` and
+  levels (`:455`). Measured: zero offenders over every rule file; 865 before `layer`, `[[emits]]` and
   `sources.qualifies` were declared as accepted-but-unconsumed (`lib.rs:2196-2199`). A file
   that will not parse as TOML at all is skipped quietly here (`lib.rs:2217-2219`); that is the
   other gate's finding. Gotcha 9 is therefore now a much narrower hazard than it was.
@@ -296,7 +296,7 @@ fastest way to predict what changing it does.
   `domain` OR any of its `extra_domains` (`propose.rs:685-692`); `domain == "universal"`
   matches every repo (`propose.rs:677`). A rule whose domain NO stack can emit can never be
   suggested, never auto-armed, and therefore never runs on any repo, ever - the A6 defect
-  class (94 of 417 rules were in that state). Two build gates now enforce reachability:
+  class (94 rules, 23 percent of the corpus at the time, were in that state). Two build gates now enforce reachability:
   `req_h1_every_corpus_domain_is_emittable_by_some_stack` (`propose.rs:843-876`, checking the
   corpus against `emittable_domains()`, `propose.rs:497`) and
   `req_a6_every_corpus_domain_has_a_detectable_witness_repo` (`propose.rs:1041-1081`, proving
@@ -567,21 +567,29 @@ role.
     its universe. **This one is an inference from the ledger answer plus the function's input
     type; no test asserts it directly.**
 
-- **Population.** 26 of 417 rules are `inspectable = false` on 2026-10-14, all 417 declare the
+- **The two runtime rules (2026-10-28).** `SEC-NO-END-OF-LIFE-RUNTIME-1` and
+  `SEC-NO-KNOWN-VULNERABLE-RUNTIME-1` are `inspectable = false` for the same reason as the rest of
+  this list (the rule-scan loop and the AI pass cannot assess them) but, unlike the rest, they DO
+  appear in findings: a dedicated deterministic pass (`crates/server/src/runtime_audit.rs`) reads
+  declared runtime versions and raises their findings after the rule scan, the same way the
+  dependency audit raises `DEP-AUDIT-1`. They get no ledger entry and so can never be "verified
+  clean". `EMIT_ONLY_RULES` below therefore holds 28 entries, not 26.
+
+- **Population.** 26 rules were `inspectable = false` on 2026-10-14, and every rule declares the
   field. By folder: `agentic/` 16, `process/` 4, `universal/` 4, `ci-cd/` 1, `permissions/` 1.
   Note the spread - `PROC-*` ids appear in three different directories and the `SPIRIT-*` and
   `ORCH-*` families are MIXED, which is exactly why a lexical prefix rule could not have done
   this job and the flag had to be per-rule. The population is pinned **by id list**, not by a
-  number: `EMIT_ONLY_RULES` (`crates/rules/tests/w16_inspectable_gate.rs:52`, 26 `(id, reason)`
+  number: `EMIT_ONLY_RULES` (`crates/rules/tests/w16_inspectable_gate.rs:52`, 28 `(id, reason)`
   entries) and `req_w16_the_emit_only_population_is_pinned` (`:366`). Its complement
   `DELIBERATELY_SCANNABLE` (`:182`, 11 ids including `SPIRIT-FILE-SIZE-1`,
   `PROC-PR-CONCURRENCY-1` and `PROC-HIDE-DEAD-END-1`) is pinned at `:393`, and the two are
-  asserted disjoint at `:409`. There is no `assert_eq!(.., 26)` and no `assert_eq!(.., 417)`
-  anywhere; the nearest numeric guard is `files.len() >= 400`
+  asserted disjoint at `:409`. There is no `assert_eq!(.., 26)` and no assertion on the total
+  rule count anywhere; the nearest numeric guard is `files.len() >= 400`
   (`crates/rules/tests/w17_tag_field_deleted.rs:95-98`).
 
 - **The client-visible effect, stated honestly.** W16's own write-up reports the "rules
-  checked" count on a TypeScript stack dropping from 167 to 145. **The mechanism is certain and
+  checked" count on a TypeScript stack dropping from 167 to 145 (a drop of 22). **The mechanism is certain and
   the exact arithmetic is not reproducible from static reading**: a delta of 22 is not 26, so
   that stack selected only 22 of the 26 emit-only rules, and which 22 depends on the proposal
   pipeline running against that repo (`ALWAYS_ON_DOMAINS`, `propose.rs:329`, and
@@ -646,8 +654,8 @@ role.
   - `Policy` was ADDED to the auto-recommended set in Pass-1 W4 (finding A8): provenance
     ("this encodes a project decision, no external authority") is not a statement about
     whether the rule is worth running; excluding it silently disarmed 17 shipped rules on
-    every repo, including `SPIRIT-FILE-SIZE-1` (`lib.rs:1258-1269`). 21 corpus rules carry
-    `policy` and all 21 arm.
+    every repo, including `SPIRIT-FILE-SIZE-1` (`lib.rs:1258-1269`). 25 corpus rules carry
+    `policy` and all 25 arm.
   - **The source comment describing `Policy` was itself wrong until W17, and believing it did
     real damage.** `Verification::Policy`'s doc comment (`lib.rs:399-421`) used to read "kept
     out of the armed ruleset like `draft`, but labeled honestly rather than as `grounded`" -
@@ -791,8 +799,7 @@ role.
 
 ### 3.14 `qualifies` (and the derived `summary`)
 
-- **Type / default.** Optional string (`lib.rs:568-571`), at RULE level. 201 rules carried one
-  on 2026-10-11.
+- **Type / default.** Optional string (`lib.rs:568-571`), at RULE level. On 2026-10-11, 201 of the rules carried one.
 - **What the engine does with it.** Source #1 for the derived `Rule::summary`:
   `qualifies` (non-empty) -> else `[decision].why` (non-empty) -> else `title`
   (`lib.rs:1620-1633`).
@@ -840,7 +847,7 @@ role.
   (`lib.rs:2426-2470`, validating against `CEILING_SEVERITY_VOCABULARY`, `lib.rs:2393`)
   exists precisely to fail the build on the typo before it ships.
 - **History worth keeping.** The whole mechanism shipped fully implemented and fully
-  unit-tested against a corpus in which NOT ONE of 417 rules declared a ceiling - complete
+  unit-tested against a corpus in which NOT ONE rule declared a ceiling - complete
   and completely inert (`lib.rs:2553-2559`). `rules_declaring_max_severity` plus
   `req_e2_the_corpus_actually_declares_severity_ceilings` is the anti-inertness gate written
   in response.
@@ -906,14 +913,14 @@ role.
 
 ### 3.18 `layer` (INERT) and `tag` (DELETED)
 
-The first edition of this document said both fields were present on all 417 rules and parsed
+The first edition of this document said both fields were present on every rule and parsed
 by nothing. **Half of that is no longer true, and the two halves were resolved differently and
 on purpose.**
 
-**`tag` is GONE.** W17 deleted it from all 417 TOMLs and from the schema (commit `23c81e6`).
+**`tag` is GONE.** W17 deleted it from every rule file and from the schema (commit `23c81e6`).
 The owner ruled it dead weight on three measured grounds, recorded at `lib.rs:661-672`: it held
-three distinct values across 417 rules (`"stack"` 388, `"universal"` 28, `"process"` 1 - 93
-percent one value); it agreed with the folder-derived domain on only 21 of 417; and the 28
+three distinct values across the whole corpus (`"stack"` 388, `"universal"` 28, `"process"` 1 - 93
+percent one value); it agreed with the folder-derived domain on only 21 of them; and the 28
 `"universal"` rules were exactly the `testing/` and `universal/` folders, already derivable
 from the path. Because `tag` is deliberately ABSENT from `RULE_LEVEL_FIELDS`
 (`lib.rs:2065-2068`, with a "do not re-add it" guard comment), a reappearance is now a BUILD
@@ -1265,7 +1272,7 @@ then never engages.
 
 ### 5.9 `violates`
 
-The single most consequential option flag, and the one the 244-rule audit found wrong 76
+The single most consequential option flag, and the one an earlier option audit found wrong 76
 times. Absent -> `false` (`lib.rs:772-776`): a genuine, non-degenerate alternative. `true`
 means CHOOSING THIS OPTION IS THE DEFECT - the option describes the absence or a degenerate
 form of the rule's own requirement, authored as an `[[option]]` only because the corpus
@@ -1467,7 +1474,7 @@ What reaches which artifact, per corpus field: see the per-field sections; summa
 | `verification`, `opt_in_only`, `layer3_only`, `stack_exception`, `extra_domains` | effect only (what ran at all) | effect only | | |
 | `inspectable` | effect only (whether the rule was scanned at all) | effect only; also decides whether the rule appears on the Coverage sheet | | emit path ignores it |
 | `layer`, `[[emits]]` | | | | declared, parsed, DISCARDED - nothing reads them |
-| `tag` | | | | DELETED from the schema and all 417 rules |
+| `tag` | | | | DELETED from the schema and from every rule |
 
 ---
 
@@ -1490,7 +1497,7 @@ closed** by gates or by W13's failure routing.
 2. **`default = false` with `kind = "default_with_exceptions"` is NOT a contradiction.**
    The first edition of this document asserted it was, and recommended a build gate for it.
    **Both were wrong and are retracted** (owner's correction of 2026-10-11,
-   `docs/plans/2026-10-09_audit-findings-tracker.md`). `default` governs ONBOARDING ADOPTION
+   recorded in the audit findings tracker, private working notes). `default` governs ONBOARDING ADOPTION
    ("does this rule ship an adopted default option, or must the architect choose?") while
    `kind` governs OPTION SEMANTICS. They are orthogonal. `default = false` is a first-class
    documented authoring choice, typically paired with `opt_in_only = true` for a rule whose
@@ -1539,7 +1546,7 @@ closed** by gates or by W13's failure routing.
 
 5. **A rule whose `domain` no stack emits can never run, for any repo, ever.**
    `domains_for_stack` (`propose.rs:527`) is the only bridge from a detected repo to corpus
-   domains; 94 of 417 rules (23 percent) once sat in unmapped folders. Two build gates now
+   domains; 94 rules (23 percent of the corpus then) once sat in unmapped folders. Two build gates now
    enforce reachability (`req_h1_every_corpus_domain_is_emittable_by_some_stack`,
    `propose.rs:843`; the witness-repo test at `propose.rs:1049`). Adding a stack rulepack
    requires wiring detection, `domains_for_stack`, AND `domain_to_glob` (section 3.4).
@@ -1558,8 +1565,8 @@ closed** by gates or by W13's failure routing.
    only the latter were structurally blind to them.
 
 8. **HALF RESOLVED. `tag` is deleted; `layer` and `[[emits]]` are declared but still read by
-   nothing** (section 3.18/3.19). `tag` is gone from all 417 TOMLs and from the schema, and
-   re-adding it is now a build failure. `layer` is on all 417 rules, is declared on
+   nothing** (section 3.18/3.19). `tag` is gone from every rule file and from the schema, and
+   re-adding it is now a build failure. `layer` is on every rule, is declared on
    `RuleToml` with `#[allow(dead_code)]`, has no field on the `Rule` domain struct at all, and
    is dropped on the floor at the `RuleToml -> Rule` conversion. Editing `layer` still changes
    nothing; do not mistake it for a selection or emission control. If you ever DO wire it,
@@ -2106,7 +2113,7 @@ block above so an old cross-reference still resolves.
    absent from a proposal with nothing recorded. The cheap hardening is the same one W13
    applied one layer over: route the lenient loader's error list rather than dropping it.
 
-9. **The 167 -> 145 "rules checked" figure is a measurement, not a derivation.** The
+9. **The 167 to 145 drop in the "rules checked" figure is a measurement, not a derivation.** The
     mechanism is certain (section 3.6a) but the delta of 22 does not equal the 26 emit-only
     rules, and reproducing which 22 a given stack selects requires running the proposal
     pipeline. Nothing in the test suite pins a "rules checked" number against a known

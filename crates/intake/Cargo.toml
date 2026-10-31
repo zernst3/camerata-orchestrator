@@ -18,3 +18,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Env-mutating tests (proving a removed model variable is ignored) use EnvGuard and the
+# workspace-wide `#[serial_test::serial(process_env)]` key; see crates/test-env.
+serial_test = "3"
+camerata-test-env = { path = "../test-env" }

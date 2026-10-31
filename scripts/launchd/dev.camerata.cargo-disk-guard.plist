@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: scripts/install-cargo-disk-guard.sh fills in __REPO_DIR__ (this checkout) and __HOME__ (your home directory). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.camerata.cargo-disk-guard</string>
+
+  <!-- Runs scripts/cargo-disk-guard.sh every 30 minutes. See the script header for what it
+       removes and why. Complements (does not replace) the weekly cargo-sweep job, the
+       7-day sweep, which cannot catch same-day growth from agent worktrees.
+       Install:  scripts/install-cargo-disk-guard.sh -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_DIR__/scripts/cargo-disk-guard.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/cargo-disk-guard.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/cargo-disk-guard.log</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-CHANNEL-SCOPE-1"
-version = 1
+version = 3
 title = "A channel topic must not be a guessable/enumerable identifier or an unvalidated client-supplied string standing in for an authorization check"
 domain = "supabase:realtime"
 layer = "platform"
@@ -17,11 +17,11 @@ qualifies = "Whether a channel's topic string is constructed in a way that an at
 
 [[sources]]
 url = "https://supabase.com/docs/guides/realtime/channels"
-title = "Supabase docs — Channels: topics are arbitrary client-chosen strings (e.g. 'realtime:chat-room'); for public channels, the documentation provides no restriction beyond knowing the topic name — topic secrecy is not an access control, only `private: true` plus a realtime.messages policy is"
+title = "Supabase docs: Channels: topics are arbitrary client-chosen strings (e.g. 'realtime:chat-room'); for public channels, the documentation provides no restriction beyond knowing the topic name (topic secrecy is not an access control, only `private: true` plus a realtime.messages policy is)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/639.html"
-title = "CWE-639: Authorization Bypass Through User-Controlled Key — a sequential or client-controlled channel topic is the same user-controlled-key shape applied to a pub/sub identifier instead of a database row"
+title = "CWE-639: Authorization Bypass Through User-Controlled Key: a sequential or client-controlled channel topic is the same user-controlled-key shape applied to a pub/sub identifier instead of a database row"
 
 [decision]
 question = "Is every channel topic either server-issued or built from an unguessable identifier that a realtime.messages RLS policy actually authorizes, rather than a sequential id or a client-controllable string treated as if its secrecy were itself the access control?"
@@ -58,11 +58,10 @@ deliberately rather than assumed.
 The topic is not enumerable: it embeds an unguessable identifier such as a UUID tied to the
 resource, never a sequential integer or other predictable pattern that lets someone iterate adjacent
 values into channels meant for other users. And the server, not the client, decides which topics a
-given authenticated user may request — a raw route parameter or query string is never passed
+given authenticated user may request: a raw route parameter or query string is never passed
 through as a topic without a server-side check that the caller is entitled to that resource.
 
-Unguessability is not the access control, though. Topic names leak through entirely ordinary paths —
-a shared link, browser history, a referrer header, a support screenshot, a log line — so every
+Unguessability is not the access control, though. Topic names leak through entirely ordinary paths (a shared link, browser history, a referrer header, a support screenshot, a log line) so every
 non-public topic is also a `private: true` channel with a matching `realtime.messages` policy, so
 that knowing the name is insufficient on its own. The two solve different problems: an unguessable
 topic with no policy is obscurity, and an authorized but sequentially-numbered topic is still
@@ -70,7 +69,7 @@ trivially enumerable by anyone authorized for their own.
 """
 remediation = """
 Construct `<topic>` from a server-issued or genuinely unguessable identifier (a UUID tied to the resource, not a
-sequential id), and ensure the client never gets to choose an arbitrary topic string outright — the server should
+sequential id) and ensure the client never gets to choose an arbitrary topic string outright: the server should
 be the one that decides, for a given authenticated user, which topic(s) they are allowed to request. Pair this with
 a realtime.messages RLS policy (SUPABASE-REALTIME-AUTHORIZATION-1) so that even a leaked topic name does not grant
 access on its own. Verify by attempting to join a channel for another user's resource using a guessed or adjacent
@@ -84,4 +83,4 @@ id = "treat-an-unguessable-topic-name-as-sufficient-access-control"
 violates = true
 label = "Channel topics are unguessable UUIDs, and that unguessability is the channel's only access control"
 directive = "Topics are built from unguessable identifiers such as UUIDs, and nothing further gates the channel: it is not marked private and no matching `realtime.messages` policy exists, so knowing the topic name is sufficient to join."
-why = "Rejected: this is security through obscurity applied to a value that routinely leaks through entirely ordinary channels a developer doesn't think of as a secret-disclosure path — a shared link, browser history, a referrer header, a support screenshot, a logging pipeline that happens to capture the URL. Once the identifier is known to anyone outside the intended audience, there is no second check behind it, because the whole point of this option is that no realtime.messages policy exists to catch that case."
+why = "Rejected: this is security through obscurity applied to a value that routinely leaks through entirely ordinary channels a developer doesn't think of as a secret-disclosure path: a shared link, browser history, a referrer header, a support screenshot, a logging pipeline that happens to capture the URL. Once the identifier is known to anyone outside the intended audience, there is no second check behind it, because the whole point of this option is that no realtime.messages policy exists to catch that case."

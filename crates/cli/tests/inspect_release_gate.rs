@@ -17,12 +17,7 @@ use camerata_secrets::SecretShape;
 use camerata_server::llm::ProjectBackend;
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 fn git(dest: &Path, args: &[&str]) {
@@ -41,6 +36,11 @@ fn git(dest: &Path, args: &[&str]) {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
+    // Test isolation: with the dependency audit disabled no osv-scanner run happens, so neither
+    // the CISA KEV nor the FIRST EPSS feed is fetched and nothing is written to the real user
+    // data dir's vuln-intel cache. (`vuln_intel::enrich_dependency_findings` honours the same
+    // variable.)
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
     if !typst_on_path() {
         eprintln!("skipping cli_inspect_export_exits_3_and_writes_nothing_when_blocked: no typst");
         return;
@@ -70,13 +70,24 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
     let export_path = export_dir.path().join("inspect.zip");
     let args = InspectArgs {
         repo: repo.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
+        fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
+        max_cost_usd: None,
+        efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
+        client_engagement: false,
+        run_client_tooling: false,
+        consensus: false,
     };
 
     let err = run_inspect_with_key_presence(args, false)

@@ -54,8 +54,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet, RuleSource, StackException,
-    VerifiedProvenance,
+    AppliesTo, Candidates, EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet,
+    RuleSource, StackException, VerifiedProvenance,
 };
 
 /// Prefix of every rule content hash: `sha256:<64 lowercase hex>`. A stored hash WITHOUT this
@@ -274,6 +274,34 @@ fn canon_verified(verified: &VerifiedProvenance) -> Canon {
     o.build()
 }
 
+fn canon_applies_to(applies_to: &AppliesTo) -> Canon {
+    let AppliesTo {
+        paths,
+        languages,
+        contains_any,
+    } = applies_to;
+    // Sorted and de-duplicated: the three lists are unordered sets, so reordering an entry is
+    // not a change to the rule and must not move its hash (a version bump would be spurious).
+    let sorted = |values: &[String]| {
+        let mut v = values.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut o = ObjBuilder::default();
+    o.strings("paths", &sorted(paths));
+    o.strings("languages", &sorted(languages));
+    o.strings("contains_any", &sorted(contains_any));
+    o.build()
+}
+
+fn canon_candidates(candidates: &Candidates) -> Canon {
+    let Candidates { locator } = candidates;
+    let mut o = ObjBuilder::default();
+    o.always("locator", locator.name());
+    o.build()
+}
+
 fn canon_stack_exception(exception: &StackException) -> Canon {
     let StackException {
         framework,
@@ -320,6 +348,8 @@ impl Rule {
             asvs,
             superseded_since,
             current_recommendation,
+            applies_to,
+            candidates,
             // Bookkeeping about the rule, not part of it: bumping the version or recording a
             // review must not change the hash the version is checked against.
             version: _,
@@ -359,6 +389,12 @@ impl Rule {
         o.strings("asvs", asvs);
         o.opt_text("superseded_since", superseded_since);
         o.opt_text("current_recommendation", current_recommendation);
+        if let Some(a) = applies_to {
+            o.nested("applies_to", canon_applies_to(a));
+        }
+        if let Some(c) = candidates {
+            o.nested("candidates", canon_candidates(c));
+        }
 
         let mut out = String::new();
         o.build().render(&mut out);
@@ -429,11 +465,16 @@ fn corpus_digest(mut entries: Vec<(String, Option<u32>, String)>) -> String {
 /// still contributes (as `-`), so the digest is total over any corpus the loader accepts; the
 /// lock gate, not this function, is what rejects an unversioned rule.
 pub fn corpus_version(set: &RuleSet) -> String {
-    corpus_digest(
-        set.iter()
-            .map(|rule| (rule.id.0.clone(), rule.version, rule.content_hash()))
-            .collect(),
-    )
+    // Memoised on the set (see `RuleSet::corpus_digest`): the digest is a pure function of the
+    // rules, which only `RuleSet::push` can change, and `push` clears the memo.
+    set.corpus_digest_or_init(|| {
+        corpus_digest(
+            set.iter()
+                .map(|rule| (rule.id.0.clone(), rule.version, rule.content_hash()))
+                .collect(),
+        )
+    })
+    .to_string()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -795,6 +836,47 @@ pub fn check_lock(set: &RuleSet, lock: &CorpusLock) -> Vec<LockProblem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `corpus_version` is a pure function of an immutable corpus that every `build_report_json`
+    /// asks for, and hashing 400+ rules each time made the export tests take 20+ minutes. The
+    /// digest is computed once per set; a `push` (the only mutation) drops it, and a clone
+    /// carries it. The value must be identical whether or not it was served from the cache.
+    #[test]
+    fn corpus_version_is_computed_once_per_set_and_invalidated_by_push() {
+        let mut set = RuleSet::default();
+        set.push(crate::bare_rule("CACHE-1", "test-fixture"));
+        assert!(!set.corpus_version_is_cached(), "nothing computed yet");
+
+        let first = corpus_version(&set);
+        assert!(
+            set.corpus_version_is_cached(),
+            "the first call fills the cache"
+        );
+        assert_eq!(corpus_version(&set), first, "a cached read changes nothing");
+        assert!(
+            set.clone().corpus_version_is_cached(),
+            "a clone carries the digest"
+        );
+
+        let mut grown = set.clone();
+        grown.push(crate::bare_rule("CACHE-2", "test-fixture"));
+        assert!(
+            !grown.corpus_version_is_cached(),
+            "push drops a stale digest"
+        );
+        let after = corpus_version(&grown);
+        assert_ne!(after, first, "a changed corpus has a different version");
+
+        let mut rebuilt = RuleSet::default();
+        rebuilt.push(crate::bare_rule("CACHE-1", "test-fixture"));
+        rebuilt.push(crate::bare_rule("CACHE-2", "test-fixture"));
+        assert_eq!(
+            corpus_version(&rebuilt),
+            after,
+            "the cached digest equals a from-scratch computation of the same corpus"
+        );
+        assert_eq!(corpus_version(&set), first, "the original is untouched");
+    }
 
     /// Pins the digest framing byte for byte against an independent oracle (Python `hashlib`
     /// over `"camerata-corpus-digest/v1\n"` plus one `id<TAB>version<TAB>hash<LF>` line per

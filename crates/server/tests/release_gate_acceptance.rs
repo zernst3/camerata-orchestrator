@@ -6,8 +6,9 @@
 //!
 //!   cargo test -p camerata-server --test release_gate_acceptance -- --ignored --nocapture
 //!
-//! `CAMERATA_SWEEP_EXPORTS` overrides the directory (default
-//! `~/Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16`). The exports are only READ.
+//! `CAMERATA_SWEEP_EXPORTS` names the directory; without it the exports are read from
+//! `$CAMERATA_FIXTURES_DIR/_runs/sweep5b-2026-10-16` (the folder holding the private fixtures).
+//! With neither set, each test prints why and skips. The exports are only READ.
 //! Nothing here prints a value: assertions compare locations and REDACTED forms.
 //!
 //! What it proves: the leaks the spec confirmed in `faktura` and `hearth` are FLAGGED, at the
@@ -16,22 +17,72 @@
 //! manifest, so the dataset-set and manifest checks report them missing; that is not asserted
 //! here beyond "the secrets check is the one that matters".
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use camerata_server::release_gate::{audit_zip, CheckId, Problem};
 
-fn exports_dir() -> PathBuf {
-    std::env::var_os("CAMERATA_SWEEP_EXPORTS")
+const EXPORTS_ENV_VAR: &str = "CAMERATA_SWEEP_EXPORTS";
+const FIXTURES_DIR_ENV_VAR: &str = "CAMERATA_FIXTURES_DIR";
+const EXPORTS_SUBDIR: &str = "_runs/sweep5b-2026-10-16";
+
+/// Where the exports should be, from the two env vars: the explicit directory wins, else the
+/// sweep folder inside the shared fixtures directory. `None` when neither is set: no
+/// machine-specific default is baked in, because this repository is public.
+fn exports_dir_from(explicit: Option<OsString>, fixtures_dir: Option<OsString>) -> Option<PathBuf> {
+    explicit
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME");
-            PathBuf::from(home).join("Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16")
-        })
+        .or_else(|| fixtures_dir.map(|dir| PathBuf::from(dir).join(EXPORTS_SUBDIR)))
+}
+
+fn exports_dir() -> Option<PathBuf> {
+    exports_dir_from(
+        std::env::var_os(EXPORTS_ENV_VAR),
+        std::env::var_os(FIXTURES_DIR_ENV_VAR),
+    )
+}
+
+/// Skip (not fail) the calling test when the exports directory is not configured.
+macro_rules! require_exports {
+    () => {
+        match exports_dir() {
+            Some(dir) => dir,
+            None => {
+                eprintln!(
+                    "skipping: sweep exports not configured; set {} to the folder holding the \
+                     private fixtures (or {} to the exports directory itself)",
+                    FIXTURES_DIR_ENV_VAR, EXPORTS_ENV_VAR
+                );
+                return;
+            }
+        }
+    };
+}
+
+#[test]
+fn exports_dir_prefers_the_explicit_override() {
+    assert_eq!(
+        exports_dir_from(Some("/x/sweep".into()), Some("/fixtures".into())),
+        Some(PathBuf::from("/x/sweep"))
+    );
+}
+
+#[test]
+fn exports_dir_falls_back_to_the_shared_fixtures_dir() {
+    assert_eq!(
+        exports_dir_from(None, Some("/fixtures".into())),
+        Some(PathBuf::from("/fixtures/_runs/sweep5b-2026-10-16"))
+    );
+}
+
+#[test]
+fn exports_dir_is_none_when_neither_env_var_is_set() {
+    assert_eq!(exports_dir_from(None, None), None);
 }
 
 /// The secrets problems of `name`.zip, with the PDF's rendered text checked too.
-fn secrets_problems(name: &str) -> Vec<Problem> {
-    let path = exports_dir().join(format!("{name}.zip"));
+fn secrets_problems(dir: &Path, name: &str) -> Vec<Problem> {
+    let path = dir.join(format!("{name}.zip"));
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let entries = camerata_server::release_gate::read_zip_entries(&bytes).expect("a zip");
     let pdf_text = entries
@@ -55,8 +106,9 @@ fn located<'a>(problems: &'a [Problem], file: &str, location: &str) -> Option<&'
 #[test]
 #[ignore = "reads the sweep exports outside the repo; run by hand"]
 fn acceptance_known_leaks_are_flagged_in_the_old_exports() {
+    let dir = require_exports!();
     // ---- faktura: one real Supabase secret key (51 chars) in findings.json and the workbook ----
-    let faktura = secrets_problems("faktura");
+    let faktura = secrets_problems(&dir, "faktura");
     for (file, location) in [
         ("findings.json", "findings[0].snippet"),
         ("findings.json", "findings[0].fix_specific"),
@@ -91,7 +143,7 @@ fn acceptance_known_leaks_are_flagged_in_the_old_exports() {
     );
 
     // ---- hearth: four real secrets, all on the one merged row findings[1] -------------------
-    let hearth = secrets_problems("hearth");
+    let hearth = secrets_problems(&dir, "hearth");
     for (location, prefix, length) in [
         ("findings[1].snippet", "sb_secret_", "(42 chars)"),
         ("findings[1].fix_specific", "sb_secret_", "(42 chars)"),
@@ -147,7 +199,8 @@ fn acceptance_known_leaks_are_flagged_in_the_old_exports() {
 #[test]
 #[ignore = "reads the sweep exports outside the repo; run by hand"]
 fn acceptance_portal_placeholders_stay_readable_and_the_secrets_check_is_clean() {
-    let portal = secrets_problems("supabase-portal-fixture");
+    let dir = require_exports!();
+    let portal = secrets_problems(&dir, "supabase-portal-fixture");
     assert!(
         portal.is_empty(),
         "the portal fixture's values are placeholders (DO_NOT / FAKE / your...here), which stay \

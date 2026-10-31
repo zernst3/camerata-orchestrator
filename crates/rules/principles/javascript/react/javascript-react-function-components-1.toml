@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-FUNCTION-COMPONENTS-1"
-version = 1
+version = 3
 title = "React component style: function components with hooks, or class components"
 domain = "javascript:react"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://react.dev/reference/react/Component"
-title = "React docs — Component (class): 'We recommend defining components as functions instead of classes'"
+title = "React docs: Component (class): 'We recommend defining components as functions instead of classes'"
 
 [decision]
 question = "What style does the project use to write React components: function components with hooks, or class components?"
@@ -22,7 +22,7 @@ id = "components-are-functions-using-hooks-not-classes"
 label = "write components as functions using hooks"
 directive = "Components are written as functions that use hooks for state and lifecycle. The one structural exception is an error boundary, which currently requires a class; it is isolated as a small, single-purpose wrapper rather than becoming a pattern that pulls other logic back into class form."
 remediation = """
-Convert the class component to a function component using hooks for state and lifecycle (useState, useEffect, and the rest), keeping only a genuinely required error boundary as a small, isolated class. Verify by confirming the component's state and lifecycle behavior are unchanged after the conversion and no this.state or lifecycle method remains outside the error boundary.
+Convert the class component to a function component using hooks for state and lifecycle (useState, useEffect and the rest), keeping only a genuinely required error boundary as a small, isolated class. Verify by confirming the component's state and lifecycle behavior are unchanged after the conversion and no this.state or lifecycle method remains outside the error boundary.
 """
 why = "Keeps a component's state and effect logic inline and lets reusable logic be lifted into custom hooks, and it is the shape React's tooling and newer APIs are built around, so a reviewer reads every component the same way. The strongest fit for new code on modern React; the one form it still cannot express is an error boundary, which remains a small class wrapper until an official hook equivalent ships."
 

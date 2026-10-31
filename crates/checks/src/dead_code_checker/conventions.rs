@@ -142,7 +142,7 @@ const PYTHON_DIRS: &[&str] = &[
     "fixtures",
 ];
 
-pub(super) struct Conventions<'a> {
+pub(crate) struct Conventions<'a> {
     packages: &'a Packages,
     frameworks: HashMap<String, Frameworks>,
     manifest_dirs: ManifestDirs,
@@ -166,7 +166,7 @@ fn relative_to<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
 }
 
 impl<'a> Conventions<'a> {
-    pub(super) fn new(files: &[(String, String)], packages: &'a Packages) -> Self {
+    pub(crate) fn new(files: &[(String, String)], packages: &'a Packages) -> Self {
         let mut by_dir: HashMap<&str, Vec<&str>> = HashMap::new();
         for (path, _) in files {
             by_dir.entry(dir_of(path)).or_default().push(basename(path));
@@ -239,7 +239,9 @@ impl<'a> Conventions<'a> {
         in_any_depth_tool_dir(path) || self.in_tool_directory(path)
     }
 
-    fn framework_loads(&self, path: &str) -> bool {
+    /// Whether a web framework's file-system router loads `path` by itself (a Next.js page or
+    /// layout, a Remix or TanStack route, an Astro or Gatsby page, ...).
+    pub(crate) fn framework_loads(&self, path: &str) -> bool {
         let package_dir = self.packages.nearest(path).map_or("", |p| p.dir.as_str());
         let Some(fw) = self.frameworks.get(package_dir) else {
             return false;

@@ -416,7 +416,7 @@ async fn run_loop(
         }
 
         // ── Call the provider ──────────────────────────────────────────────
-        let resp = call_provider(
+        let resp = match call_provider(
             driver,
             system_prompt.as_deref(),
             &messages,
@@ -424,7 +424,24 @@ async fn run_loop(
             bust_cache_this_turn,
         )
         .await
-        .with_context(|| format!("provider call failed on iteration {iteration}"))?;
+        {
+            Ok(resp) => resp,
+            // A model REFUSAL mid-run is not a broken call: the earlier turns already did
+            // (and paid for) real work. End the run with an explicit refused outcome that
+            // keeps the cost and the assistant output so far, instead of discarding it all.
+            Err(e) if crate::llm::is_refusal(&e) => {
+                // The refused call was billed too: its cost belongs in the run's total.
+                if let Some(c) = crate::llm::refusal_billed(&e).and_then(|b| b.cost_usd) {
+                    total_cost_usd += c;
+                }
+                final_result = refused_result(iteration, &messages);
+                break;
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("provider call failed on iteration {iteration}"))
+            }
+        };
         // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
         bust_cache_this_turn = false;
 
@@ -513,6 +530,36 @@ async fn run_loop(
         },
         denials,
     })
+}
+
+/// The outcome text for a run the model refused part-way: it starts with `INCOMPLETE:` (the
+/// marker delegates and fan-out already read as "this work did not finish", so a parent never
+/// mistakes it for a result), names the refusal and the turn it happened on, and carries every
+/// piece of assistant text produced before it so nothing the run already did is lost.
+fn refused_result(turn: usize, messages: &[Value]) -> String {
+    let mut partial: Vec<String> = Vec::new();
+    for m in messages.iter().filter(|m| m["role"] == "assistant") {
+        match &m["content"] {
+            Value::String(t) if !t.trim().is_empty() => partial.push(t.clone()),
+            Value::Array(blocks) => {
+                for b in blocks.iter().filter(|b| b["type"] == "text") {
+                    if let Some(t) = b["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                        partial.push(t.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = format!(
+        "INCOMPLETE: the model REFUSED the request (stop_reason: refusal) on turn {turn}; \
+         the run ended there."
+    );
+    if !partial.is_empty() {
+        out.push_str("\n\nAssistant output before the refusal:\n");
+        out.push_str(&partial.join("\n\n"));
+    }
+    out
 }
 
 // ─── tool-result feedback (per-shape) ──────────────────────────────────────────
@@ -919,6 +966,9 @@ fn build_anthropic_request_body(
         body["tool_choice"] = serde_json::json!({"type": "auto"});
     }
 
+    // The one place a body is made valid for its model (effort default, rejected fields).
+    crate::model_registry::conform_messages_body(model, &mut body);
+
     (body, use_caching)
 }
 
@@ -971,6 +1021,11 @@ async fn call_anthropic_with_tools(
 
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("parse Anthropic response JSON: {e}"))?;
+    // `stop_reason: "refusal"` arrives with HTTP 200 and no usable content. Parsed as a
+    // normal turn it would be an empty final answer; fail the turn instead.
+    if let Some(refusal) = crate::llm::refusal_error(&v) {
+        return Err(refusal);
+    }
 
     // Pass the FULL response object through as `text`: it has the `content` array the
     // normalizer's Anthropic branch reads (`content[].type=="tool_use"` / `"text"`).
@@ -1951,7 +2006,7 @@ fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
 /// tool constraints. This is THE system prompt for every OpenRouter/API in-process loop — the
 /// path open-weight models arrive through — so it is the single highest-impact insertion point
 /// for the operating protocol. See the hardened rewrite 3.5 in
-/// `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md`.
+/// the prompt-hardening and governance-kernel notes.
 ///
 /// `model` pins the kernel's per-tier addendum (`kernel_for(model)`); an empty model falls back
 /// to the base [`camerata_app_core::GOVERNANCE_KERNEL`] with no addendum.
@@ -3719,6 +3774,101 @@ mod tests {
         );
     }
 
+    /// First call: a tool call with some assistant prose and a cost. Second call: the model
+    /// REFUSES (`stop_reason: "refusal"`, surfaced by the transport as a typed error).
+    struct RefusesOnSecondCall {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for RefusesOnSecondCall {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n > 0 {
+                return Err(crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal"
+                }))
+                .expect("a refusal stop_reason is an error"));
+            }
+            let tc = serde_json::json!({
+                "message": {
+                    "role": "assistant",
+                    "content": "Looking at the target path first.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "gated_write",
+                            "arguments": serde_json::json!({
+                                "path": "forbidden/config.rs", "content": "// x"
+                            }).to_string()
+                        }
+                    }]
+                }
+            });
+            Ok(LlmResponse {
+                text: tc.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: Some(0.002),
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let r = self.complete(req).await?;
+            on_delta(&r.text);
+            Ok(r)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A refusal on a later turn ends the run with an explicit refused outcome that KEEPS the
+    /// cost and denials of the earlier turns and the assistant text so far, instead of
+    /// aborting the whole run with an error.
+    #[tokio::test]
+    async fn a_mid_run_refusal_ends_the_run_keeping_cost_and_partial_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let role = all_rules_role();
+        let driver = ApiAgentDriver::new(
+            Arc::new(RefusesOnSecondCall {
+                calls: Default::default(),
+            }),
+            "stub-model",
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .with_worktree(tmp.path().to_path_buf());
+
+        let outcome = driver
+            .run(&role, "write something")
+            .await
+            .expect("a refusal is an outcome, not an Err");
+        assert!(
+            outcome.result.starts_with("INCOMPLETE:"),
+            "{}",
+            outcome.result
+        );
+        assert!(outcome.result.contains("REFUSED"), "{}", outcome.result);
+        assert!(outcome.result.contains("turn 2"), "{}", outcome.result);
+        assert!(
+            outcome.result.contains("Looking at the target path first."),
+            "partial output kept: {}",
+            outcome.result
+        );
+        assert_eq!(outcome.cost_usd, Some(0.002), "earlier turns' cost kept");
+        assert!(!outcome.denials.is_empty(), "earlier turns' denials kept");
+    }
+
     /// Phase H2: the SAME denied write ALSO lands as a durable `gate_deny` row in an
     /// injected [`camerata_persistence::GovernanceLog`] — not just the in-memory
     /// `AgentOutcome.denials` the test above covers. Proves the wiring end-to-end:
@@ -4362,6 +4512,44 @@ mod tests {
         // No tools → no tools/tool_choice keys.
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    /// The agentic request (tools + tool_choice) for every strict model: no rejected field,
+    /// `tool_choice` stays the valid `auto`, and the effort default is pinned to `high` where
+    /// the model defaults lower.
+    #[test]
+    fn anthropic_agent_request_is_valid_for_every_new_model() {
+        let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "do it"}),
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "x", "input": {}}
+            ]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]}),
+        ];
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            let (body, _) =
+                build_anthropic_request_body(model, Some("You are governed."), &messages, &schemas);
+            for key in ["thinking", "temperature", "top_p", "top_k"] {
+                assert!(body.get(key).is_none(), "{model}: `{key}` must not be sent");
+            }
+            assert_eq!(body["tool_choice"]["type"], "auto", "{model}");
+            assert_eq!(body["messages"].as_array().unwrap().len(), 3, "{model}");
+            assert_eq!(body["messages"][2]["role"], "user", "{model}: no prefill");
+            let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
+            assert_eq!(
+                body["output_config"]["effort"] == "high",
+                wants_high,
+                "{model}: effort"
+            );
+        }
     }
 
     // ── Anthropic shape: Layer-2 grounding cache breakpoint ───────────────────

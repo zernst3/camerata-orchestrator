@@ -127,6 +127,22 @@ struct ProjectView {
     /// default as a freshly-created project.
     #[serde(default)]
     backend: ProjectBackend,
+    /// Who the inspection is for (part of the inspection setup): fills the confidentiality line
+    /// on every page and sheet of the export, and a blank one blocks the export. Absent from an
+    /// older server -> empty.
+    #[serde(default)]
+    client_name: String,
+    /// The project is a client engagement (`camerata_server::client_lock`). Absent → on, the
+    /// server's own default for a project persisted before the field existed.
+    #[serde(default = "default_client_engagement")]
+    client_engagement: bool,
+    /// The operator's opt-in to run the client's own tooling for this engagement. Absent → off.
+    #[serde(default)]
+    client_tooling_opt_in: bool,
+}
+
+fn default_client_engagement() -> bool {
+    true
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -157,7 +173,7 @@ fn default_true_op() -> bool {
 }
 
 /// One work-item TYPE in a project's hierarchy schema, as the BFF reports it (mirrors the server's
-/// `WorkType`). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// `WorkType`). See the epic design page notes §3.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct WorkTypeView {
     name: String,
@@ -330,6 +346,7 @@ use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
 use camerata_api_types::project::ProjectBackend;
 use camerata_api_types::project::StallThresholds as StallThresholdsView;
 use camerata_api_types::project::StepModels as StepModelsView;
+use camerata_api_types::project::{ReviewOnError, ReviewTier, MAX_L3_FIX_ROUNDS};
 use camerata_ui_core::backend::ProjectBackendExt;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
@@ -350,15 +367,15 @@ struct TierMapView {
 }
 
 fn default_fast_chain_str() -> Vec<String> {
-    vec!["claude-haiku-4-5-20251001".to_string()]
+    vec!["claude-haiku-5-5".to_string()]
 }
 
 fn default_balanced_chain_str() -> Vec<String> {
-    vec!["claude-sonnet-5".to_string()]
+    vec!["claude-sonnet-5-5".to_string()]
 }
 
 fn default_strongest_model_str() -> String {
-    "claude-opus-5".to_string()
+    "claude-opus-5-5".to_string()
 }
 
 impl Default for TierMapView {
@@ -572,6 +589,43 @@ pub(super) async fn set_project_backend(
     serde_json::from_value(body.get("project")?.get("backend")?.clone()).ok()
 }
 
+/// Set whether a project is a client engagement and whether the operator opts in to running the
+/// client's own tooling (`POST /api/projects/:id/client-engagement`, see
+/// `set_client_engagement_handler`). Like [`set_project_backend`], this is compliance-relevant, so
+/// it returns the server's ECHOED `(client_engagement, client_tooling_opt_in)`, never the values
+/// asked for. `None` on any failure.
+pub(super) async fn set_project_client_engagement(
+    id: &str,
+    client_engagement: bool,
+    client_tooling_opt_in: bool,
+) -> Option<(bool, bool)> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/client-engagement",
+            crate::bff_base(),
+            id
+        ))
+        .json(&serde_json::json!({
+            "client_engagement": client_engagement,
+            "client_tooling_opt_in": client_tooling_opt_in,
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let project = body.get("project")?;
+    Some((
+        project.get("client_engagement")?.as_bool()?,
+        project.get("client_tooling_opt_in")?.as_bool()?,
+    ))
+}
+
 /// Set the model for ONE non-fleet AI step on a project. Uses the
 /// `POST /api/projects/:id/step-models` endpoint (patch semantics: one step per call). The
 /// `id` is the SCOPED project id passed into the editor — never a global — so the mutation
@@ -622,6 +676,31 @@ async fn set_product_brief(id: &str, brief: &str) -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Save the inspection setup's client name. `Err` carries the server's reason (too long, a line
+/// break, an unknown project) or the transport error, for the caller to toast.
+async fn set_client_name(id: &str, client_name: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/client-name",
+            crate::bff_base(),
+            id
+        ))
+        .json(&serde_json::json!({ "client_name": client_name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if body.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(body
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("The client name was not saved.")
+            .to_string())
+    }
 }
 
 /// Add a project-memory entry (#112, Layer 3) — human-added, persisted as Approved.
@@ -1255,15 +1334,16 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
 }
 
 /// Set the L3 agentic code-review gate configuration for a project.
-/// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
-async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
+/// Uses the `POST /api/projects/:id/l3-review` endpoint (R7). Posts the whole config:
+/// `enabled`, `model` and the reviewer policy (`on_error`, `fix_rounds`, `tier`).
+async fn set_project_l3_review(id: &str, config: &L3ReviewView) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/l3-review",
             crate::bff_base(),
             id
         ))
-        .json(&serde_json::json!({ "enabled": enabled, "model": model }))
+        .json(config)
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1460,8 +1540,9 @@ enum StartRunOutcome {
 /// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`.
 ///
 /// Returns [`StartRunOutcome::Started`] with the run id on success, or
-/// [`StartRunOutcome::Blocked`] (with the gate's reason) when the no-code-first gate
-/// refuses the start because the story's decisions are not all approved. A transport
+/// [`StartRunOutcome::Blocked`] (with the server's reason) when the no-code-first gate
+/// refuses the start because the story's decisions are not all approved, or the unit has
+/// no repository to work in (no Intake repo selected, no local clone). A transport
 /// or decode failure maps to [`StartRunOutcome::Failed`].
 /// Build the request body for a development run:
 /// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`,
@@ -1510,6 +1591,11 @@ async fn start_dev_run(
     tier_map: &TierMapView,
     skip_layer2: bool,
 ) -> StartRunOutcome {
+    // The architect starting development confirms the unit's Intake repo: record its branch
+    // so the run works in that repository (the server refuses a unit with none, with why).
+    if let Err(message) = uow::ensure_run_branch(story_id).await {
+        return StartRunOutcome::Blocked(message);
+    }
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
         .post(format!(
@@ -1701,9 +1787,16 @@ enum HomeView {
 pub fn CockpitShell() -> Element {
     let screen = use_signal(|| CockpitScreen::Projects);
     use_context_provider(|| screen);
-    match screen() {
-        CockpitScreen::Projects => rsx! { ProjectGate {} },
-        CockpitScreen::InProject => rsx! { CockpitApp {} },
+    // The inspection walkthrough's state (shared by the switch, the offer, the Help menu and the
+    // palette), and its popup host. The host draws nothing while the walkthrough is off.
+    crate::walkthrough::provide_tour();
+    rsx! {
+        match screen() {
+            CockpitScreen::Projects => rsx! { ProjectGate {} },
+            CockpitScreen::InProject => rsx! { CockpitApp {} },
+        }
+        crate::walkthrough::HelpMenuListener {}
+        crate::walkthrough::WalkthroughHost {}
     }
 }
 
@@ -1909,6 +2002,8 @@ fn HomeNav(home_view: Signal<HomeView>) -> Element {
                 onclick: move |_| hv.set(HomeView::Docs),
                 "Docs"
             }
+            // No `data-tour` here: the walkthrough's backend step is about the Settings tab INSIDE
+            // a project, and a click on this one (before any project is open) must not advance it.
             button {
                 class: cls(HomeView::Settings),
                 onclick: move |_| hv.set(HomeView::Settings),
@@ -2051,6 +2146,10 @@ fn ProjectsHome() -> Element {
                 p { class: "eyebrow", "Camerata" }
                 h1 { class: "h1", "Your projects" }
                 p { class: "lede", "A project is the container for everything — its repos, ruleset, baseline, and workspace. Open one to begin, or create a new one." }
+                // The one-time first-launch offer of the guided inspection (no projects yet).
+                crate::walkthrough::WalkthroughOffer {
+                    projects: if loading { None } else { Some(list.len()) },
+                }
 
                 if loading {
                     p { class: "pg-empty", "Loading projects\u{2026}" }
@@ -2179,7 +2278,10 @@ fn ProjectsHome() -> Element {
                     }
                 }
 
-                div { class: "pg-create",
+                div {
+                    class: "pg-create",
+                    // The walkthrough's first step points here.
+                    "data-tour": camerata_ui_core::walkthrough::target::PROJECT_NEW,
                     p { class: "section-label", "Create a project" }
                     p { class: "section-hint", "A project starts empty — just a name. You add repos, rules, and everything else from inside it (the way an Azure resource group works)." }
                     div { class: "pg-create-row",
@@ -2259,6 +2361,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             }
             button {
                 class: cls(CockpitView::Onboard),
+                "data-tour": camerata_ui_core::walkthrough::target::NAV_ONBOARD,
                 onclick: move |_| view.set(CockpitView::Onboard),
                 "Onboard repos"
             }
@@ -2294,6 +2397,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             }
             button {
                 class: cls(CockpitView::Credentials),
+                "data-tour": camerata_ui_core::walkthrough::target::SETTINGS,
                 onclick: move |_| view.set(CockpitView::Credentials),
                 "Settings"
             }
@@ -2401,7 +2505,7 @@ fn UsageMeter() -> Element {
 
 /// The `/api/gate-probe` result (#14): the end-to-end gate-loop go/no-go.
 // dead_code: the `GateSelfCheck` box was unmounted from the UoW view by the 3-phase redesign
-// (docs/plans/2026-06-25_uow-3phase-redesign.md section 10: "UI affordance only"); the
+// (the UoW three-phase redesign notes section 10: "UI affordance only"); the
 // component, this view and the fetch are deliberately preserved (see `UowDevControls`).
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -3027,6 +3131,12 @@ fn SettingsView(global_only: bool) -> Element {
                         p { class: "section-label settings-label", "Backend" }
                         rules::BackendEditor { project: p_owned.clone() }
 
+                        // ── Client engagement (per-project) ────────────────────
+                        // Right after the backend: it decides which backends and models this
+                        // project may use at all, and whether its own tooling may run.
+                        p { class: "section-label settings-label", "Client engagement" }
+                        rules::ClientEngagementEditor { project: p_owned.clone() }
+
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
 
@@ -3322,15 +3432,21 @@ fn DocsView() -> Element {
     }
 }
 
+mod decision_cards;
 mod freshness;
 pub mod live_run;
 mod palette;
 mod pane_context;
+mod remediation;
 mod review;
+mod review_findings;
 pub mod rules;
+mod saved_inspections;
 pub mod scan;
 mod stack;
 pub mod table;
+#[cfg(test)]
+mod tour_targets;
 pub mod uow;
 pub mod viewer;
 
@@ -3987,12 +4103,14 @@ mod tests {
                 work_item: Some(wi("github:acme/web#10")),
                 stage: UowStage::Development,
                 authoring: false,
+                source_kind: None,
             },
             UowListEntry {
                 id: "uow-2".to_string(),
                 work_item: Some(wi("github:acme/web#11")),
                 stage: UowStage::Intake,
                 authoring: false,
+                source_kind: None,
             },
         ];
         // A match returns the right UoW (drives "Open Unit of Work").
@@ -4713,6 +4831,40 @@ mod tests {
         assert_eq!(result, Some(ProjectBackend::Api));
     }
 
+    /// `set_project_client_engagement` POSTs both flags and hands back the server's ECHOED
+    /// values (here the server kept the opt-in off), never the values it asked for.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_project_client_engagement_posts_both_flags_and_returns_echoed_values() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/client-engagement"))
+            .and(body_json(serde_json::json!({
+                "client_engagement": true,
+                "client_tooling_opt_in": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project": {
+                    "id": "p-1",
+                    "name": "Acme",
+                    "client_engagement": true,
+                    "client_tooling_opt_in": false,
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_client_engagement("p-1", true, true).await;
+
+        assert_eq!(result, Some((true, false)));
+    }
+
     /// An `{ ok: false, message: "..." }` response (e.g. unknown project id) must NOT be read
     /// as success just because the HTTP status is 200 — `set_project_backend` checks the
     /// `ok` field, not only the status code.
@@ -5008,26 +5160,38 @@ mod tests {
         assert!(ok);
     }
 
-    /// `set_project_l3_review` POSTs {enabled, model}.
+    /// `set_project_l3_review` POSTs the whole config: enabled, model and the reviewer policy.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn set_project_l3_review_posts_enabled_and_model() {
+    async fn set_project_l3_review_posts_enabled_model_and_reviewer_policy() {
+        use camerata_api_types::project::{ReviewOnError, ReviewTier};
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/l3-review"))
-            .and(body_json(
-                serde_json::json!({ "enabled": true, "model": "claude-opus-5" }),
-            ))
+            .and(body_json(serde_json::json!({
+                "enabled": true,
+                "model": "claude-opus-5",
+                "on_error": "fail_closed",
+                "fix_rounds": 1,
+                "tier": "strongest"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_l3_review("p-1", true, "claude-opus-5").await;
+        let config = super::L3ReviewView {
+            enabled: true,
+            model: "claude-opus-5".to_string(),
+            on_error: ReviewOnError::FailClosed,
+            fix_rounds: 1,
+            tier: ReviewTier::Strongest,
+        };
+        let ok = super::set_project_l3_review("p-1", &config).await;
 
         assert!(ok);
     }
@@ -5491,6 +5655,189 @@ mod tests {
                 assert_eq!(reason, "Decisions are not all approved.")
             }
             _ => panic!("expected Blocked"),
+        }
+    }
+
+    /// Mount `GET /api/uow/:id` returning a unit with `branch` and Intake `repos`.
+    async fn mount_uow(
+        server: &wiremock::MockServer,
+        story: &str,
+        branch: Option<&str>,
+        repos: serde_json::Value,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path(format!("/api/uow/{story}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": story,
+                "branch": branch,
+                "intake": { "context": "", "repos": repos },
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Gap 1: starting development records the unit's branch from its single Intake repo
+    /// (`POST /api/uow/:id/branch`) before the run starts, so the server's brownfield
+    /// implementer works in that repository instead of the greenfield scaffolder.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_records_the_intake_branch_before_starting() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(
+            &server,
+            "s-9",
+            None,
+            serde_json::json!([{ "repo": "acme/api",
+                "branch": { "mode": "new_from_base", "base": "main", "new_name": "" } }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-9/branch"))
+            .and(body_json(serde_json::json!({ "branch": "camerata/s-9" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-9/run"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-9" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("s-9", &TierMapView::default(), false).await;
+
+        assert!(matches!(outcome, StartRunOutcome::Started(ref id) if id == "run-9"));
+    }
+
+    /// Gap 1: a unit with no Intake repo records no branch, and the server's refusal reason
+    /// reaches the console as `Blocked(reason)` instead of a silent scaffold.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_without_an_intake_repo_surfaces_the_no_repository_reason() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(&server, "s-10", None, serde_json::json!([])).await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-10/branch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-10/run"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "This unit of work has no repository selected."
+            })))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("s-10", &TierMapView::default(), false).await;
+
+        match outcome {
+            StartRunOutcome::Blocked(reason) => assert!(reason.contains("no repository")),
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    /// A branch already recorded (an earlier run committed to it) is kept, not re-derived.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_keeps_an_already_recorded_branch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(
+            &server,
+            "s-11",
+            Some("feature/earlier"),
+            serde_json::json!([{ "repo": "acme/api",
+                "branch": { "mode": "new_from_base", "base": "main", "new_name": "" } }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-11/branch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-11/run"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "r" })),
+            )
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let _ = super::start_dev_run("s-11", &TierMapView::default(), false).await;
+    }
+
+    /// When the server refuses the branch record (400 invalid name, 409 repo outside the
+    /// project), starting development surfaces ITS message as the blocked reason and does not
+    /// start a run that cannot work.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_surfaces_the_servers_branch_refusal_and_starts_no_run() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (status, reason) in [
+            (400u16, "`..` is not a valid branch name: it contains `..`."),
+            (
+                409u16,
+                "This unit of work belongs to `other/web`, which is not one of the active project's repositories.",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount_uow(
+                &server,
+                "s-12",
+                None,
+                serde_json::json!([{ "repo": "acme/api",
+                    "branch": { "mode": "existing", "branch_name": ".." } }]),
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path("/api/uow/s-12/branch"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "reason": reason })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/stories/s-12/run"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "r" })),
+                )
+                .expect(0)
+                .mount(&server)
+                .await;
+
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let outcome = super::start_dev_run("s-12", &TierMapView::default(), false).await;
+
+            match outcome {
+                StartRunOutcome::Blocked(message) => assert_eq!(message, reason),
+                _ => panic!("expected Blocked with the server's reason for HTTP {status}"),
+            }
         }
     }
 

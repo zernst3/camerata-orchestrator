@@ -1,5 +1,5 @@
 id = "UI-AUTH-TOKEN-STORAGE-1"
-version = 1
+version = 4
 title = "Session and auth tokens never live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, a non-HttpOnly cookie); they live in an HttpOnly, Secure, SameSite cookie"
 domain = "ui"
 layer = "universal"
@@ -16,11 +16,11 @@ title = "CWE-522: Insufficiently Protected Credentials"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"
-title = "OWASP Session Management Cheat Sheet — cookie attributes: HttpOnly (not accessible via JavaScript), Secure (HTTPS only), SameSite (CSRF mitigation)"
+title = "OWASP Session Management Cheat Sheet: cookie attributes: HttpOnly (not accessible via JavaScript), Secure (HTTPS only), SameSite (CSRF mitigation)"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html#local-storage"
-title = "OWASP HTML5 Security Cheat Sheet — Local Storage: 'do not store... sensitive data in local storage due to the lack of security'"
+title = "OWASP HTML5 Security Cheat Sheet: Local Storage: 'do not store... sensitive data in local storage due to the lack of security'"
 
 [decision]
 question = "Does every session/auth/refresh token live only in an HttpOnly, Secure, SameSite cookie set by the server, or does any such credential ever live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, or a cookie set without HttpOnly)?"
@@ -49,20 +49,10 @@ between requests, a distinct storage-location question from how it travels in an
 [[option]]
 id = "httponly-secure-samesite-cookie-only"
 label = "Session/auth/refresh tokens live only in an HttpOnly, Secure, SameSite cookie set by the server"
-directive = """
-Access tokens, refresh tokens, and session identifiers are set only via a server response's Set-Cookie header
-carrying the HttpOnly attribute (so no client-side JavaScript, including a compromised third-party script, can read
-the value even under XSS), the Secure attribute (sent only over HTTPS), and an explicit SameSite value (Lax for
-most applications, Strict where the UX cost is acceptable, with any cross-site requirement handled by a
-CSRF-token-plus-SameSite=None combination rather than omitting SameSite). No client-side code ever calls
-localStorage.setItem, sessionStorage.setItem, or an IndexedDB write with a token value, and no cookie carrying a
-credential is ever set via document.cookie (which cannot carry HttpOnly). If a client-visible value is genuinely
-needed (a non-sensitive flag indicating "is logged in," for UI branching only, with no capability of its own), it
-is an inert boolean/flag, never the token or a value derived from it that could be replayed.
-"""
+directive = "Access tokens, refresh tokens and session identifiers are set only via a server response's Set-Cookie header carrying the HttpOnly attribute (so no client-side JavaScript, including a compromised third-party script, can read the value even under XSS), the Secure attribute (sent only over HTTPS) and an explicit SameSite value (Lax for most applications, Strict where the UX cost is acceptable, with any cross-site requirement handled by a CSRF-token-plus-SameSite=None combination rather than omitting SameSite). No client-side code ever calls localStorage.setItem, sessionStorage.setItem or an IndexedDB write with a token value, and no cookie carrying a credential is ever set via document.cookie (which cannot carry HttpOnly). If a client-visible value is genuinely needed (a non-sensitive flag indicating \"is logged in,\" for UI branching only, with no capability of its own), it is an inert boolean/flag, never the token or a value derived from it that could be replayed."
 remediation = """
-Move the session/auth/refresh token out of localStorage, sessionStorage, IndexedDB, or a non-HttpOnly cookie, and
-set it instead via the server's Set-Cookie response header with HttpOnly, Secure, and an explicit SameSite
+Move the session/auth/refresh token out of localStorage, sessionStorage, IndexedDB or a non-HttpOnly cookie and
+set it instead via the server's Set-Cookie response header with HttpOnly, Secure and an explicit SameSite
 attribute. Update client-side request code to rely on the browser's automatic cookie attachment rather than reading
 the token value and attaching it manually (which requires the value to be JS-readable, defeating the point).
 Verify by attempting to read the cookie's value via document.cookie or any Web Storage API from the browser console
@@ -84,4 +74,4 @@ id = "cookie-set-via-client-side-javascript-no-httponly"
 violates = true
 label = "Set the session cookie via client-side JavaScript (document.cookie) rather than a server Set-Cookie header"
 directive = "After receiving a token from the login response body, client-side JavaScript sets it as a cookie via document.cookie, rather than the server setting it directly via a Set-Cookie response header."
-why = "Rejected: a cookie set via document.cookie can never carry the HttpOnly attribute — only a server's Set-Cookie response header can set it — so this pattern produces a cookie that LOOKS like the safer storage mechanism while remaining exactly as JS-readable (and therefore XSS-exfiltrable) as localStorage. The token must be set directly by the server's response header to actually gain HttpOnly's protection."
+why = "Rejected: a cookie set via document.cookie can never carry the HttpOnly attribute (only a server's Set-Cookie response header can set it) so this pattern produces a cookie that LOOKS like the safer storage mechanism while remaining exactly as JS-readable (and therefore XSS-exfiltrable) as localStorage. The token must be set directly by the server's response header to actually gain HttpOnly's protection."

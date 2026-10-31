@@ -47,7 +47,7 @@ npm-debug.log*
 
 # Rust
 /target
-# cargo-mutants output (mutation testing runs; see docs/plans/2026-10-22_post-v1-roadmap.md §4)
+# cargo-mutants output (mutation testing runs; see the post-V1 roadmap notes §4)
 mutants.out*/
 
 # audio experiment assets

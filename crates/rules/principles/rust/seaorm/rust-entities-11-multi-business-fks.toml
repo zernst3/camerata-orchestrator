@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-11"
-version = 1
+version = 3
 title = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 domain = "rust:seaorm"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction?"
+question = "How are SeaORM relations declared when a child has two or more business foreign keys to the same parent?"
 default = "two-or-more-business-fks-to-the-same-parent-both"
 why = "Both directions get type-checked, self-documenting Rust-side traversal, and role-named variants make the relation self-documenting. Uses the macro's one-impl-per-pair limit constructively. Keeping only one belongs_to and storing the other role as a plain column loses SeaORM's relation-based traversal (find_related, relation-driven joins) for the second role, which is exactly the ergonomic benefit the rule exists to give to both business FKs equally — note this is a Rust-side navigation loss, not a database-enforcement loss: a plain Uuid column can and should still carry its own REFERENCES constraint at the DB layer regardless of whether an ORM relation is declared for it. Dropping the reverse has_many for one role works mechanically but business FKs are routinely traversed from both sides (a requester's open requests, a reviewer's pending reviews), so the missing direction becomes inline-join boilerplate at every reverse-traversal call site. Picking impl Related arbitrarily compiles fine but reads worse, because the principal semantic role makes the relation self-documenting and routing impl Related to the secondary role inverts that signal."
 
@@ -43,8 +43,8 @@ why = "Compiles fine but reads worse: the principal semantic role makes the rela
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"
-title = "SeaORM docs: Complex Relations — Diamond Relations (multiple FKs to same target entity, disambiguated via relation_enum/via_rel)"
+title = "SeaORM docs: Complex Relations: Diamond Relations (multiple FKs to same target entity, disambiguated via relation_enum/via_rel)"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/advanced-query/custom-joins/"
-title = "SeaORM docs: Custom Joins (Linked trait) — an alternative when Related cannot express multiple join paths between the same two entities"
+title = "SeaORM docs: Custom Joins (Linked trait): an alternative when Related cannot express multiple join paths between the same two entities"

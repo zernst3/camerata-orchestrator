@@ -272,6 +272,12 @@ impl CacheModel {
     }
 }
 
+/// The delimiter token of the one audit run these calls belong to. `audit_repo` hands the same
+/// token to every routing group, which is what lets a second group reuse the first one's digest.
+fn run_nonce() -> crate::prompt_frame::FrameNonce {
+    crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef")
+}
+
 async fn scan(llm: &CacheModelLlm, n_chunks: usize, n_batches: usize, concurrency: usize) {
     let chunk_files: Vec<Vec<(String, String)>> = (0..n_chunks)
         .map(|n| {
@@ -290,11 +296,13 @@ async fn scan(llm: &CacheModelLlm, n_chunks: usize, n_batches: usize, concurrenc
         llm,
         REPO,
         REPO_MAP,
+        &run_nonce(),
         &std::collections::HashSet::new(),
         None,
         None,
         None,
         &chunks,
+        None,
         &batches,
         concurrency,
         "pass[all]",
@@ -303,7 +311,7 @@ async fn scan(llm: &CacheModelLlm, n_chunks: usize, n_batches: usize, concurrenc
         false,
     )
     .await;
-    assert!(err.is_none(), "{err:?}");
+    assert!(err.is_empty(), "{err:?}");
     assert_eq!(ok, n_chunks * n_batches);
 }
 
@@ -378,11 +386,13 @@ async fn a_second_routing_group_reads_the_first_groups_digest() {
         &llm,
         REPO,
         REPO_MAP,
+        &run_nonce(),
         &std::collections::HashSet::new(),
         None,
         None,
         None,
         &chunks,
+        None,
         &batches,
         6,
         "pass[web]",

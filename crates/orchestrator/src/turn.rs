@@ -1,7 +1,7 @@
 //! The orchestrator TURN: `handle_turn` drives one change-request round-trip for an
 //! EXISTING scaffolded project, end to end.
 //!
-//! See `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`, the
+//! See the product-owner vibe-mode design notes, the
 //! "Architect-orchestrator design (decided 2026-07-10)" section. This module is the
 //! crate's own doc's promised "later phase": "The orchestrator LOOP that calls
 //! [`crate::classify`] on every proposed action, drives the fleet, and records the
@@ -100,13 +100,23 @@ pub enum Interpretation {
 /// Interprets a change-request message into a structural [`Interpretation`], given
 /// the project's living spec as context. Object-safe (`&dyn TurnLlm`) so production
 /// can pass the real model while tests inject a fake.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait TurnLlm: Send + Sync {
-    async fn interpret(
-        &self,
-        spec: &crate::spec::LivingSpec,
-        message: &str,
-    ) -> anyhow::Result<Interpretation>;
+    fn interpret<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        spec: &'life1 crate::spec::LivingSpec,
+        message: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Interpretation>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── the execution seam ─────────────────────────────────────────────────────────
@@ -125,9 +135,25 @@ pub struct ExecutionSummary {
 /// Drives the REAL governed execution seam for a proposed change. Object-safe so
 /// production can wrap `start_governed_run` while tests inject a fake that never
 /// touches a filesystem or spawns a fleet.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait TurnExecutor: Send + Sync {
-    async fn execute(&self, change: &ProposedChange) -> anyhow::Result<ExecutionSummary>;
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        change: &'life1 ProposedChange,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<ExecutionSummary>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── decision recording ─────────────────────────────────────────────────────────
@@ -150,9 +176,18 @@ pub struct RecordedDecisionInput {
 /// attached (`None` is a legitimate, fail-soft outcome — see
 /// `AppState::record_orchestrator_decision`'s contract in `camerata-server`; a
 /// missing decision store never blocks the turn itself).
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait DecisionRecorder: Send + Sync {
-    async fn record(&self, decision: RecordedDecisionInput) -> Option<i64>;
+    fn record<'life0, 'async_trait>(
+        &'life0 self,
+        decision: RecordedDecisionInput,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<i64>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// A recorded decision, echoed back on [`TurnOutcome`] so a caller can show "what it

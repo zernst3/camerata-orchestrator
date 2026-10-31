@@ -56,7 +56,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         why: "w".to_string(),
         violates: true,
     };
-    let mut selected = vec![("ARCH-X-1".to_string(), "d".to_string())];
+    let mut selected = vec![crate::scan_routing::AuditRule::new("ARCH-X-1", "d")];
     let evidence = format!(".env:3 {}", p.text);
     let reasoning = format!("because {}", p.value);
     let violating = apply_alternative_decision(
@@ -84,6 +84,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         kind: None,
     }];
     let rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-X-1".to_string(),
         recommended_option_id: "good".to_string(),
         recommendation_reasoning: reasoning.clone(),
@@ -96,6 +97,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
     assert!(!leaks(&convention[0], &p), "convention-observed row leaked");
 
     let no_conv_rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-Y-1".to_string(),
         no_convention: true,
         recommendation_reasoning: reasoning,
@@ -221,9 +223,10 @@ impl Stub {
 #[async_trait::async_trait]
 impl LlmPort for Stub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
-            text: self.text.clone(),
+            text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -304,6 +307,38 @@ async fn fix_specific_prompt_carries_no_secret_value_and_forbids_repeating_one()
     );
 }
 
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn fix_specific_entry_point_redacts_raw_files_before_the_model_reads_them() {
+    // The caller hands over the RAW scanned files, as `onboard` does. The entry point itself
+    // must route them through `files_for_model` before building the context window.
+    let p = secret();
+    let mut finding = raw_finding(&p, 3);
+    finding.fix_specific = None;
+    crate::onboard::redact::redact_finding(&mut finding);
+    let raw_files = vec![(".env".to_string(), format!("# top\n\n{}\n", p.text))];
+    let stub = Stub::new(r#"{"fixes":[]}"#);
+    let _ = generate_fix_specifics(
+        &stub,
+        "acme/app",
+        vec![finding],
+        &raw_files,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let sent = stub.everything_sent();
+    assert!(
+        !sent.contains(&p.value),
+        "generate_fix_specifics sent the raw file to the model"
+    );
+    assert!(
+        sent.contains("sb_secret_…"),
+        "the redacted form is what the model sees"
+    );
+}
+
 // ---- model-prompt redaction (section 5): every builder, end to end ------------------------
 
 /// A repo whose `.env` holds the planted secret on line 3 and whose source quotes it again.
@@ -336,10 +371,10 @@ fn two_options() -> Vec<RuleAlternatives> {
 #[test]
 fn build_digest_over_files_for_model_contains_no_secret_value() {
     let p = secret();
-    let digest = build_digest(&crate::onboard::redact::files_for_model_with(
-        &leaky_repo(&p),
-        true,
-    ));
+    let digest = build_digest(
+        &crate::onboard::redact::files_for_model_with(&leaky_repo(&p), true),
+        &crate::prompt_frame::FrameNonce::generate(),
+    );
     assert!(!digest.contains(&p.value), "the digest carried the value");
     assert!(
         digest.contains("sb_secret_\u{2026}"),
@@ -369,7 +404,7 @@ async fn audit_repo_passes_alternatives_and_calibration_prompts_contain_no_secre
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &two_options(),
         &std::collections::HashMap::new(),
         None,
@@ -447,7 +482,7 @@ async fn model_prompt_redaction_flag_off_sends_raw_and_warns() {
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &[],
         &std::collections::HashMap::new(),
         None,

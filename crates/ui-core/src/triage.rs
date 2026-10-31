@@ -257,8 +257,44 @@ pub struct FindingView {
     /// AI-judged findings.
     #[serde(default)]
     pub captures: std::collections::BTreeMap<String, String>,
+    /// The server's semantic category (`secret-exposure`, `authorization`, ...), mirrored from
+    /// `camerata_server::onboard::Finding::category`. `None` for a deterministic finding the
+    /// server never classified. Read only through [`FindingView::is_secret_exposure`].
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+}
+
+impl FindingView {
+    /// True when this finding is about a leaked credential: the server classed it
+    /// `secret-exposure` (the model's rows, and the floor's hardcoded-secret rule), or its rule
+    /// id names a secret, a token, a private key or the Supabase service-role key. The rule-id
+    /// test is not a fallback: the floor's private-key and vendor-token rows carry NO category
+    /// on purpose (on the server a category is a merge key, and two credentials a few lines
+    /// apart must stay two rows), so this is the one place they are recognised. The snippet of
+    /// such a finding is redacted, so two of them in different repos can look identical while
+    /// describing different credentials. Decision memory uses this to keep them apart.
+    pub fn is_secret_exposure(&self) -> bool {
+        if self.category.as_deref() == Some("secret-exposure") {
+            return true;
+        }
+        let id = self.rule_id.to_ascii_uppercase();
+        let words: Vec<&str> = id.split('-').collect();
+        let word_starts = |t: &str| words.iter().any(|w| w.starts_with(t));
+        word_starts("SECRET")
+            || word_starts("HARDCODED")
+            || word_starts("CREDENTIAL")
+            || word_starts("APIKEY")
+            || word_starts("PASSWORD")
+            || word_starts("TOKEN")
+            || ["API-KEY", "PRIVATE-KEY", "VENDOR-TOKEN", "SUPABASE-KEY"]
+                .iter()
+                .any(|run| {
+                    let run: Vec<&str> = run.split('-').collect();
+                    words.windows(run.len()).any(|w| w == run.as_slice())
+                })
+    }
 }
 
 /// One evidence site absorbed into a merged finding — the view-model mirror of
@@ -299,7 +335,7 @@ pub fn site_count(f: &FindingView) -> usize {
 }
 
 /// Which of the curator workbench's four kind surfaces a finding row belongs on
-/// (`docs/plans/2026-10-11_pass2-curator-ui-design.md` §1-§2).
+/// (the pass-2 curator UI design notes §1-§2).
 ///
 /// The split is NOT a UI taste: it is the data model's own
 /// [`FindingKind::is_informational`](camerata_api_types::audit::FindingKind::is_informational)
@@ -1018,7 +1054,7 @@ fn deviation_ratio_ppm(f: &FindingView) -> u64 {
 ///
 /// The default is opinionated; the table is not locked — chorale's column headers still
 /// re-sort on demand.
-pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, usize) {
+pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, String, usize) {
     let enforced = if f.status == "active" { 0 } else { 1 };
     (
         enforced,
@@ -1026,9 +1062,42 @@ pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, usiz
         kind_rank(f),
         deviation_ratio_ppm(f),
         f.rule_id.clone(),
+        // The repo comes before the path: `src/index.ts` in two repos is two files, and the
+        // order must not interleave them.
+        f.repo.clone(),
         f.path.clone(),
         f.line,
     )
+}
+
+/// The value the Queue's File column shows and groups by. In a multi-repo scan the path alone
+/// names no file (`src/index.ts` exists in every service), so the repo leads and two repos'
+/// same-named files are two groups. A single-repo scan shows the bare path, as it always did.
+pub fn file_group_label(f: &FindingView, multi_repo: bool) -> String {
+    if multi_repo && !f.repo.is_empty() {
+        format!("{}: {}", f.repo, f.path)
+    } else {
+        f.path.clone()
+    }
+}
+
+/// One repo's line in the per-repo tally under the triage tabs: `acme/a: 3 to review of 12`.
+pub fn repo_counts_line(repo: &str, counts: TriageCounts) -> String {
+    format!(
+        "{repo}: {} to review of {}",
+        counts.outstanding(),
+        counts.total()
+    )
+}
+
+/// Where a finding lives, for a detail view: `repo: path:line`, or `path:line` when the finding
+/// carries no repo.
+pub fn finding_location_label(f: &FindingView) -> String {
+    if f.repo.is_empty() {
+        format!("{}:{}", f.path, f.line)
+    } else {
+        format!("{}: {}:{}", f.repo, f.path, f.line)
+    }
 }
 
 /// The default finding status (`"active"`). FindingView's `#[serde(default)]` provider; lives in
@@ -1038,10 +1107,20 @@ pub use crate::scan::default_finding_status;
 /// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
 /// so its disposition survives table switches and re-sorts.
 pub fn finding_key(f: &FindingView) -> String {
-    format!(
+    let key = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    );
+    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
+    // version in one lockfile shared the whole key and dispositioning one buried the other. The
+    // advisory id (carried on dependency rows only) tells them apart. Every other row's key is
+    // unchanged. Must match `camerata_server::report_export::finding_key` byte for byte.
+    match f.captures.get("advisory") {
+        Some(advisory) if f.rule_id == "DEP-AUDIT-1" && !advisory.is_empty() => {
+            format!("{key}\u{0}{advisory}")
+        }
+        _ => key,
+    }
 }
 
 /// The disposition state for a finding (Unresolved when absent from the map).
@@ -1148,6 +1227,27 @@ impl TriageModel {
             .collect();
         out.sort_by_key(queue_sort_key);
         out
+    }
+
+    /// [`Self::counts`] split by repo: one entry per repo that has a row in `findings`, sorted by
+    /// repo name. The sum of the entries is `counts(findings)`. A multi-repo scan shows these
+    /// beside the project total so a reviewer sees which service still has work in it.
+    pub fn counts_by_repo(&self, findings: &[FindingView]) -> Vec<(String, TriageCounts)> {
+        let mut repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        repos
+            .into_iter()
+            .map(|repo| {
+                let rows: Vec<FindingView> = findings
+                    .iter()
+                    .filter(|f| f.repo == repo)
+                    .cloned()
+                    .collect();
+                let counts = self.counts(&rows);
+                (repo, counts)
+            })
+            .collect()
     }
 
     /// Tally every disposition over `findings` — see [`TriageCounts`].
@@ -1817,6 +1917,32 @@ mod tests {
     }
 
     #[test]
+    fn two_advisories_on_one_package_version_do_not_share_a_key() {
+        let dep = |advisory: &str| {
+            finding(serde_json::json!({
+                "repo": "o/r", "path": "Cargo.lock", "line": 0,
+                "rule_id": "DEP-AUDIT-1", "severity": "high",
+                "snippet": "time@0.1.45", "detail": "",
+                "captures": { "advisory": advisory }
+            }))
+        };
+        let (a, b) = (dep("RUSTSEC-2020-0071"), dep("RUSTSEC-2021-0001"));
+        assert_ne!(finding_key(&a), finding_key(&b));
+        // The server builds the same bytes (`report_export::finding_key`).
+        assert_eq!(
+            finding_key(&a),
+            "o/r\u{0}DEP-AUDIT-1\u{0}Cargo.lock\u{0}0\u{0}time@0.1.45\u{0}RUSTSEC-2020-0071"
+        );
+        // Any other row keeps the five-part key, even with an "advisory" capture of its own.
+        let other = finding(serde_json::json!({
+            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "RULE-X",
+            "severity": "low", "snippet": "s", "detail": "",
+            "captures": { "advisory": "X" }
+        }));
+        assert_eq!(finding_key(&other), "o/r\u{0}RULE-X\u{0}a.rs\u{0}1\u{0}s");
+    }
+
+    #[test]
     fn finding_state_defaults_to_unresolved_when_absent() {
         let f = finding(serde_json::json!({
             "repo": "r", "path": "p", "line": 1,
@@ -1847,6 +1973,84 @@ mod tests {
     #[test]
     fn default_finding_status_is_active() {
         assert_eq!(default_finding_status(), "active");
+    }
+
+    // ── M10: the same path in two repos ────────────────────────────────────────────────────
+
+    fn in_repo(repo: &str, path: &str, line: usize) -> FindingView {
+        finding(serde_json::json!({
+            "repo": repo, "path": path, "line": line,
+            "rule_id": "R-1", "severity": "high", "snippet": format!("s{line}"), "detail": ""
+        }))
+    }
+
+    #[test]
+    fn the_file_group_names_the_repo_only_when_there_are_several() {
+        let a = in_repo("acme/a", "src/index.ts", 1);
+        let b = in_repo("acme/b", "src/index.ts", 1);
+        assert_eq!(file_group_label(&a, false), "src/index.ts");
+        assert_eq!(file_group_label(&a, true), "acme/a: src/index.ts");
+        assert_ne!(file_group_label(&a, true), file_group_label(&b, true));
+        let mut orphan = a.clone();
+        orphan.repo.clear();
+        assert_eq!(file_group_label(&orphan, true), "src/index.ts");
+    }
+
+    #[test]
+    fn the_location_label_leads_with_the_repo() {
+        let a = in_repo("acme/a", "src/index.ts", 12);
+        assert_eq!(finding_location_label(&a), "acme/a: src/index.ts:12");
+        let mut orphan = a;
+        orphan.repo.clear();
+        assert_eq!(finding_location_label(&orphan), "src/index.ts:12");
+    }
+
+    #[test]
+    fn the_default_order_does_not_interleave_two_repos_with_the_same_path() {
+        let mut rows = [
+            in_repo("acme/b", "src/index.ts", 1),
+            in_repo("acme/a", "src/index.ts", 1),
+            in_repo("acme/b", "src/index.ts", 1),
+            in_repo("acme/a", "src/index.ts", 1),
+        ];
+        rows.sort_by_key(queue_sort_key);
+        let repos: Vec<&str> = rows.iter().map(|f| f.repo.as_str()).collect();
+        assert_eq!(repos, ["acme/a", "acme/a", "acme/b", "acme/b"]);
+    }
+
+    #[test]
+    fn a_repos_line_says_what_is_left_to_review() {
+        let counts = TriageCounts {
+            unresolved: 3,
+            confirmed: 4,
+            ignored: 5,
+            ..TriageCounts::default()
+        };
+        assert_eq!(
+            repo_counts_line("acme/a", counts),
+            "acme/a: 3 to review of 12"
+        );
+    }
+
+    #[test]
+    fn counts_by_repo_split_the_same_path_and_sum_to_the_total() {
+        let a1 = in_repo("acme/a", "src/index.ts", 1);
+        let a2 = in_repo("acme/a", "src/index.ts", 2);
+        let b1 = in_repo("acme/b", "src/index.ts", 1);
+        let all = vec![a1.clone(), a2, b1.clone()];
+        let mut m = TriageModel::default();
+        m.mark_false_positive(std::slice::from_ref(&b1), "fixture");
+        let by_repo = m.counts_by_repo(&all);
+        assert_eq!(by_repo.len(), 2);
+        assert_eq!(by_repo[0].0, "acme/a");
+        assert_eq!(by_repo[0].1.unresolved, 2);
+        assert_eq!(by_repo[1].0, "acme/b");
+        assert_eq!(by_repo[1].1.false_positive, 1);
+        assert_eq!(by_repo[1].1.outstanding(), 0);
+        let summed: usize = by_repo.iter().map(|(_, c)| c.total()).sum();
+        assert_eq!(summed, m.counts(&all).total());
+        // A decision on repo B's src/index.ts:1 does not touch repo A's.
+        assert_eq!(m.state_of(&a1), TriageState::Unresolved);
     }
 
     // ── evaluated_option_id (audit-integrated alternative recommendation) ──────────────────

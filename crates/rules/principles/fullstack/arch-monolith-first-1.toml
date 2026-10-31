@@ -1,6 +1,6 @@
 id = "ARCH-MONOLITH-FIRST-1"
-version = 1
-title = "Deployment topology: a single service, a message broker, or independent services"
+version = 3
+title = "Deployment topology: a single service, a message broker or independent services"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/decisions/2026-06-14_persistence_sqlite_event_sourced_versioning.md"
-title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
+title = "Decision: Persistence: SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/MonolithFirst.html"
-title = "Martin Fowler — MonolithFirst"
+title = "Martin Fowler: MonolithFirst"
 
 # Stack exception. Supabase Edge Functions are a second, independently-deployed runtime BY DESIGN
 # on the Supabase platform (Deno-based functions deployed and invoked separately from the primary
@@ -35,7 +35,7 @@ why = "All three are legitimate topologies and the right one follows from the pr
 [[option]]
 id = "monolith-first"
 label = "deploy as a single service"
-directive = "The system deploys as a single service. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced later only when a measured need justifies it (a throughput ceiling profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons, or a decoupling requirement an in-process design genuinely cannot satisfy)."
+directive = "The system deploys as a single service. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced later only when a measured need justifies it (a throughput ceiling profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons or a decoupling requirement an in-process design genuinely cannot satisfy)."
 remediation = """
 Consolidate the service back into a single deployable unit, with internal components communicating through in-process calls and background work running on an in-process scheduler or a durable queue backed by the primary datastore. Only reintroduce a broker or a service split later if profiling shows a measured throughput or scaling need. Verify by confirming the system deploys and releases as one unit with no network hop between components that could instead be an in-process call.
 """
@@ -44,17 +44,17 @@ why = "Keeps the whole system in one deployable: in-process calls with no networ
 [[option]]
 id = "broker-up-front"
 label = "use a message broker for inter-component and background work"
-directive = "The system uses a dedicated message broker (or managed queue/stream) for inter-component communication and background work. Producers publish and consumers subscribe; the project owns delivery semantics, retry and dead-letter handling, and the broker as a piece of operated infrastructure."
+directive = "The system uses a dedicated message broker (or managed queue/stream) for inter-component communication and background work. Producers publish and consumers subscribe; the project owns delivery semantics, retry and dead-letter handling and the broker as a piece of operated infrastructure."
 remediation = """
-Introduce a dedicated message broker (or managed queue/stream) for inter-component communication and background work, with producers publishing and consumers subscribing rather than calling each other in-process. Own the delivery semantics, retries, and dead-letter handling this introduces. Verify by confirming inter-component messages flow through the broker and a consumer outage does not crash the producer.
+Introduce a dedicated message broker (or managed queue/stream) for inter-component communication and background work, with producers publishing and consumers subscribing rather than calling each other in-process. Own the delivery semantics, retries and dead-letter handling this introduces. Verify by confirming inter-component messages flow through the broker and a consumer outage does not crash the producer.
 """
 why = "The natural fit when the work is genuinely asynchronous or bursty — slow third-party integrations, fan-out workloads, spikes that must be buffered and absorbed — or when an event/stream backbone is already part of the architecture. It decouples producers from consumers and smooths load, in exchange for owning the broker and its delivery semantics (retries, ordering, dead-letters); worth adopting up front when those needs are known rather than speculative."
 
 [[option]]
 id = "services-from-start"
 label = "split into independent services"
-directive = "The system is split into independently deployed services that communicate over the network, each with its own deploy cadence, scaling profile, and ownership boundary."
+directive = "The system is split into independently deployed services that communicate over the network, each with its own deploy cadence, scaling profile and ownership boundary."
 remediation = """
-Split the component into its own independently deployed service with its own deploy cadence, scaling profile, and ownership boundary, communicating with the rest of the system over the network rather than in-process. Verify by confirming the service can be deployed, scaled, and rolled back independently of the rest of the system.
+Split the component into its own independently deployed service with its own deploy cadence, scaling profile and ownership boundary, communicating with the rest of the system over the network rather than in-process. Verify by confirming the service can be deployed, scaled and rolled back independently of the rest of the system.
 """
 why = "The right shape when separate teams own separate surfaces, when parts of the system scale very differently, or when strong failure/blast-radius isolation between components is a hard requirement (and it permits polyglot stacks per service). It provides independent deploy and scaling in exchange for network hops between services and cross-service consistency to design for — a worthwhile trade when those organizational or scaling boundaries genuinely exist."

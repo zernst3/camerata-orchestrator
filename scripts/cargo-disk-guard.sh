@@ -4,10 +4,10 @@
 # Why this exists: cargo has no garbage collector, and AI-agent development multiplies the
 # problem. Every agent runs in its own git worktree with its own full `target/` (5-20 GiB
 # each), and nothing deleted those after the agent's branch was merged. The weekly
-# `cargo-sweep --time 7` job (dev.zachernst.cargo-sweep) only removes artifacts older than a
+# `cargo-sweep --time 7` job only removes artifacts older than a
 # week, so it can never catch same-day growth. On 2026-10-21 the data volume hit 99% full
 # (17 GiB free) with ~135 GiB of cargo output in this repo alone. This guard runs every 30
-# minutes (launchd: scripts/launchd/dev.zachernst.cargo-disk-guard.plist) and escalates with
+# minutes (launchd: scripts/launchd/dev.camerata.cargo-disk-guard.plist) and escalates with
 # disk pressure.
 #
 # Everything it deletes is regenerable build output or an already-merged worktree. It never
@@ -23,7 +23,7 @@
 #
 # Usage: scripts/cargo-disk-guard.sh [--dry-run] [--throttle]
 #
-# macOS privacy (TCC): a launchd job cannot read ~/Documents unless the executable it runs
+# macOS privacy (TCC): a launchd job cannot read your Documents folder unless the executable it runs
 # (/bin/bash here) has Full Disk Access. Without it every scheduled run logs "Operation not
 # permitted" and does nothing. The weekly cargo-sweep job had the same silent failure. Either grant
 # Full Disk Access (System Settings > Privacy & Security > Full Disk Access), or trigger this from
@@ -31,8 +31,24 @@
 
 set -u
 
-REPOS_ROOT="${CARGO_GUARD_REPOS_ROOT:-$HOME/Documents/Repos}"
-ORCH_REPO="${CARGO_GUARD_ORCH_REPO:-$REPOS_ROOT/camerata-orchestrator}"
+# Default layout: the folder that holds this repository's main checkout is the root that is
+# swept. The main checkout is found through the shared git directory, so the default is the
+# same whether this script runs from the main checkout or from an agent worktree. Set
+# CARGO_GUARD_REPOS_ROOT (and optionally CARGO_GUARD_ORCH_REPO) to sweep a different layout.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -n "${CARGO_GUARD_REPOS_ROOT:-}" ]; then
+    REPOS_ROOT="$CARGO_GUARD_REPOS_ROOT"
+    ORCH_REPO="${CARGO_GUARD_ORCH_REPO:-$REPOS_ROOT/camerata-orchestrator}"
+else
+    COMMON_GIT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [ -n "$COMMON_GIT_DIR" ]; then
+        MAIN_CHECKOUT="$(dirname "$COMMON_GIT_DIR")"
+    else
+        MAIN_CHECKOUT="$(dirname "$SCRIPT_DIR")"
+    fi
+    ORCH_REPO="${CARGO_GUARD_ORCH_REPO:-$MAIN_CHECKOUT}"
+    REPOS_ROOT="$(dirname "$ORCH_REPO")"
+fi
 MERGE_TARGETS="${CARGO_GUARD_MERGE_TARGETS:-feat/audit-report-export main}"
 ACTIVE_MINUTES="${CARGO_GUARD_ACTIVE_MINUTES:-60}"
 TIER1_GIB="${CARGO_GUARD_TIER1_GIB:-150}"
@@ -137,8 +153,13 @@ done)"
 free="$(free_gib)"
 if [ -n "$free" ] && [ "$free" -lt "$TIER1_GIB" ]; then
     log "tier 1 (free ${free} GiB < ${TIER1_GIB}): cargo-sweep --time 1"
+    # Idle targets only: a sweep over a target a build is writing removed object files the
+    # linker was about to read and failed the build (2026-10-28, twice).
     if [ "$DRY_RUN" = 0 ] && command -v cargo-sweep >/dev/null; then
-        cargo-sweep sweep --recursive --time 1 "$REPOS_ROOT" >/dev/null 2>&1
+        echo "$IDLE_TARGETS" | while read -r t; do
+            [ -n "$t" ] || continue
+            cargo-sweep sweep --time 1 "$(dirname "$t")" >/dev/null 2>&1
+        done
     fi
 fi
 

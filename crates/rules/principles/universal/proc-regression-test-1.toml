@@ -1,5 +1,5 @@
 id = "PROC-REGRESSION-TEST-1"
-version = 1
+version = 4
 title = "Every bug fix ships with a regression test that fails before the fix and passes after"
 domain = "universal"
 layer = "universal"
@@ -11,14 +11,14 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
+title = "CONVENTIONS.md: §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
 
 [[sources]]
 url = "https://llvm.org/docs/DeveloperPolicy.html"
-title = "LLVM Developer Policy — Test Cases (every bug fix/feature ships with a regression test)"
+title = "LLVM Developer Policy: Test Cases (every bug fix/feature ships with a regression test)"
 
 [decision]
-question = "What position does the project take on: Every bug fix ships with a regression test that fails before the fix and passes after?"
+question = "When a bug is fixed, what test accompanies the fix?"
 default = "every-bug-fix-ships-with-a-regression-test-that"
 why = "Without a regression test, the bug is gone today and free to recur tomorrow because nothing in CI is watching for it. The next refactor, the next dependency upgrade, the next AI-authored change in the same area can reintroduce the exact same defect and the suite will still pass. The cost of writing the test is paid once; the cost of the same bug returning is paid every time it does. The test must fail before the fix specifically (not just pass after) because a test that passes against both pre- and post-fix code is testing something other than the bug, and its presence creates false confidence that the bug is now guarded. The rule applies to every author but is load-bearing for AI-authored fixes, because an agent fixing a symptom has no instinct to encode the failure mode as a permanent guard unless the workflow requires it. Fixing the bug without any test removes the immediate defect but leaves zero regression guard, so the same failure can be reintroduced by the next change with no signal. Adding a test only for bugs in load-bearing or hot paths keeps test debt low but produces a two-tier system where 'minor' bug fixes have no guard at all, and the judgment of which bugs are minor is exactly the kind of call that drifts over time. Documenting the reproduction steps in the PR description instead of as a test produces a record that no automated system reads, so it does not actually protect against recurrence and decays as the PR scrolls off the recent list. Relying on canary or staging to surface the bug if it recurs does catch some recurrences but only after the fix has shipped, by which point the cost of acting on it is higher and the link back to the original fix has often been lost."
 
@@ -36,7 +36,7 @@ id = "the-bug-fix-lands-without-any-accompanying-test"
 violates = true
 label = "Bug fix lands without any accompanying test"
 directive = "the bug fix lands without any accompanying test; the project relies on the surrounding test suite staying green to catch any related regression in the future"
-why = "No accompanying test removes the immediate defect but leaves zero regression guard; the same failure can be reintroduced by the next refactor, dependency upgrade, or AI-authored change with no signal from CI."
+why = "No accompanying test removes the immediate defect but leaves zero regression guard; the same failure can be reintroduced by the next refactor, dependency upgrade or AI-authored change with no signal from CI."
 
 [[option]]
 id = "the-bug-fix-lands-with-a-regression-test-only-wh"
@@ -57,4 +57,4 @@ id = "the-bug-fix-lands-without-a-regression-test-the"
 violates = true
 label = "Rely on canary/staging to catch recurrence"
 directive = "the bug fix lands without a regression test; the project relies on canary or staging environments to surface any recurrence after the fix has shipped"
-why = "Staging environments catch some recurrences but only after the fix has shipped; by that point the cost of acting on the recurrence is higher and the link back to the original fix has often been lost."
+why = "A recurrence is caught, if at all, only after the fix has shipped, when acting on it costs more and the link back to the original fix has often been lost. Staging catches only some recurrences."

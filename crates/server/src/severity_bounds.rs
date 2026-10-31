@@ -1,17 +1,14 @@
-//! The corpus's authored severity bounds, applied to a finding set in ONE place.
+//! The corpus's authored severity bounds, applied to the server's findings.
 //!
-//! A corpus rule can bound the severity of its own findings three ways:
+//! The bounds themselves (the `min_severity` floor, the C4-R1 null-location safety net, the
+//! `max_severity` ceiling and the A5.2 `deviation_ceiling`), their order and their rationale
+//! live in [`camerata_rules::severity_bounds`], the one implementation this crate and the
+//! repo-installed CI gate (`camerata-check`) share. This module is the server's adapter: it
+//! maps an [`onboard::Finding`](crate::onboard::Finding) onto
+//! [`camerata_rules::severity_bounds::BoundedFinding`] and resolves a finding's rule through
+//! [`crate::report_export::corpus_rule_for`], which also grounds an external tool's own rule id.
 //!
-//! - `min_severity`: a FLOOR (W8 / W5-Q2). Raises a lower severity up to it, for an accusing,
-//!   located finding only (see [`crate::report_export::raise_to_rule_min_severity`]).
-//! - `max_severity`: a CEILING (E2). Clamps a higher severity down to it.
-//! - `deviation_ceiling`: the A5.2 ceiling for a consistency deviation (default `medium`).
-//!
-//! Between the floor and the ceilings sits one bound that is NOT corpus-authored: the C4-R1
-//! null-location safety net ([`crate::report_export::downgrade_unlocated_above_informational`]),
-//! which sends a finding with no path and line 0 to `info`. See "C4-R1" below.
-//!
-//! # Why this module exists
+//! # Why the bounds run in the scan pipeline
 //!
 //! These bounds used to be applied ONLY at export time, inside `report_export::build_report_json`
 //! (the PDF) and `xlsx_export::partition_rows` (the workbook, CSV and JSON). The live scan
@@ -22,93 +19,157 @@
 //!
 //! The fix is a POSITION fix, in the same spirit as the evidence-gate seal fix: the bounds are
 //! applied to the findings themselves, as part of the scan pipeline, via
-//! [`apply_corpus_severity_bounds`]. The exporters keep calling the same primitives through
-//! [`bounded_severity`] / [`apply_severity_ceilings`], so there is exactly ONE definition of
-//! the order and the rules, and the export-side clamps stay as idempotent backstops for a
-//! `ScanReport` that did not come through the live pipeline (a persisted older scan, a test
-//! fixture, a hand-built report).
-//!
-//! # Order
-//!
-//! Floor, then C4-R1, then `max_severity`, then the deviation ceiling: the one order every
-//! surface uses. The two ceilings only ever LOWER a severity, so their relative order cannot
-//! change the result (the outcome is the lower of the two); the floor must run first so a
-//! ceiling always gets the last word. The corpus-load gate rejects a `min_severity` ranking
-//! above the same rule's `max_severity`, so floor-then-ceilings always lands inside
-//! `[min, max]`.
+//! [`apply_corpus_severity_bounds`]. The exporters call [`bounded_severity`], the same chain, so
+//! the export-side clamps stay as idempotent backstops for a `ScanReport` that did not come
+//! through the live pipeline (a persisted older scan, a test fixture, a hand-built report).
 //!
 //! # C4-R1 is part of the chain (changed 2026-10-21)
 //!
-//! C4-R1 says no finding above `info` may ship with BOTH an empty path AND line 0: nothing
-//! concrete was established about where it is, so it cannot be actionable at its stated
-//! severity. Its rationale (see `downgrade_unlocated_above_informational`) is about the FINDING,
-//! not about one artifact's presentation, and it was written as "the single place every
-//! checker's findings funnel through". It had been applied by the PDF alone, which left the
-//! live scan, the workbook, the CSV/JSON exports and `findings.json` showing the producer's
-//! severity for the same row (`high` where the PDF said `info`). Nothing in the design makes
-//! that difference intentional: the docs only recorded it as an acknowledged asymmetry (and, in
-//! `RULES_REFERENCE.md`, as an open issue). So it now runs here, between the floor and the
-//! ceilings, and every surface agrees. It only ever lowers, and `info` ranks with `low`, so no
-//! ceiling can raise it back. The floor still declines an unlocated row at its own
-//! precondition, so the two cannot fight from any position.
+//! C4-R1 says no finding above `info` may ship with BOTH an empty path AND line 0. Its rationale
+//! is about the FINDING, not about one artifact's presentation. It had been applied by the PDF
+//! alone, which left the live scan, the workbook, the CSV/JSON exports and `findings.json`
+//! showing the producer's severity for the same row (`high` where the PDF said `info`). So it
+//! runs in the shared chain, between the floor and the ceilings, and every surface agrees.
 //!
 //! Consequence worth knowing: an unlocated finding is `info` in the live triage view too, so an
 //! operator-forced `violates` pick (which carries no evidence and anchors at `high`) is shown
 //! at `info` from the moment it is emitted, exactly as the PDF always showed it.
 
 use crate::onboard::Finding;
-use crate::report_export::{
-    clamp_deviation_severity, clamp_to_rule_max_severity, downgrade_unlocated_above_informational,
-    normalize_severity, raise_to_rule_min_severity,
-};
+use crate::report_export::corpus_rule_for;
+use camerata_api_types::audit::FindingKind;
+use camerata_rules::severity_bounds::{BoundKind, BoundedFinding};
 
-/// Apply BOTH ceilings to an already-normalized `severity`: the rule's `max_severity` (E2),
-/// then the A5.2 deviation ceiling. Ceilings only lower, so the order between the two is
-/// immaterial to the result; it is fixed here to match the historical exporter order.
-fn apply_severity_ceilings(
-    severity: String,
-    f: &Finding,
-    corpus: Option<&camerata_rules::RuleSet>,
-) -> String {
-    let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
-    clamp_deviation_severity(severity, f, corpus)
+impl BoundedFinding for Finding {
+    fn severity(&self) -> &str {
+        &self.severity
+    }
+
+    fn rule_id(&self) -> &str {
+        &self.rule_id
+    }
+
+    fn bound_kind(&self) -> BoundKind {
+        match &self.kind {
+            Some(FindingKind::Defect) => BoundKind::Defect,
+            Some(FindingKind::Deviation(_)) => BoundKind::Deviation,
+            Some(
+                FindingKind::ConventionObserved(_)
+                | FindingKind::NoConvention(_)
+                | FindingKind::NotAssessed(_),
+            ) => BoundKind::Informational,
+            None => BoundKind::Unspecified,
+        }
+    }
+
+    fn is_unlocated(&self) -> bool {
+        camerata_rules::severity_bounds::is_unlocated(&self.path, self.line)
+    }
+
+    fn set_severity(&mut self, severity: String) {
+        self.severity = severity;
+    }
+
+    fn note_severity_adjustment(&mut self, note: String) {
+        record_adjustment(self, note);
+    }
 }
 
-/// `f`'s severity after every bound: normalize, the floor, C4-R1, then both ceilings. The
-/// single definition the live scan ([`apply_corpus_severity_bounds`]), the PDF partition
+/// The `Finding::captures` key a severity adjustment is recorded under, one sentence per line.
+///
+/// M2/M8: the live scan applies the bounds in place, so by export time the producer's severity
+/// is gone and a downgrade (the unlocated safety net most of all) was invisible. The note rides
+/// with the finding instead. A capture is the carrier because it is a serde-default map that
+/// every `Finding` already has; a dedicated `Finding::severity_adjustments` field, when the AI
+/// tier adds one for its own ceilings, joins in through [`recorded_adjustments`].
+pub const SEVERITY_ADJUSTMENTS_CAPTURE: &str = "severity_adjustments";
+
+/// Most adjustment sentences one finding keeps (a row passes through a handful of producers).
+const MAX_RECORDED_ADJUSTMENTS: usize = 8;
+
+/// Append `note` to the finding's recorded adjustments (never twice, and at most
+/// [`MAX_RECORDED_ADJUSTMENTS`]). The ONE writer: the corpus bounds and the AI tier's ceilings
+/// both record through it.
+pub(crate) fn record_adjustment(f: &mut Finding, note: String) {
+    let entry = f
+        .captures
+        .entry(SEVERITY_ADJUSTMENTS_CAPTURE.to_string())
+        .or_default();
+    if entry.lines().any(|l| l == note) || entry.lines().count() >= MAX_RECORDED_ADJUSTMENTS {
+        return;
+    }
+    if !entry.is_empty() {
+        entry.push('\n');
+    }
+    entry.push_str(&note);
+}
+
+/// The adjustments recorded on `f` so far, oldest first.
+pub(crate) fn recorded_adjustments(f: &Finding) -> Vec<String> {
+    f.captures
+        .get(SEVERITY_ADJUSTMENTS_CAPTURE)
+        .map(|v| {
+            v.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every severity adjustment to tell the client about for `f`, as finished sentences: the ones
+/// recorded when the scan applied the bounds, plus any the bounds would make now (a finding that
+/// reached an exporter without the live bound pass). Empty for a finding no bound moved.
+pub(crate) fn severity_adjustment_lines(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    let mut notes = recorded_adjustments(f);
+    let (_, now) = camerata_rules::severity_bounds::bounded_severity_explained(
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    );
+    for note in now {
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    notes.iter().map(|n| finish_sentence(n)).collect()
+}
+
+/// Capitalise the first letter and end with a full stop.
+fn finish_sentence(note: &str) -> String {
+    let note = note.trim();
+    let mut chars = note.chars();
+    let mut out = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => return String::new(),
+    };
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
+}
+
+/// `f`'s severity after every bound (see [`camerata_rules::severity_bounds::bounded_severity`]).
+/// The definition the live scan ([`apply_corpus_severity_bounds`]), the PDF partition
 /// (`report_export::build_report_json`) and the workbook / CSV / JSON partition
 /// (`xlsx_export::partition_rows`) all share, so the surfaces cannot drift.
 pub(crate) fn bounded_severity(f: &Finding, corpus: Option<&camerata_rules::RuleSet>) -> String {
-    let severity = raise_to_rule_min_severity(normalize_severity(&f.severity), f, corpus);
-    let severity = downgrade_unlocated_above_informational(severity, f);
-    apply_severity_ceilings(severity, f, corpus)
+    camerata_rules::severity_bounds::bounded_severity(f, corpus_rule_for(&f.rule_id, corpus))
 }
 
-/// Apply every severity bound (`min_severity` floor, the C4-R1 unlocated downgrade,
-/// `max_severity` ceiling, `deviation_ceiling`) to every finding, in place, in the order every
-/// surface uses. See the module docs for why this belongs in the scan pipeline.
+/// Apply every severity bound to every finding, in place
+/// ([`camerata_rules::severity_bounds::apply_corpus_severity_bounds`]: idempotent, and a finding
+/// no bound moves keeps its producer's exact string).
 ///
-/// Properties the callers rely on:
-///
-/// - **Idempotent.** A bounded severity is a fixed point of the bounds, so running this twice
-///   (the live scan, then an export-side backstop) changes nothing.
-/// - **Minimal write.** `Finding::severity` is only rewritten when a bound actually moves it.
-///   A finding no bound touches keeps its producer's exact string; this function does not
-///   re-case or re-vocabulary a severity as a side effect.
-/// - **No corpus is still a corpus.** The deviation ceiling's `medium` DEFAULT needs no
-///   authored rule, and the exporters apply it with no corpus at all. A caller holding an
-///   `Option<&RuleSet>` therefore uses [`apply_scan_severity_bounds`], which applies an empty
-///   `RuleSet` rather than skipping, so the live view and the export agree for a scan that ran
-///   without a corpus too.
+/// No corpus is still a corpus: the deviation ceiling's `medium` DEFAULT needs no authored rule,
+/// and the exporters apply it with no corpus at all. A caller holding an `Option<&RuleSet>`
+/// therefore uses [`apply_scan_severity_bounds`].
 pub fn apply_corpus_severity_bounds(findings: &mut [Finding], corpus: &camerata_rules::RuleSet) {
-    for f in findings.iter_mut() {
-        let bounded = bounded_severity(f, Some(corpus));
-        // Compare against the NORMALIZED original, so an unrelated casing difference
-        // ("High" vs "high") is not mistaken for a bound moving the severity.
-        if bounded != normalize_severity(&f.severity) {
-            f.severity = bounded;
-        }
-    }
+    camerata_rules::severity_bounds::apply_corpus_severity_bounds(findings, |id| {
+        corpus_rule_for(id, Some(corpus))
+    });
 }
 
 /// [`apply_corpus_severity_bounds`] for a caller holding the scan pipeline's
@@ -129,7 +190,7 @@ pub fn apply_scan_severity_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_api_types::audit::{DeviationKind, FindingKind};
+    use camerata_api_types::audit::DeviationKind;
 
     fn rule_set(configure: impl FnOnce(&mut camerata_rules::Rule)) -> camerata_rules::RuleSet {
         let mut rule = camerata_rules::bare_rule("BOUND-1", "test-fixture");
@@ -189,6 +250,16 @@ mod tests {
             bounded("critical", Some(FindingKind::Defect), &set),
             "critical"
         );
+    }
+
+    /// The live scan applies the same exemption the shared chain defines: a producer-emitted
+    /// `info` is an observation, not a defect, and the floor never raises it.
+    #[test]
+    fn the_live_scan_floor_never_raises_a_producer_emitted_info() {
+        let set = rule_set(|r| r.min_severity = Some("critical".to_string()));
+        assert_eq!(bounded("info", Some(FindingKind::Defect), &set), "info");
+        assert_eq!(bounded("Info", Some(deviation()), &set), "Info");
+        assert_eq!(bounded("low", Some(FindingKind::Defect), &set), "critical");
     }
 
     #[test]

@@ -2,10 +2,13 @@
 //! runtime by [`crate::fixtures`]; this crate's source contains no secret-shaped literal.
 
 mod detection;
+mod detector_edges;
+mod firebase_spans;
 mod json_walk;
 mod redaction;
 mod rules;
 mod source_hygiene;
+mod twin_boundaries;
 mod twins;
 mod vendors;
 

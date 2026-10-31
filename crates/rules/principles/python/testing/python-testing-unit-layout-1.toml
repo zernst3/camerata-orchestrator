@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-UNIT-LAYOUT-1"
-version = 1
+version = 3
 title = "Unit tests live in a top-level tests/ directory mirroring the source tree"
 domain = "python:testing"
 layer = "language"
@@ -35,8 +35,8 @@ id = "scattered"
 violates = true
 label = "no fixed location; test files live wherever convenient"
 directive = "Test files are placed wherever the author chooses, mixed with production code or at the repo root."
-why = "Avoided: makes coverage reporting, CI filtering, and contributor orientation significantly harder."
+why = "Avoided: makes coverage reporting, CI filtering and contributor orientation significantly harder."
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/goodpractices.html"
-title = "pytest — Good Integration Practices (Choosing a test layout)"
+title = "pytest: Good Integration Practices (Choosing a test layout)"

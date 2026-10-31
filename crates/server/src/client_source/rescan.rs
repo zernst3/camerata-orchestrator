@@ -100,18 +100,28 @@ pub fn parse_porcelain_z(stdout: &[u8]) -> HashSet<String> {
 /// treated as "the AI looked and found nothing".
 fn ai_covered(report: &ScanReport) -> bool {
     report.provenance.audit_model.is_some()
-        && report.ai_error.is_none()
+        && report.ai_review_complete()
         && report.ai_blocked_reason.is_none()
         && !report.blocked
 }
 
 /// Whether `finding` came from the AI (semantic) review, which the delta carries forward for
 /// unchanged files. The deterministic floor and the preview linters are recomputed over the
-/// whole tree every run and must NOT be carried (they would duplicate); the ledger records the
-/// tier each rule ran under, and an ad hoc `AI-` rule the model invented is semantic by nature.
+/// whole tree every run and must NOT be carried (they would duplicate).
+///
+/// H12: the finding's own producer decides, when it recorded one
+/// ([`crate::onboard::PRODUCED_TIER_CAPTURE`]). The model can report under a floor rule id, such as
+/// a hardcoded secret the floor's patterns missed; the ledger holds that id as a deterministic rule
+/// (the tier is whichever ran first), so judging by the ledger dropped the model's finding from the
+/// delta and the file's problem vanished from the next report. A finding saved before the producer
+/// was recorded falls back to the tier its rule ran under, and an ad hoc `AI-` rule the model
+/// invented is semantic by nature.
 fn is_ai_advisory(finding: &Finding, report: &ScanReport) -> bool {
     if finding.preview {
         return false;
+    }
+    if let Some(producer) = finding.captures.get(crate::onboard::PRODUCED_TIER_CAPTURE) {
+        return producer == "semantic";
     }
     match report.ledger.rule(&finding.rule_id) {
         Some(entry) => entry.tier == RuleTier::Semantic,
@@ -290,6 +300,12 @@ pub async fn rescan_changes(
         changed_files += delta.changed;
         prior.files.insert(name.clone(), delta.unchanged);
         prior.findings.extend(delta.carried);
+        // H11: the carried findings come from this inspection, so the incremental run can say
+        // which commit they were last found at. Not when the inspection ran on a dirty tree:
+        // the commit would then name a state that was not what the findings describe.
+        if !covered.dirty {
+            prior.commits.insert(name.clone(), inspected.to_string());
+        }
         if covered.dirty {
             notes.push(format!(
                 "{name}: the inspection ran on a tree with uncommitted changes; the delta is \
@@ -327,6 +343,7 @@ pub async fn rescan_changes(
                 from_sha: from_sha.clone(),
                 to_sha: to_sha.clone(),
             }),
+            resume_run: None,
         },
     )
     .await;
@@ -445,6 +462,35 @@ mod tests {
             ]
         );
         assert!(parse_name_status_z(b"").is_empty());
+    }
+
+    /// An inspection with a failed scan pass over files is not a baseline: carrying its findings
+    /// for "unchanged" files would present the files that pass never reviewed as reviewed and
+    /// clean. The same predicate the scan's own manifest uses decides it.
+    #[test]
+    fn an_inspection_with_a_failed_chunk_is_not_an_ai_covered_baseline() {
+        let mut report = super::super::test_support::report_at("acme/app", &"a".repeat(40));
+        report.provenance.audit_model = Some("model-x".to_string());
+        assert!(ai_covered(&report), "a complete inspection is a baseline");
+
+        report.failed_passes.push(crate::ai_audit::FailedPass {
+            repo: "acme/app".to_string(),
+            pass: "scan".to_string(),
+            reason: "scripted".to_string(),
+            files_not_reviewed: 3,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
+        });
+        assert!(!ai_covered(&report), "a chunk of files was never reviewed");
+
+        // A failed pass that is not over files leaves every file's review intact.
+        report.failed_passes[0].files_not_reviewed = 0;
+        assert!(ai_covered(&report));
+
+        report.ai_error = Some("acme/app: AI audit skipped".to_string());
+        assert!(!ai_covered(&report));
     }
 
     #[test]

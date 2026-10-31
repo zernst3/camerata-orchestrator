@@ -33,7 +33,7 @@ use camerata_server::model_tier::{CapabilityBand, TierMap};
 use camerata_server::project::{L3ReviewConfig, ModelProfile, ProjectStore, StepKind};
 use camerata_server::provider_policy::ProviderPolicy;
 use camerata_server::rate_limit::ProviderRateLimiter;
-use camerata_server::{resolve_chat_model, step_model, step_model_or, AppState};
+use camerata_server::{fix_step_model, resolve_chat_model, step_model, step_model_or, AppState};
 
 use camerata_fleet::orchestrator::{delegate_models_json, lead_stage_index};
 use camerata_intake::{Plan, PlanTask, TaskKind};
@@ -306,12 +306,19 @@ fn scope1_vision_band_routing_when_enabled() {
 const ALL_STEPS: &[(StepKind, &str)] = &[
     (StepKind::Audit, "audit-model"),
     (StepKind::Calibration, "calibration-model"),
+    (StepKind::Fix, "fix-model"),
     (StepKind::ResearchChat, "research-chat-model"),
     (StepKind::StoryAuthoring, "story-authoring-model"),
     (StepKind::Decomposition, "decomposition-model"),
     (StepKind::Escalation, "escalation-model"),
     (StepKind::Clarification, "clarification-model"),
 ];
+
+/// The steps a model profile sets: every step but the fix step. The fix step's default is the
+/// run-time `fix_on_haiku` switch, so a profile leaves it unset rather than pinning a model over it.
+fn profile_steps() -> impl Iterator<Item = &'static (StepKind, &'static str)> {
+    ALL_STEPS.iter().filter(|(kind, _)| *kind != StepKind::Fix)
+}
 
 /// Build a seeded AppState with ONE active project, returning (state, project_id).
 fn seeded_state_with_project() -> (AppState, String) {
@@ -376,6 +383,28 @@ fn scope2_request_model_overrides_project_default_for_every_step() {
     }
 }
 
+/// Rank 10: the fix step is unset on a new project (so the `fix_on_haiku` switch decides), is
+/// explicit once set, and goes back to unset when set to blank.
+#[test]
+fn scope2_fix_step_is_unset_by_default_and_clears_back_to_unset() {
+    let (state, id) = seeded_state_with_project();
+    assert_eq!(
+        fix_step_model(&state),
+        None,
+        "a new project sets no fix model"
+    );
+    state
+        .projects()
+        .set_step_model(&id, StepKind::Fix, "claude-opus-5".to_string())
+        .unwrap();
+    assert_eq!(fix_step_model(&state).as_deref(), Some("claude-opus-5"));
+    state
+        .projects()
+        .set_step_model(&id, StepKind::Fix, "  ".to_string())
+        .unwrap();
+    assert_eq!(fix_step_model(&state), None, "blank clears it");
+}
+
 #[test]
 fn scope2_step_model_floors_to_default_when_no_active_project() {
     // A seeded state with NO project at all: step_model falls to DEFAULT_MODEL (the only
@@ -419,6 +448,7 @@ fn scope3_l3_model_returns_pinned_then_falls_back_to_balanced() {
             L3ReviewConfig {
                 enabled: true,
                 model: "L3-pinned-id".to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -431,6 +461,7 @@ fn scope3_l3_model_returns_pinned_then_falls_back_to_balanced() {
             L3ReviewConfig {
                 enabled: true,
                 model: "   ".to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -485,20 +516,22 @@ fn scope4_balanced_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::Balanced);
 
     assert_eq!(p.model_profile, ModelProfile::Balanced);
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
-    assert_eq!(
-        p.tier_map.fast,
-        vec!["claude-haiku-4-5-20251001".to_string()]
-    );
-    // Every step model overwritten to Haiku.
-    for (kind, _) in ALL_STEPS {
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
+    assert_eq!(p.tier_map.fast, vec!["claude-haiku-5-5".to_string()]);
+    // Every step model overwritten to Haiku, except the fix step, which a profile leaves unset.
+    for (kind, _) in profile_steps() {
         assert_eq!(
             p.model_for_step(*kind),
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
             "Balanced overwrites {kind:?} to Haiku"
         );
     }
+    assert_eq!(
+        p.model_for_step(StepKind::Fix),
+        "",
+        "a profile never sets the fix model"
+    );
     assert!(!p.l3_review.enabled, "Balanced leaves L3 off");
 }
 
@@ -511,14 +544,19 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::MaxQuality);
 
     assert_eq!(p.model_profile, ModelProfile::MaxQuality);
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
-    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5".to_string()]);
-    for (kind, _) in ALL_STEPS {
-        assert_eq!(p.model_for_step(*kind), "claude-sonnet-5");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5-5".to_string()]);
+    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5-5".to_string()]);
+    for (kind, _) in profile_steps() {
+        assert_eq!(p.model_for_step(*kind), "claude-sonnet-5-5");
     }
+    assert_eq!(
+        p.model_for_step(StepKind::Fix),
+        "",
+        "a profile never sets the fix model"
+    );
     assert!(p.l3_review.enabled, "MaxQuality turns L3 on");
-    assert_eq!(p.l3_review.model, "claude-sonnet-5");
+    assert_eq!(p.l3_review.model, "claude-sonnet-5-5");
 }
 
 #[test]
@@ -547,7 +585,7 @@ fn scope4_max_efficiency_profile_picks_free_models() {
 
     assert_eq!(p.model_profile, ModelProfile::MaxEfficiency);
     // Strongest stays Opus; balanced/fast chains lead with the free model.
-    assert_eq!(p.tier_map.strongest, "claude-opus-5");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5-5");
     assert_eq!(p.tier_map.balanced[0], "qwen/qwen3-coder:free");
     // Step models use the free coder.
     assert_eq!(p.model_for_step(StepKind::Audit), "qwen/qwen3-coder:free");

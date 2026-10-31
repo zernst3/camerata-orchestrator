@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SEC-NO-WEAK-TOKEN-RANDOMNESS-1` checker
 //! (`WeakTokenRandomnessChecker`), wired into the brownfield SCAN, and proven to reach the
-//! CURATED finding set. See `docs/plans/2026-09-29_codebase-inspection-hardening.md`, D2.
+//! CURATED finding set. See the codebase-inspection hardening notes, D2.
 //!
 //! D2's problem statement: a token for an UNAUTHENTICATED public share link built from
 //! `Math.random()`, sitting right next to a sibling that correctly uses
@@ -85,12 +85,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 fn selected_weak_randomness_rule() -> Vec<SelectedRule> {

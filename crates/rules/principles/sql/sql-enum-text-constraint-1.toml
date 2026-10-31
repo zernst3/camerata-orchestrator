@@ -1,11 +1,16 @@
 id = "SQL-ENUM-TEXT-CONSTRAINT-1"
-version = 1
-title = "A column representing a closed set of values is constrained — a native enum, a CHECK list, or a lookup-table FK — never a bare, unconstrained text column"
+version = 4
+title = "A column representing a closed set of values is constrained by a native enum, a CHECK list or a lookup-table FK, never a bare unconstrained text column"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the column, its CHECK, its enum type or domain, and its lookup-table FK are all table, type or domain statements); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_tables" }
 # Severity floor, transcribed from this rule's own prose: "Flag as medium severity: 'Your
 # <table>.<column> column ...'".
 min_severity = "medium"
@@ -15,11 +20,11 @@ qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` 
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
-title = "PostgreSQL — CHECK constraints: 'the value in a certain column must satisfy a Boolean expression', the mechanism for constraining a column to a fixed set of valid values"
+title = "PostgreSQL: CHECK constraints: 'the value in a certain column must satisfy a Boolean expression', the mechanism for constraining a column to a fixed set of valid values"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-enum.html"
-title = "PostgreSQL — Enumerated Types: a native enum type restricts a column to a static, ordered set of values"
+title = "PostgreSQL: Enumerated Types: a native enum type restricts a column to a static, ordered set of values"
 
 [decision]
 question = "What position does the project take on constraining a closed-set-valued column — native enum, CHECK list, or lookup-table FK — versus leaving it an unconstrained text column?"
@@ -55,20 +60,20 @@ schema itself silently accepting anything.
 
 [[option]]
 id = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
-label = "Constrain closed-set columns via native enum, CHECK list, or lookup-table FK, chosen by how often the set changes and whether it's reused"
+label = "Constrain closed-set columns via native enum, CHECK list or lookup-table FK, chosen by how often the set changes and whether it's reused"
 directive = """
-A column that represents a closed set of values — a status, state, role, type, kind, tier, or category — is
+A column that represents a closed set of values (a status, state, role, type, kind, tier or category) is
 constrained at the database by one of three mechanisms rather than left as a bare, unconstrained text/varchar
 column whose valid set lives only in application code: a native PostgreSQL enum type, a `CHECK (<column> IN (...))`
-list, or a foreign key to a lookup table. The mechanism is chosen by how the set behaves: a small, stable,
-single-table set fits a native enum or CHECK list; a set that changes often, needs descriptive metadata, or is
+list or a foreign key to a lookup table. The mechanism is chosen by how the set behaves: a small, stable,
+single-table set fits a native enum or CHECK list; a set that changes often, needs descriptive metadata or is
 shared across multiple tables fits a lookup-table FK. Whichever is chosen, an out-of-set value (a typo, a bad
 migration, a write from another service) is rejected by the database itself, not merely by whichever application
 validator happens to run.
 """
 remediation = """
 Add a `CHECK (<column> IN (...))` constraint listing the valid values, convert `<column>` to a native PostgreSQL
-enum type, or introduce a lookup table and a foreign key to it — whichever mechanism matches how often this
+enum type or introduce a lookup table and a foreign key to it: whichever mechanism matches how often this
 particular set changes and whether other tables need to reference the same set of values. Verify by attempting to
 insert a row with a value outside the valid set through a path that bypasses your application's own validation (a
 raw SQL statement or migration script) and confirming the database itself rejects it.
@@ -81,4 +86,4 @@ id = "leave-closed-set-columns-as-unconstrained-text"
 violates = true
 label = "Represent closed-set values as a plain text/varchar column with no database-level constraint, relying on application code to validate the set"
 directive = "Store status/role/type-shaped values in an unconstrained text or varchar column, with the valid set of values enforced only by application-layer validation (a TypeScript union, a constant list, a request validator)."
-why = "Rejected: this is application-only enforcement for a value the application itself treats as closed — exactly the gap SQL-INVARIANTS-CONSTRAINTS-1 names generically, specialized here to the enum shape specifically because it is common enough, and the resulting bug (a stray string value the application's own switch/match logic has no case for) distinctive enough, to warrant calling it out by name rather than leaving it to the generic invariants rule alone."
+why = "Rejected: this is application-only enforcement for a value the application itself treats as closed: exactly the gap SQL-INVARIANTS-CONSTRAINTS-1 names generically, specialized here to the enum shape specifically because it is common enough, and the resulting bug (a stray string value the application's own switch/match logic has no case for) distinctive enough, to warrant calling it out by name rather than leaving it to the generic invariants rule alone."

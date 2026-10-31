@@ -13,6 +13,7 @@ use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 mod cache;
+mod injection;
 mod ledger;
 mod other_rules;
 mod redaction;
@@ -90,16 +91,18 @@ impl LlmPort for StubJudge {
     }
 }
 
-/// The candidate ids a request asks about, read from the JSON array after the batch marker.
+/// The candidate ids a request asks about: each candidate is one JSON object on its own line,
+/// inside its own delimited block, after the batch marker.
 pub(super) fn asked_ids(req: &LlmRequest) -> Vec<String> {
-    let json = req
+    let blocks = req
         .prompt
         .split_once(BATCH_MARKER)
         .map(|(_, rest)| rest)
         .unwrap_or_default();
-    let items: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
-    items
-        .iter()
+    blocks
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|i| i["id"].as_str().map(str::to_string))
         .collect()
 }

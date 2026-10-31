@@ -13,11 +13,13 @@ pub fn build_report(
 ) -> ScanReport {
     let proposed_rules = propose_rules(&findings, &repos);
     ScanReport {
+        run_id: None,
         repos,
         stacks,
         files_scanned,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
         code_lines: 0,
@@ -34,6 +36,10 @@ pub fn build_report(
         coverage_notes: Vec::new(),
         provenance: ScanProvenance::default(),
         recommendations: std::collections::HashMap::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         failed_passes: Vec::new(),
         ledger: crate::scan_ledger::ScanLedger::new(),
     }

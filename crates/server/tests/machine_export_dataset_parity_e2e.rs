@@ -102,22 +102,22 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     sql.fix_specific = Some("Bind the id as a parameter,\nnever format it in.".to_string());
     sql.also_matches = vec!["ARCH-STRICT-LAYERING-1".to_string()];
     sql.also_locations = vec![
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/refunds.rs".to_string(),
-            line: 22,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "format!(...)".to_string(),
-            consequence: false,
-        },
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/report.rs".to_string(),
-            line: 3,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "impact".to_string(),
-            consequence: true,
-        },
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/refunds.rs".to_string(),
+            22,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "format!(...)".to_string(),
+            false,
+        ),
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/report.rs".to_string(),
+            3,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "impact".to_string(),
+            true,
+        ),
     ];
 
     let mut in_test = kinded(
@@ -247,6 +247,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-PAGINATION-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-PAGINATION-1".to_string(),
             recommended_option_id: "cursor".to_string(),
             evidence: Some("src/api/list.rs:42 - cursor paging, with a comma".to_string()),
@@ -257,6 +258,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-IDEMPOTENCY-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-IDEMPOTENCY-1".to_string(),
             recommended_option_id: "none".to_string(),
             evidence: None,
@@ -276,11 +278,17 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     .collect();
 
     let report = ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 1,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -316,6 +324,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
             audited_rule_ids,
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -466,7 +475,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 26] = [
+const FINDING_HEADERS: [&str; 28] = [
     "Severity",
     "Headline",
     "Repo",
@@ -493,9 +502,11 @@ const FINDING_HEADERS: [&str; 26] = [
     "Kind",
     "Sites",
     "Also found at",
+    "Severity adjustments",
+    "Carried from",
 ];
 
-const FINDING_RENDERED: [&str; 24] = [
+const FINDING_RENDERED: [&str; 26] = [
     "severity",
     "headline",
     "repo",
@@ -520,6 +531,8 @@ const FINDING_RENDERED: [&str; 24] = [
     "fix_specific",
     "fix",
     "kind",
+    "severity_adjustments",
+    "carried_from",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -547,7 +560,7 @@ const FINDING_EXTRA_KEYS: [&str; 12] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 28] = [
+const FINDING_BASE_KEYS: [&str; 30] = [
     "severity",
     "headline",
     "repo",
@@ -574,6 +587,8 @@ const FINDING_BASE_KEYS: [&str; 28] = [
     "kind",
     "also_locations",
     "site_count",
+    "severity_adjustments",
+    "carried_from",
     "is_fp",
     "fp_reason",
 ];
@@ -614,7 +629,7 @@ fn yes_or_blank(row: &Value, key: &str) -> String {
     }
 }
 
-/// The 26 cells a findings-style worksheet row must show for `row`; a False Positives row adds
+/// The 28 cells a findings-style worksheet row must show for `row`; a False Positives row adds
 /// the "FP Reason" cell (and shows a blank Action, since a false positive has no matrix cell).
 fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
     let mut cells = vec![
@@ -648,6 +663,8 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
         text(row, "kind"),
         text(row, "site_count"),
         locations_text(row),
+        text(row, "severity_adjustments"),
+        text(row, "carried_from"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));

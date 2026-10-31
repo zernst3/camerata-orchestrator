@@ -242,7 +242,6 @@ mod tests {
     use camerata_ui_core::pane_context::BatchAnswer;
     use camerata_ui_core::triage::{FindingView, KeyMods, PaneFocus, TriageState};
     use camerata_ui_core::viewer::{FileKey, SourceFileView, ViewerCache, WindowView};
-    use dioxus::prelude::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 

@@ -1,0 +1,55 @@
+id = "TESTING-MEANINGFUL-ASSERTION-1"
+version = 2
+title = "Every test asserts on the behavior of the code under test: a test with no assertion, or one that asserts only on what its own stub returns, is not a test"
+domain = "testing"
+layer = "universal"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling: a test that checks nothing is a gap in the safety net (it reports green for
+# broken behavior and inflates coverage), not a fault in running behavior. The deterministic check
+# emits at medium; the ceiling keeps the AI-judged half ("asserts only a stub") at medium too.
+max_severity = "medium"
+default = true
+# `grounded`: "a test includes an assertion" is an established check with several independent
+# statements of it (SonarSource's "Tests should include assertions", the Jest community's
+# `expect-expect` lint rule, PMD's UnitTestShouldIncludeAssert, cited from the Java testing rule).
+# No `linter` annotation: the rule is answered by the repository-wide checker for JavaScript,
+# TypeScript, Python and Rust, not routed to a provisioned linter. Master sequence item 22e
+# (protected: corpus), slotted with W29 Wave D. Only the owner sets `verified`.
+verification = "grounded"
+qualifies = "Two halves. (1) Deterministically checkable, with no judgment involved: a test whose body holds no assertion at all, in JavaScript and TypeScript test files (Jest, Vitest, Mocha, Jasmine, node:test, Bun: an it, test or specify call, or its only or concurrent form, with a string title and a callback that takes no parameter), Python test modules (pytest and unittest: test functions, and test methods of Test classes or TestCase subclasses, in modules named test*.py or *_test.py) and Rust (functions marked #[test] or #[<runtime>::test]). Anything that might check counts as an assertion: an assertion call or macro, a matcher, a snapshot, an expected exception or warning, a throw or raise, a Testing Library query that fails when nothing matches, a panicking call in Rust (unwrap, expect, unwrap_err, expect_err and the ? operator), any call whose name reads as a check (assert, expect, verify, check, should, ensure, validate, match, snapshot, fail, raise, throw), a helper in the same file that asserts, and any helper the check cannot see into (one imported from a test-support module, a method a test class inherits, a free Rust function defined in another file, an unknown macro). Not reported: skipped, todo and table-driven tests, #[should_panic], #[ignore], #[test_case] and #[rstest] tests, a JavaScript test whose callback takes a parameter (an AVA or tap t, Mocha's done, Playwright fixtures), a file whose before or after hook asserts, a file that declares or imports its own test or it, a Python test with a decorator outside a known non-asserting list (pytest marks, patch, given, settings, freeze_time, override_settings), a Python test that requests a fixture that might assert (directly or through another fixture) or whose name says it checks, a Python module wrapped by an autouse fixture that might assert, and test files in vendored or build folders. A test that only shows that code does not raise, panic or fail to compile has no assertion and is reported. Go, Java, C#, Ruby and the other corpus languages are not checked deterministically; their tests are read only by the reviewed semantic pass. (2) A judgment, assessed by the reviewed semantic read of the code rather than by the deterministic check: a test that asserts, but only on a value its own mock or stub produced, so that it would pass whatever the code under test does. Partly covered by off-the-shelf linting: eslint-plugin-jest's expect-expect and SonarSource's rule S2699 report the first half per framework; no linter reports the second."
+
+[[sources]]
+url = "https://rules.sonarsource.com/java/RSPEC-2699/"
+title = "SonarSource rule S2699: Tests should include assertions"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/expect-expect.md"
+title = "eslint-plugin-jest rule documentation: expect-expect, enforce assertion to be made in a test body"
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer, Wave D and 22e, TESTING-MEANINGFUL-ASSERTION-1"
+
+[decision]
+question = "Does every test check the behavior of the code it exercises?"
+default = "every-test-asserts-on-real-behavior"
+why = "A test runner reports a test as passed when nothing in it fails. A test with no assertion therefore passes whenever the code it calls does not throw, whatever that code returns, and a test that asserts only on what its own stub returns passes whatever the code under test does. Both report green for broken behavior, both count toward coverage they do not provide, and both are easy to write by accident: a forgotten expect, a refactor that moved the assertion into a helper and then removed it, a mock asserted on instead of the result. They hide regressions in exactly the places the team believes are tested."
+
+[[option]]
+id = "every-test-asserts-on-real-behavior"
+label = "Every test asserts on a result or an effect of the code under test"
+directive = "Every test asserts on something the code under test produced: a returned value, a raised error, a rendered output, a call it made to a collaborator or a change of state. A test that only runs code to show it does not throw states that expectation explicitly (for example, an assertion that the call does not raise). Never assert only on a value the test's own mock or stub returns; assert on what the code under test did with it."
+remediation = """
+Add an assertion to the test named in the finding that checks the behavior its name describes: the value the code under test returns, the error it raises, the output it renders or the call it makes to a collaborator. If the test exists only to show the code does not fail, make that explicit with an assertion or remove the test. Verify by breaking the behavior on purpose (change the returned value) and confirming the test now fails, then restore it.
+"""
+effort = "low"
+why = "Adding the missing assertion is a local edit to one test, and the deliberate break proves the test now guards the behavior it is named for."
+
+[[option]]
+id = "tests-may-pass-without-checking"
+violates = true
+label = "Tests may run code without asserting on its behavior, or assert only on their own stubs"
+directive = "Tests may call the code under test without asserting on its result, or assert only on values their own mocks and stubs return."
+why = "A test that asserts nothing passes whenever the code it runs does not throw, and a test that asserts only on its own stub passes whatever the code under test does. Both report green for broken behavior and count toward coverage they do not provide, so a regression ships through a suite everyone believes covers it."

@@ -70,12 +70,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 /// `e2e_report_pipeline.rs`'s): the PDF-compile stage of `inspect` skips gracefully rather
 /// than hard-failing CI environments without `typst` on PATH.
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 // Serial with the env-mutating test below: the scan pipeline this drives READS
@@ -84,6 +79,11 @@ fn typst_on_path() -> bool {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
+    // Test isolation: with the dependency audit disabled no osv-scanner run happens, so neither
+    // the CISA KEV nor the FIRST EPSS feed is fetched and nothing is written to the real user
+    // data dir's vuln-intel cache. (`vuln_intel::enrich_dependency_findings` honours the same
+    // variable.)
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
     if !typst_on_path() {
         eprintln!("skipping deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip: typst not on PATH");
         return;
@@ -91,20 +91,43 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
 
     let repo_dir = tempfile::tempdir().expect("create temp dir for the fixture git repo");
     stage_fixture_as_git_repo(repo_dir.path());
+    // 22c: noise the inspection's filter drops, so the manifest's excluded-noise figures are
+    // non-zero and can be compared with `camerata count`'s.
+    std::fs::write(
+        repo_dir.path().join("package-lock.json"),
+        "{\n  \"a\": 1\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo_dir.path().join("vendor")).unwrap();
+    std::fs::write(repo_dir.path().join("vendor/lib.js"), "var a;\nvar b;\n").unwrap();
     let export_dir = tempfile::tempdir().expect("create temp dir for the export zip");
     let export_path = export_dir.path().join("inspect.zip");
+    // Counted BEFORE the run: the scan's Rust build pass leaves `target/` and `Cargo.lock` in
+    // the repo afterwards, which a later count would include.
+    let count = camerata_server::onboard::count::count_repo(repo_dir.path()).expect("count");
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         // `Api` + `has_api_key: false` below resolves to `Blocked` — the real compliance
         // gate, not a test-only bypass. See this file's own doc comment.
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
+        fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
+        max_cost_usd: None,
+        efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
+        client_engagement: false,
+        run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -142,6 +165,40 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     );
     assert!(names.contains(&"findings.json".to_string()), "{names:?}");
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+
+    // 22c: the manifest states the quote basis exactly as `camerata count` does (the same
+    // filter function, the same line definition), and names the client.
+    let manifest: serde_json::Value = {
+        use std::io::Read;
+        let mut text = String::new();
+        archive
+            .by_name("manifest.json")
+            .expect("manifest.json")
+            .read_to_string(&mut text)
+            .expect("manifest text");
+        serde_json::from_str(&text).expect("manifest parses")
+    };
+    let inspection = &manifest["inspection"];
+    assert!(count.excluded_noise_files >= 2, "anti-vacuity: {count:?}");
+    assert_eq!(
+        inspection["counted_lines"], count.total_lines,
+        "{inspection}"
+    );
+    assert_eq!(
+        inspection["excluded_noise_files"], count.excluded_noise_files,
+        "{inspection}"
+    );
+    assert_eq!(
+        inspection["excluded_noise_lines"], count.excluded_noise_lines,
+        "{inspection}"
+    );
+    assert_eq!(inspection["client_name"], "Example Client Ltd");
+    assert!(
+        inspection["corpus_rules_applied"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "{inspection}"
+    );
 }
 
 /// A bare-minimum synthetic git repo: no planted findings, no SQL-concat pattern anywhere —
@@ -214,13 +271,24 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
+        fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: true,
+        max_cost_usd: None,
+        efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
+        client_engagement: false,
+        run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

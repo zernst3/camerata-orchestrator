@@ -64,7 +64,11 @@ pub struct DispositionWire {
 /// leaves it blank; every field degrades to an empty/omitted value in the template).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ReportOptions {
-    #[serde(default)]
+    /// Who the report is prepared FOR: the cover's "Prepared for" line and the confidentiality
+    /// marking on every page and sheet. Server-populated from the project's inspection setup
+    /// (`Project::client_name`), never client-supplied (`serde(skip)`), so every export of a
+    /// project names the same client. A blank name blocks the export ([`require_client_name`]).
+    #[serde(skip)]
     pub client_name: String,
     #[serde(default)]
     pub project_title: String,
@@ -94,7 +98,29 @@ pub struct ReportOptions {
     /// provenance. Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub model: Option<crate::ModelRecord>,
+    /// H4: also export the triage log (per rule, what the AI pass proposed, what review kept
+    /// and threw out, and why) as a workbook sheet and `csv/triage-log.csv`. OFF by default:
+    /// the export dialog (or `camerata inspect` via [`EXPORT_TRIAGE_LOG_ENV`]) asks for it.
+    /// See `xlsx_export::triage_log`.
+    #[serde(default)]
+    pub triage_log: bool,
+    /// Every repo the project holds, in the project's order. Server-populated from the project,
+    /// never client-supplied (`serde(skip)`). The package assembly refuses a report that covers
+    /// fewer repos than this ([`require_all_repos`]); empty means the caller names no project
+    /// (a one-off inspection) and only the report's own `repos_not_inspected` is checked.
+    #[serde(skip)]
+    pub expected_repos: Vec<String>,
+    /// The export is for the operator's own review (the project is not a client engagement, or
+    /// `camerata inspect --internal`). Only an internal export may be made from a run that did not
+    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `findings.json`.
+    /// Server-populated, never client-supplied (`serde(skip)`).
+    #[serde(skip)]
+    pub internal: bool,
 }
+
+/// Env var that turns the optional triage log on for an export when set to `1` or `true`
+/// (folded in by [`ReportOptions::apply_env_defaults`], like the brand). Unset means off.
+pub const EXPORT_TRIAGE_LOG_ENV: &str = "CAMERATA_EXPORT_TRIAGE_LOG";
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
 /// doesn't POST one. Brand-neutral name (not `CANTUS_*`) so a future Camerata licensee sets
@@ -122,6 +148,17 @@ pub const NEUTRAL_COVER_TITLE: &str = "Codebase Inspection Report";
 /// the ultimate fallback is a real name, not an empty string. A per-report `prepared_by` or the
 /// env var still wins over this (see [`resolve_prepared_by`]'s precedence).
 pub const DEFAULT_PREPARED_BY: &str = "Zachary Ernst, Cantus Works";
+
+/// The brand the bundled logo files (`docs/design/brand/`) belong to. The mark renders on a
+/// report only when its resolved brand is this one ([`brand_kit_matches`]); the colours and
+/// type of the W27 template apply to every report, the logo does not.
+pub const BRAND_KIT_NAME: &str = "Cantus Works";
+
+/// Whether `brand` (the resolved [`ReportOptions::brand`], `None` for no brand) is the bundled
+/// brand kit's, ignoring case and surrounding whitespace.
+pub(crate) fn brand_kit_matches(brand: Option<&str>) -> bool {
+    brand.is_some_and(|b| b.trim().eq_ignore_ascii_case(BRAND_KIT_NAME))
+}
 
 /// Precedence resolver: the per-report field wins when non-blank, else the env value when
 /// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
@@ -169,7 +206,18 @@ impl ReportOptions {
             .unwrap_or_default();
         self.prepared_by =
             resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
+        self.triage_log = self.triage_log
+            || triage_log_env_on(std::env::var(EXPORT_TRIAGE_LOG_ENV).ok().as_deref());
     }
+}
+
+/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value turns the triage log on: `1` or `true` (any
+/// case), nothing else. Split out so it is testable without touching the process environment.
+pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
 }
 
 /// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
@@ -257,10 +305,22 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
 /// round-trip test below (`finding_key_matches_ui_core_format`) pins the format so the two
 /// can never silently drift apart.
 pub fn finding_key(f: &Finding) -> String {
-    format!(
+    let key = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    );
+    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
+    // version in one lockfile share the whole key, and dispositioning one used to bury the other.
+    // The advisory id (kept for dependency rows only) tells them apart. Every other row's key
+    // is unchanged. `camerata_ui_core::triage::finding_key` appends the same suffix.
+    match f.captures.get(crate::dep_audit::ADVISORY_CAPTURE) {
+        Some(advisory)
+            if f.rule_id == crate::dep_audit::DEP_AUDIT_RULE_ID && !advisory.is_empty() =>
+        {
+            format!("{key}\u{0}{advisory}")
+        }
+        _ => key,
+    }
 }
 
 // ── Effective disposition (status + wire, reconciled) ───────────────────────────
@@ -421,7 +481,7 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 /// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
 ///   template's `d.review_state` read.
 ///
-/// See `docs/plans/2026-09-29_codebase-inspection-hardening.md`'s P5 section: the bug this
+/// See the codebase-inspection hardening notes' P5 section: the bug this
 /// fixes is a raw (nobody-reviewed) export whose narrative said "N were reviewed... 0 were
 /// dispositioned as false positives by the auditor" — a flat fabrication, since reviewing
 /// something is precisely what had not happened.
@@ -538,196 +598,51 @@ pub(crate) fn bucket_title(bucket: &str) -> &'static str {
 /// exactly once per finding (computed alongside its disposition in `build_report_json`'s
 /// partition loop) rather than matching `finding.severity.as_str()` ad hoc in each section.
 pub(crate) fn normalize_severity(raw: &str) -> String {
-    match raw.to_ascii_lowercase().as_str() {
-        "critical" => "critical".to_string(),
-        "high" => "high".to_string(),
-        "medium" => "medium".to_string(),
-        // `info` is a real, distinct tier (Bug 4): a convention-to-consider, ranked BELOW
-        // `low`. It must survive normalization rather than collapsing into `low`, or an
-        // informational stance note would silently re-enter the plan/low action tier.
-        "info" => "info".to_string(),
-        _ => "low".to_string(),
-    }
+    camerata_rules::severity_bounds::normalize_severity(raw)
 }
 
-/// E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): clamp `severity` DOWN to `rule_id`'s
-/// corpus-declared [`camerata_rules::Rule::max_severity`], when one is declared and `severity`
-/// currently ranks ABOVE it (a lower [`severity_rank`] number is more severe, so "above the
-/// ceiling" means `severity_rank(severity) < severity_rank(ceiling)`). Never RAISES a severity
-/// that already ranks at or below the ceiling — this is a ceiling, not a floor, and applying it
-/// is always safe regardless of how `severity` got to its current value (a model's own
-/// judgment, the D5 severity floor, the D6/D7 severity ceiling rules — ALL of those run
-/// upstream, inside `ai_audit.rs`, before a finding ever reaches this export layer; this is the
-/// LAST clamp, applied once per finding at the single choke-point every exporter (the PDF's
-/// `build_report_json`, the xlsx/`findings.json` `partition_rows`) already shares for severity
-/// normalization, so "no report may exceed it" holds for every artifact, not just one).
-///
-/// `rule_id` is resolved through [`corpus_rule_for`] (not a bare `corpus.get_by_id`), so an
-/// external-tool/preview finding whose `rule_id` is the TOOL's own id (e.g. a Semgrep rule
-/// name) still resolves to the grounded corpus rule that may carry a ceiling. Absent corpus,
-/// absent rule, or absent `max_severity` all degrade to a no-op — the overwhelming majority of
-/// findings have no ceiling to apply.
+// The four severity bounds (E2 `max_severity`, W8 `min_severity`, A5.2 `deviation_ceiling`,
+// C4-R1 unlocated) and their order live in `camerata_rules::severity_bounds`, shared with the
+// `camerata-check` CI gate; the exporters apply them through
+// `crate::severity_bounds::bounded_severity`. The three adapters below keep this module's
+// unit tests pinned to the same chain, resolving the rule through [`corpus_rule_for`].
+
+#[cfg(test)]
 pub(crate) fn clamp_to_rule_max_severity(
     severity: String,
     rule_id: &str,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    let Some(rule) = corpus_rule_for(rule_id, corpus) else {
-        return severity;
-    };
-    let Some(raw_ceiling) = rule.max_severity.as_deref() else {
-        return severity;
-    };
-    let ceiling = normalize_severity(raw_ceiling);
-    if severity_rank(&severity) < severity_rank(&ceiling) {
-        ceiling
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::clamp_to_max_severity(
+        severity,
+        corpus_rule_for(rule_id, corpus),
+    )
 }
 
-/// W8 / W5-Q2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): RAISE `severity` UP to
-/// `f`'s corpus-declared [`camerata_rules::Rule::min_severity`], when one is declared and
-/// `severity` currently ranks BELOW it. The exact structural mirror of
-/// [`clamp_to_rule_max_severity`], built because the owner ruled that a rule's prose statement
-/// of a single severity is a FLOOR:
-///
-/// > **"Floor, it's the minimum rating."**
-///
-/// Never LOWERS a severity that already ranks at or above the floor — this is a floor, not a
-/// ceiling. Absent corpus, absent rule, or absent `min_severity` all degrade to a no-op, which
-/// is the overwhelming majority of findings. `rule_id` is resolved through [`corpus_rule_for`]
-/// for the same reason the ceiling does it: an external-tool/preview finding carrying the
-/// TOOL's own id must still reach the grounded corpus rule that may carry a floor.
-///
-/// # Two preconditions, both deliberate — a floor is not as safe as a ceiling
-///
-/// A ceiling can only lower a severity, so it is safe to apply unconditionally. A floor RAISES
-/// one, so an over-broad floor is a false alarm shipped to a client. Two guards bound it:
-///
-/// 1. **An ACCUSING kind, explicitly present.** The floor applies only when
-///    [`camerata_api_types::audit::FindingKind`] is present and NOT informational — i.e.
-///    `Defect` or `Deviation`. A `ConventionObserved` / `NoConvention` / `NotAssessed` row says
-///    something is FINE (or was not evaluated) and "always ship at `info` severity" by W3's
-///    design; raising one to `high` would both lie to the client and, via
-///    [`is_informational`]'s severity test, re-route it into an action bucket. An ABSENT kind
-///    is excluded too, under W3's standing honesty rule that nothing may silently default to
-///    `Defect` — the same reason [`clamp_deviation_severity`] refuses to assume an unkinded row
-///    is a deviation.
-/// 2. **A real location.** A finding with BOTH an empty `path` and `line == 0` established
-///    nothing concrete to rate, and [`downgrade_unlocated_above_informational`] (C4-R1) exists
-///    to force exactly that shape to `info`. Declining the floor there, rather than relying on
-///    running before C4-R1, makes the floor ORDER-INDEPENDENT with respect to that safety net:
-///    it cannot undo it from any position in the chain.
-///
-/// # Where this sits relative to the ceiling
-///
-/// Applied at the same export choke-points as the ceiling (the PDF's `build_report_json`
-/// partition, the xlsx/`findings.json` `partition_rows`), so every artifact agrees — but
-/// FIRST in that chain, so `max_severity` and the A5.2 deviation ceiling both still get the
-/// last word. The corpus-load gate (`camerata_rules::rules_with_invalid_severity_floor`)
-/// rejects a `min_severity` ranking above the same rule's `max_severity`, so the two can never
-/// state an unsatisfiable pair; with that guaranteed, floor-then-ceiling always lands inside
-/// `[min_severity, max_severity]`.
+#[cfg(test)]
 pub(crate) fn raise_to_rule_min_severity(
     severity: String,
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    match &f.kind {
-        Some(kind) if !kind.is_informational() => {}
-        // Informational, or no kind at all — see precondition 1 above.
-        _ => return severity,
-    }
-    if f.path.is_empty() && f.line == 0 {
-        // Nothing concrete to rate — see precondition 2 above.
-        return severity;
-    }
-    let Some(rule) = corpus_rule_for(&f.rule_id, corpus) else {
-        return severity;
-    };
-    let Some(raw_floor) = rule.min_severity.as_deref() else {
-        return severity;
-    };
-    let floor = normalize_severity(raw_floor);
-    if severity_rank(&severity) > severity_rank(&floor) {
-        floor
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::raise_to_min_severity(
+        severity,
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    )
 }
 
-/// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
-/// CONSISTENCY DEVIATION. The default a deviation may never exceed, absent an authored
-/// per-rule escape hatch — the owner's driver is FORWARD DRIFT COST ("consistency issues
-/// would be a problem moving forward with new features moreso than the existing code"), so
-/// the default cap sits at `medium`, and a rule whose decision domain genuinely compounds
-/// (where drift is expensive) raises it by AUTHORING `deviation_ceiling = "high"` in the
-/// corpus — an authoring-time structured field, never a prose-scanning runtime heuristic.
-pub(crate) const DEVIATION_DEFAULT_CEILING: &str = "medium";
-
-/// A5.2: clamp a [`camerata_api_types::audit::FindingKind::Deviation`] row's severity DOWN
-/// to its rule's authored `deviation_ceiling`, defaulting to
-/// [`DEVIATION_DEFAULT_CEILING`] when the rule authors none. A no-op for every other kind
-/// (a Defect under the same rule is untouched) and for a row with no kind at all (a
-/// legacy/unspecified row is NOT assumed to be a deviation). Like
-/// [`clamp_to_rule_max_severity`] this is a ceiling, never a floor — it cannot raise — and
-/// it is applied at the same export choke-points (the PDF's `build_report_json` partition
-/// and the xlsx/`findings.json` `partition_rows`), so every artifact agrees. The kind is a
-/// STRUCTURED field set at emission (`ai_audit::assign_deviation_kinds`); nothing here
-/// inspects prose.
+#[cfg(test)]
 pub(crate) fn clamp_deviation_severity(
     severity: String,
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    if !matches!(
-        f.kind,
-        Some(camerata_api_types::audit::FindingKind::Deviation(_))
-    ) {
-        return severity;
-    }
-    let ceiling = corpus_rule_for(&f.rule_id, corpus)
-        .and_then(|r| r.deviation_ceiling.as_deref())
-        .map(normalize_severity)
-        .unwrap_or_else(|| DEVIATION_DEFAULT_CEILING.to_string());
-    if severity_rank(&severity) < severity_rank(&ceiling) {
-        ceiling
-    } else {
-        severity
-    }
-}
-
-/// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
-/// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
-/// — that combination means nothing concrete was ever established for the location this
-/// finding supposedly cites, which reads as "deterministic rule asserting a falsehood" rather
-/// than a real, actionable defect. This was discovered via a Supabase RLS checker over-firing
-/// at `critical` with an empty path/line-0 "last established" fact (see
-/// `camerata_checks::supabase::rls_checker`'s own C4-R1 fix, which now avoids triggering this
-/// at the source by citing a real policy location) — but the invariant is enforced HERE, at the
-/// single place every checker's findings funnel through before bucketing, so any OTHER
-/// checker/producer that ever ships an unlocated above-informational finding is caught too,
-/// not just this one rule.
-///
-/// Downgrades the SEVERITY only (to `"info"`, so `is_informational` routes it to the
-/// `informational` appendix exactly like any other info-tier finding) — never drops the
-/// finding. A client should still see "something was flagged, but the scan couldn't pin down
-/// where," rather than losing the observation entirely (the over-tell rule, applied here at the
-/// pipeline-integrity level rather than a triage-confidence one).
-///
-/// This is a property of the FINDING (an unlocated finding is not actionable at its stated
-/// severity), not of how one artifact presents it, so it lives in the shared bound chain
-/// ([`crate::severity_bounds::bounded_severity`]: floor, then this, then the ceilings) and every
-/// surface applies it: the live scan, the PDF, and the workbook / CSV / JSON / `findings.json`.
-/// Until 2026-10-21 only the PDF did, so one unlocated finding read `info` in the PDF and `high`
-/// everywhere else.
-pub(crate) fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
-    if severity != "info" && f.path.is_empty() && f.line == 0 {
-        "info".to_string()
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::clamp_deviation_severity(
+        severity,
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    )
 }
 
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
@@ -804,6 +719,20 @@ pub struct CodeVolumeJson {
     /// template must render the total either way and only additionally list languages when
     /// this is non-empty.
     pub by_language: Vec<crate::onboard::LanguageVolume>,
+    /// Each repo's own line count, when the project has more than one repo. Absent from the JSON
+    /// otherwise, so a one-repo `findings.json` is byte for byte what it always was; the template
+    /// guards for the key. Never merged into the total above without saying which repo holds
+    /// what.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub per_repo: Vec<CodeVolumeRepoJson>,
+}
+
+/// One repo's share of the code volume.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodeVolumeRepoJson {
+    pub repo: String,
+    pub files: usize,
+    pub lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -820,7 +749,19 @@ pub struct CoverJson {
     pub audited_refs: Vec<AuditedRefJson>,
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
+    /// The model backend (`api` / `cli`) and provider that ran the inspection, e.g.
+    /// `api (anthropic)`, from [`ReportOptions::model`]. `None` when the caller recorded none.
+    pub model_backend: Option<String>,
     pub camerata_version: String,
+    /// The git commit the exporting engine was built from ([`crate::ENGINE_COMMIT`]). `None`
+    /// for a build outside a git checkout. Rendered in the PDF methodology and carried in
+    /// `findings.json`'s `provenance`.
+    pub engine_commit: Option<String>,
+    /// The rule-library lock hash ([`camerata_rules::corpus_version`]: the digest over every
+    /// rule's id, version and content hash, exactly the content of `CORPUS_LOCK.toml`). The
+    /// same value as `manifest.json`'s `inspection.corpus_version` and the README's "Corpus
+    /// version" line. `None` when the export ran without a loaded corpus.
+    pub corpus_version: Option<String>,
     /// `%Y-%m-%d %H:%M UTC` (M5) — of when this PDF was generated (NOT the scan time —
     /// that's `audited_refs`/provenance; this is "as-of" for the export itself).
     pub generated_at: String,
@@ -834,6 +775,45 @@ pub struct CoverJson {
     /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
     pub brand: Option<String>,
     pub stats: CoverStatsJson,
+    /// H11: set when this run re-audited only the changed files and carried the earlier
+    /// inspection's other findings forward ("12 files re-audited this run, 3 findings carried
+    /// from the inspection at abc1234."). `None` for a full scan, and the cover then prints
+    /// nothing extra.
+    pub incremental_note: Option<String>,
+    /// Set only on an internal export of a run that did not complete: the line printed on the
+    /// cover and carried in `findings.json`. Absent otherwise, so a complete run's output is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_incomplete: Option<String>,
+}
+
+/// H11: the cover sentence for an incremental run. Plain words; each count is the ledger's.
+pub fn incremental_cover_note(carry: &crate::scan_ledger::IncrementalCarry) -> String {
+    let files = |n: usize| {
+        if n == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{n} files")
+        }
+    };
+    let findings = if carry.carried_findings == 1 {
+        "1 finding".to_string()
+    } else {
+        format!("{} findings", carry.carried_findings)
+    };
+    let source = match carry.prior_sha.as_deref().map(str::trim) {
+        Some(sha) if !sha.is_empty() => {
+            let short: String = sha.chars().take(7).collect();
+            format!("the inspection at {short}")
+        }
+        _ => "an earlier inspection".to_string(),
+    };
+    format!(
+        "{} re-audited this run. {} not re-audited; {} carried from {source}.",
+        files(carry.changed),
+        files(carry.carried_files),
+        findings
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1159,7 +1139,9 @@ pub struct CitationSourceJson {
 #[derive(Debug, Clone, Serialize)]
 pub struct CitationJson {
     /// `"grounded"` (corpus-cited) | `"preview"` (deterministic tool, no corpus citation) |
-    /// `"advisory"` (AI-tier, no corpus entry at all).
+    /// `"related"` (AI-tier, a real standard attached by keyword match, not a rule that was
+    /// checked; see [`RELATED_STANDARD_LABEL_PREFIX`]) | `"advisory"` (AI-tier, no corpus entry
+    /// at all).
     pub kind: String,
     /// One-line, template-ready label (e.g. "AI-advisory, model-inferred.").
     pub label: String,
@@ -1231,11 +1213,29 @@ pub struct CuratedSiteJson {
     /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
     /// a row representing three detected sites exported as one line at one `path:line`, so
     /// an over-merge was observationally identical to a detection miss (tracker C5). The
-    /// template does not render it yet (the PDF is the summary — Pass 3 owns presentation);
-    /// the data is here so it CAN, and so the report JSON is complete.
+    /// template renders it from [`Self::also_sites`], which adds the rule titles; this field
+    /// keeps the verbatim records so the report JSON is complete.
     pub also_locations: Vec<crate::onboard::MergedLocation>,
-    /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
-    /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
+    /// H6: the same absorbed sites, ready to print: location plus the human title of the rule
+    /// each was flagged under (never the raw rule id). The PDF renders these as "Also found at".
+    /// Empty for an un-merged row.
+    pub also_sites: Vec<AlsoSiteJson>,
+    /// Members of a merge that were flagged at THIS row's own place (or at a place already
+    /// listed in `also_sites`), as finished sentences: "Also flagged here as <headline>
+    /// (<severity>)". They are the same place, so they are not counted as another site.
+    pub also_flagged_here: Vec<String>,
+    /// For a leaked credential that another repo of the project also flags under the same name:
+    /// one finished sentence naming those repos. Display only: the rows stay separate, because
+    /// each service's owner rotates their own. Empty for every other row.
+    pub same_credential_note: String,
+    /// M2/M8: one finished sentence for every bound that moved this row's severity ("Severity
+    /// lowered from high to info: no file or line was identified for this finding."). The
+    /// severity shown is the adjusted one; this says what it was and why it changed. Empty
+    /// when nothing moved it, and the PDF then prints nothing.
+    pub severity_adjustments: Vec<String>,
+    /// Pass-1 W7 (C5): total DISTINCT places this row represents: its own `path:line` plus every
+    /// `also_locations` entry at a different place. A member absorbed at the row's own line is
+    /// not another site. `1` for an un-merged row.
     pub site_count: usize,
     /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
     /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
@@ -1244,12 +1244,149 @@ pub struct CuratedSiteJson {
     pub kind: camerata_api_types::audit::KindOnWire,
 }
 
+/// H6: one absorbed evidence site as the PDF prints it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AlsoSiteJson {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    /// The corpus title of the rule this site was flagged under; `None` when the id has no
+    /// corpus entry (an AI-invented id), so a raw id is never printed.
+    pub title: Option<String>,
+    /// The absorbed finding's own headline, when it carried one: what is printed when the rule
+    /// has no corpus title.
+    pub headline: Option<String>,
+    /// The absorbed finding's own severity, only when it outranks the row's.
+    pub severity: Option<String>,
+    /// True for a site that is only a consequence of the row's root cause.
+    pub consequence: bool,
+}
+
+/// The `Finding::captures` key an incremental run writes on a finding it carried forward from the
+/// earlier inspection: the commit it was last found at.
+pub const CARRIED_FROM_CAPTURE: &str = "carried_from";
+
+/// H11: the commit of the earlier inspection `f` was carried forward from, when this run did not
+/// re-audit its file. `None` for a row found this run.
+pub fn carried_from(f: &Finding) -> Option<String> {
+    f.captures
+        .get(CARRIED_FROM_CAPTURE)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The absorbed members of a row, split by place: those at a DIFFERENT place from the row and
+/// from each other (the "other sites"), and those at a place already named (the row's own, or
+/// an earlier member's), flagged with whether that place is the row's own.
+pub(crate) struct AbsorbedSplit<'a> {
+    pub other_sites: Vec<&'a crate::onboard::MergedLocation>,
+    pub same_place: Vec<(&'a crate::onboard::MergedLocation, bool)>,
+}
+
+/// See [`AbsorbedSplit`]. `own` is the row's own place ([`crate::onboard::site_place`]).
+pub(crate) fn split_absorbed<'a>(
+    own: crate::onboard::SitePlace,
+    locs: &'a [crate::onboard::MergedLocation],
+) -> AbsorbedSplit<'a> {
+    let mut seen: std::collections::HashSet<crate::onboard::SitePlace> =
+        std::collections::HashSet::new();
+    seen.insert(own.clone());
+    let mut split = AbsorbedSplit {
+        other_sites: Vec::new(),
+        same_place: Vec::new(),
+    };
+    for l in locs {
+        let place = l.place();
+        if seen.insert(place.clone()) {
+            split.other_sites.push(l);
+        } else {
+            split.same_place.push((l, place == own));
+        }
+    }
+    split
+}
+
+/// The sentence for a member absorbed at a place already named: "Also flagged here as
+/// <label> (<severity>)" at the row's own place, "Also flagged at path:line as ..." at another
+/// member's. `label` is the member's headline, else the rule's corpus title; with neither it
+/// reads "under another rule". Never a raw rule id.
+pub(crate) fn flagged_sentence(
+    l: &crate::onboard::MergedLocation,
+    at_own_place: bool,
+    corpus_title: Option<&str>,
+) -> String {
+    let label = Some(l.headline.trim())
+        .filter(|h| !h.is_empty())
+        .or(corpus_title.filter(|t| !t.trim().is_empty()));
+    let place = if at_own_place {
+        "here".to_string()
+    } else {
+        format!("at {}:{}", l.path, l.line)
+    };
+    let rating = if l.severity.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", l.severity.trim())
+    };
+    match label {
+        Some(h) => format!("Also flagged {place} as {h}{rating}"),
+        None => format!("Also flagged {place} under another rule{rating}"),
+    }
+}
+
+/// H6: the absorbed sites of `f` that are at a different place, titled from the corpus, with
+/// the member's own headline when the corpus has no title and its severity when it outranks the
+/// row's.
+pub(crate) fn also_sites_for(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<AlsoSiteJson> {
+    let row_rank = severity_rank(&crate::severity_bounds::bounded_severity(f, corpus));
+    split_absorbed(f.place(), &f.also_locations)
+        .other_sites
+        .into_iter()
+        .map(|l| AlsoSiteJson {
+            repo: l.repo.clone(),
+            path: l.path.clone(),
+            line: l.line,
+            title: corpus
+                .and_then(|c| c.get_by_id(&l.rule_id))
+                .map(|r| r.title.clone()),
+            headline: Some(l.headline.trim().to_string()).filter(|h| !h.is_empty()),
+            severity: Some(normalize_severity(&l.severity))
+                .filter(|_| !l.severity.trim().is_empty())
+                .filter(|s| severity_rank(s) < row_rank),
+            consequence: l.consequence,
+        })
+        .collect()
+}
+
+/// The "Also flagged here" sentences of `f` (see [`flagged_sentence`]).
+pub(crate) fn also_flagged_here_for(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    split_absorbed(f.place(), &f.also_locations)
+        .same_place
+        .into_iter()
+        .map(|(l, own)| {
+            let title = corpus
+                .and_then(|c| c.get_by_id(&l.rule_id))
+                .map(|r| r.title.as_str());
+            flagged_sentence(l, own, title)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CuratedGroupJson {
     pub rule_id: String,
     pub title: String,
     pub citation: CitationJson,
     pub sites: Vec<CuratedSiteJson>,
+    /// For a project of several repos: the repos this rule was found in, sorted. Empty for a
+    /// project of one repo (the group then reads as it always has).
+    pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1257,6 +1394,12 @@ pub struct HealthyRuleJson {
     pub rule_id: String,
     pub title: String,
     pub citation: CitationJson,
+    /// For a project of several repos: the repos where the rule was checked and is clean. A rule
+    /// that did not apply to a repo is not clean there, so it is named in
+    /// [`Self::not_applicable_in`] and never here. Both are empty for a one-repo project.
+    pub clean_in: Vec<String>,
+    /// For a project of several repos: the repos the rule does not apply to.
+    pub not_applicable_in: Vec<String>,
 }
 
 /// W1: one rule the ledger confirms did NOT run this scan, with the real reason — the
@@ -1326,6 +1469,10 @@ pub struct MethodologyJson {
     /// did not run, rather than the reader having to notice its absence from the findings.
     #[serde(default)]
     pub failed_passes: Vec<String>,
+    /// H5: one plain sentence telling the reader what a "related standard" citation means (see
+    /// [`RELATED_STANDARD_LABEL_PREFIX`]). Rendered in the Methodology section, the report's
+    /// guide to reading its findings.
+    pub citation_note: String,
 }
 
 /// The serializer's single output type — mirrors the §4 anatomy sections in
@@ -1338,6 +1485,15 @@ pub struct AuditReportJson {
     /// review-claim wording — see [`ReviewState`]'s doc comment.
     pub review_state: ReviewState,
     pub cover: CoverJson,
+    /// W27: whether the bundled brand kit's logo mark renders (cover and running header).
+    /// True only when the resolved brand IS the kit's brand ([`brand_kit_matches`]); any other
+    /// agency's brand gets the text wordmark alone, so the template never puts one agency's
+    /// logo on another's report.
+    pub brand_mark: bool,
+    /// The confidentiality marking (2026-10-24 decision): the footer line on every PDF page and
+    /// the handling note on the first. The workbook prints the same `line` in every sheet's
+    /// footer ([`confidentiality_marking`] is the one producer).
+    pub confidentiality: ConfidentialityJson,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
@@ -1370,6 +1526,9 @@ pub struct AuditReportJson {
     /// citation/title header across two places in the document for no reader benefit, so the
     /// bar for moving a GROUP here is "zero curated sites," not "any informational/held site."
     pub held_for_review_findings: Vec<CuratedGroupJson>,
+    /// Where the services of a multi-repo project differ on a rule: an observation after the
+    /// findings, with no severity, in no total. `None` (and nothing rendered) for one repo.
+    pub patterns_across_services: Option<PatternsAcrossServicesJson>,
     pub whats_healthy: WhatsHealthyJson,
     /// W1: rules the ledger confirms did NOT run this scan, each with its real reason — the
     /// "excluded from this audit" section. Empty whenever `report.ledger` carries no rule
@@ -1379,7 +1538,400 @@ pub struct AuditReportJson {
     pub rules_not_run: Vec<ExcludedRuleJson>,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
+    /// H4: what this scan did not cover, by pass and by path (see [`coverage_gaps`]). Rendered
+    /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
+    pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
+}
+
+/// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
+/// the finished label ("Violated, 3 sites", "Clean", "Not applicable: ...", "Not reviewed: ...").
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternCellJson {
+    pub repo: String,
+    #[serde(flatten)]
+    pub state: crate::scan_ledger::CellState,
+    pub label: String,
+}
+
+/// One rule the services differ on. Carries no severity and no bucket: it is an observation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternRowJson {
+    pub rule_id: String,
+    pub title: String,
+    /// The fixed sentence that introduces the row ([`crate::onboard::patterns_matrix::
+    /// pattern_sentence`]).
+    pub statement: String,
+    pub cells: Vec<PatternCellJson>,
+}
+
+/// The "Patterns across services" section: where the services of one project differ on a rule.
+/// Present only for a project of more than one repo. Never part of the findings, the severity
+/// totals or any count (the release gate checks that).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternsAcrossServicesJson {
+    pub repos: Vec<String>,
+    /// One plain sentence on what the section is and is not.
+    pub note: String,
+    pub rows: Vec<PatternRowJson>,
+    pub themes: Vec<crate::onboard::patterns_matrix::Theme>,
+}
+
+/// What the section says about itself: an observation, not a finding.
+pub const PATTERNS_NOTE: &str = "This section compares the services of this project. It is an \
+     observation, not a finding: it carries no severity and is in no total. A service where a \
+     rule does not apply, or was not reviewed, is shown as such and is never counted as clean.";
+
+/// The finished label of one cell.
+pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
+    use crate::scan_ledger::CellState;
+    match state {
+        CellState::Violated { sites } => {
+            format!(
+                "Violated, {sites} {}",
+                if *sites == 1 { "site" } else { "sites" }
+            )
+        }
+        CellState::Clean => "Clean".to_string(),
+        CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
+        CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
+    }
+}
+
+/// The patterns section for a report, or `None` for a project of one repo. A row for a rule
+/// the corpus does not know (an id the model invented) is left out when a corpus is loaded:
+/// the section names rules by title and never prints a raw id.
+pub fn patterns_across_services_json(
+    report: &crate::onboard::ScanReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Option<PatternsAcrossServicesJson> {
+    let matrix = &report.patterns_across_services;
+    if !matrix.is_present() {
+        return None;
+    }
+    let rows = matrix
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let title = match corpus {
+                Some(c) => c.get_by_id(&row.rule_id)?.title.clone(),
+                None => row.rule_id.clone(),
+            };
+            Some(PatternRowJson {
+                rule_id: row.rule_id.clone(),
+                statement: crate::onboard::patterns_matrix::pattern_sentence(&title),
+                title,
+                cells: row
+                    .cells
+                    .iter()
+                    .map(|c| PatternCellJson {
+                        repo: c.repo.clone(),
+                        label: pattern_cell_label(&c.state),
+                        state: c.state.clone(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    Some(PatternsAcrossServicesJson {
+        repos: matrix.repos.clone(),
+        note: PATTERNS_NOTE.to_string(),
+        rows,
+        themes: matrix.themes.clone(),
+    })
+}
+
+/// The confidentiality marking a client deliverable carries (2026-10-24 decision, recorded in
+/// the private decision log).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConfidentialityJson {
+    /// "Confidential, prepared for <client> on <date>": every PDF page footer and every
+    /// workbook sheet footer.
+    pub line: String,
+    /// The first page's short handling note: who the report is for, and not to forward it
+    /// outside that company without consent.
+    pub handling_note: String,
+}
+
+/// The longest client name the inspection setup accepts. The name is printed in every PDF
+/// footer and every workbook sheet footer, so this is the plain length cap; the workbook
+/// footer's own limit (which counts each `&` twice) is checked on top of it, see
+/// [`validate_client_name`].
+pub const CLIENT_NAME_MAX_CHARS: usize = 100;
+
+/// The most characters Excel keeps in one header or footer string, layout codes included.
+pub(crate) const EXCEL_FOOTER_MAX_CHARS: usize = 255;
+
+/// The widest date the marking line can carry ("%-d %B %Y": two digits, the longest month
+/// name, four digits). The footer bound is measured with it, so a name accepted today still
+/// fits whatever day the inspection is dated.
+pub(crate) const WORST_MARKING_DATE: &str = "30 September 2026";
+
+/// The confidentiality line for `client` (already cleaned) and `date`: the one place its
+/// wording lives, shared by the marking and the footer-length bound.
+fn marking_line(client: &str, date: &str) -> String {
+    format!("Confidential, prepared for {client} on {date}")
+}
+
+/// A client name as every artifact prints it: invisible zero-width characters removed, then
+/// trimmed. The one cleaning step, so the PDF, the workbook and the manifest can never print
+/// different strings for the same name.
+pub(crate) fn clean_client_name(raw: &str) -> String {
+    strip_zero_width(raw).trim().to_string()
+}
+
+/// Why an export refused to start: the inspection setup has no usable client name. Its
+/// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientNameRequired(pub String);
+
+impl std::fmt::Display for ClientNameRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientNameRequired {}
+
+/// Why an export refused to start: the report covers fewer repos than the project holds. Its
+/// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoriesMissing {
+    /// The repos the report does not cover.
+    pub repos: Vec<String>,
+    message: String,
+}
+
+impl std::fmt::Display for RepositoriesMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RepositoriesMissing {}
+
+/// The refusal for a client export of a run that did not complete.
+#[derive(Debug, Clone)]
+pub struct RunIncomplete {
+    /// The plain-language refusal, with the reasons.
+    pub message: String,
+    /// Why the run is incomplete (see [`crate::onboard::ScanReport::incomplete_reasons`]).
+    pub reasons: Vec<String>,
+    /// True when an outage stop is among the reasons (the CLI exits 5 rather than 6).
+    pub outage: bool,
+    /// True when the spend limit stopped the run (the CLI exits 4 rather than 6, so a script that
+    /// raises the limit and runs again keeps working).
+    pub cost_capped: bool,
+}
+
+impl std::fmt::Display for RunIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunIncomplete {}
+
+/// Refuse a CLIENT export of a run that did not complete: any failed part, any part that did not
+/// run (spend limit or outage stop), a fatal AI error, or a repo not inspected. Nothing is built
+/// and no zip is written. An internal export is allowed and is marked instead
+/// ([`internal_incomplete_marking`]).
+pub fn require_complete_run(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Result<(), RunIncomplete> {
+    if opts.internal {
+        return Ok(());
+    }
+    let reasons = report.incomplete_reasons();
+    if reasons.is_empty() {
+        return Ok(());
+    }
+    Err(RunIncomplete {
+        message: format!(
+            "This inspection did not run to completion, so it cannot be exported for a client: \
+             {}. Run it again; nothing was written.",
+            reasons.join("; ")
+        ),
+        reasons,
+        outage: report.ledger.is_outage_stopped(),
+        cost_capped: report.ledger.is_cost_capped(),
+    })
+}
+
+/// The cover line of an internal export of a run that did not complete; `None` for a complete run.
+pub fn internal_incomplete_marking(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Option<String> {
+    if !opts.internal {
+        return None;
+    }
+    let reasons = report.incomplete_reasons();
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "INTERNAL INCOMPLETE. This inspection did not run to completion and is not for a client: {}.",
+        reasons.join("; ")
+    ))
+}
+
+/// Refuse to package a report that covers fewer repos than the project holds. A deliverable for
+/// ten of eleven repos, read as the whole codebase, is worse than no deliverable: so a repo the
+/// scan could not inspect ([`crate::onboard::ScanReport::repos_not_inspected`]) and a project
+/// repo the report does not list at all both stop the export, naming the repos.
+pub fn require_all_repos(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Result<(), RepositoriesMissing> {
+    let mut missing: Vec<String> = report
+        .repos_not_inspected
+        .iter()
+        .map(|(repo, _)| repo.clone())
+        .collect();
+    for repo in &opts.expected_repos {
+        if !report.repos.iter().any(|r| r == repo) && !missing.contains(repo) {
+            missing.push(repo.clone());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let total = opts
+        .expected_repos
+        .len()
+        .max(report.repos.len() + missing.len());
+    let reasons: Vec<String> = missing
+        .iter()
+        .map(
+            |repo| match report.repos_not_inspected.iter().find(|(r, _)| r == repo) {
+                Some((_, why)) => format!("{repo} ({why})"),
+                None => format!("{repo} (not in this inspection)"),
+            },
+        )
+        .collect();
+    Err(RepositoriesMissing {
+        message: format!(
+            "This report covers {} of {total} repositories, so it cannot be packaged as the \
+             inspection of the project. Not inspected: {}. Make each one readable and run the \
+             inspection again.",
+            total - missing.len(),
+            reasons.join("; ")
+        ),
+        repos: missing,
+    })
+}
+
+/// Check a client name as the inspection setup saves it: zero-width characters removed and
+/// trimmed ([`clean_client_name`]), at most [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks
+/// or other control characters (it is one line of a page footer), and short enough that the
+/// workbook footer holds the whole confidentiality line (Excel keeps 255 characters, and a
+/// literal `&` is written twice). Blank is allowed here (the operator may clear the field);
+/// exporting with a blank name is refused by [`require_client_name`].
+pub fn validate_client_name(name: &str) -> Result<String, ClientNameRequired> {
+    let name = clean_client_name(name);
+    if name.chars().count() > CLIENT_NAME_MAX_CHARS {
+        return Err(ClientNameRequired(format!(
+            "The client name is longer than {CLIENT_NAME_MAX_CHARS} characters. Shorten it in \
+             the inspection setup; it is printed in the footer of every page."
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ClientNameRequired(
+            "The client name contains a line break or another control character. Enter it on \
+             one line in the inspection setup."
+                .to_string(),
+        ));
+    }
+    if !name.is_empty() {
+        let footer = crate::xlsx_export::sheet_footer(&marking_line(&name, WORST_MARKING_DATE));
+        let used = footer.encode_utf16().count();
+        if used > EXCEL_FOOTER_MAX_CHARS {
+            return Err(ClientNameRequired(format!(
+                "The client name is too long for the workbook footer: Excel keeps \
+                 {EXCEL_FOOTER_MAX_CHARS} characters there and this name needs {used} (each \
+                 & counts twice). Shorten it in the inspection setup."
+            )));
+        }
+    }
+    Ok(name)
+}
+
+/// The export-time check: a valid, NON-BLANK client name, or the message that blocks the
+/// export. Called by the one package assembly (`release_gate::build_product_package_with_stem`)
+/// and the PDF-only route, before anything is compiled, so no deliverable can say
+/// "prepared for ." (2026-10-24 decision).
+pub fn require_client_name(opts: &ReportOptions) -> Result<String, ClientNameRequired> {
+    let name = validate_client_name(&opts.client_name)?;
+    if name.is_empty() {
+        return Err(ClientNameRequired(
+            "Enter the client name in the inspection setup before exporting. It fills the \
+             confidentiality line on every page of the report and every sheet of the workbook."
+                .to_string(),
+        ));
+    }
+    Ok(name)
+}
+
+/// The scan date as the confidentiality line prints it: "21 October 2026". The SAME instant
+/// the cover's "Generated" line uses ([`scan_instant`], falling back to now only when the scan
+/// recorded no time), so the two can never name different days.
+fn marking_date(provenance: &crate::onboard::ScanProvenance) -> String {
+    scan_instant(provenance)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%-d %B %Y")
+        .to_string()
+}
+
+/// THE producer of the confidentiality marking, shared by the PDF data ([`build_report_json`])
+/// and the workbook (`xlsx_export::build_workbook`), so the PDF footer and the sheet footers
+/// print the same line. A blank client name (reachable only when a caller bypasses
+/// [`require_client_name`], as unit tests do) yields "Confidential, prepared on <date>" rather
+/// than "prepared for .". Consent is the brand's to give when there is one, else the preparer's.
+pub fn confidentiality_marking(
+    provenance: &crate::onboard::ScanProvenance,
+    opts: &ReportOptions,
+) -> ConfidentialityJson {
+    let client = clean_client_name(&opts.client_name);
+    let date = marking_date(provenance);
+    let consent_from = resolve_brand(opts, None).unwrap_or_else(|| resolve_prepared_by(opts, None));
+    if client.is_empty() {
+        return ConfidentialityJson {
+            line: format!("Confidential, prepared on {date}"),
+            handling_note: format!(
+                "This report is confidential. Please do not forward it without the written \
+                 consent of {consent_from}."
+            ),
+        };
+    }
+    ConfidentialityJson {
+        line: marking_line(&client, &date),
+        handling_note: format!(
+            "This report is confidential and was prepared for {client} only. Please do not \
+             forward it outside {client} without the written consent of {consent_from}."
+        ),
+    }
+}
+
+/// The disclaimer for a project of several repos: the same paragraph, speaking of the
+/// repositories the cover page names rather than one repository state.
+pub const AUDIT_REPORT_DISCLAIMER_MULTI: &str =
+    "This report is an advisory architectural and security assessment based on static \
+     analysis of the repository states identified on the cover page. It is not a \
+     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     the inspected code at scan time and may not represent the live production systems. All \
+     remediation should be validated by the client's engineering team against the live \
+     environments. The preparing reviewer accepts no liability for actions taken on the basis \
+     of this report.";
+
+/// The disclaimer for a project of `repo_count` repos.
+pub fn audit_report_disclaimer(repo_count: usize) -> &'static str {
+    if repo_count > 1 {
+        AUDIT_REPORT_DISCLAIMER_MULTI
+    } else {
+        AUDIT_REPORT_DISCLAIMER
+    }
 }
 
 /// General-audit variant of `ai_audit::DEEP_ADVISORY_DISCLAIMER` / the deep-report export's
@@ -1443,6 +1995,21 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
             } else if tool == crate::FIREBASE_SCOPE_COVERAGE_TOOL {
                 // Not a tool either: the one written statement of what Firebase coverage is.
                 crate::FIREBASE_SCOPE_SENTENCE.to_string()
+            } else if tool == crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL {
+                // Not a tool either, and not a failure: the client's own tooling RAN, with the
+                // operator's opt-in. The note's own (client-voice) text says so.
+                client_tooling_text(notes, tool)
+            } else if notes
+                .iter()
+                .any(|n| n.tool == tool && crate::scan_tools::is_client_tooling_skip(n))
+            {
+                // Withheld on purpose (a client engagement with no opt-in), not a tool failure:
+                // the note's own text names the step and why.
+                client_tooling_text(notes, tool)
+            } else if crate::runtime_audit::is_runtime_note_tool(tool) {
+                // Not a tool either: the runtime end-of-life and runtime vulnerability pass. Its
+                // notes are already written for the reader and name what was not checked.
+                every_note_text(notes, tool)
             } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
                 // Also not a tool name: these notes mean "a rule file in the library could
                 // not be read, so that rule was never applied".
@@ -1461,13 +2028,51 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
         .collect()
 }
 
-fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
+/// Every note for `tool`, in order and deduplicated, as one disclosure line. For passes whose
+/// notes are already client-voice sentences (the runtime end-of-life and vulnerability pass).
+fn every_note_text(notes: &[crate::onboard::CoverageNote], tool: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in notes.iter().filter(|n| n.tool == tool) {
+        if !seen.contains(&n.message.as_str()) {
+            seen.push(n.message.as_str());
+        }
+    }
+    seen.join(" ")
+}
+
+/// The client-tooling notes for `tool`, in order and deduplicated, as one disclosure line.
+fn client_tooling_text(notes: &[crate::onboard::CoverageNote], tool: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in notes.iter().filter(|n| n.tool == tool) {
+        if (tool == crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL
+            || crate::scan_tools::is_client_tooling_skip(n))
+            && !seen.contains(&n.message.as_str())
+        {
+            seen.push(n.message.as_str());
+        }
+    }
+    seen.join(" ")
+}
+
+fn failed_pass_disclosures(
+    failed_passes: &[crate::ai_audit::FailedPass],
+    internal: bool,
+) -> Vec<String> {
     failed_passes
         .iter()
         .map(|f| {
             let mut pass = f.pass.clone();
             if let Some(first) = pass.get_mut(0..1) {
                 first.make_ascii_uppercase();
+            }
+            // A client export is refused for a run with a failed part, so this wording reaches
+            // only an internal export; the client-facing form carries no failure wording.
+            if f.scope_note {
+                // A disclosed limit of the scope (a tool not run), not a failed part.
+                return format!("{pass} for {}: not run ({}).", f.repo, f.reason);
+            }
+            if !internal {
+                return format!("{pass} for {}: did not complete.", f.repo);
             }
             format!(
                 "{pass} for {}: not computed — pass failed ({}).",
@@ -1521,6 +2126,7 @@ fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec
 /// export somehow has zero curated AND zero excluded candidates (every candidate is held or a
 /// dependency advisory) — dividing zero by zero is not a 0% or 100% fix rate, it is "not yet
 /// established," identically to the draft case.
+#[cfg(test)]
 pub(crate) fn next_steps_note(
     review_state: ReviewState,
     candidates_reviewed: usize,
@@ -1528,6 +2134,31 @@ pub(crate) fn next_steps_note(
     held_for_review: usize,
     excluded_false_positive: usize,
 ) -> String {
+    next_steps_note_for(
+        false,
+        review_state,
+        candidates_reviewed,
+        curated_total,
+        held_for_review,
+        excluded_false_positive,
+    )
+}
+
+/// [`next_steps_note`] for a project of one repo (`multi_repo` false) or several, where the
+/// retest covers the repositories and the codebases rather than one repository.
+pub(crate) fn next_steps_note_for(
+    multi_repo: bool,
+    review_state: ReviewState,
+    candidates_reviewed: usize,
+    curated_total: usize,
+    held_for_review: usize,
+    excluded_false_positive: usize,
+) -> String {
+    let (rescan_object, introduces) = if multi_repo {
+        ("repositories", "the codebases introduce")
+    } else {
+        ("repository", "the codebase introduces")
+    };
     let not_yet_established = || {
         format!(
             "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
@@ -1560,10 +2191,10 @@ pub(crate) fn next_steps_note(
     format!(
         "There are three steps from here. First, the do-now items above get fixed, by your own \
          team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
-         retest: the reviewing engineer re-scans the repository once the fixes are in and signs \
-         a short addendum confirming each item is closed. Third, ongoing coverage: a monthly \
-         delta rescan plus on-call architect availability for anything new the codebase \
-         introduces between engagements."
+         retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
+         signs a short addendum confirming each item is closed. Third, ongoing coverage: a \
+         monthly delta rescan plus on-call architect availability for anything new \
+         {introduces} between engagements."
     )
 }
 
@@ -1787,6 +2418,23 @@ pub(crate) fn resolve_citation(
     }
 }
 
+/// H5 (2026-10-28): the label prefix of a citation the P3 class fallback attached by KEYWORD
+/// match (`classify_ai_finding`). The standard is real and relevant, but no Camerata rule
+/// checked the code against it: the model reported a defect and its wording matched a defect
+/// class. Such a citation carries kind `"related"`, never `"grounded"`, so neither the report,
+/// the workbook nor `findings.json` presents it as a rule that was checked. Triage
+/// confirmation was the other option and was rejected: triage is optional in the desktop
+/// flow, so gating the citation on it would strip every keyword-matched finding of its
+/// standard (and, through `is_uncited_ai_finding`, out of the curated set) in any export made
+/// before a human triaged. See docs/TECHNICAL.md, "Related standards".
+pub(crate) const RELATED_STANDARD_LABEL_PREFIX: &str =
+    "Related standard (matched by keyword, not a rule check): ";
+
+/// The Methodology sentence that explains [`RELATED_STANDARD_LABEL_PREFIX`] to a reader.
+pub(crate) const RELATED_STANDARD_NOTE: &str = "A source marked \"related standard\" was matched \
+    to a model finding by keyword and names the published standard the issue relates to, not a \
+    rule Camerata checked the code against.";
+
 // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
 //
 // Several of the report's MOST important findings — a cross-tenant RLS policy, RLS
@@ -1823,7 +2471,7 @@ pub(crate) fn resolve_citation(
 /// gates the P3 citation fallback/exclusion to ONLY AI-tier findings: a deterministic
 /// floor rule that happens to lack a corpus citation (a separate, pre-existing gap — e.g.
 /// `SEC-NO-RAW-SQL-CONCAT-1`, which has no TOML entry at all) is untouched by this gate.
-pub(crate) fn is_ai_tier(finding: &Finding) -> bool {
+pub fn is_ai_tier(finding: &Finding) -> bool {
     finding.rule_id.starts_with("AI-") || finding.confidence.is_some()
 }
 
@@ -1976,6 +2624,9 @@ pub(crate) fn classify_ai_finding(
 /// advisory citation is a different, pre-existing gap this pass does not touch. Returns
 /// the ORIGINAL citation unchanged in every other case (already grounded, already
 /// preview-labeled, not AI-tier, or AI-tier but unclassifiable).
+///
+/// H5: a class-fallback citation is returned as kind `"related"` with its label prefixed by
+/// [`RELATED_STANDARD_LABEL_PREFIX`]; its sources are the grounding rule's own, unchanged.
 pub(crate) fn citation_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -1992,7 +2643,11 @@ pub(crate) fn citation_for_finding(
         Some(class) => {
             let grounded = resolve_citation(class.grounding_rule_id(), None, corpus);
             if grounded.kind == "grounded" {
-                grounded
+                CitationJson {
+                    kind: "related".to_string(),
+                    label: format!("{RELATED_STANDARD_LABEL_PREFIX}{}", grounded.label),
+                    sources: grounded.sources,
+                }
             } else {
                 base
             }
@@ -2143,11 +2798,13 @@ pub(crate) fn resolve_fix(
     if remediation.is_empty() {
         return None;
     }
-    Some(instantiate_remediation(
+    // The authored text is a TOML multi-line string: join its hard line wraps here, once, so no
+    // artifact ever sees a mid-sentence newline (see `fix_text`).
+    Some(fix_text::prepare(&instantiate_remediation(
         remediation,
         &finding.path,
         &finding.captures,
-    ))
+    )))
 }
 
 /// C5-8 (R7 amended): whether `finding` has ANY fix text available to show a client, if it
@@ -2860,12 +3517,7 @@ pub(crate) fn is_action_row_missing_an_estimate(
 /// severity-based sort in this module; `xlsx_export::severity_rank` (same crate) delegates
 /// here rather than keeping its own copy, so the two artifacts' tie-breaks can never drift.
 pub(crate) fn severity_rank(sev: &str) -> u8 {
-    match sev {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
-    }
+    camerata_rules::severity_bounds::severity_rank(sev)
 }
 
 /// C4-P4 (residual defect 5): bucket rank for ordering the "Curated findings" section — action
@@ -2932,17 +3584,19 @@ fn curated_group_sort_key(group: &CuratedGroupJson) -> (u8, u8, u8, String) {
 /// which outranks an ungrounded AI-advisory citation — so a security-floor finding (typically
 /// `"grounded"`) never prints after an architecture/advisory note (typically `"advisory"`) of
 /// the same severity, even though raw severity alone can't tell them apart. 0 sorts first.
-/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"preview"` | `"advisory"`); anything
-/// else is treated as the lowest tier rather than panicking on an unrecognized value.
+/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"related"` | `"preview"` |
+/// `"advisory"`); anything else is treated as the lowest tier rather than panicking on an
+/// unrecognized value. H5: `"related"` keeps the rank `"grounded"` gave the same finding
+/// before it was relabelled, so the honest label does not reorder anyone's report.
 pub(crate) fn provenance_tier_rank(citation_kind: &str) -> u8 {
     match citation_kind {
-        "grounded" => 0,
+        "grounded" | "related" => 0,
         "preview" => 1,
         _ => 2,
     }
 }
 
-// C3-1b (`docs/plans/2026-09-30_cycle2-queue-hardening.md`): there used to be a
+// C3-1b (the cycle-2 queue-hardening notes): there used to be a
 // `fix_generation_failed` gate here that read a `"[needs review: fix not generated]"` tag
 // off `detail` and demoted a would-be `do_now` finding to `do_next` — conflating a PIPELINE
 // failure (the fix-specific generation pass gave up) with a CONFIDENCE judgement about the
@@ -3436,8 +4090,23 @@ fn default_narrative(
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
 /// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
 /// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
-fn ai_tier_note_for(review_state: ReviewState) -> String {
-    match review_state {
+fn ai_tier_note_for(review_state: ReviewState, repos_not_run: usize, total_repos: usize) -> String {
+    let repos = |n: usize| {
+        if n == 1 {
+            "1 repo".to_string()
+        } else {
+            format!("{n} repos")
+        }
+    };
+    if repos_not_run > 0 && repos_not_run >= total_repos {
+        // The tier ran nowhere: say so, and make no claim about a review that did not happen.
+        return format!(
+            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+             produced in this run came from the deterministic tier.",
+            repos(repos_not_run)
+        );
+    }
+    let ran = match review_state {
         ReviewState::Reviewed => {
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. Every advisory finding in this export has been \
@@ -3453,6 +4122,14 @@ fn ai_tier_note_for(review_state: ReviewState) -> String {
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
+    };
+    if repos_not_run == 0 {
+        ran
+    } else {
+        format!(
+            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
+            repos(repos_not_run)
+        )
     }
 }
 
@@ -3697,17 +4374,20 @@ fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
         if already_disclosed.contains(rule_key) {
             continue;
         }
-        let represented: usize = report
-            .findings
-            .iter()
-            .map(|f| {
-                usize::from(f.rule_id.eq_ignore_ascii_case(rule_key))
-                    + f.also_locations
-                        .iter()
-                        .filter(|l| l.rule_id.eq_ignore_ascii_case(rule_key))
-                        .count()
-            })
-            .sum();
+        // DISTINCT places: a member absorbed at its row's own line is the same site.
+        let mut places: std::collections::HashSet<crate::onboard::SitePlace> =
+            std::collections::HashSet::new();
+        for f in &report.findings {
+            if f.rule_id.eq_ignore_ascii_case(rule_key) {
+                places.insert(f.place());
+            }
+            for l in &f.also_locations {
+                if l.rule_id.eq_ignore_ascii_case(rule_key) {
+                    places.insert(l.place());
+                }
+            }
+        }
+        let represented = places.len();
         if represented >= *n_claimed {
             continue;
         }
@@ -3767,7 +4447,7 @@ fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
 /// [`apply_evidence_gate`]'s doc comment — this is its body, split out when W7 added the
 /// sites-vs-rows check so each half keeps its own no-op early return.
 fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
-    if report.recommendations.is_empty() {
+    if report.recommendations.is_empty() && report.recommendations_by_repo.is_empty() {
         return;
     }
     let healthy_ids: std::collections::HashSet<String> = if report.ledger.rules().next().is_some() {
@@ -3775,19 +4455,34 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     } else {
         report.provenance.audited_rule_ids.iter().cloned().collect()
     };
+    // One recommendation per (rule, repo) when the scan kept them; the by-rule map holds only
+    // the last repo's. A row the gate adds is attributed to the repo whose evidence it is, never
+    // to the first repo of the project.
+    let recs: Vec<crate::ai_audit::RuleRecommendation> =
+        if report.recommendations_by_repo.is_empty() {
+            let mut by_rule: Vec<_> = report.recommendations.values().cloned().collect();
+            by_rule.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+            by_rule
+        } else {
+            report.recommendations_by_repo.clone()
+        };
     let rule_ids_with_any_finding: std::collections::HashSet<String> = report
         .findings
         .iter()
         .flat_map(|f| std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned()))
         .collect();
     let mut synthetic = Vec::new();
-    for rid in &healthy_ids {
+    for rec in &recs {
+        // The id as the ledger spells it (the recommendation's is upper-cased).
+        let Some(rid) = healthy_ids
+            .iter()
+            .find(|id| id.eq_ignore_ascii_case(&rec.rule_id))
+        else {
+            continue;
+        };
         if rule_ids_with_any_finding.contains(rid.as_str()) {
             continue;
         }
-        let Some(rec) = report.recommendations.get(&rid.to_ascii_uppercase()) else {
-            continue;
-        };
         let Some(evidence) = rec.evidence.as_deref() else {
             continue;
         };
@@ -3801,7 +4496,11 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
         // to call a sentence a location.
         let located = !path.is_empty();
         synthetic.push(Finding {
-            repo: report.repos.first().cloned().unwrap_or_default(),
+            repo: if rec.repo.is_empty() {
+                report.repos.first().cloned().unwrap_or_default()
+            } else {
+                rec.repo.clone()
+            },
             path,
             line,
             rule_id: rid.clone(),
@@ -3834,6 +4533,26 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     report
         .ledger
         .record_stage("evidence-gate-synthesis", rows_in, rows_out, acc);
+}
+
+/// For a rule listed under "What's healthy" in a project of several repos: the repos where it
+/// was checked and is clean, and the repos it does not apply to. The list says where the rule
+/// is healthy; a repo it never applied to is not one of them.
+fn healthy_repos_for(
+    report: &crate::onboard::ScanReport,
+    rule_id: &str,
+) -> (Vec<String>, Vec<String>) {
+    use crate::scan_ledger::CellState;
+    let mut clean = Vec::new();
+    let mut not_applicable = Vec::new();
+    for repo in &report.repos {
+        match crate::onboard::patterns_matrix::cell_for(report, rule_id, repo) {
+            CellState::Clean => clean.push(repo.clone()),
+            CellState::NotApplicable { .. } => not_applicable.push(repo.clone()),
+            CellState::Violated { .. } | CellState::NotReviewed { .. } => {}
+        }
+    }
+    (clean, not_applicable)
 }
 
 /// Build the report's single output type from a completed scan + the client's triage
@@ -3915,6 +4634,16 @@ pub fn build_report_json(
         ReviewState::Reviewed
     } else {
         ReviewState::Raw
+    };
+    // The repos that flag a credential under the same name, for the display-only note on each
+    // such site. Built over the rows the report carries: a row the reviewer dismissed as a false
+    // positive is not in the report, so no note may point at it. Nothing to link in one repo.
+    let credentials = if report.repos.len() > 1 {
+        crate::onboard::credential_cross_ref::CredentialIndex::from_findings(
+            live.iter().map(|(f, _, _, _)| *f),
+        )
+    } else {
+        crate::onboard::credential_cross_ref::CredentialIndex::default()
     };
 
     // Dependency findings get their own §7 lane — carve them out of every other section.
@@ -4148,7 +4877,7 @@ pub fn build_report_json(
         // silently diverge from `sites[0]` if a future change weakened the gate above.
         let citation = citation_for_finding(first_site, corpus);
         let title = title_for_finding(first_site, corpus);
-        let site_jsons = sites
+        let site_jsons: Vec<CuratedSiteJson> = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
                 // `chosen_option_for_rule` feeds `effective_bucket`'s C5-8 "has a fix" check
@@ -4230,6 +4959,11 @@ pub fn build_report_json(
                 } else {
                     base_headline
                 };
+                let specific_fix = f
+                    .fix_specific
+                    .as_deref()
+                    .map(fix_text::prepare)
+                    .filter(|s| !s.is_empty());
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
@@ -4289,25 +5023,44 @@ pub fn build_report_json(
                     // information, never echoes the primary line back.
                     fix: {
                         let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
-                        if generic.as_deref() == f.fix_specific.as_deref() {
+                        if generic == specific_fix {
                             None
                         } else {
                             generic
                         }
                     },
-                    fix_for_this_finding: f.fix_specific.clone(),
+                    // The model's text gets the same wrap-joining as the authored text, so the
+                    // equality above compares like with like.
+                    fix_for_this_finding: specific_fix,
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
-                    site_count: 1 + f.also_locations.len(),
+                    also_sites: also_sites_for(f, corpus),
+                    also_flagged_here: also_flagged_here_for(f, corpus),
+                    same_credential_note: crate::onboard::credential_cross_ref::note(
+                        &credentials.also_flagged_in(f),
+                    ),
+                    severity_adjustments: crate::severity_bounds::severity_adjustment_lines(
+                        f, corpus,
+                    ),
+                    site_count: f.distinct_site_count(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
             .collect();
+        let repos = if report.repos.len() > 1 {
+            let mut repos: Vec<String> = site_jsons.iter().map(|s| s.repo.clone()).collect();
+            repos.sort();
+            repos.dedup();
+            repos
+        } else {
+            Vec::new()
+        };
         all_curated_groups.push(CuratedGroupJson {
             rule_id,
             title,
             citation,
             sites: site_jsons,
+            repos,
         });
     }
 
@@ -4382,6 +5135,15 @@ pub fn build_report_json(
                 .entry(category_for(also_id, corpus))
                 .or_default()
                 .insert(also_id.clone());
+        }
+        // H6: a rule that survived only as an absorbed site (`also_locations`) fired just as
+        // genuinely as one demoted into `also_matches`; counting it clean in its own category
+        // was the same false statement one channel over.
+        for site in &f.also_locations {
+            matched_rule_ids_by_category
+                .entry(category_for(&site.rule_id, corpus))
+                .or_default()
+                .insert(site.rule_id.clone());
         }
     }
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
@@ -4533,13 +5295,22 @@ pub fn build_report_json(
     let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
-        .map(|rid| HealthyRuleJson {
-            rule_id: rid.clone(),
-            title: corpus
-                .and_then(|c| c.get_by_id(rid))
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| rid.clone()),
-            citation: resolve_citation(rid, None, corpus),
+        .map(|rid| {
+            let (clean_in, not_applicable_in) = if has_rule_ledger_data && report.repos.len() > 1 {
+                healthy_repos_for(report, rid)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            HealthyRuleJson {
+                rule_id: rid.clone(),
+                title: corpus
+                    .and_then(|c| c.get_by_id(rid))
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| rid.clone()),
+                citation: resolve_citation(rid, None, corpus),
+                clean_in,
+                not_applicable_in,
+            }
         })
         .collect();
     healthy_rules.sort_by(|a, b| {
@@ -4594,7 +5365,19 @@ pub fn build_report_json(
         .filter(|n| n.tool == "osv-scanner")
         .map(|n| n.message.clone())
         .collect();
-    let dependency_clean = dep_rows.is_empty();
+    // M11: "clean" means checked and nothing found. A dependency audit that did not run (no
+    // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
+    // the rows empty and so read as clean. Only a run that proves it checked everything may say
+    // so.
+    // An AI-only scan never started osv-scanner (`osv_scanner_version` is `None`): it checked
+    // nothing, so it cannot say nothing was found.
+    let dependency_clean = dep_rows.is_empty()
+        && report.provenance.osv_scanner_version.is_some()
+        && report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool == "osv-scanner")
+            .all(crate::dep_audit::note_proves_clean);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
@@ -4713,7 +5496,7 @@ pub fn build_report_json(
             }
         }
     }
-    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
+    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report, opts.internal);
     // Client-report fix (2026-10-07 grading pass): a rule that declares mechanical/
     // architectural enforcement but has no wired detector IS a real pipeline gap worth
     // disclosing, but it is an ENGINEERING fact, not a client-facing one — the registry names
@@ -4725,7 +5508,7 @@ pub fn build_report_json(
     // methodology (38 bullets total, ~3 pages on a real export). The client gets exactly ONE
     // plain, factual sentence instead, and only when the count is nonzero.
     let no_wired_detector_count = report_ledger
-        .rules()
+        .rules_merged()
         .filter(|r| {
             !r.ran
                 && r.skip_reason
@@ -4838,6 +5621,19 @@ pub fn build_report_json(
     let code_volume = (report.code_lines > 0).then(|| CodeVolumeJson {
         lines: report.code_lines,
         by_language: report.code_lines_by_language.clone(),
+        per_repo: if report.repos.len() > 1 {
+            report
+                .volume_by_repo
+                .iter()
+                .map(|v| CodeVolumeRepoJson {
+                    repo: v.repo.clone(),
+                    files: v.files,
+                    lines: v.lines,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     });
     let cover = CoverJson {
         repos: report.repos.clone(),
@@ -4848,10 +5644,16 @@ pub fn build_report_json(
         audited_refs,
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
+        model_backend: opts
+            .model
+            .as_ref()
+            .map(|m| format!("{} ({})", m.backend, m.provider)),
         camerata_version: report.provenance.camerata_version.clone(),
+        engine_commit: crate::ENGINE_COMMIT.map(str::to_string),
+        corpus_version: corpus.map(camerata_rules::corpus_version),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
-        client_name: opts.client_name.clone(),
+        client_name: clean_client_name(&opts.client_name),
         project_title: opts.project_title.clone(),
         // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
         // `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` itself. By the time `opts`
@@ -4864,14 +5666,20 @@ pub fn build_report_json(
         prepared_by: resolve_prepared_by(opts, None),
         brand: resolve_brand(opts, None),
         stats,
+        incremental_note: report.ledger.incremental().map(incremental_cover_note),
+        internal_incomplete: internal_incomplete_marking(report, opts),
     };
 
     // ── Methodology (M4: ported from the better sample copy, no dashes per S12) ────────
+    // A project of several repos is several independent services, so the prose that speaks of
+    // "the repository" or "the codebase" speaks of the repositories and the services instead.
+    let multi_repo = report.repos.len() > 1;
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         held_for_review: held_for_review_total,
-        next_steps: next_steps_note(
+        next_steps: next_steps_note_for(
+            multi_repo,
             review_state,
             candidates_reviewed,
             curated_total,
@@ -4884,16 +5692,35 @@ pub fn build_report_json(
              produces findings that either hold or do not, with no model judgment. These are \
              labeled deterministic in the report."
                 .to_string(),
-        ai_tier_note: ai_tier_note_for(review_state),
+        ai_tier_note: ai_tier_note_for(
+            review_state,
+            coverage_gaps::repos_without_ai_review(report).len(),
+            report.repos.len(),
+        ),
+        citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
-            "No runtime or dynamic analysis; findings derive from static repository state."
-                .to_string(),
-            "Row Level Security findings reflect the repository's migration history, not the \
-             live database. Changes made in the Supabase dashboard that never landed in a \
-             migration are invisible to a repository scan and must be confirmed against \
-             production."
-                .to_string(),
+            if multi_repo {
+                "No runtime or dynamic analysis; findings derive from the static state of the \
+                 repositories."
+                    .to_string()
+            } else {
+                "No runtime or dynamic analysis; findings derive from static repository state."
+                    .to_string()
+            },
+            if multi_repo {
+                "Row Level Security findings reflect each repository's migration history, not \
+                 the live databases. Changes made in the Supabase dashboard that never landed \
+                 in a migration are invisible to a repository scan and must be confirmed \
+                 against production."
+                    .to_string()
+            } else {
+                "Row Level Security findings reflect the repository's migration history, not the \
+                 live database. Changes made in the Supabase dashboard that never landed in a \
+                 migration are invisible to a repository scan and must be confirmed against \
+                 production."
+                    .to_string()
+            },
             "No review of organizational controls, identity and access management, or \
              infrastructure configuration."
                 .to_string(),
@@ -4912,6 +5739,8 @@ pub fn build_report_json(
 
     AuditReportJson {
         review_state,
+        brand_mark: brand_kit_matches(cover.brand.as_deref()),
+        confidentiality: confidentiality_marking(&report.provenance, opts),
         cover,
         executive_summary,
         three_things,
@@ -4922,6 +5751,7 @@ pub fn build_report_json(
         priority_grid,
         curated_findings,
         held_for_review_findings,
+        patterns_across_services: patterns_across_services_json(report, corpus),
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
@@ -4930,7 +5760,8 @@ pub fn build_report_json(
         rules_not_run,
         dependency_snapshot,
         methodology,
-        disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
+        coverage_gaps: coverage_gaps::coverage_gaps(report),
+        disclaimer: audit_report_disclaimer(report.repos.len()).to_string(),
     }
 }
 
@@ -4966,6 +5797,79 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
     compile_pdf_from_data(&render_data_json(json)?).await
 }
 
+// Test-only seam: a test that needs a different `typst` (a recording fake) scopes it onto ITS
+// OWN task with `TYPST_PROGRAM.scope(path, fut)`. The override is task-local, so it can neither
+// leak into a concurrently running test nor require changing the process-wide `PATH`, which is
+// what made unrelated typst-using tests flaky when a sibling swapped `PATH` for a fake.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TYPST_PROGRAM: std::path::PathBuf;
+}
+
+/// The `typst` executable to run: the task-local test override if one is scoped, else `typst`
+/// from `PATH`.
+fn typst_program() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Ok(p) = TYPST_PROGRAM.try_with(|p| p.clone()) {
+        return p.into_os_string();
+    }
+    "typst".into()
+}
+
+/// The files the template reads besides `data.json`, written next to it for every compile: the
+/// embedded fonts (W27: Inter for text, JetBrains Mono for code, both SIL OFL, licence files
+/// beside them in `templates/fonts/`) and the brand kit's two logo marks. Embedded in the
+/// binary like the template itself, so nothing has to ship alongside the server and the PDF
+/// never depends on what fonts the exporting machine happens to have installed.
+const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
+    (
+        "fonts/Inter-Regular.ttf",
+        include_bytes!("../templates/fonts/Inter-Regular.ttf"),
+    ),
+    (
+        "fonts/Inter-Italic.ttf",
+        include_bytes!("../templates/fonts/Inter-Italic.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBold.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBold.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBoldItalic.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBoldItalic.ttf"),
+    ),
+    (
+        "fonts/JetBrainsMono-Regular.ttf",
+        include_bytes!("../templates/fonts/JetBrainsMono-Regular.ttf"),
+    ),
+    (
+        "brand-mark.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark.svg"),
+    ),
+    (
+        "brand-mark-small.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark-small.svg"),
+    ),
+];
+
+/// Which fonts Typst may draw from. Production uses [`FontSources::BundledFirst`]; the
+/// embedding test uses [`FontSources::BundledOnly`] to prove the bundle alone renders the
+/// report on a machine with no Inter or JetBrains Mono installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSources {
+    /// `--font-path fonts`: Typst searches the bundled files BEFORE system fonts, so Inter
+    /// and JetBrains Mono always come from the bundle, and a glyph neither has (a CJK path, an
+    /// emoji) still falls back to a system font instead of rendering as a missing box.
+    ///
+    /// Production stays on this, deliberately: every character the bundled fonts cover is drawn
+    /// from them on any machine, and forcing [`FontSources::BundledOnly`] would silently drop
+    /// the characters they lack (the multi-byte path test pins that a report keeps an accented,
+    /// CJK or emoji path and snippet). Installed fonts reach the output only for such a glyph.
+    BundledFirst,
+    /// `--font-path fonts --ignore-system-fonts`.
+    BundledOnly,
+}
+
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -4977,6 +5881,15 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
+    let (pdf, warnings) = run_typst(data_json, FontSources::BundledFirst).await?;
+    if !warnings.trim().is_empty() {
+        tracing::warn!(%warnings, "typst reported warnings while compiling the report");
+    }
+    Ok(pdf)
+}
+
+/// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
+async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -4991,15 +5904,28 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     )
     .await
     .context("could not write report.typ")?;
+    tokio::fs::create_dir_all(tmp.path().join("fonts"))
+        .await
+        .context("could not create the fonts dir for the PDF export")?;
+    for (name, bytes) in TEMPLATE_ASSETS {
+        tokio::fs::write(tmp.path().join(name), bytes)
+            .await
+            .with_context(|| format!("could not write {name}"))?;
+    }
 
-    let mut cmd = tokio::process::Command::new("typst");
+    let mut cmd = tokio::process::Command::new(typst_program());
     cmd.current_dir(tmp.path())
         .arg("compile")
         .arg("report.typ")
         .arg("report.pdf")
         .arg("--root")
         .arg(tmp.path())
+        .arg("--font-path")
+        .arg(tmp.path().join("fonts"))
         .kill_on_drop(true);
+    if fonts == FontSources::BundledOnly {
+        cmd.arg("--ignore-system-fonts");
+    }
     // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
     // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
     // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
@@ -5034,22 +5960,94 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         Err(_elapsed) => anyhow::bail!("typst compile timed out after 30s"),
     };
 
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("typst compile failed: {stderr}");
     }
 
     tokio::fs::read(&pdf_path)
         .await
+        .map(|pdf| (pdf, stderr))
         .context("typst reported success but report.pdf was not found")
 }
 
+pub mod coverage_gaps;
+pub(crate) mod fix_text;
+pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
+
+#[cfg(test)]
+mod coverage_gaps_tests;
+
+#[cfg(test)]
+mod engine_identity_tests;
+
+#[cfg(test)]
+mod fix_text_tests;
+
+#[cfg(test)]
+mod fn_batch_b_tests;
+
+#[cfg(test)]
+mod fn_batch_c_adjust_tests;
+
+#[cfg(test)]
+mod fn_batch_c_dep_tests;
+
+#[cfg(test)]
+mod fn_batch_c_followup_tests;
+
+#[cfg(test)]
+mod fn_batch_c_incremental_tests;
+
+#[cfg(test)]
+mod fn_batch_c_sites_tests;
+
+#[cfg(test)]
+mod fn_batch_a_followup_tests;
+
+#[cfg(test)]
+mod fn_batch_c_tests;
+
 #[cfg(test)]
 mod tests {
+
+    /// H2: a client-tooling note is not a tool failure. The opt-in note and the skip note each
+    /// reach the report in their own words, never as "the ... checks did not fully run".
+    #[test]
+    fn client_tooling_notes_reach_the_report_in_their_own_words() {
+        let notes = vec![
+            crate::onboard::CoverageNote {
+                tool_failed: false,
+                repo: None,
+                tool: "clippy".to_string(),
+                message: crate::scan_tools::client_tooling_skipped_message("cargo clippy", 2),
+            },
+            crate::onboard::CoverageNote {
+                tool_failed: false,
+                repo: None,
+                tool: crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL.to_string(),
+                message: "cargo clippy ran with the operator's opt-in to run this repository's \
+                          own tooling."
+                    .to_string(),
+            },
+        ];
+        let lines = tool_coverage_disclosures(&notes);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("was not run")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("opt-in to run")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("did not fully run")),
+            "{lines:?}"
+        );
+    }
+
     use super::*;
     use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
-    fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+    pub(super) fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
             repo: "owner/repo".to_string(),
             path: path.to_string(),
@@ -5062,13 +6060,19 @@ mod tests {
         }
     }
 
-    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+    pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: vec![
@@ -5110,6 +6114,7 @@ mod tests {
                 audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
                 camerata_version: "0.0.0-test".to_string(),
                 osv_scanner_version: Some("1.9.0".to_string()),
+                vulnerability_data: None,
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
                 model_sessions: Vec::new(),
@@ -5139,8 +6144,16 @@ mod tests {
         }
     }
 
-    fn empty_opts() -> ReportOptions {
+    pub(super) fn empty_opts() -> ReportOptions {
         ReportOptions::default()
+    }
+
+    /// Options for an internal export, the only kind that carries failure wording.
+    pub(super) fn internal_opts() -> ReportOptions {
+        ReportOptions {
+            internal: true,
+            ..ReportOptions::default()
+        }
     }
 
     // ── finding_key round-trip with ui-core's format ──────────────────────────
@@ -5822,7 +6835,7 @@ mod tests {
         );
     }
 
-    // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
+    // ── E2 (the audit findings tracker): a rule's `max_severity`
     // ceiling, applied LAST — never exceeded by any report, never raising a lower severity ──
 
     /// Every site severity a report actually exported, scanning BOTH top-level row sections.
@@ -6911,14 +7924,14 @@ mod tests {
     #[test]
     fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
         let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
-        carrier.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "owner/repo".to_string(),
-            path: ".env.production".to_string(),
-            line: 1,
-            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
-            snippet: "committed secret file".to_string(),
-            consequence: false,
-        }];
+        carrier.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            ".env.production".to_string(),
+            1,
+            "SEC-NO-SECRET-FILE-1".to_string(),
+            "committed secret file".to_string(),
+            false,
+        )];
 
         // Both rules were audited. Only the carrier has a row of its own.
         let report = report_with(
@@ -6997,7 +8010,7 @@ mod tests {
     }
 
     // ── P1: deduplication + cross-tier merge, end-to-end through build_report_json ──────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Runs the SAME two merge
+    // the codebase-inspection hardening notes, P1. Runs the SAME two merge
     // passes the real audit pipeline runs (`ai_audit::merge_by_location` then
     // `ai_audit::merge_semantic_groups`) over a faktura-SHAPED synthetic fixture — never the
     // real fixture, never a fixture-specific rule/file/table name — then builds the report and
@@ -9311,7 +10324,7 @@ mod tests {
     }
 
     // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P3.
+    // the codebase-inspection hardening notes, P3.
 
     /// An AI-tier finding (`AI-`-prefixed rule id) whose defect does not classify into any
     /// of the P3 closed taxonomy classes must be held OUT of `curated_findings` entirely —
@@ -9871,10 +10884,14 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
             },
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: "ruff".to_string(),
                 message: "ruff not installed".to_string(),
             },
@@ -9894,6 +10911,8 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 12 rule(s) with eslint: spawn ENOENT at \
                           /internal/path/node_modules/.bin/eslint. It enforces once wired \
@@ -9901,10 +10920,14 @@ mod tests {
                     .to_string(),
             },
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 3 rule(s) with eslint: exit code 2.".to_string(),
             },
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
             },
@@ -9962,15 +10985,19 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
-                message: "/Users/someone/corpus/supabase/rls/a.toml did not parse, so rule \
+                message: "/Users/auditor/corpus/supabase/rls/a.toml did not parse, so rule \
                           SUPABASE-RLS-ENABLED-1 was not loaded and did not run: TOML parse \
                           error in a.toml: unknown variant `architectual`"
                     .to_string(),
             },
             CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
-                message: "/Users/someone/corpus/universal/b.toml did not parse, so rule \
+                message: "/Users/auditor/corpus/universal/b.toml did not parse, so rule \
                           SEC-NO-RAW-SQL-CONCAT-1 was not loaded and did not run: TOML parse \
                           error in b.toml: expected a value"
                     .to_string(),
@@ -10003,7 +11030,7 @@ mod tests {
 
         // G3's prohibition: never the raw diagnostics.
         for leak in [
-            "/Users/someone",
+            "/Users/auditor",
             ".toml",
             "TOML parse error",
             "architectual",
@@ -10028,6 +11055,8 @@ mod tests {
     fn the_firebase_scope_sentence_reaches_the_summary_and_methodology_verbatim() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: "operator note".to_string(),
         }];
@@ -10060,6 +11089,8 @@ mod tests {
     fn req_w13_the_client_facing_corpus_load_line_pluralizes_correctly() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
             message: "x.toml did not parse".to_string(),
         }];
@@ -10427,6 +11458,213 @@ mod tests {
         );
     }
 
+    /// W27: the bundled fonts alone render the report. Compiled with system fonts IGNORED, so a
+    /// machine that happens to have Inter or JetBrains Mono installed cannot mask a missing or
+    /// misnamed bundle file: Typst warns "unknown font family" for a family it cannot find, and
+    /// the PDF's font dictionaries name every embedded face.
+    #[tokio::test]
+    async fn the_bundled_fonts_alone_render_the_report_in_inter_and_jetbrains_mono() {
+        if which_typst().is_none() {
+            eprintln!("skipping the_bundled_fonts_alone_render_the_report: typst not on PATH");
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "Acme Corp".to_string();
+        opts.brand = BRAND_KIT_NAME.to_string();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
+        assert!(json.brand_mark, "the kit's own brand renders the mark");
+
+        let (pdf, warnings) = run_typst(
+            &render_data_json(&json).expect("serialize"),
+            FontSources::BundledOnly,
+        )
+        .await
+        .expect("the report compiles from the bundled fonts alone");
+        assert!(
+            !warnings.contains("unknown font family"),
+            "a bundled family is missing: {warnings}"
+        );
+        let text = String::from_utf8_lossy(&pdf);
+        for face in ["Inter-Regular", "Inter-SemiBold", "JetBrainsMono-Regular"] {
+            assert!(
+                text.contains(&format!("+{face}")),
+                "the PDF does not embed {face}"
+            );
+        }
+    }
+
+    /// Confidentiality (2026-10-24 decision): the marking names the client and the SCAN date
+    /// (not the wall clock), consent belongs to the brand when there is one and else to the
+    /// preparer, and a blank client never prints "prepared for .".
+    #[test]
+    fn the_confidentiality_marking_names_the_client_the_scan_date_and_who_consents() {
+        let mut provenance = ScanProvenance {
+            finished_at: "2026-10-21T09:30:00Z".to_string(),
+            ..ScanProvenance::default()
+        };
+        let mut opts = empty_opts();
+        opts.client_name = "  Example Client Ltd ".to_string();
+        opts.brand = "Cantus Works".to_string();
+        let m = confidentiality_marking(&provenance, &opts);
+        assert_eq!(
+            m.line,
+            "Confidential, prepared for Example Client Ltd on 21 October 2026"
+        );
+        assert_eq!(
+            m.handling_note,
+            "This report is confidential and was prepared for Example Client Ltd only. Please \
+             do not forward it outside Example Client Ltd without the written consent of \
+             Cantus Works."
+        );
+
+        opts.brand = String::new();
+        opts.prepared_by = "A. Reviewer".to_string();
+        assert!(confidentiality_marking(&provenance, &opts)
+            .handling_note
+            .ends_with("written consent of A. Reviewer."));
+
+        opts.client_name = "   ".to_string();
+        provenance.finished_at = "2026-03-02T00:00:00Z".to_string();
+        let blank = confidentiality_marking(&provenance, &opts);
+        assert_eq!(blank.line, "Confidential, prepared on 2 March 2026");
+        assert!(!blank.line.contains("prepared for"));
+        for text in [&blank.line, &blank.handling_note, &m.line, &m.handling_note] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_name_must_be_one_short_line_and_present_to_export() {
+        assert_eq!(
+            validate_client_name("  Example Client Ltd  ").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(validate_client_name("").as_deref(), Ok(""));
+        assert!(validate_client_name("Example\nClient").is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS + 1)).is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+
+        let mut opts = empty_opts();
+        opts.client_name = " ".to_string();
+        let refused = require_client_name(&opts).expect_err("blank blocks the export");
+        assert!(
+            refused.to_string().contains("inspection setup"),
+            "{refused}"
+        );
+        opts.client_name = "Example Client Ltd".to_string();
+        assert_eq!(
+            require_client_name(&opts).as_deref(),
+            Ok("Example Client Ltd")
+        );
+    }
+
+    /// Invisible characters are not part of a client's name: they are stripped where the name is
+    /// saved, so the manifest, the workbook and the PDF can never print different strings, and a
+    /// name made only of them is blank (and refused with the message that says so).
+    #[test]
+    fn zero_width_characters_are_stripped_from_the_client_name() {
+        assert_eq!(
+            validate_client_name("Ex\u{200B}ample\u{FEFF} Client\u{2060} Ltd\u{200D}").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(
+            validate_client_name("\u{200B}  \u{200C}\u{2060}").as_deref(),
+            Ok("")
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "\u{200B}\u{200D}".to_string();
+        let refused = require_client_name(&opts).expect_err("an invisible name is a blank name");
+        assert!(
+            refused.to_string().contains("Enter the client name"),
+            "the refusal says the name is missing: {refused}"
+        );
+        // The marking prints the same string the setup saved.
+        opts.client_name = "Acme\u{200B} Ltd".to_string();
+        assert_eq!(
+            confidentiality_marking(&ScanProvenance::default(), &opts)
+                .line
+                .split(" on ")
+                .next(),
+            Some("Confidential, prepared for Acme Ltd")
+        );
+    }
+
+    /// The workbook footer holds 255 characters, with each `&` written twice, so a name made of
+    /// ampersands has the least room. The bound is measured on the real footer, with the longest
+    /// date the marking can print, and refused with a message that says what to shorten.
+    #[test]
+    fn a_client_name_that_would_overflow_the_workbook_footer_is_refused() {
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+        // 80 characters with several ampersands is a realistic long name.
+        let long = format!("{} & Sons & Daughters & Partners", "A".repeat(49));
+        assert!(long.chars().count() <= 80);
+        assert!(validate_client_name(&long).is_ok());
+
+        let footer_len = |name: &str| {
+            let line = marking_line(name, WORST_MARKING_DATE);
+            crate::xlsx_export::sheet_footer(&line)
+                .encode_utf16()
+                .count()
+        };
+        let widest_accepted = (1..=CLIENT_NAME_MAX_CHARS)
+            .take_while(|n| validate_client_name(&"&".repeat(*n)).is_ok())
+            .last()
+            .expect("a short name of ampersands is accepted");
+        assert!(widest_accepted < CLIENT_NAME_MAX_CHARS, "the bound bites");
+        assert!(footer_len(&"&".repeat(widest_accepted)) <= EXCEL_FOOTER_MAX_CHARS);
+        assert!(
+            footer_len(&"&".repeat(widest_accepted + 1)) > EXCEL_FOOTER_MAX_CHARS,
+            "the bound is exact, not merely safe"
+        );
+        let refused = validate_client_name(&"&".repeat(CLIENT_NAME_MAX_CHARS))
+            .expect_err("a hundred ampersands cannot fit a footer");
+        assert!(refused.to_string().contains("footer"), "{refused}");
+        assert!(refused.to_string().contains("Shorten"), "{refused}");
+    }
+
+    /// The longest date the marking can print is the one the bound is measured with.
+    #[test]
+    fn the_worst_marking_date_is_the_longest_the_marking_can_print() {
+        use chrono::TimeZone;
+        let longest = (1..=12u32)
+            .flat_map(|month| {
+                (1..=28u32).map(move |day| {
+                    chrono::Utc
+                        .with_ymd_and_hms(2026, month, day, 0, 0, 0)
+                        .unwrap()
+                        .format("%-d %B %Y")
+                        .to_string()
+                })
+            })
+            .map(|date| date.chars().count())
+            .max()
+            .unwrap();
+        // Days 29 to 31 add no width over 28 (both are two digits).
+        assert_eq!(WORST_MARKING_DATE.chars().count(), longest);
+    }
+
+    /// W27: the logo mark belongs to the bundled brand kit, so it renders for that brand only.
+    /// Another agency's brand, or no brand, never gets it.
+    #[test]
+    fn the_brand_mark_renders_only_for_the_brand_kit_brand() {
+        assert!(brand_kit_matches(Some("Cantus Works")));
+        assert!(brand_kit_matches(Some("  cantus works ")));
+        assert!(!brand_kit_matches(Some("Another Agency")));
+        assert!(!brand_kit_matches(None));
+    }
+
     // ── req_det: two exports of ONE report are byte-identical ─────────────────
 
     /// req_det: compiling the SAME report twice, across a second boundary, must produce
@@ -10549,6 +11787,11 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
@@ -11069,13 +12312,8 @@ mod tests {
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
-    fn which_typst() -> Option<()> {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|_| ())
+    pub(super) fn which_typst() -> Option<()> {
+        camerata_test_env::typst_on_path().then_some(())
     }
 
     // ── Regression guard: the backtick-hash interpolation bug class ───────────
@@ -12051,8 +13289,18 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
-        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &internal_opts(),
+        );
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(
@@ -12168,8 +13416,18 @@ mod tests {
             reason: "the calibration pass returned no usable remediation-effort estimate for \
                      any finding this run"
                 .to_string(),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
-        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &internal_opts(),
+        );
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(
@@ -12235,7 +13493,7 @@ mod tests {
             .find(r#"if site.fix_for_this_finding != none ["#)
             .expect("the primary branch must gate on fix_for_this_finding first");
         let fix_label_idx = template[primary_idx..]
-            .find(r#"[Fix: ]#site.fix_for_this_finding"#)
+            .find(r#"[Fix: ]#fix_body(site.fix_for_this_finding)"#)
             .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
         let secondary_idx = template[primary_idx..]
             .find("General guidance: ")
@@ -12979,8 +14237,10 @@ mod tests {
             AUDIT_REPORT_DISCLAIMER.to_string(),
             next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
             next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
-            ai_tier_note_for(ReviewState::Raw),
-            ai_tier_note_for(ReviewState::Reviewed),
+            ai_tier_note_for(ReviewState::Raw, 0, 1),
+            ai_tier_note_for(ReviewState::Reviewed, 0, 1),
+            ai_tier_note_for(ReviewState::Raw, 1, 2),
+            ai_tier_note_for(ReviewState::Reviewed, 2, 2),
             default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             disposition_label(Disposition::Ignored, "some reason", "accepted", false),
@@ -13293,11 +14553,17 @@ mod export_invariants_gate {
 
     fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["demo/portal".to_string()],
             stacks: Vec::new(),
             files_scanned: 40,
             test_file_count: 5,
             files_excluded: 3,
+            excluded_noise_lines: None,
             code_chars: 20_000,
             code_lines: 1_200,
             code_lines_by_language: vec![LanguageVolume {
@@ -13333,6 +14599,7 @@ mod export_invariants_gate {
                 audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
                 camerata_version: "0.0.0-test".to_string(),
                 osv_scanner_version: Some("1.9.0".to_string()),
+                vulnerability_data: None,
                 started_at: "2026-10-02T00:00:00Z".to_string(),
                 finished_at: "2026-10-02T00:05:00Z".to_string(),
                 model_sessions: Vec::new(),
@@ -14416,6 +15683,7 @@ mod export_invariants_gate {
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         // Genuinely ran, zero findings -> healthy.
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -14426,6 +15694,7 @@ mod export_invariants_gate {
         // Genuinely ran AND fired (matches the one real Finding above) -> neither healthy nor
         // excluded.
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -14436,6 +15705,7 @@ mod export_invariants_gate {
         // The W1-item-4 defect shape: declared mechanical, no wired detector -> excluded with
         // a reason, never healthy.
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             crate::scan_ledger::RuleTier::Deterministic,
             false,
@@ -14622,14 +15892,14 @@ mod export_invariants_gate {
         // absorption because its key collided with the pre-existing entry.
         let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
         collision_primary.repo = "acme/widgets".to_string();
-        collision_primary.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "acme/widgets".to_string(),
-            path: "handler.rs".to_string(),
-            line: 52,
-            rule_id: "SEC-COLLISION-DEMO-1".to_string(),
-            snippet: "already-absorbed-earlier".to_string(),
-            consequence: false,
-        }];
+        collision_primary.also_locations = vec![crate::onboard::MergedLocation::site(
+            "acme/widgets".to_string(),
+            "handler.rs".to_string(),
+            52,
+            "SEC-COLLISION-DEMO-1".to_string(),
+            "already-absorbed-earlier".to_string(),
+            false,
+        )];
         let mut collision_fresh = finding("SEC-COLLISION-DEMO-1", "handler.rs", 52, "medium");
         collision_fresh.repo = "acme/widgets".to_string();
 
@@ -14682,26 +15952,26 @@ mod export_invariants_gate {
         a.category = Some("arch-conformance".to_string());
         a.confidence = Some("needs-review".to_string());
         a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
-        a.also_locations = vec![MergedLocation {
-            repo: a.repo.clone(),
-            path: "already-merged-a.rs".to_string(),
-            line: 99,
-            rule_id: "AI-ALREADY-MERGED-A-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        a.also_locations = vec![MergedLocation::site(
+            a.repo.clone(),
+            "already-merged-a.rs".to_string(),
+            99,
+            "AI-ALREADY-MERGED-A-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let mut b = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 2, "medium");
         b.category = Some("arch-conformance".to_string());
         b.confidence = Some("needs-review".to_string());
         b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
-        b.also_locations = vec![MergedLocation {
-            repo: b.repo.clone(),
-            path: "already-merged-b.rs".to_string(),
-            line: 199,
-            rule_id: "AI-ALREADY-MERGED-B-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        b.also_locations = vec![MergedLocation::site(
+            b.repo.clone(),
+            "already-merged-b.rs".to_string(),
+            199,
+            "AI-ALREADY-MERGED-B-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let structural_input = vec![a, b];
         let rows_in = structural_input.len();
         let pre = structural_input.clone();
@@ -14770,6 +16040,7 @@ mod export_invariants_gate {
         ];
         for rid in rule_ids {
             ledger.record_rule(
+                "",
                 rid,
                 crate::scan_ledger::RuleTier::Deterministic,
                 false,
@@ -14843,6 +16114,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec![]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             crate::scan_ledger::RuleTier::Deterministic,
             false,
@@ -14888,6 +16160,7 @@ mod export_invariants_gate {
             let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
             let mut ledger = crate::scan_ledger::ScanLedger::new();
             ledger.record_rule(
+                "",
                 "ARCH-EXPLICIT-TX-1",
                 crate::scan_ledger::RuleTier::Semantic,
                 true,
@@ -14899,6 +16172,7 @@ mod export_invariants_gate {
             report.recommendations.insert(
                 "ARCH-EXPLICIT-TX-1".to_string(),
                 crate::ai_audit::RuleRecommendation {
+                    repo: String::new(),
                     rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                     recommended_option_id: "some-option".to_string(),
                     recommendation_reasoning: "the model's pick".to_string(),
@@ -14962,6 +16236,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "ARCH-EXPLICIT-TX-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -14973,6 +16248,7 @@ mod export_invariants_gate {
         report.recommendations.insert(
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                 recommended_option_id:
                     "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
@@ -15023,6 +16299,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec!["SEC-NO-HARDCODED-SECRETS-1"]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -15148,14 +16425,14 @@ mod export_invariants_gate {
             "medium",
         );
         fully_represented.kind = deviation_kind.clone();
-        fully_represented.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "demo/portal".to_string(),
-            path: "src/api/users.rs".to_string(),
-            line: 7,
-            rule_id: "ARCH-API-VERSIONING-1".to_string(),
-            snippet: "router.get(\"/users\", ...)".to_string(),
-            consequence: false,
-        }];
+        fully_represented.also_locations = vec![crate::onboard::MergedLocation::site(
+            "demo/portal".to_string(),
+            "src/api/users.rs".to_string(),
+            7,
+            "ARCH-API-VERSIONING-1".to_string(),
+            "router.get(\"/users\", ...)".to_string(),
+            false,
+        )];
         let mut report = report_with(vec![fully_represented], vec!["ARCH-API-VERSIONING-1"]);
         let rows_before = report.findings.len();
         apply_evidence_gate(&mut report);
@@ -15190,7 +16467,7 @@ mod export_invariants_gate {
         );
     }
 
-    // ── Pass-1 W1: the seal (docs/plans/2026-10-09_audit-findings-tracker.md) ─────────────
+    // ── Pass-1 W1: the seal (the audit findings tracker) ─────────────
     //
     // C1 — every row the engine produces reaches the reader; nothing may be added after the
     //      row set is final.
@@ -15253,6 +16530,7 @@ mod export_invariants_gate {
 
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -15261,6 +16539,7 @@ mod export_invariants_gate {
             1,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -15270,6 +16549,7 @@ mod export_invariants_gate {
         );
         // The zero-finding, multi-option rule the evidence gate will flag.
         ledger.record_rule(
+            "",
             "ARCH-EXPLICIT-TX-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -15293,6 +16573,7 @@ mod export_invariants_gate {
         report.recommendations.insert(
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                 recommended_option_id: "some-option".to_string(),
                 recommendation_reasoning: "the model's pick".to_string(),

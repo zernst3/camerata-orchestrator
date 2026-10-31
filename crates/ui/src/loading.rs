@@ -61,11 +61,25 @@ pub struct BombeEnabled(pub Signal<bool>);
 #[derive(Clone, Copy)]
 pub struct BombePreview(pub Signal<bool>);
 
+thread_local! {
+    // The app's loading count, remembered when it is provided. A guard built with
+    // `LoadingGuard::new()` inside a long-lived spawned task cannot always resolve the count from
+    // the Dioxus context (see its doc); it falls back to this one, which is the same signal.
+    // Dioxus runs every task of an app on the thread that owns the app, so the thread-local is
+    // the app's count. A signal whose app is gone is detected (`try_write` fails) and ignored.
+    static ROOT_COUNT: std::cell::RefCell<Option<LoadingCount>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Provide the global loading count + bombe control signals into the Dioxus
 /// context.  Call once at the app root before any child that might consume
 /// them.
 pub fn provide_loading_context() {
-    use_context_provider(|| Signal::new(0usize));
+    use_context_provider(|| {
+        let count = Signal::new(0usize);
+        ROOT_COUNT.with(|slot| *slot.borrow_mut() = Some(count));
+        count
+    });
     use_context_provider(|| BombeEnabled(Signal::new(true))); // on by default
     use_context_provider(|| BombePreview(Signal::new(false))); // no preview
 }
@@ -105,15 +119,21 @@ impl LoadingGuard {
         // `Runtime::with_current_scope`, which panics with no VirtualDom), so gate on
         // `Runtime::try_current()` first. With no runtime — e.g. a plain unit test exercising an
         // async helper that wraps itself in a guard — this degrades to a no-op.
-        let count = if dioxus::core::Runtime::try_current().is_some() {
+        let from_context = if dioxus::core::Runtime::try_current().is_some() {
             try_consume_context::<LoadingCount>()
         } else {
             None
         };
-        if let Some(mut c) = count {
+        if let Some(mut c) = from_context {
             c += 1;
+            return Self { count: Some(c) };
         }
-        Self { count }
+        // Not resolvable here (a spawned task): the app's own count, if its app is still alive.
+        let fallback = ROOT_COUNT.with(|slot| *slot.borrow()).and_then(|mut c| {
+            let counted = c.try_write().map(|mut n| *n += 1).is_ok();
+            counted.then_some(c)
+        });
+        Self { count: fallback }
     }
 
     /// Increment an EXPLICITLY-provided [`LoadingCount`] — the fix for the pitfall documented on
@@ -131,9 +151,11 @@ impl LoadingGuard {
 impl Drop for LoadingGuard {
     fn drop(&mut self) {
         if let Some(count) = self.count.as_mut() {
-            // Saturating: a stray double-drop is silently safe.
-            let prev = *count.peek();
-            count.set(prev.saturating_sub(1));
+            // Saturating: a stray double-drop is silently safe, and a count whose app is gone
+            // is left alone.
+            if let Ok(mut n) = count.try_write() {
+                *n = n.saturating_sub(1);
+            }
         }
     }
 }
@@ -408,5 +430,74 @@ mod tests {
             0,
             "guard dropped when the spawned task completed -> back to idle"
         );
+    }
+
+    // ── A guard built with `new()` inside a spawned task still moves the app's count ─────────────
+
+    fn harness_spawning_a_task_that_uses_new() -> Element {
+        provide_loading_context();
+        let count = use_context::<LoadingCount>();
+        CAPTURED_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        // The shape of most AI triggers in the cockpit: no captured count, `LoadingGuard::new()`
+        // built inside the spawned task, held across a real suspension.
+        spawn(async move {
+            let _guard = LoadingGuard::new();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+        rsx! { div {} }
+    }
+
+    #[tokio::test]
+    async fn spawned_task_guard_via_new_still_moves_the_real_bombe_count() {
+        let mut vdom = VirtualDom::new(harness_spawning_a_task_that_uses_new);
+        vdom.rebuild_in_place();
+        let count = CAPTURED_COUNT
+            .with(|c| c.borrow_mut().take())
+            .expect("harness captured LoadingCount during render");
+        vdom.process_events();
+        assert_eq!(
+            *count.read(),
+            1,
+            "a guard built with new() inside a spawned task moves the app's count"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        vdom.process_events();
+        assert_eq!(*count.read(), 0, "and releases it when the task ends");
+    }
+
+    // ── The AI triggers that held no guard now hold one (source pins) ────────────────────────────
+    //
+    // These three spawn bodies cannot be rendered without a server, so the test pins the source:
+    // the guard is the first statement of the spawned task that starts the model work.
+
+    fn spawn_body_starts_with_guard(source: &str, marker: &str) -> bool {
+        let at = source.find(marker).expect("the call site exists");
+        let before = &source[..at];
+        let spawn_at = before.rfind("spawn(async move {").expect("inside a spawn");
+        source[spawn_at..at].contains("LoadingGuard::new()")
+    }
+
+    #[test]
+    fn the_routine_escalation_answer_holds_the_bombe() {
+        assert!(spawn_body_starts_with_guard(
+            include_str!("routines.rs"),
+            "answer_escalation(&id, &text, \"approve\")"
+        ));
+    }
+
+    #[test]
+    fn the_source_screen_rescan_holds_the_bombe() {
+        assert!(spawn_body_starts_with_guard(
+            include_str!("source_ui.rs"),
+            "match rescan_changes(&pid, &rp).await"
+        ));
+    }
+
+    #[test]
+    fn the_remediation_unit_rescan_holds_the_bombe_through_its_poll() {
+        assert!(spawn_body_starts_with_guard(
+            include_str!("cockpit/remediation.rs"),
+            "match crate::source_ui::rescan_changes(&project_id, &repo).await"
+        ));
     }
 }

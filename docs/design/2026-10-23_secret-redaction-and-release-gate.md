@@ -2,11 +2,11 @@
 
 Written 2026-10-23 against branch `feat/audit-report-export` tip `35b4855`, after reading the
 work order (`_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`), the owner's binding
-decisions (`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE, 2026-10-22), `crates/gateway/src/lib.rs`
+decisions (private decision log, 2026-10-22), `crates/gateway/src/lib.rs`
 (the SEC arms), `crates/orchestrator/src/secrets.rs` (the chat scrubber), `crates/llm/src/
 credentials.rs`, every production `Finding` constructor and text-mutation site in `crates/server`,
 the three exporters, `templates/audit_report.typ`, the scan cache, the prompt builders, gates 1
-to 7, and the latest sweep exports under `~/Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16/`
+to 7, and the latest sweep exports under `$CAMERATA_FIXTURES_DIR/_runs/sweep5b-2026-10-16/`
 (faktura, hearth, supabase-portal-fixture; the 2026-10-18 hearth rerun agrees with sweep5b).
 Build-ready: every "decide" below is decided. The governing law, from the work order: **a value
 that matches a secret shape never appears in full in anything the client receives, and never
@@ -911,7 +911,7 @@ form and not the value in `snippet`, `detail`, `fix_specific`, `also_locations[*
 ### 8.7 Acceptance over the three real exports (`#[ignore]`, run by hand)
 
 `crates/server/tests/release_gate_acceptance.rs`, reading the directory in
-`CAMERATA_SWEEP_EXPORTS` (default `~/Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16`):
+`CAMERATA_SWEEP_EXPORTS` (default `$CAMERATA_FIXTURES_DIR/_runs/sweep5b-2026-10-16`):
 
 - `acceptance_known_leaks_are_flagged_in_the_old_exports`: for `faktura.zip` and `hearth.zip`,
   `audit_zip(bytes, Some(pdf_text))` reports at least the problems in section 10 (by file,
@@ -944,7 +944,7 @@ form and not the value in `snippet`, `detail`, `fix_specific`, `also_locations[*
    `release()`, hooks in both routes, CLI exit 3, sample generator, source-grep tests; 8.5).
 9. `test(server): PDF text smoke tests` (8.6).
 10. `feat(cli): camerata release-gate <zip>` behind the `pdf-text` feature, plus the acceptance test
-    file (8.7). Run the acceptance by hand; record the before/after in `docs/OVERNIGHT_DECISIONS.md`.
+    file (8.7). Run the acceptance by hand; record the before/after in the private decision log.
 11. `docs: OVERVIEW crate map, TECHNICAL (new section "Secret redaction and the release gate"),
     the `rules/principles/universal/sec-no-vendor-token-1.toml` note that items (b) and (c) are now
     built` (bump the rule's `version` and regenerate `CORPUS_LOCK.toml` only if the rule text

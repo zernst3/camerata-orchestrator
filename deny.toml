@@ -1,0 +1,125 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/), run as a blocking CI
+# job: `cargo deny check advisories licenses sources`. Locally: `cargo install cargo-deny --locked`
+# and run the same command from the repository root.
+#
+# Every exception below carries its reason. Add one only with a reason, and remove it as soon as
+# the upstream fix lands.
+
+[graph]
+# No `targets`: the whole graph is checked, including the macOS and Windows desktop stacks,
+# because those are what ships.
+all-features = true
+
+[advisories]
+# Vulnerabilities, unsound code, unmaintained crates and yanked versions all fail by default.
+ignore = [
+    # `serial` is unmaintained. It comes from `portable-pty` 0.8 (crates/server, the terminal
+    # pane). It is only used for serial-port support Camerata never opens. Removing it means
+    # moving to portable-pty 0.9, a dependency upgrade that is tracked separately.
+    { id = "RUSTSEC-2017-0008", reason = "unmaintained, via portable-pty 0.8; serial ports are never opened" },
+    # `fxhash` is unmaintained. It comes from `selectors` <- `kuchikiki` <- `wry`
+    # (dioxus-desktop). It is a hash function with no security role. No release of the
+    # chain has dropped it yet.
+    { id = "RUSTSEC-2025-0057", reason = "unmaintained, via wry (dioxus-desktop); no upstream release without it" },
+    # `paste` is unmaintained. It is a compile-time proc macro reached through `rav1e`
+    # <- `image` <- dioxus-desktop and never runs in the shipped binary.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained, compile-time proc macro via image (dioxus-desktop)" },
+    # `proc-macro-error` is unmaintained. It is a compile-time proc macro reached through
+    # gtk-rs 0.18 (`glib-macros`), the Linux webview stack under wry, and never runs in the
+    # shipped binary.
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained, compile-time proc macro via gtk-rs 0.18 (wry on Linux)" },
+    # `ttf-parser` is unmaintained. It comes from `lopdf` <- `pdf-extract` (crates/cli), which
+    # reads back the PDFs Camerata itself wrote so the release gate can check their text.
+    # No maintained replacement is in that chain yet.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, via pdf-extract; parses only PDFs Camerata wrote" },
+    # `zbus_names`, `zvariant` and `zvariant_derive` are unmaintained as standalone crates
+    # (merged into zbus 6). They come from zbus 5 <- `ashpd` <- `rfd`, the native file dialog
+    # in crates/ui on Linux. They clear when rfd moves to zbus 6.
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained, via rfd (Linux file dialog); clears with zbus 6" },
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained, via rfd (Linux file dialog); clears with zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained, via rfd (Linux file dialog); clears with zbus 6" },
+    # `zip` < 9: three flaws in `ZipArchive::extract` and `ZipStreamReader::extract` (SUID bits,
+    # symlink targets and permissions applied through symlinks when unpacking to disk). Camerata
+    # never calls either: it writes archives and reads entries into memory (release_gate,
+    # the export tests). Both zip 8.6 (direct, crates/server and crates/cli) and zip 7.2 (via
+    # rust_xlsxwriter 0.96) are affected. The fix is zip 9 plus rust_xlsxwriter 0.101, a
+    # dependency upgrade of the export code that is tracked separately. If code ever unpacks
+    # an archive to disk, remove these three ignores first.
+    { id = "RUSTSEC-2026-0367", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
+]
+
+[licenses]
+# Permissive licenses only. A copyleft license is never added here. It gets a per-crate
+# exception below with its reason, so each one is a visible decision.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "NCSA",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = [
+    # Camerata's own crates, under the repository's LICENSE. Listed per crate rather than
+    # allowed globally, so that a third-party noncommercial dependency cannot slip in under
+    # the same identifier. A new workspace crate needs a line here.
+    { crate = "camerata", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-agent", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-api-types", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-app-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-check", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-checks", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-client", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-deploy", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-fleet", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-gateway", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-intake", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-linter-registry", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-liveness", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-llm", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-maintenance", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-mcp", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-orchestrator-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-persistence", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-preview", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-rules", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-scaffold", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-secrets", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-server", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-source-check", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-test-env", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-ui", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-ui-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "camerata-worktracker", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    { crate = "corpus-verifier", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    # MPL-2.0 is file-level copyleft: it covers the MPL-licensed files themselves, not the
+    # code that links to them. Camerata uses these crates unmodified, so the license puts no
+    # obligation on Camerata's own source. Only modifying one of these crates' files would
+    # require publishing that change. They come from `kuchikiki` <- `wry` (dioxus-desktop's
+    # HTML handling) and `dirs-sys` <- `dirs`.
+    # TODO confirm with Zach: these five exceptions are kept so CI stays green, and are on
+    # the maintainer's sign-off list. Drop an entry if the decision is to avoid MPL-2.0.
+    { crate = "cssparser", allow = ["MPL-2.0"] },
+    { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short", allow = ["MPL-2.0"] },
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+    { crate = "selectors", allow = ["MPL-2.0"] },
+]
+
+[licenses.private]
+ignore = false
+
+[sources]
+# crates.io only. A git or alternative-registry dependency fails until it is listed here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

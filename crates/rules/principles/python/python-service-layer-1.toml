@@ -1,5 +1,5 @@
 id = "PYTHON-SERVICE-LAYER-1"
-version = 1
+version = 3
 title = "Business logic lives in a service layer, not in views or route handlers"
 domain = "python"
 layer = "language"
@@ -24,7 +24,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.cosmicpython.com/book/chapter_04_service_layer.html"
-title = "Cosmic Python (Percival & Gregory) — Chapter 4: Our First Use Case: Flask API and Service Layer"
+title = "Cosmic Python (Percival & Gregory): Chapter 4 (Our First Use Case: Flask API and Service Layer)"
 
 [decision]
 question = "Where does business logic live relative to web views and route handlers?"
@@ -34,9 +34,9 @@ why = "A Flask or FastAPI route handler exists to translate HTTP into a call and
 [[option]]
 id = "service-layer"
 label = "keep handlers thin; business logic in a service layer"
-directive = "Views and route handlers only parse and validate input, call a service-layer function, and shape the response. All business rules, multi-step workflows, and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks, and other endpoints and unit-testable without the web stack."
+directive = "Views and route handlers only parse and validate input, call a service-layer function and shape the response. All business rules, multi-step workflows and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks and other endpoints and unit-testable without the web stack."
 remediation = """
-Move the business logic and persistence orchestration out of the view or route handler and into a service function or class that takes plain arguments, leaving the handler to parse input, call the service, and shape the response. Verify by confirming the service function can be called and tested without an HTTP request object.
+Move the business logic and persistence orchestration out of the view or route handler and into a service function or class that takes plain arguments, leaving the handler to parse input, call the service and shape the response. Verify by confirming the service function can be called and tested without an HTTP request object.
 """
 why = "A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
 
@@ -49,4 +49,4 @@ why = "Ties the logic to the request cycle: it cannot be reused outside HTTP or 
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
-title = "Django Design Philosophies — Simplicity; models contain domain logic"
+title = "Django Design Philosophies: Simplicity; models contain domain logic"

@@ -1,5 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
-version = 1
+version = 3
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
 domain = "ci-cd"
 layer = "universal"
@@ -35,7 +35,7 @@ The `in_loop` flag maps the chosen cadence onto the engine's layers: in_loop = f
 
 [[sources]]
 url = "https://google.github.io/osv-scanner/"
-title = "OSV-Scanner — dependency vulnerability scanner by Google"
+title = "OSV-Scanner: dependency vulnerability scanner by Google"
 linter = "osv-scanner"
 
 [[sources]]
@@ -45,11 +45,11 @@ linter = "osv-scanner"
 
 [[sources]]
 url = "https://osv.dev/"
-title = "OSV (Open Source Vulnerabilities) — the database osv-scanner queries"
+title = "OSV (Open Source Vulnerabilities): the database osv-scanner queries"
 
 [[sources]]
 url = "https://google.github.io/osv-scanner/usage/"
-title = "OSV-Scanner usage — CLI flags, output formats, configuration"
+title = "OSV-Scanner usage: CLI flags, output formats, configuration"
 
 [decision]
 question = "Where and how often should dependency-vulnerability scanning run?"
@@ -57,17 +57,17 @@ why = "Camerata does not build a scheduling or cadence engine. The cadence is a 
 
 [[option]]
 id = "dep-audit-weekly-ci"
-label = "Scheduled weekly CI job (recommended — low noise, catches newly-disclosed CVEs)"
+label = "Scheduled weekly CI job (recommended: low noise, catches newly-disclosed CVEs)"
 directive = """Run osv-scanner in CI as a scheduled weekly job, NOT on every PR. The scan catches newly-disclosed CVEs that affect already-merged dependencies, which per-PR runs miss entirely. A weekly schedule is the standard cadence for dependency scanning: low noise, actionable findings, no per-PR friction. Pin an exact osv-scanner version (no ranges) and fail the job on findings at or above the chosen severity.
 
-Implementation — GitHub Actions example:
+Implementation (GitHub Actions example):
 
 ```yaml
 # .github/workflows/dep-audit.yml
 name: Dependency Vulnerability Scan
 on:
   schedule:
-    - cron: '0 3 * * 1'   # every Monday at 03:00 UTC — adjust to taste
+    - cron: '0 3 * * 1'   # every Monday at 03:00 UTC, adjust to taste
   workflow_dispatch:        # allow manual runs on demand
 
 jobs:
@@ -98,7 +98,7 @@ id = "dep-audit-per-pr"
 label = "Run in CI on every pull request / push"
 directive = """Run osv-scanner in CI on every pull_request and push event. This catches a vulnerable dependency the moment it is introduced in a PR, at the cost of added per-PR latency. Best for teams with a low-tolerance security posture or regulated environments. Pin an exact osv-scanner version (no ranges) and fail the job on findings at or above the chosen severity.
 
-Implementation — GitHub Actions example:
+Implementation (GitHub Actions example):
 
 ```yaml
 # .github/workflows/dep-audit.yml
@@ -132,10 +132,10 @@ why = "Per-PR scanning catches vulnerabilities the moment they are introduced. A
 
 [[option]]
 id = "dep-audit-every-pass"
-label = "Run both locally during development AND in CI — highest coverage"
+label = "Run both locally during development AND in CI: highest coverage"
 directive = """Run osv-scanner both in CI and continuously during development: locally on every change (for example as a pre-commit or pre-push hook, or a file-watch task) AND in CI on a schedule or per-PR. This is the highest-coverage option: every local change AND every CI run is gated. It adds latency to the local dev cycle; accept that trade only if the security posture demands it.
 
-osv-scanner is fast (it reads lock files, not a full build), so the local overhead is typically a few seconds per run. Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity in both places. The team wires the local hook and the CI cadence (weekly cron, per-PR, or both)."""
+osv-scanner is fast (it reads lock files, not a full build), so the local overhead is typically a few seconds per run. Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity in both places. The team wires the local hook and the CI cadence (weekly cron, per-PR or both)."""
 remediation = """
 Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
 """
@@ -147,7 +147,7 @@ id = "dep-audit-manual"
 label = "Manual / on-demand only (workflow_dispatch)"
 directive = """Run osv-scanner as a manual, on-demand workflow only (workflow_dispatch). No scheduled or PR-triggered runs; the team fires the scan deliberately when they choose (before a release, after a dependency bump, etc.). Use this when automated scanning is not yet appropriate (early-stage project, no CI budget, explicit opt-in culture). Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity.
 
-Implementation — GitHub Actions example:
+Implementation (GitHub Actions example):
 
 ```yaml
 # .github/workflows/dep-audit.yml
@@ -171,7 +171,7 @@ jobs:
 
 Replace `<x.y.z>` with an exact pinned osv-scanner version. The team owns the decision of when to fire the workflow, and can upgrade to a scheduled or per-PR cadence as the project matures."""
 remediation = """
-Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs, and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
+Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
 """
 effort = "medium"
 why = "Manual-only scanning is appropriate for early-stage projects or teams not ready for automated scanning. It documents the decision and the tool, and is easily upgraded to an automated cadence later."

@@ -1,5 +1,5 @@
 id = "RUST-AXUM-STATE-SHARED-DEPS-1"
-version = 1
+version = 4
 title = "Share application dependencies via Axum State, not global static variables"
 domain = "rust:axum"
 layer = "framework"
@@ -17,7 +17,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Share application dependencies via State?"
+question = "How do Axum handlers get access to shared dependencies such as the database pool and configuration?"
 default = "use-state-for-shared-dependencies"
 why = "Axum State is a typed, immutable container for application-wide dependencies (database connection pools, cache clients, configuration, external service clients) that the router passes to every handler. When handlers and services receive State as an extractor argument, they access dependencies through the type system, not by looking up a hidden global or static. If dependencies live in global static variables instead, three problems emerge. First, global state is invisible to the type system and to code readers; a handler that depends on a database pool does not declare this dependency anywhere a linter or reviewer can see. Second, testing becomes complex because tests must somehow initialize and reset the global state without interfering with other tests. Third, the order-of-initialization is fragile; global statics can fail to initialize in the wrong way, and there is no structured way to handle initialization errors. Using State makes dependencies explicit in handler signatures, testable (dependency injection via State), and composable (the router itself constructs and owns the State instance)."
 
@@ -26,7 +26,7 @@ id = "use-state-for-shared-dependencies"
 label = "Share application dependencies via Axum State"
 directive = "Application-wide dependencies (database pools, caches, config, service clients) are placed into a struct that is wrapped in Axum State and registered on the router. Handlers receive this State as an extractor argument. Global static variables or lazy_static initialization is not used for application dependencies."
 remediation = """
-Move the dependency out of a global static (lazy_static, once_cell, or manual startup init) and into a struct wrapped in Axum State, registered on the router, with handlers receiving it as an extractor argument. Verify by confirming the dependency's initialization goes through the router's State and no handler reads it from a global variable.
+Move the dependency out of a global static (lazy_static, once_cell or manual startup init) and into a struct wrapped in Axum State, registered on the router, with handlers receiving it as an extractor argument. Verify by confirming the dependency's initialization goes through the router's State and no handler reads it from a global variable.
 """
 why = "State makes dependencies explicit in handler signatures and simplifies testing via dependency injection."
 
@@ -34,7 +34,7 @@ why = "State makes dependencies explicit in handler signatures and simplifies te
 id = "use-global-statics-for-dependencies"
 violates = true
 label = "Use global static variables for application dependencies"
-directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
+directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell or manual initialization on startup) and handlers access them directly from the global scope."
 why = "Global state is invisible to the type system: a handler that depends on a database pool does not declare that dependency anywhere a linter or reviewer can see; testing becomes complex because tests must initialize and reset the global without interfering with each other; and initialization-order bugs produce failures that are hard to attribute because there is no structured way to handle initialization errors."
 
 [[option]]
@@ -45,8 +45,8 @@ why = "Extension is Axum's older, more loosely-typed mechanism: it stores values
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"
-title = "axum::extract::State — Shared application state extractor"
+title = "axum::extract::State: Shared application state extractor"
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/struct.Router.html"
-title = "axum::Router — with_state method and global state"
+title = "axum::Router: with_state method and global state"

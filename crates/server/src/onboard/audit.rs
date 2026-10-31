@@ -146,7 +146,7 @@ fn gitignore_status_phrase(path: &str, files: &[(String, String)]) -> &'static s
 /// computes "a" vs "an" from the resolved value at substitution time
 /// (`report_export::indefinite_article`). A value that carried its own article here would
 /// double up with either mechanism — see the W4 bug this shape fixes
-/// (`docs/plans/2026-09-30_cycle2-queue-hardening.md`).
+/// (the cycle-2 queue-hardening notes).
 pub(crate) fn classify_secret_kind(rule_id: &str, snippet: &str, path: &str) -> &'static str {
     match rule_id {
         "SEC-NO-SECRET-FILE-1" => secret_file_kind(path),
@@ -354,6 +354,24 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     // P4: cheap, local context facts (secret kind + `.gitignore` coverage) need the WHOLE
     // file set, not just the one file `audit_content` sees — a second pass over the
     // now-complete `findings` list, not threaded into `audit_content` itself.
+    enrich_secret_context(&mut findings, files);
+    findings
+}
+
+/// H9: the path-only floor rules over files the walk named but could not read (over the size
+/// limit, past the file limit, or not decodable as text). A rule whose verdict comes from the
+/// path alone (`SEC-NO-SECRET-FILE-1`: a `.p12`, a `.pem`, an `id_rsa`) needs no content, so
+/// skipping the read must not skip the rule. Content rules see an empty file and report nothing.
+/// `files` is the audited set, used only for the `.gitignore` coverage context.
+pub fn audit_unread_paths(
+    repo: &str,
+    paths: &[String],
+    files: &[(String, String)],
+) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = paths
+        .iter()
+        .flat_map(|path| audit_content(repo, path, ""))
+        .collect();
     enrich_secret_context(&mut findings, files);
     findings
 }

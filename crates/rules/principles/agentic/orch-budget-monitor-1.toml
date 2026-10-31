@@ -1,5 +1,5 @@
 id = "ORCH-BUDGET-MONITOR-1"
-version = 1
+version = 4
 title = "Budget self-monitoring"
 domain = "agentic"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "defect"
 inspectable = false
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/"
+title = "OWASP Top 10 for LLM Applications, LLM10:2025 Unbounded Consumption (quotas, resource limits and timeouts keep model use from running up unbounded cost)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-BUDGET-MONITOR-1 (budget self-monitoring)"
+title = "Project policy: an autonomous run tracks its own spend against a cap, and a wrapper enforces a hard limit before each model call"
 
 [decision]
 question = "How should an autonomous run cap its spend?"
@@ -32,11 +36,11 @@ id = "per-session-cap-only"
 violates = true
 label = "per-session cap only"
 directive = "Each autonomous run enforces a single per-session spend cap and halts when it is reached, with no rolling-window safety threshold across runs."
-why = "A defensible alternative that bounds any single run but leaves independent runs free to accumulate unbounded spend across a window, so it does not cover the aggregate runaway case."
+why = "Independent runs can still accumulate unbounded spend across a window: a per-session cap bounds any single run but does not cover the aggregate runaway case."
 
 [[option]]
 id = "no-budget-caps"
 violates = true
 label = "no budget caps"
 directive = "The autonomous run operates with no budget caps and no rolling-window safety threshold."
-why = "A defensible alternative for attended, short runs where a human can intervene before spend escalates, but unsafe for unattended routines that have neither property."
+why = "Unattended routines can escalate spend with nothing to stop them. Running without caps is only tolerable for attended, short runs where a human can intervene in time."

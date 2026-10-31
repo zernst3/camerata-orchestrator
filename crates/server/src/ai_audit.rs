@@ -66,6 +66,8 @@ pub struct RuleAlternatives {
     pub kind: Option<camerata_rules::RuleKind>,
 }
 
+pub use camerata_llm::failure::{AttemptRecord, FailureClass};
+
 /// A named audit pass that failed or timed out for a repo — e.g. the alternative-
 /// recommendation pass hitting the CLI's hang timeout. Captured here instead of only
 /// `eprintln!`-ing to stderr, so the report export (`report_export::build_report_json`) can
@@ -73,7 +75,7 @@ pub struct RuleAlternatives {
 /// a report that never mentions the pass ran at all. `pass` is a short, stable, general name
 /// (never a fixture-specific string) — any pass this fail-soft pattern applies to can push
 /// one of these. See `ScanReport::failed_passes` and W6 in
-/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`.
+/// the cycle-2 queue-hardening notes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FailedPass {
     /// The repo this pass failed for (`owner/repo`).
@@ -84,6 +86,352 @@ pub struct FailedPass {
     /// The error text, verbatim (e.g. the CLI timeout message), so the operator sees the
     /// real reason rather than a generic placeholder.
     pub reason: String,
+    /// How many files this pass was shown and therefore did NOT review, for a scan pass (a
+    /// file chunk x rule batch). Zero for a pass that is not over files (the recommendation,
+    /// estimate and fix passes). `serde(default)` so a report persisted before this existed
+    /// still loads. Rendered under Coverage by [`Self::coverage_line`].
+    #[serde(default)]
+    pub files_not_reviewed: usize,
+    /// Why the part failed. Decides what the run did next (second try, outage count) and what the
+    /// operator is told. `serde(default)` (content) so a ledger written before the class loads.
+    #[serde(default)]
+    pub class: FailureClass,
+    /// The repo-relative files the part was shown and so did not review, for the failure report.
+    /// Empty for a part that is not over files. Operator only; never rendered into an export.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// What each attempt got back, oldest first, the end-of-run second try included. Operator
+    /// only; never rendered into an export.
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
+    /// True for a disclosed LIMIT of this inspection's scope (a tool that was not run by policy
+    /// or does not apply to the code), not a part that failed. Shown in Coverage like any
+    /// disclosure; it never makes the run incomplete, so it never locks a client export.
+    #[serde(default)]
+    pub scope_note: bool,
+}
+
+impl FailedPass {
+    /// The Coverage line for this failed pass: `"<repo>, <pass>: pass failed, N files not
+    /// reviewed by the AI pass"`. A pass over no files states only that it failed. The full
+    /// reason stays in the methodology disclosure; this is the one-line coverage fact.
+    pub fn coverage_line(&self) -> String {
+        if self.files_not_reviewed == 0 {
+            return format!("{}, {}: pass failed", self.repo, self.pass);
+        }
+        let files = if self.files_not_reviewed == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", self.files_not_reviewed)
+        };
+        format!(
+            "{}, {}: pass failed, {files} not reviewed by the AI pass",
+            self.repo, self.pass
+        )
+    }
+}
+
+/// How many times a scan pass whose reply is MALFORMED (complete, not cut off, but holding no
+/// JSON object the parser can read) is sent again before the pass is declared failed. A
+/// malformed reply is never parsed as "no findings": it either recovers within this bound or
+/// becomes a [`FailedPass`] naming the files it did not review. Kept small because the same
+/// prompt tends to fail the same way and every retry is billed.
+pub(crate) const MALFORMED_REPLY_RETRIES: usize = 2;
+
+/// The line a malformed-reply retry adds to the user prompt. A retry after a content failure
+/// must change the request (the same prompt sent again pays twice for the same answer), and this
+/// tells the model what was wrong with its reply. Camerata's own words, outside the framed client
+/// content, appended after the whole original prompt so the cached prefix is unchanged.
+pub(crate) const MALFORMED_REPLY_NOTE: &str = "Your previous reply to this exact request held no JSON object that parses. Reply with ONLY the JSON object described above, no prose before or after it.";
+
+/// One scan pass (a file chunk x rule batch) that produced NO answer, and why. Collected by
+/// every pass runner ([`run_passes`], [`run_passes_batch`], [`run_routed_passes`],
+/// [`run_security_passes`]) instead of keeping only the last error, so a round where 1 of 40
+/// passes failed and one where 39 of 40 failed are distinguishable, and every failed pass is
+/// named. A model REFUSAL (`stop_reason: "refusal"`) is one of these, never an empty finding list.
+#[derive(Debug, Clone)]
+struct PassFailure {
+    /// Human-readable pass name, e.g. `pass[rust] 2/3 · rules 1/4`.
+    pass: String,
+    /// The error text (for a refusal, it says so).
+    error: String,
+    /// How many files the failed pass was shown (its chunk), so the disclosure can say how
+    /// many went unreviewed. Zero when the pass is not over a file chunk.
+    files: usize,
+    /// `Some(n)` when the reply was cut off at the output limit and `n` complete findings were
+    /// recovered from the part that arrived (they are in the round's findings; the rest of the
+    /// pass was not reviewed). `None` for a pass that produced nothing.
+    recovered: Option<usize>,
+    /// Why the pass failed: what the run does with it next (second try, outage count).
+    class: FailureClass,
+    /// What each attempt at the call got back, from the transport.
+    attempts: Vec<AttemptRecord>,
+    /// The repo-relative files the pass was shown, for the failure report.
+    file_names: Vec<String>,
+}
+
+impl PassFailure {
+    /// A failure of rule-batch `bi` of `n_b` on file chunk `ci` of `n_c` in round `label`.
+    fn at(
+        label: &str,
+        ci: usize,
+        n_c: usize,
+        bi: usize,
+        n_b: usize,
+        error: &dyn std::fmt::Display,
+    ) -> Self {
+        Self {
+            pass: format!("{label} {}/{n_c} · rules {}/{n_b}", ci + 1, bi + 1),
+            error: error.to_string(),
+            files: 0,
+            recovered: None,
+            class: FailureClass::Content,
+            attempts: Vec::new(),
+            file_names: Vec::new(),
+        }
+    }
+
+    /// A failure with an already-built pass name.
+    fn named(pass: String, error: &dyn std::fmt::Display) -> Self {
+        Self {
+            pass,
+            error: error.to_string(),
+            files: 0,
+            recovered: None,
+            class: FailureClass::Content,
+            attempts: Vec::new(),
+            file_names: Vec::new(),
+        }
+    }
+
+    /// The same failure, recording the cause: its class and the transport's attempt trail.
+    fn caused_by(mut self, e: &anyhow::Error) -> Self {
+        self.class = classify_pass_error(e);
+        self.attempts = camerata_llm::failure::attempts_of(e);
+        if self.attempts.is_empty() {
+            // The call itself answered (a cut-off, malformed or refused reply), so the
+            // transport has no failed attempt to show; the record says what was wrong with the
+            // answer.
+            let mut record = AttemptRecord::new("", "");
+            record.error_type = Some(self.class.as_str().to_string());
+            record.message = camerata_llm::failure::scrub_message(
+                &self.error,
+                camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+            );
+            self.attempts.push(record);
+        }
+        self
+    }
+
+    /// The same failure, naming the model its attempts asked for where the record does not.
+    fn with_model(mut self, model: Option<&str>) -> Self {
+        let model = model
+            .map(str::to_string)
+            .unwrap_or_else(|| resolve_audit_model(None));
+        for a in self.attempts.iter_mut().filter(|a| a.model.is_empty()) {
+            a.model.clone_from(&model);
+        }
+        self
+    }
+
+    /// The same failure, naming the files the pass was shown.
+    fn with_file_names<'a>(mut self, names: impl Iterator<Item = &'a String>) -> Self {
+        self.file_names = names.cloned().collect();
+        self
+    }
+
+    /// The same failure, recording that the pass was shown `files` files.
+    fn with_files(mut self, files: usize) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// The same failure, recording that `n` complete findings were recovered from a reply that
+    /// was cut off (see [`PartialPassReply`]).
+    fn with_recovered(mut self, n: usize) -> Self {
+        self.recovered = Some(n);
+        self
+    }
+}
+
+/// What every pass runner returns: `(findings, proposed rules, requested files, passes that
+/// answered, passes that did not)`.
+type PassesOut = (
+    Vec<Finding>,
+    Vec<ProposedRule>,
+    std::collections::HashSet<String>,
+    usize,
+    Vec<PassFailure>,
+);
+
+/// One [`FailedPass`] row per failed pass, each naming the pass and carrying the real error,
+/// plus how many passes in the round answered (so 1-of-40 reads differently from 39-of-40).
+/// The ONE place a runner's failures become disclosure; used by the scan rounds and the
+/// resolution round alike.
+fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Vec<FailedPass> {
+    let total = answered + failures.len();
+    failures
+        .iter()
+        .map(|f| FailedPass {
+            repo: repo.to_string(),
+            pass: format!("audit {}", f.pass),
+            reason: match f.recovered {
+                // A cut-off reply: its complete findings are in the report, the rest is not.
+                Some(n) => format!(
+                    "{} ({n} complete finding{} recovered from the part that arrived and are \
+                     in this report; {answered} of {total} passes in this round answered in \
+                     full; any finding past the cut-off is missing)",
+                    batch_mode::disclosable_error(&f.error),
+                    if n == 1 { "" } else { "s" }
+                ),
+                None => format!(
+                    "{} ({answered} of {total} passes in this round answered; the findings \
+                     this pass would have produced are missing)",
+                    batch_mode::disclosable_error(&f.error)
+                ),
+            },
+            files_not_reviewed: f.files,
+            class: f.class,
+            files: f.file_names.clone(),
+            attempts: f.attempts.clone(),
+            scope_note: false,
+        })
+        .collect()
+}
+
+/// The class of a pass error. A cut-off reply and a model refusal are content by construction;
+/// everything else is classified by the transport's own typed failure, else from its text.
+pub(crate) fn classify_pass_error(e: &anyhow::Error) -> FailureClass {
+    if e.downcast_ref::<PartialPassReply>().is_some() || crate::llm::is_refusal(e) {
+        return FailureClass::Content;
+    }
+    camerata_llm::failure::classify_error(e)
+}
+
+/// What a stage's failed calls looked like, kept for its failed pass: the class of the last
+/// failure and every attempt with its time, the end-of-run second try marked.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StageTrail {
+    pub attempts: Vec<AttemptRecord>,
+    pub class: Option<FailureClass>,
+}
+
+impl StageTrail {
+    /// A call of the stage failed with `e`: keep the transport's own attempt records (or one
+    /// describing the failure when the error carries none).
+    pub(crate) fn note_error(&mut self, e: &anyhow::Error, second_try: bool) {
+        let class = classify_pass_error(e);
+        let mut records = camerata_llm::failure::attempts_of(e);
+        if records.is_empty() {
+            records.push(Self::describe(class, &e.to_string()));
+        }
+        for r in &mut records {
+            r.second_try = second_try;
+            if r.model.is_empty() {
+                r.model = resolve_audit_model(None);
+            }
+        }
+        self.attempts.extend(records);
+        self.class = Some(class);
+    }
+
+    /// The stage's calls answered but the answer was unusable (no fix, no estimate): keep one
+    /// record saying so, so the failed pass shows when each try ended without a result.
+    ///
+    /// `rejections` says why each reply of the part was turned down (see
+    /// [`AttemptRecord::rejections`]); empty when the part never got a reply to turn down.
+    pub(crate) fn note_unusable(
+        &mut self,
+        message: &str,
+        second_try: bool,
+        rejections: Vec<String>,
+    ) {
+        let mut record = Self::describe(FailureClass::Content, message);
+        record.second_try = second_try;
+        record.model = resolve_audit_model(None);
+        record.rejections = bounded_rejections(rejections);
+        self.attempts.push(record);
+        self.class.get_or_insert(FailureClass::Content);
+    }
+
+    fn describe(class: FailureClass, message: &str) -> AttemptRecord {
+        let mut record = AttemptRecord::new("", "");
+        record.error_type = Some(class.as_str().to_string());
+        record.message = camerata_llm::failure::scrub_message(
+            message,
+            camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+        );
+        record
+    }
+
+    /// The class of the failed pass: that of the last failure, else content.
+    pub(crate) fn class(&self) -> FailureClass {
+        self.class.unwrap_or(FailureClass::Content)
+    }
+}
+
+/// The most rejection reasons one attempt record keeps.
+const MAX_RECORDED_REJECTIONS: usize = 40;
+
+/// Rejection reasons as an attempt record keeps them: each scrubbed of secrets and capped, the
+/// first [`MAX_RECORDED_REJECTIONS`] of them, and a last line counting the rest.
+pub(crate) fn bounded_rejections(reasons: Vec<String>) -> Vec<String> {
+    let total = reasons.len();
+    let mut out: Vec<String> = reasons
+        .into_iter()
+        .take(MAX_RECORDED_REJECTIONS)
+        .map(|r| {
+            camerata_llm::failure::scrub_message(
+                &r,
+                camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+            )
+        })
+        .collect();
+    if total > MAX_RECORDED_REJECTIONS {
+        out.push(format!("and {} more", total - MAX_RECORDED_REJECTIONS));
+    }
+    out
+}
+
+/// The error a stage returns when both its tries failed: the second failure with the whole
+/// trail (the first try's records first, the second's marked).
+pub(crate) fn error_with_both_tries(first: &anyhow::Error, second: anyhow::Error) -> anyhow::Error {
+    let mut trail = StageTrail::default();
+    trail.note_error(first, false);
+    trail.note_error(&second, true);
+    let class = classify_pass_error(&second);
+    let mut failure = camerata_llm::failure::LlmCallFailure::new(class, second.to_string());
+    failure.attempts = trail.attempts;
+    anyhow::Error::new(failure)
+}
+
+/// True when a failed call of a stage is worth the end-of-run second try: its class is transport
+/// or content, and the run has not stopped.
+pub(crate) fn second_try_allowed(e: &anyhow::Error, meter: Option<&UsageMeter>) -> bool {
+    classify_pass_error(e).is_retried_at_end() && !meter.is_some_and(UsageMeter::outage_stopped)
+}
+
+/// Why a pass failed when the outage stop refused a retry its reply needed (the pass was in
+/// flight when the run stopped).
+pub(crate) const OUTAGE_BEFORE_RETRY: &str = "the run stopped because the model provider could \
+                                              not be reached before the reply could be retried";
+
+/// What refused a retry a reply needed: the outage stop once the run has stopped, else the spend
+/// limit. The class says which, so a pass caught in flight by the stop is recorded as an outage
+/// stop and the operator is never told a spend limit was reached when there may be none.
+fn retry_blocked_cause(meter: Option<&UsageMeter>) -> (FailureClass, &'static str) {
+    if meter.is_some_and(UsageMeter::outage_stopped) {
+        (FailureClass::OutageStop, OUTAGE_BEFORE_RETRY)
+    } else {
+        (FailureClass::SpendLimit, SPEND_LIMIT_BEFORE_RETRY)
+    }
+}
+
+/// The error a pass returns when a retry its reply needed was refused; see
+/// [`retry_blocked_cause`].
+fn retry_blocked_error(meter: Option<&UsageMeter>) -> anyhow::Error {
+    let (class, message) = retry_blocked_cause(meter);
+    anyhow::Error::new(camerata_llm::failure::LlmCallFailure::new(class, message))
 }
 
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
@@ -93,6 +441,12 @@ pub struct FailedPass {
 pub struct RuleRecommendation {
     /// The rule id this recommendation is for (uppercased).
     pub rule_id: String,
+    /// The repo (`owner/repo`) this recommendation was made for. Each repo of a multi-repo scan
+    /// is assessed on its own, so the convention found in one is not the convention of another.
+    /// Empty for a recommendation made without a repo in view (an older report, a targeted
+    /// re-assessment that has not been given one).
+    #[serde(default)]
+    pub repo: String,
     /// The option id violations were (or will be) reported against.
     pub recommended_option_id: String,
     /// 1-3 sentences explaining the pick, grounded in the codebase evidence the model saw.
@@ -116,7 +470,7 @@ pub struct RuleRecommendation {
     /// assertion. `None` when the model found no such evidence (or the field was blank/absent)
     /// — see `applicable`'s doc comment: an absent evidence line FORCES `applicable = false`
     /// for a model-sourced recommendation, because an unevidenced "this codebase does/needs X"
-    /// claim is never trusted (P7, `docs/plans/2026-09-29_codebase-inspection-hardening.md`).
+    /// claim is never trusted (P7, the codebase-inspection hardening notes).
     /// Always `None` for an operator-forced pick (`operator_chosen: true`) — the operator's
     /// explicit choice needs no repo evidence to be trusted.
     #[serde(default)]
@@ -203,6 +557,7 @@ impl Default for RuleRecommendation {
     /// contradict the field's own documented default.
     fn default() -> Self {
         RuleRecommendation {
+            repo: String::new(),
             rule_id: String::new(),
             recommended_option_id: String::new(),
             recommendation_reasoning: String::new(),
@@ -238,6 +593,556 @@ pub struct UsageMeter {
     /// The same calls split by pipeline stage (operator telemetry; never exported — see
     /// [`crate::stage_telemetry`]). Always updated together with the aggregate above.
     stages: StageMeter,
+    /// The largest dollar cost any single call has had so far, in micro-dollars. The cap's
+    /// per-pass reserve (see [`crate::cost_cap`]).
+    max_call_micro_usd: AtomicU64,
+    /// The largest price any REQUEST this run has built could cost, in micro-dollars: its input at
+    /// the full input rate plus its `max_tokens` at the output rate ([`request_ceiling_usd`]). The
+    /// other half of the cap's per-pass reserve, so the reserve tracks what a call is allowed to
+    /// cost and not only what past calls happened to cost (see [`crate::cost_cap`]).
+    max_request_micro_usd: AtomicU64,
+    /// How this run executes: efficiency switches and the spend cap. Set once, before the first
+    /// call, by [`Self::with_controls`]; the default is every measure on and no cap.
+    controls: crate::cost_cap::RunControls,
+    /// The cap's mutable record: passes in flight, and what the cap stopped.
+    budget: std::sync::Mutex<crate::cost_cap::BudgetState>,
+    /// Wakes passes waiting for the first reported cost (see [`Self::admit`]).
+    admission: tokio::sync::Notify,
+    /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
+    /// admission refuses every new part. See [`crate::run_health`].
+    health: crate::run_health::RunHealth,
+}
+
+/// Why a pass was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapReached;
+
+/// Proof that a pass was admitted under the spend cap; releases its slot when dropped (after
+/// the pass, its truncation retry included, has finished).
+pub struct PassPermit<'a> {
+    meter: &'a UsageMeter,
+}
+
+impl Drop for PassPermit<'_> {
+    fn drop(&mut self) {
+        {
+            let mut budget = self.meter.budget();
+            budget.in_flight = budget.in_flight.saturating_sub(1);
+        }
+        self.meter.admission.notify_waiters();
+    }
+}
+
+/// The answer to one admission attempt.
+enum Admission<'a> {
+    Admitted(PassPermit<'a>),
+    /// The cap forbids another pass.
+    CapReached,
+    /// No call has reported a cost yet and a pass is already in flight, so there is nothing to
+    /// reserve against: wait for it.
+    Wait,
+}
+
+impl UsageMeter {
+    /// A meter for a run that executes under `controls`.
+    pub fn with_controls(controls: crate::cost_cap::RunControls) -> Self {
+        Self {
+            controls,
+            ..Self::default()
+        }
+    }
+
+    /// The efficiency switches this run executes under. A call site with no meter (a unit test
+    /// of one function) uses [`efficiency_of`].
+    pub fn efficiency(&self) -> crate::efficiency::EfficiencyConfig {
+        self.controls.efficiency
+    }
+
+    /// The run's controls, as built.
+    pub fn controls(&self) -> &crate::cost_cap::RunControls {
+        &self.controls
+    }
+
+    /// The run-wide outage counter.
+    pub fn health(&self) -> &crate::run_health::RunHealth {
+        &self.health
+    }
+
+    /// True once the outage stop has tripped: no new part is sent.
+    pub fn outage_stopped(&self) -> bool {
+        self.health.is_stopped()
+    }
+
+    /// The class a part refused right now is recorded with: an outage stop, else the spend limit.
+    fn not_run_class(&self) -> FailureClass {
+        if self.health.is_stopped() {
+            FailureClass::OutageStop
+        } else {
+            FailureClass::SpendLimit
+        }
+    }
+
+    /// Actual spend so far, in dollars, as the telemetry and the printed total count it.
+    pub fn spent_usd(&self) -> f64 {
+        self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+
+    /// True once actual spend has reached the cap. Always false with no cap.
+    pub fn cap_reached(&self) -> bool {
+        self.controls
+            .max_cost_usd
+            .is_some_and(|cap| self.spent_usd() >= cap)
+    }
+
+    /// True when one MORE call from a pass that already holds its permit would go past the
+    /// limit: the same test [`Self::admit`] applies to a new pass (spend so far plus one call's
+    /// reserve for every pass in flight, this one included, against the cap), without taking a
+    /// permit. A retry of a cut-off or malformed reply checks this before it is sent. Always
+    /// false with no cap; true once any call's cost was unknowable (the cap cannot be enforced).
+    pub fn retry_blocked(&self) -> bool {
+        // After an outage stop no call is sent, a retry of an admitted pass included.
+        if self.health.is_stopped() {
+            return true;
+        }
+        let Some(cap) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let budget = self.budget();
+        if budget.cost_unknown {
+            return true;
+        }
+        let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
+        self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+    }
+
+    /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
+    /// the most any single call has cost so far and the most any request built so far could
+    /// cost. Taking the request's ceiling into account means the first pass of a run is no
+    /// longer admitted against a zero reserve, and that a generous `max_tokens` (a 128,000-token
+    /// ceiling on Opus is $2.56 of output alone) tightens admission instead of widening the
+    /// overshoot the cap can reach.
+    fn reserve_micro_usd(&self) -> u64 {
+        self.max_call_micro_usd
+            .load(Ordering::Relaxed)
+            .max(self.max_request_micro_usd.load(Ordering::Relaxed))
+    }
+
+    /// Tell the cap about a request about to be sent: the most it could cost joins the reserve
+    /// ([`request_ceiling_usd`]). Call it for every request, before it is sent; with no cap set
+    /// it does nothing. A request whose model has no list price adds nothing here (a call that
+    /// cannot be priced already makes a cap unenforceable, and the pre-flight refuses it).
+    pub fn note_request(&self, req: &LlmRequest) {
+        if self.controls.max_cost_usd.is_none() {
+            return;
+        }
+        let Some(ceiling) = request_ceiling_usd(req) else {
+            return;
+        };
+        let micro = crate::llm::usd_to_micro_ceil(ceiling);
+        let before = self
+            .max_request_micro_usd
+            .fetch_max(micro, Ordering::Relaxed);
+        if before == 0 && micro > 0 {
+            // Passes waiting for a first figure to reserve against can go on.
+            self.admission.notify_waiters();
+        }
+    }
+
+    fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// One admission attempt. Admitted only while `spent + in_flight * reserve < cap` (see the
+    /// overshoot bound in [`crate::cost_cap`]); with no cap, always admitted. The check and the
+    /// in-flight count move together under one lock, so two passes cannot both claim the last
+    /// slot.
+    fn try_admit(&self) -> Admission<'_> {
+        // The outage stop refuses every new part, cap or no cap.
+        if self.health.is_stopped() {
+            return Admission::CapReached;
+        }
+        let mut budget = self.budget();
+        if let Some(cap) = self.controls.max_cost_usd {
+            // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
+            if budget.cost_unknown {
+                return Admission::CapReached;
+            }
+            let reserve_micro = self.reserve_micro_usd();
+            let reserve = reserve_micro as f64 / 1_000_000.0;
+            // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
+            // a pass whose request alone reaches the limit closes admission at once, whether or
+            // not any call has reported a cost yet.
+            if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
+                return Admission::CapReached;
+            }
+            // Until one call has reported a cost the run has not seen what a call really costs
+            // (a request's ceiling is an upper bound, usually far above it), so only ONE pass may
+            // be in flight: a cap must never be a number that concurrent passes can all slip
+            // under at once (warm_schedule off, a free first call, ...).
+            if self.max_call_micro_usd.load(Ordering::Relaxed) == 0 && budget.in_flight >= 1 {
+                return Admission::Wait;
+            }
+        }
+        budget.in_flight += 1;
+        Admission::Admitted(PassPermit { meter: self })
+    }
+
+    /// Ask to start one scan pass. Waits (without spending anything) while the only thing
+    /// standing in the way is that no cost is known yet; refuses with [`CapReached`] when the
+    /// cap forbids the pass. An admitted pass holds its permit until it is dropped.
+    pub async fn admit(&self) -> Result<PassPermit<'_>, CapReached> {
+        loop {
+            // Register for wake-ups BEFORE checking, so a release between the check and the
+            // wait is not missed.
+            let woken = self.admission.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            match self.try_admit() {
+                Admission::Admitted(permit) => return Ok(permit),
+                Admission::CapReached => return Err(CapReached),
+                Admission::Wait => woken.await,
+            }
+        }
+    }
+
+    /// Record a scan pass the cap refused.
+    pub fn record_not_run(&self, mut pass: crate::cost_cap::NotRunPass) {
+        pass.class = self.not_run_class();
+        self.budget().not_run_passes.push(pass);
+    }
+
+    /// [`Self::admit`] for one call of a stage that is not a scan pass (a calibration batch, a
+    /// fix batch, a deep-tier call). A refusal records the stage as stopped PART WAY, because
+    /// the stage's earlier calls ran.
+    pub async fn admit_for_stage(
+        &self,
+        repo: &str,
+        stage: &str,
+    ) -> Result<PassPermit<'_>, CapReached> {
+        let permit = self.admit().await;
+        if permit.is_err() {
+            self.record_stage_not_run(repo, stage, true);
+        }
+        permit
+    }
+
+    fn record_stage_not_run(&self, repo: &str, stage: &str, partial: bool) {
+        let mut budget = self.budget();
+        if !budget
+            .not_run_stages
+            .iter()
+            .any(|s| s.repo == repo && s.stage == stage)
+        {
+            budget.not_run_stages.push(crate::cost_cap::NotRunStage {
+                repo: repo.to_string(),
+                stage: stage.to_string(),
+                partial,
+                class: self.not_run_class(),
+            });
+        }
+    }
+
+    /// Stage boundary check: true (and the stage is recorded as NOT RUN) when the stage must
+    /// not start, so the caller skips it. `stage` is the name the failed-pass list shows.
+    ///
+    /// A stage is blocked once spend has reached the cap, AND once the cap has already stopped
+    /// anything (a refused scan pass, or an earlier stage): after the cap has bitten, nothing
+    /// later may start, which is what keeps the overshoot bounded.
+    pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
+        if self.health.is_stopped() {
+            self.record_stage_not_run(repo, stage, false);
+            return true;
+        }
+        let Some(_) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let already_stopped = {
+            let budget = self.budget();
+            !budget.not_run_passes.is_empty()
+                || !budget.not_run_stages.is_empty()
+                || budget.cost_unknown
+        };
+        if !self.cap_reached() && !already_stopped {
+            return false;
+        }
+        self.record_stage_not_run(repo, stage, false);
+        true
+    }
+
+    /// Repo boundary check: true (and the repo is recorded as not finished) when the cap has
+    /// been reached or has already stopped something, so the caller skips the repo's model work
+    /// without reading its files into digests first. The repo's own token-free checks are not
+    /// affected; the caller still runs them. A run with no cap never blocks a repo.
+    pub fn repo_blocked(&self, repo: &str) -> bool {
+        if self.health.is_stopped() {
+            let mut budget = self.budget();
+            if !budget.outage_repos.iter().any(|r| r == repo) {
+                budget.outage_repos.push(repo.to_string());
+            }
+            return true;
+        }
+        let Some(_) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let already_stopped = {
+            let budget = self.budget();
+            !budget.not_run_passes.is_empty()
+                || !budget.not_run_stages.is_empty()
+                || !budget.repos_not_finished.is_empty()
+                || budget.cost_unknown
+        };
+        if !self.cap_reached() && !already_stopped {
+            return false;
+        }
+        let mut budget = self.budget();
+        if !budget.repos_not_finished.iter().any(|r| r == repo) {
+            budget.repos_not_finished.push(repo.to_string());
+        }
+        true
+    }
+
+    /// Batch gate: a submitted Message Batch cannot be cancelled cheaply, so the cap is checked
+    /// BEFORE submitting. Returns the operator-facing reason to refuse, or `None` to submit.
+    /// `projected_usd` is the caller's projection of what this submission commits (its exact
+    /// input tokens at the batch price); the pre-flight estimate of the whole run, when the
+    /// caller supplied one, can raise it. Pure: [`Self::record_note`] keeps the reason.
+    ///
+    /// `projected_usd` is `None` when the caller could not project the batch at all. With a cap
+    /// set and no projection from anywhere, the cap cannot be enforced, so the submission is
+    /// REFUSED and says so: a limit that silently does nothing is the worst outcome. The
+    /// pre-flight estimate covers the whole run, so only what remains of it (estimate minus
+    /// spend, floored at zero) is counted against each submission.
+    pub fn batch_refusal_reason(&self, projected_usd: Option<f64>) -> Option<String> {
+        let cap = self.controls.max_cost_usd?;
+        let spent = self.spent_usd();
+        let remaining_estimate = self
+            .controls
+            .estimate_hint_usd
+            .map(|hint| (hint - spent).max(0.0));
+        let projected = match (projected_usd, remaining_estimate) {
+            (None, None) => {
+                return Some(format!(
+                    "batch NOT submitted: the ${cap:.2} limit could not be enforced, because \
+                     neither the exact token count nor the estimate could project this batch's \
+                     cost, and a submitted batch cannot be cancelled cheaply"
+                ));
+            }
+            (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+        };
+        if spent + projected <= cap {
+            return None;
+        }
+        Some(format!(
+            "batch NOT submitted: spent ${spent:.2} plus a projected ${projected:.2} would pass \
+             the ${cap:.2} limit, and a submitted batch cannot be cancelled cheaply, so the \
+             limit is checked before submitting"
+        ))
+    }
+
+    /// Keep an operator-facing note on the cap's record (a refused batch submission).
+    pub fn record_note(&self, note: String) {
+        self.budget().notes.push(note);
+    }
+
+    /// What the cap did so far; `None` when no cap was set.
+    pub fn cost_cap_record(&self) -> Option<crate::cost_cap::CostCapRecord> {
+        let cap_usd = self.controls.max_cost_usd?;
+        let budget = self.budget();
+        Some(crate::cost_cap::CostCapRecord {
+            cap_usd,
+            spent_usd: self.spent_usd(),
+            // Only what the spend limit stopped: an outage stop has its own record.
+            not_run_passes: budget
+                .not_run_passes
+                .iter()
+                .filter(|p| p.class == FailureClass::SpendLimit)
+                .cloned()
+                .collect(),
+            not_run_stages: budget
+                .not_run_stages
+                .iter()
+                .filter(|s| s.class == FailureClass::SpendLimit)
+                .cloned()
+                .collect(),
+            notes: budget.notes.clone(),
+            repos_not_finished: budget.repos_not_finished.clone(),
+            cost_unknown: budget.cost_unknown,
+        })
+    }
+
+    /// True once a call's cost could not be determined while a limit was set: the limit can no
+    /// longer be enforced, so nothing further is admitted (see [`Self::try_admit`]). What the
+    /// refusals that follow are reported as depends on this: the limit was NOT reached.
+    pub fn cost_unknown(&self) -> bool {
+        self.budget().cost_unknown
+    }
+
+    /// What the outage stop left undone; `None` when the run never stopped.
+    pub fn outage_record(&self) -> Option<crate::run_health::OutageRecord> {
+        let trigger = self.health.trigger()?;
+        let budget = self.budget();
+        Some(crate::run_health::OutageRecord {
+            trigger,
+            not_run_passes: budget
+                .not_run_passes
+                .iter()
+                .filter(|p| p.class == FailureClass::OutageStop)
+                .cloned()
+                .collect(),
+            not_run_stages: budget
+                .not_run_stages
+                .iter()
+                .filter(|s| s.class == FailureClass::OutageStop)
+                .cloned()
+                .collect(),
+            repos_not_finished: budget.outage_repos.clone(),
+        })
+    }
+}
+
+/// [`UsageMeter::record_failed`] for a call site that may have no meter.
+fn meter_failed(meter: Option<&UsageMeter>, stage: Stage, error: &anyhow::Error) {
+    if let Some(m) = meter {
+        m.record_failed(stage, error);
+    }
+}
+
+/// The most one request can cost, in dollars: its whole prompt (system and user text, at a
+/// conservative three characters a token) at the full input rate, no cache discount, plus its
+/// `max_tokens` (never above what the model can write) at the output rate. `None` for a model
+/// the registry has no price for. The figure a spend limit reserves per call
+/// ([`UsageMeter::note_request`]).
+pub fn request_ceiling_usd(req: &LlmRequest) -> Option<f64> {
+    let chars = req.prompt.len() + req.system.as_ref().map_or(0, String::len);
+    let input = (chars as u64).div_ceil(3).max(1);
+    let output = match camerata_llm::model_registry::max_output_for(&req.model) {
+        Some(limit) => req.max_tokens.min(limit),
+        None => req.max_tokens,
+    };
+    crate::llm::usage_cost_usd(
+        &req.model,
+        &crate::llm::CallUsage {
+            input: Some(input),
+            output: Some(u64::from(output)),
+            cache_read: 0,
+            cache_creation: 0,
+            cache_creation_1h: None,
+        },
+        crate::llm::PriceBasis::realtime(),
+    )
+}
+
+/// [`UsageMeter::note_request`] for a call site that may have no meter.
+pub(crate) fn note_request(meter: Option<&UsageMeter>, req: &LlmRequest) {
+    if let Some(m) = meter {
+        m.note_request(req);
+    }
+}
+
+/// [`UsageMeter::admit`] for a call site that may have no meter (no meter: always admitted, no
+/// permit).
+async fn admit_pass(meter: Option<&UsageMeter>) -> Result<Option<PassPermit<'_>>, CapReached> {
+    match meter {
+        Some(m) => m.admit().await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// [`UsageMeter::admit_for_stage`] for a call site that may have no meter.
+async fn admit_stage<'a>(
+    meter: Option<&'a UsageMeter>,
+    repo: &str,
+    stage: &str,
+) -> Result<Option<PassPermit<'a>>, CapReached> {
+    match meter {
+        Some(m) => m.admit_for_stage(repo, stage).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Stage names as the failed-pass list shows them (also the spend-cap record's keys).
+pub const STAGE_ALTERNATIVES: &str = "rule-alternative recommendations";
+pub const STAGE_CALIBRATION: &str = "calibration (verification and hour estimates)";
+pub const STAGE_DETAIL: &str = "detail regeneration";
+pub const STAGE_FIX: &str = "fix-specific generation";
+pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
+pub const STAGE_DEEP: &str = "deep compliance tier";
+
+/// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
+/// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the
+/// same arithmetic the pre-flight prints and the cockpit shows). The fallback projection for the
+/// batch spend-cap gate when the exact token count is unavailable; `None` when the model has no
+/// list price. The batches given are the work as routed, so they count as one group; the fix
+/// stage and the clone judge run after the submission and are not part of what it commits.
+fn batch_estimate_usd(
+    model: &str,
+    chunks: &[&[(String, String)]],
+    batches: &[&[(String, String)]],
+    terse_output: bool,
+) -> Option<f64> {
+    use camerata_ui_core::scan::{
+        estimate_run_cost_bounds, PricedModel, RunFlags, RunModels, RunRepoInput,
+    };
+    let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
+    let code_chars: usize = chunks
+        .iter()
+        .flat_map(|c| c.iter())
+        .map(|(_, content)| content.len())
+        .sum();
+    let rules: usize = batches.iter().map(|b| b.len()).sum();
+    let priced = PricedModel {
+        id: model,
+        price_in: price.price_in,
+        price_out: price.price_out,
+    };
+    let bounds = estimate_run_cost_bounds(
+        &RunRepoInput {
+            repo: "batch".to_string(),
+            code_chars,
+            selected: rules,
+            multi_option_selected: 0,
+            routing_groups: 1,
+        },
+        "batch",
+        &RunModels {
+            scan: priced,
+            calibration: priced,
+            fix: None,
+            clone_judge: None,
+        },
+        RunFlags {
+            thorough: false,
+            deep: false,
+            backend: crate::llm::ProjectBackend::Api,
+            terse_output,
+        },
+    );
+    Some(bounds.expected.1)
+}
+
+/// Whether the `terse_output` measure applies to a call site that may have no meter.
+///
+/// Unlike the other measures this one is OFF without a meter. It asks the model for less and
+/// then spends a second stage to get the rest back; that stage must be metered (the spend limit,
+/// the telemetry row and the operator's opt-out all live on the meter), so a path with no meter
+/// runs the scan exactly as it ran before rank 4. [`warn_terse_needs_meter`] says so once.
+pub fn terse_output_of(meter: Option<&UsageMeter>) -> bool {
+    meter.is_some_and(|m| m.efficiency().terse_output)
+}
+
+/// The note for a path that has no meter: `terse_output` would have applied, and did not.
+fn warn_terse_needs_meter(repo: &str) {
+    eprintln!(
+        "[camerata-server] {repo}: terse_output needs a run meter (spend limit, telemetry, \
+         opt-out), and this path has none; scanning with the full detail instead"
+    );
+}
+
+/// The efficiency switches in force for a call site that may have no meter (every measure on).
+pub fn efficiency_of(meter: Option<&UsageMeter>) -> crate::efficiency::EfficiencyConfig {
+    meter.map(UsageMeter::efficiency).unwrap_or_default()
 }
 
 impl UsageMeter {
@@ -245,7 +1150,9 @@ impl UsageMeter {
     /// names its stage, so the per-stage table can never drift from the aggregate.
     pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         self.stages.record(stage, r);
-        self.record(r);
+        self.record(stage, r);
+        // A reply came back: the provider is reachable, so the outage streak starts over.
+        self.health.note_success();
     }
 
     /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
@@ -261,23 +1168,91 @@ impl UsageMeter {
         self.stages.record_wasted_share(stage, r, share);
     }
 
+    /// Add one fix-generation pass's counts to the run's fix give-up tally (see
+    /// [`crate::stage_telemetry::FixOutcome`]).
+    pub fn record_fix_outcome(&self, outcome: crate::stage_telemetry::FixOutcome) {
+        self.stages.record_fix_outcome(outcome);
+    }
+
+    /// Add the detail-regeneration stage's rejection counts to the run's tally (operator
+    /// telemetry only).
+    pub fn record_detail_rejections(&self, rejections: crate::stage_telemetry::DetailRejections) {
+        self.stages.record_detail_rejections(rejections);
+    }
+
+    /// Record how many (chunk, rule) pairs the rule router skipped for one repo.
+    pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
+        self.stages.record_routing(pairs_total, pairs_skipped);
+    }
+
+    /// Record one (chunk, rule) decision of the candidate prefilter (rank 8).
+    pub fn record_candidate(
+        &self,
+        rule_id: &str,
+        locator: &str,
+        outcome: crate::stage_telemetry::CandidateOutcome,
+        whole_bytes: u64,
+        sent_bytes: u64,
+    ) {
+        self.stages
+            .record_candidate(rule_id, locator, outcome, whole_bytes, sent_bytes);
+    }
+
+    /// Record one chunk's candidate-prefilter fallback to whole files (rank 8).
+    pub fn record_candidate_fallback(&self, fallback: crate::stage_telemetry::CandidateFallback) {
+        self.stages.record_candidate_fallback(fallback);
+    }
+
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
     pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
-        self.stages.snapshot(counted_lines)
+        let mut telemetry = self.stages.snapshot(counted_lines);
+        telemetry.efficiency = Some(self.controls.efficiency);
+        telemetry
     }
 
     /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
-    /// counted. Private: callers go through [`Self::record_stage`].
-    fn record(&self, r: &crate::llm::LlmResponse) {
+    /// counted. Private: callers go through [`Self::record_stage`]. `stage` names the call in
+    /// the note written when its cost cannot be determined.
+    fn record(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
         if let Some(o) = r.output_tokens {
             self.output_tokens.fetch_add(o, Ordering::Relaxed);
         }
-        if let Some(c) = r.cost_usd {
-            self.cost_micro_usd
-                .fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
+        // With a cap set a call's cost MUST be known. A reported figure is used as is; a call that
+        // reported tokens but no dollars is priced from them (the same function every other cost
+        // path uses); a call that cannot be priced either way makes the cap unenforceable.
+        let cost = match r.cost_usd {
+            Some(c) => Some(c),
+            None if self.controls.max_cost_usd.is_some() => {
+                let derived = crate::llm::usage_cost_usd(
+                    &r.model,
+                    &crate::llm::CallUsage {
+                        input: r.input_tokens,
+                        output: r.output_tokens,
+                        cache_read: r.cache_read_input_tokens,
+                        cache_creation: r.cache_creation_input_tokens,
+                        cache_creation_1h: None,
+                    },
+                    crate::llm::PriceBasis::for_response(r),
+                );
+                if derived.is_none() {
+                    self.mark_cost_unknown(stage, r);
+                }
+                derived
+            }
+            None => None,
+        };
+        if let Some(c) = cost {
+            // Rounded UP: this feeds the cap, and flooring could read a run that is over the
+            // limit by a fraction of a micro-dollar as under it.
+            let micro = crate::llm::usd_to_micro_ceil(c);
+            self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
+            let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
+            if before == 0 && micro > 0 {
+                self.admission.notify_waiters();
+            }
             self.cost_calls.fetch_add(1, Ordering::Relaxed);
         }
         // Cache breakdowns are additive across calls (each call contributes its own share
@@ -287,6 +1262,46 @@ impl UsageMeter {
         self.cache_creation_input_tokens
             .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A call's cost could not be determined while a cap is set: remember that the cap is no
+    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record,
+    /// naming the model, the stage and the token counts of the call, so the operator can find it
+    /// in the transcript and price it by hand.
+    fn mark_cost_unknown(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        {
+            let mut budget = self.budget();
+            if budget.cost_unknown {
+                return;
+            }
+            budget.cost_unknown = true;
+            let tokens = match (r.input_tokens, r.output_tokens) {
+                (Some(i), Some(o)) => format!("{i} input and {o} output tokens"),
+                _ => "no token counts".to_string(),
+            };
+            budget.notes.push(format!(
+                "The spend limit could not be enforced past this point: a call to `{}` in the {} \
+                 stage reported no cost and its tokens could not be priced ({tokens}), so what \
+                 it cost is unknown. No further passes were started (NOT RUN).",
+                r.model,
+                stage.label()
+            ));
+        }
+        self.admission.notify_waiters();
+    }
+
+    /// Count a call that FAILED but was still billed: a model refusal carries the usage it was
+    /// charged (see [`crate::llm::ModelRefusal`]). A refused call costs what any other call
+    /// costs, so the cap must see it; without this a run of refusals reads as $0 spent and never
+    /// stops. A failure that carries no usage (a transport error) changes nothing.
+    pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
+        if let Some(billed) = crate::llm::refusal_billed(error) {
+            self.stages.record(stage, billed);
+            self.record(stage, billed);
+        }
+        // The outage stop watches every failed call, after the transport's own retries.
+        self.health
+            .note_failure(classify_pass_error(error), &error.to_string());
     }
 
     pub fn snapshot(&self) -> ActualUsage {
@@ -306,15 +1321,16 @@ impl UsageMeter {
     }
 }
 
-/// Resolve the model the audit pass will actually use: the caller's explicit pick, else
-/// `CAMERATA_AUDIT_MODEL`, else the client's compiled-in default.
+/// Resolve the model the audit pass will actually use: the caller's explicit pick (the open
+/// project's setting in the cockpit, `--model` on the command line), else the built-in default
+/// ([`crate::llm::DEFAULT_MODEL`], Sonnet 5.5). Never the environment.
 ///
 /// # Why this is a function and not three copies of four lines
 ///
 /// It was three copies. `audit_repo` picked a model one way, `generate_fix_specifics`
 /// re-derived it with a comment reading "Resolve the model the same way `audit_pass` does",
 /// and what reached `ScanProvenance.audit_model` was neither — it was the caller's RAW pick,
-/// so a run driven by `CAMERATA_AUDIT_MODEL` or by the default recorded `None`.
+/// so a run driven by the default recorded `None`.
 ///
 /// That is not a tidiness problem. `None` in provenance was read for months as "no model
 /// ran", when it actually meant "nobody wrote down which model ran", and the 2026-10-16
@@ -329,12 +1345,30 @@ pub fn resolve_audit_model(caller_pick: Option<&str>) -> String {
     caller_pick
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_AUDIT_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
+/// The model the calibration stage runs on: the caller's calibration pick, else the SCAN model (so an audit is end to end on one model by
+/// default). The one resolution the pre-flight ([`crate::cost_cap::models_the_run_will_use`])
+/// and the stage share, so the model the run names and prices is the model it calls.
+pub fn resolve_calibration_model(calibration_pick: Option<&str>, scan_model: &str) -> String {
+    calibration_pick
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| scan_model.to_string())
+}
+
+/// The model a stage's request NAMES: the stage's pick when it has one, else the run's default
+/// audit model ([`resolve_audit_model`]). Never empty.
+///
+/// A request with an empty model is not "the default": the transport fills it with the PROCESS
+/// default (an environment variable, whatever an operator's `.env` said; it is gone), a model the pre-flight
+/// never named, the ledger never recorded and the spend limit's price check never saw. On
+/// 2026-10-29 that sent the alternatives stage to an unpriced id; its cost was unknown, so the
+/// limit refused every later pass with about $9.99 of a $10 limit unspent. Every audit-stage
+/// request goes through here so that cannot recur.
+pub fn stage_model(pick: Option<&str>) -> String {
+    resolve_audit_model(pick)
 }
 
 /// A snapshot of real audit usage, serialized onto the scan report for the UI's
@@ -383,15 +1417,39 @@ const CHUNK_DIGEST_CHARS: usize = 350_000;
 /// this the digest had no line markers and the model estimated by counting (and drifted —
 /// 3 of 4 findings on the testbed cited the wrong line).
 fn number_lines(content: &str) -> String {
+    number_lines_from(content.lines(), 1)
+}
+
+/// [`number_lines`] for a run of lines that starts at line `first` of its file (a candidate
+/// excerpt keeps the file's real line numbers).
+fn number_lines_from<'a>(lines: impl Iterator<Item = &'a str>, first: usize) -> String {
     let mut s = String::new();
-    for (i, line) in content.lines().enumerate() {
-        s.push_str(&format!("{:>4}| {}\n", i + 1, line));
+    for (i, line) in lines.enumerate() {
+        s.push_str(&format!("{:>4}| {}\n", i + first, line));
     }
     s
 }
 
+/// The digests a pass call sends: `digests_override` when a candidate pass set supplies them
+/// (rank 8), else each chunk's whole-file [`build_digest`].
+fn pass_digests(
+    chunks: &[&[(String, String)]],
+    digests_override: Option<&[String]>,
+    nonce: &crate::prompt_frame::FrameNonce,
+) -> Vec<String> {
+    match digests_override {
+        Some(d) => {
+            debug_assert_eq!(d.len(), chunks.len(), "one candidate digest per chunk");
+            d.to_vec()
+        }
+        None => chunks.iter().map(|c| build_digest(c, nonce)).collect(),
+    }
+}
+
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
-/// Each file is delimited and LINE-NUMBERED so the model can cite exact paths + lines.
+/// Each file is LINE-NUMBERED so the model can cite exact paths + lines, and framed by
+/// [`crate::prompt_frame::frame_untrusted`] under `nonce`, the run's random delimiter token, so a
+/// file cannot print a header that passes for the start of another file.
 ///
 /// # Truncation notice (BUG-8)
 ///
@@ -402,20 +1460,21 @@ fn number_lines(content: &str) -> String {
 /// I miss something?"). The minimum drop threshold is intentionally conservative:
 /// dropping even one method body is significant; dropping only the closing brace of
 /// the last function is not.
-pub fn build_digest(files: &[(String, String)]) -> String {
+pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
     let mut out = String::new();
     let mut truncated = false;
     let mut significant_truncation = false;
     for (path, content) in files {
-        let header = format!("// ===== FILE: {path} =====\n");
+        // The frame's own bytes (opening and closing lines), counted against the cap like the
+        // old header was.
+        let frame_len = crate::prompt_frame::frame_untrusted(nonce, path, "").len();
         let numbered = number_lines(content);
-        if out.len() + header.len() + numbered.len() > MAX_DIGEST_CHARS {
+        if out.len() + frame_len + numbered.len() > MAX_DIGEST_CHARS {
             // Add a partial slice of this file if there's room, then stop.
-            let remaining = MAX_DIGEST_CHARS.saturating_sub(out.len() + header.len());
+            let remaining = MAX_DIGEST_CHARS.saturating_sub(out.len() + frame_len);
             if remaining > 200 {
-                out.push_str(&header);
                 let slice: String = numbered.chars().take(remaining).collect();
-                out.push_str(&slice);
+                out.push_str(&crate::prompt_frame::frame_untrusted(nonce, path, &slice));
                 out.push('\n');
                 // BUG-8: only warn when we actually dropped a meaningful chunk of
                 // content. A trivially small drop (e.g. the last closing brace of
@@ -430,8 +1489,9 @@ pub fn build_digest(files: &[(String, String)]) -> String {
             truncated = true;
             break;
         }
-        out.push_str(&header);
-        out.push_str(&numbered);
+        out.push_str(&crate::prompt_frame::frame_untrusted(
+            nonce, path, &numbered,
+        ));
         out.push('\n');
     }
     if truncated && significant_truncation {
@@ -450,12 +1510,59 @@ pub fn build_digest(files: &[(String, String)]) -> String {
 /// system prompt is pinned by a test that fails until you do). Do NOT bump it for a pure
 /// scheduling or billing change (cache breakpoints, concurrency, the position of a label line),
 /// which leave the answer the model gives unchanged.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
+///
+/// 2: client content framed under a per-run random delimiter token, named in the system prompt
+/// (`crate::prompt_frame`).
+///
+/// 3: the detail-regeneration prompt allows a fix direction to say what the fix needs, asks a
+/// borderline explanation to start with "Borderline:", and lets a name joined with a slash or
+/// a dot be written as its parts when a part is itself a name (a plain member access such as
+/// supabase.from stays as written).
+///
+/// 4: retry fixes F3. The detail-regeneration reply is addressed by the opaque id alone (the
+/// finding's path and line are attached by Camerata, not echoed), splits the explanation from
+/// the fix direction, and the prompt lists the names the text must keep; the fix reply is
+/// addressed by the same kind of opaque id instead of a batch position, and its prompt lists
+/// the names the evidence lets the fix use.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 4;
+
+/// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
+/// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
+/// Sent only where the model accepts it (`LlmRequest::temperature`); the strict models ignore it
+/// and the legacy ones (Haiku 4.5, the default fast tier) and future permissive ones get the
+/// least random answer they offer. The fix-text and prose-lens passes keep the provider
+/// default: they word findings, not choose them.
+pub const AUDIT_TEMPERATURE: f32 = 0.0;
 
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
-/// covered), and the STRICT JSON schema to return.
+/// covered), and the STRICT JSON schema to return. This is the prompt with the `terse_output`
+/// measure OFF (the long `detail`, `proposed_rules` on every pass); [`audit_system_prompt_with`]
+/// is the one implementation and takes the switch.
 pub fn audit_system_prompt() -> String {
-    r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
+    audit_system_prompt_with(false)
+}
+
+/// The separator [`parse_ai_findings`] puts between a finding's one-line `title` and its
+/// `detail` when it builds `Finding::detail`. The post-merge detail regeneration splits on the
+/// same constant to keep the headline and replace the explanation, so the two cannot drift.
+pub(crate) const HEADLINE_SEP: &str = " — ";
+
+/// [`audit_system_prompt`] with the `terse_output` switch explicit.
+///
+/// OFF (`terse == false`): byte-identical to the prompt before rank 4 (the incremental cache's
+/// pin test hashes it). ON: the output schema asks for a ONE-sentence `detail` and carries no
+/// `proposed_rules` array; the advisory pass adds that array back through its own instruction
+/// line ([`pass_task_line`]), which sits in the uncached suffix.
+///
+/// # Why one prompt for every pass, and not a second one for the non-advisory passes
+///
+/// The system prompt leads the prompt-cache prefix. If the advisory pass (a chunk's first
+/// rule-batch) and its sibling passes carried different system prompts, the siblings could not
+/// read the cache entry the advisory pass wrote (the whole `warm_schedule` saving) because the
+/// first block of the prefix would differ. So the terse prompt is the same for all passes and
+/// the one difference between them lives in the instruction line.
+pub fn audit_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
 
 The user message lists the rules the project has ADOPTED, each as `- [RULE-ID] directive`. Your job is to check the code against EACH adopted rule and report EVERY place the code violates it.
 
@@ -522,7 +1629,62 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail": "why it's a problem and what the fix direction is","#,
+        r#""detail": "ONE sentence, at most 25 words: why this code violates the rule, naming any other file or symbol the judgment depends on","#,
+    );
+    let base = replace_expected(&base, AUDIT_PROPOSED_RULES_SCHEMA, "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings": [], "proposed_rules": [], "needs_files": []}."#,
+        r#"return {"findings": [], "needs_files": []}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
+}
+
+/// The sentence that opens the output-shape section of both scan system prompts. The terse
+/// variants insert their short-detail paragraph in front of it.
+const AUDIT_OUTPUT_SHAPE_LEAD: &str =
+    "Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:";
+
+/// The `proposed_rules` array of the full output schema, exactly as it appears in
+/// [`audit_system_prompt`] (the terse prompt removes it).
+const AUDIT_PROPOSED_RULES_SCHEMA: &str = r#"  "proposed_rules": [
+    {
+      "name": "short-kebab-name (only for issues NOT covered by an adopted rule)",
+      "title": "the rule to enforce going forward",
+      "rationale": "why this rule, grounded in the findings",
+      "severity": "critical|high|medium|low",
+      "enforcement": "mechanical|review"
+    }
+  ],
+"#;
+
+/// What the terse scan prompts tell the model about `detail`. The full explanation is written
+/// later, for the findings that survive the merge, from the title, this sentence and the code
+/// around the line, so everything the judgment rests on has to be in those three places.
+const TERSE_DETAIL_PARAGRAPH: &str = "SHORT DETAIL. Write `detail` as ONE sentence of at most 25 words: the specific reason this code violates the rule, naming every OTHER file or symbol the judgment depends on (a flag read in another file, the helper whose body decides it). If the case is borderline, begin the sentence with \"Borderline:\". Do not write fix advice or background: a separate step writes the full explanation, for the findings that survive deduplication, from your title, this sentence and the code around the line. So whatever makes this a violation must be in the title, in `code`, or in this one sentence.";
+
+/// The instruction an ADVISORY pass adds to its line under `terse_output`, restoring the
+/// `proposed_rules` array the terse system prompt left out. Later passes are told not to report
+/// novel issues, so they have nothing to propose and never see this.
+const ADVISORY_PROPOSED_RULES_INSTRUCTION: &str = "In THIS pass only, ALSO add a top-level `proposed_rules` array to your JSON, one entry per genuinely novel issue you flagged: [{\"name\": \"short-kebab-name\", \"title\": \"the rule to enforce going forward\", \"rationale\": \"why this rule, grounded in the findings\", \"severity\": \"critical|high|medium|low\", \"enforcement\": \"mechanical|review\"}]. Use an empty array when you propose none.";
+
+/// `text` with the first `from` replaced by `to`. The tests pin that each replacement applies;
+/// a miss here would silently leave the full prompt in place, which only costs the saving,
+/// never correctness.
+fn replace_expected(text: &str, from: &str, to: &str) -> String {
+    debug_assert!(text.contains(from), "terse prompt: missing `{from}`");
+    text.replacen(from, to, 1)
 }
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
@@ -640,6 +1802,93 @@ fn parse_finding_captures(f: &serde_json::Value) -> std::collections::BTreeMap<S
     out
 }
 
+/// The canonical severity label for a model-written one (M3): trimmed and case-folded, with the
+/// common synonyms mapped (`severe` and `major` to high, `moderate` to medium, `minor` and
+/// `informational` to low). A label that is none of these keeps `current`, so an odd word never
+/// quietly turns into a rating.
+pub(crate) fn parse_model_severity(raw: &str, current: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "critical" | "crit" | "blocker" => "critical",
+        "high" | "severe" | "major" => "high",
+        "medium" | "moderate" | "med" => "medium",
+        "low" | "minor" | "informational" | "info" | "note" => "low",
+        _ => return current.to_string(),
+    }
+    .to_string()
+}
+
+/// A model-written rule label as a rule id candidate (M4): surrounding brackets, quotes and
+/// backticks removed, anything after a `:` or an opening parenthesis dropped, uppercased, with
+/// spaces and underscores turned into hyphens.
+fn normalize_model_rule_label(raw: &str) -> String {
+    let t = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '[' | ']' | '`' | '"' | '\'' | '*'))
+        .trim();
+    let t = t.split(':').next().unwrap_or(t);
+    let t = t.split(" (").next().unwrap_or(t).trim();
+    t.to_ascii_uppercase().replace([' ', '_'], "-")
+}
+
+/// The adopted rule id a near-miss label means (M4): the label plus a version suffix
+/// (`SEC-NO-RAW-SQL-CONCAT` for `SEC-NO-RAW-SQL-CONCAT-1`), or the longest adopted id the label
+/// extends (`SEC-NO-RAW-SQL-CONCAT-1-IN-REPORTS`). Only a hyphenated label is tried.
+fn adopted_near_match(norm: &str, adopted: &std::collections::HashSet<String>) -> Option<String> {
+    if !norm.contains('-') {
+        return None;
+    }
+    let versioned: Vec<&String> = adopted
+        .iter()
+        .filter(|a| {
+            a.strip_prefix(norm)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+    if let [only] = versioned.as_slice() {
+        return Some((*only).clone());
+    }
+    // The label extends an adopted id. Not when what it adds is itself a run of another adopted
+    // id's words ("SEC-NO-A-1-SEC-NO-B-1": two rules named at once): that is not one rule.
+    let words_of = |id: &str| format!("-{id}-");
+    adopted
+        .iter()
+        .filter(|a| {
+            norm.strip_prefix(a.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| {
+                    !rest.is_empty()
+                        && !adopted
+                            .iter()
+                            .any(|b| words_of(b).contains(&words_of(rest)))
+                })
+        })
+        .max_by_key(|a| a.len())
+        .cloned()
+}
+
+/// A model-written line number (M5): a number, a numeric string, `L42`, `line 42`, or a range such as
+/// `42-47` (its first line). Anything else is 0, "no line".
+fn parse_model_line(v: &serde_json::Value) -> usize {
+    if let Some(n) = v.as_u64() {
+        return n as usize;
+    }
+    if let Some(x) = v.as_f64() {
+        return if x >= 0.0 { x as usize } else { 0 };
+    }
+    let Some(t) = v.as_str() else {
+        return 0;
+    };
+    let lower = t.trim().to_ascii_lowercase();
+    let rest = ["lines", "line", "ln", "l"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+        .unwrap_or(&lower);
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '#' | '.'));
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().unwrap_or(0)
+}
+
 /// Parse a model audit response into Findings + ProposedRules in the scan's shapes.
 /// Robust: malformed output yields empty vecs rather than erroring the whole scan.
 pub fn parse_ai_findings(
@@ -657,8 +1906,14 @@ pub fn parse_ai_findings(
     let mut findings = Vec::new();
     if let Some(arr) = v["findings"].as_array() {
         for f in arr {
-            let rule = f["rule"].as_str().unwrap_or("architecture").trim();
-            let norm = rule.to_ascii_uppercase().replace(' ', "-");
+            let rule = ["rule", "rule_id", "id"]
+                .iter()
+                .find_map(|k| f[*k].as_str())
+                .unwrap_or("architecture");
+            let mut norm = normalize_model_rule_label(rule);
+            if norm.is_empty() {
+                norm = "ARCHITECTURE".to_string();
+            }
             // If the model cited an ADOPTED rule id, key the finding to that id directly so
             // the violation shows up under the rule the architect selected. Else try to
             // canonicalize a well-known invented name onto the adopted rule it actually
@@ -666,18 +1921,22 @@ pub fn parse_ai_findings(
             // AI-discovered issue beyond the ruleset (AI- provenance prefix).
             let rule_id = if adopted.contains(&norm) {
                 norm
+            } else if let Some(near) = adopted_near_match(&norm, adopted) {
+                near
             } else if let Some(canon) = canonical_adopted_rule(&norm, adopted) {
                 canon
             } else {
                 format!("AI-{norm}")
             };
-            let severity = match f["severity"].as_str().unwrap_or("medium") {
-                "critical" => "critical",
-                "high" => "high",
-                "low" => "low",
-                _ => "medium",
-            };
-            let title = f["title"].as_str().unwrap_or("").trim().to_string();
+            let severity =
+                parse_model_severity(f["severity"].as_str().unwrap_or("medium"), "medium");
+            // The title is the headline of `Finding::detail`, split off again by the detail
+            // regeneration at the FIRST `HEADLINE_SEP`, so the title itself must never hold one.
+            let title = f["title"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .replace(HEADLINE_SEP, " - ");
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
             if title.is_empty() && detail.is_empty() && code.is_empty() {
@@ -689,7 +1948,7 @@ pub fn parse_ai_findings(
             // detail so the human still sees the one-line statement.
             let snippet = if code.is_empty() { title.clone() } else { code };
             let detail = match (title.is_empty(), detail.is_empty()) {
-                (false, false) => format!("{title} — {detail}"),
+                (false, false) => format!("{title}{HEADLINE_SEP}{detail}"),
                 (false, true) => title.clone(),
                 _ => detail,
             };
@@ -697,9 +1956,13 @@ pub fn parse_ai_findings(
                 could_be_intentional: false,
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
-                line: f["line"].as_u64().unwrap_or(0) as usize,
+                line: ["line", "start_line", "line_number"]
+                    .iter()
+                    .map(|k| parse_model_line(&f[*k]))
+                    .find(|n| *n > 0)
+                    .unwrap_or(0),
                 rule_id,
-                severity: severity.to_string(),
+                severity,
                 snippet,
                 detail,
                 status: "active".to_string(),
@@ -989,7 +2252,7 @@ fn strip_dedup_pointers(reason: &str) -> String {
 /// (clear precondition phrasing, not any use of the word "if") — a finding that merely
 /// contains "if" somewhere in an unrelated sentence must not trip this.
 ///
-/// CRITICAL GUARDRAIL (calibration review, docs/plans/2026-09-30_cycle2-queue-hardening.md,
+/// CRITICAL GUARDRAIL (calibration review, the cycle-2 queue-hardening notes,
 /// extended cycle-5): this predicate is used ONLY to (a) block an upward calibration move in
 /// [`apply_verdicts`], (b) cap the deterministic D5 floor's critical escalation in
 /// [`severity_calibration_floor`], and (c) break ties in the "do now" ranking in
@@ -1063,11 +2326,21 @@ pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
 /// never lowers a severity below what it already was (an explicit downgrade verdict with no
 /// bearing on this guardrail continues to apply exactly as before).
 pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
-    let Some(json) = extract_json_object(raw) else {
-        return findings;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return findings;
+    // A reply that parses whole is read whole. One that does not (cut off at the output limit
+    // mid-verdict) still holds every verdict that was written out in full: those are read one by
+    // one ([`answered_verdicts`]) and the findings it never reached keep what they had.
+    let whole = extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .filter(|v| v["verdicts"].is_array());
+    let v = match whole {
+        Some(v) => v,
+        None => {
+            let salvaged = answered_verdicts(raw, findings.len());
+            if salvaged.is_empty() {
+                return findings;
+            }
+            serde_json::json!({ "verdicts": salvaged })
+        }
     };
     let Some(arr) = v["verdicts"].as_array() else {
         return findings;
@@ -1076,12 +2349,10 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
     for (i, mut f) in findings.into_iter().enumerate() {
         if let Some(verdict) = arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
             if let Some(sev) = verdict["severity"].as_str() {
-                let candidate = match sev {
-                    "critical" => "critical",
-                    "high" => "high",
-                    "low" => "low",
-                    _ => "medium",
-                };
+                // An unrecognised label keeps the finding's current severity (M3): it must not
+                // be read as a verdict of "medium".
+                let candidate = parse_model_severity(sev, &f.severity);
+                let candidate = candidate.as_str();
                 // Raising = moving to a MORE severe label. This module's local
                 // `severity_rank` ranks `critical` highest (4) down to unrecognized/`low`
                 // (0/1), so "raise" means the candidate's rank EXCEEDS the base severity's.
@@ -1102,8 +2373,16 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                          justify one.",
                         f.severity
                     ));
-                } else {
-                    f.severity = candidate.to_string();
+                } else if candidate != f.severity {
+                    let before = std::mem::replace(&mut f.severity, candidate.to_string());
+                    let why = strip_dedup_pointers(raw_reason.trim());
+                    let why = camerata_secrets::redact_str(&why).into_owned();
+                    let why = if why.trim().is_empty() {
+                        "the calibration step's verdict".to_string()
+                    } else {
+                        format!("the calibration step's verdict: {}", why.trim())
+                    };
+                    record_severity_adjustment(&mut f, &before, candidate, &why);
                 }
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
@@ -1174,7 +2453,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
 
 // ── D5: severity calibration rules of thumb ──────────────────────────────────────────────
 //
-// docs/plans/2026-09-29_codebase-inspection-hardening.md, D5. The calibration MODEL already
+// the codebase-inspection hardening notes, D5. The calibration MODEL already
 // carries these rules of thumb in its own system prompt (`verify_system_prompt`, above), but a
 // model's application of a rule of thumb is, by construction, a per-run judgment call — the same
 // finding phrased identically twice is not guaranteed the same verdict twice. This section is
@@ -1551,7 +2830,9 @@ fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
 fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
     if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
         if severity_rank(&f.severity) < severity_rank(floor_sev) {
+            let before = f.severity.clone();
             f.severity = floor_sev.to_string();
+            record_severity_adjustment(&mut f, &before, floor_sev, &reason);
         }
         f.calibration_rationale = Some(reason);
     }
@@ -1808,7 +3089,53 @@ fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// unlike CORS, these two CAN legitimately co-occur with a floor-earned Critical in the same
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
-fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
+fn apply_severity_ceiling_rule(f: Finding) -> Finding {
+    let before = f.severity.clone();
+    let mut out = apply_severity_ceiling_rule_inner(f);
+    if out.severity != before {
+        let why = out
+            .calibration_rationale
+            .clone()
+            .unwrap_or_else(|| "a severity ceiling applied".to_string());
+        let after = out.severity.clone();
+        record_severity_adjustment(&mut out, &before, &after, &why);
+    }
+    out
+}
+
+/// The text of `f` as its PRODUCER wrote it: `detail` up to the first calibration marker
+/// (`[calibrated: ...]` / `[needs review: ...]`, which `apply_verdicts` appends and which carry
+/// the calibration model's own one-line reason), plus `snippet` and `category`, lowercased. R1
+/// reads this, so a reason such as "confirm whether" added by the calibration step is not taken
+/// for the finding's own hedge (H7).
+fn producer_text(f: &Finding) -> String {
+    let cut = ["[calibrated", "[needs review"]
+        .iter()
+        .filter_map(|m| f.detail.find(m))
+        .min()
+        .unwrap_or(f.detail.len());
+    format!(
+        "{} {} {}",
+        &f.detail[..cut],
+        f.snippet,
+        f.category.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase()
+}
+
+/// Whether `f` names the CORS class itself: a rule id with a `CORS` word (or `CROSS-ORIGIN`), or
+/// a category naming CORS. R2 clamps only these (M1); CORS vocabulary in the prose of an
+/// unrelated finding no longer moves its severity.
+fn names_cors_class(f: &Finding) -> bool {
+    let id = f.rule_id.to_ascii_uppercase();
+    id.split(['-', '_']).any(|w| w == "CORS")
+        || id.contains("CROSS-ORIGIN")
+        || f.category
+            .as_deref()
+            .is_some_and(|c| c.to_ascii_lowercase().contains("cors"))
+}
+
+fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
     // W31 — checked FIRST, and cap-only.
     //
     // A row the engine flagged as possibly deliberate cannot be told apart from a deliberate
@@ -1887,8 +3214,12 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
     }
 
     let text = calibration_floor_scan_text(&f);
+    let floor_earned_critical = mentions_unauthenticated_or_full_compromise(&text);
 
-    if mentions_cors_misconfig(&text) {
+    // R2 runs after the floor check and only for a finding that NAMES the CORS class (M1): a
+    // floor-earned critical is never clamped, and CORS words in another rule's prose never
+    // move its rating.
+    if names_cors_class(&f) && !floor_earned_critical && mentions_cors_misconfig(&text) {
         f.severity = "medium".to_string();
         f.calibration_rationale = Some(
             "Severity ceiling: a browser-mediated CORS/cross-origin misconfiguration requires a \
@@ -1899,8 +3230,6 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
         );
         return f;
     }
-
-    let floor_earned_critical = mentions_unauthenticated_or_full_compromise(&text);
 
     if mentions_open_redirect(&text) && !floor_earned_critical {
         if mentions_redirect_chained_to_credential_capture(&text) {
@@ -1938,7 +3267,9 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
         );
     }
 
-    if mentions_self_hedged_confirmation_only(&text) {
+    // R1 reads the producer's own words only and never caps a floor-earned critical (H7): an
+    // unauthenticated delete whose calibration reason says "confirm whether" stays critical.
+    if !floor_earned_critical && mentions_self_hedged_confirmation_only(&producer_text(&f)) {
         f.confidence = Some("needs-review".to_string());
         f.needs_review = true;
         if severity_rank(&f.severity) > severity_rank("low") {
@@ -1987,14 +3318,14 @@ pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
 /// Floor for [`scaled_max_tokens`] — the ORIGINAL flat budget every aggregate pass
 /// hardcoded before this fix, kept as the minimum so a small finding/rule set (the common
 /// case) sees zero behavior change.
-const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+const AGGREGATE_MAX_TOKENS_FLOOR: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_FLOOR;
 
 /// Ceiling for [`scaled_max_tokens`] — bounds a single call's requested budget regardless
 /// of how many items land in one chunk. The per-pass `*_BATCH_SIZE` constants below keep
 /// any one call's item count well under what would reach this in practice; the ceiling is
 /// a second, independent guard against requesting an unreasonably large budget from the
 /// API (e.g. if a caller ever skips chunking).
-const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+const AGGREGATE_MAX_TOKENS_CEILING: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_CEILING;
 
 /// `max_tokens` for a call describing `n_items` things, given a per-item token estimate —
 /// clamped to `[AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING]` so small batches
@@ -2003,6 +3334,69 @@ pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
     (n_items as u32)
         .saturating_mul(per_item_tokens)
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
+/// `max_tokens` for a call describing `n_items` things whose reply runs at `effort`: the
+/// per-item text budget PLUS the effort's thinking allowance
+/// ([`camerata_ui_core::scan::output_cap_tokens`]), within the floor and the ceiling. The 5.x
+/// models think before they write and the thinking counts against `max_tokens`; a cap that
+/// covers only the text cuts the reply off with nothing in it.
+pub(crate) fn staged_max_tokens(n_items: usize, per_item_tokens: u32, effort: &str) -> u32 {
+    camerata_ui_core::scan::output_cap_tokens(
+        (n_items as u32).saturating_mul(per_item_tokens),
+        effort,
+    )
+}
+
+/// The effort each stage asks for (`output_config.effort`), or `None` for a stage that keeps the
+/// model's own default (the deep tier and the clone judge). Per STAGE, never per model: the
+/// registry's per-model default (Opus 5.5 and Haiku 5.5 default to `medium` and were forced to
+/// `high` for every call) is only the fallback for a request that names none.
+pub(crate) fn stage_effort(stage: Stage) -> Option<&'static str> {
+    use camerata_ui_core::scan as s;
+    match stage {
+        Stage::ScanPass => Some(s::SCAN_EFFORT),
+        Stage::DetailRegeneration => Some(s::DETAIL_EFFORT),
+        Stage::Calibration => Some(s::CALIBRATION_EFFORT),
+        Stage::Alternatives => Some(s::ALTERNATIVES_EFFORT),
+        Stage::FixGeneration => Some(s::FIX_EFFORT),
+        Stage::DeepTier | Stage::CloneJudge => None,
+    }
+}
+
+/// `req` with `stage`'s effort set ([`stage_effort`]).
+pub(crate) fn with_stage_effort(req: LlmRequest, stage: Stage) -> LlmRequest {
+    match stage_effort(stage) {
+        Some(effort) => req.with_effort(effort),
+        None => req,
+    }
+}
+
+/// `max_tokens` for one scan request holding `n_rules` rules: the measured per-rule output budget
+/// ([`camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE`], the figure the pre-flight estimate
+/// prices the scan's output from) plus the scan's thinking allowance ([`staged_max_tokens`] at
+/// [`camerata_ui_core::scan::SCAN_EFFORT`]), never below the flat cap the scan used before it
+/// scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the shared ceiling.
+/// A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
+pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
+    staged_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::SCAN_EFFORT,
+    )
+    .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
+}
+
+/// `max_tokens` for one alternatives request asking about `n_rules` rules: the measured per-rule
+/// budget ([`camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE`], the figure the
+/// pre-flight estimate prices the stage from) plus the stage's thinking allowance, so never below
+/// the flat 4096 the stage used before it scaled and never above the shared ceiling.
+pub(crate) fn alternatives_max_tokens(n_rules: usize) -> u32 {
+    staged_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+        camerata_ui_core::scan::ALTERNATIVES_EFFORT,
+    )
 }
 
 /// Per-finding token estimate for the CALIBRATION pass's response — each verdict is a
@@ -2024,6 +3418,26 @@ const CALIBRATION_BATCH_SIZE: usize = 40;
 /// than a calibration verdict.
 const FIX_TOKENS_PER_FINDING: u32 = 250;
 
+/// `max_tokens` for one calibration call over `n_findings` findings: the per-verdict text budget
+/// plus the calibration stage's thinking allowance.
+pub(crate) fn calibration_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        VERIFY_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::CALIBRATION_EFFORT,
+    )
+}
+
+/// `max_tokens` for one fix call over `n_findings` findings: the per-fix text budget plus the
+/// fix stage's thinking allowance.
+pub(crate) fn fix_max_tokens(n_findings: usize) -> u32 {
+    staged_max_tokens(
+        n_findings,
+        FIX_TOKENS_PER_FINDING,
+        camerata_ui_core::scan::FIX_EFFORT,
+    )
+}
+
 /// How many findings fit in ONE fix-generation call. Same rationale as
 /// `CALIBRATION_BATCH_SIZE` (a full chunk already exceeds the old flat floor); smaller
 /// than the calibration batch because each response entry is longer prose.
@@ -2033,6 +3447,146 @@ const FIX_BATCH_SIZE: usize = 25;
 /// every option with its own rationale — comparable prose volume to a fix — so it's sized
 /// like `FIX_BATCH_SIZE`.
 const ALTERNATIVES_BATCH_SIZE: usize = 25;
+
+/// The text of each finding that a calibration or fix prompt frames: path, quoted code, detail and
+/// the captured object names and values. A delimiter token is drawn to avoid all of it.
+fn finding_evidence_texts(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|f| {
+            [f.path.clone(), f.snippet.clone(), f.detail.clone()]
+                .into_iter()
+                .chain(f.captures.iter().flat_map(|(k, v)| [k.clone(), v.clone()]))
+        })
+        .collect()
+}
+
+/// The verdict objects a calibration reply holds IN FULL, one per finding index below `n` (the
+/// first of a repeated index wins), read one by one with [`complete_array_objects`]. The last,
+/// unfinished object of a reply cut off at the output limit is not guessed at. Empty for a reply
+/// that holds no `verdicts` array.
+fn answered_verdicts(raw: &str, n: usize) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    complete_array_objects(raw, "verdicts")
+        .into_iter()
+        .filter_map(|object| serde_json::from_str::<serde_json::Value>(object).ok())
+        .filter(|v| {
+            v["index"]
+                .as_u64()
+                .is_some_and(|i| (i as usize) < n && seen.insert(i))
+        })
+        .collect()
+}
+
+/// The first calibration call over a chunk: its reply and the `max_tokens` it was sent with.
+struct CalibrationCall<'a> {
+    reply: &'a crate::llm::LlmResponse,
+    cap: u32,
+}
+
+/// A calibration reply cut off at the output limit, made whole: the verdicts it wrote out in full,
+/// then ONE re-ask of just the findings it did not reach (the same prompt over those findings
+/// alone, a smaller request with its own cap), merged back under the original indices as
+/// `{"verdicts":[...]}`. A reply that is not cut off is `first.text` unchanged. The re-ask is never
+/// the same request again: when the reply answered NOTHING the findings are the same, so the
+/// re-ask raises the cap to twice `first_cap` (the cap the first call was sent with) within the
+/// runaway ceiling, as the scan's truncation retry does; a first cap already at the ceiling has
+/// nothing to change, and then no re-ask is sent.
+///
+/// The cut-off call is recorded as wasted by the share of the findings it left unanswered (all of
+/// it when it answered none). The re-ask goes through the spend limit like any retry, and a re-ask
+/// that fails or is itself cut off keeps what it did answer: the findings still unanswered pass
+/// through uncalibrated, as they always did, and the stage never drops one.
+async fn reask_unanswered_verdicts(
+    llm: &dyn LlmPort,
+    meter: Option<&UsageMeter>,
+    calibration_model: Option<&str>,
+    system: &str,
+    chunk: &[Finding],
+    first: CalibrationCall<'_>,
+    prompt_for: &(dyn Fn(&[&Finding]) -> String + Sync),
+) -> String {
+    let CalibrationCall {
+        reply: first,
+        cap: first_cap,
+    } = first;
+    if !first.truncated {
+        return first.text.clone();
+    }
+    let n = chunk.len();
+    let mut answered = answered_verdicts(&first.text, n);
+    let have: std::collections::BTreeSet<usize> = answered
+        .iter()
+        .filter_map(|v| v["index"].as_u64().map(|i| i as usize))
+        .collect();
+    let missing: Vec<usize> = (0..n).filter(|i| !have.contains(i)).collect();
+    if let Some(m) = meter {
+        if answered.is_empty() {
+            m.record_wasted(Stage::Calibration, first);
+        } else if !missing.is_empty() {
+            m.record_wasted_share(
+                Stage::Calibration,
+                first,
+                missing.len() as f64 / n.max(1) as f64,
+            );
+        }
+    }
+    // The re-ask's cap: sized for the findings left when some were answered (a smaller, different
+    // request); twice the first cap when none were (the same findings, so the cap is what changes).
+    let reask_cap = if answered.is_empty() {
+        let raised = first_cap
+            .saturating_mul(2)
+            .min(AGGREGATE_MAX_TOKENS_CEILING);
+        (raised > first_cap).then_some(raised)
+    } else {
+        Some(calibration_max_tokens(missing.len()))
+    };
+    let reask_cap =
+        reask_cap.filter(|_| !missing.is_empty() && !meter.is_some_and(UsageMeter::retry_blocked));
+    if let Some(cap) = reask_cap {
+        let items: Vec<&Finding> = missing.iter().map(|&i| &chunk[i]).collect();
+        let req = with_stage_effort(
+            LlmRequest::new(prompt_for(&items))
+                .with_system(system.to_string())
+                .with_max_tokens(cap)
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(items.len()))
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
+        note_request(meter, &req);
+        let mut on_delta = |_: &str| {};
+        match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(resp) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::Calibration, &resp);
+                }
+                let got = answered_verdicts(&resp.text, items.len());
+                if resp.truncated {
+                    if let Some(m) = meter {
+                        if got.is_empty() {
+                            m.record_wasted(Stage::Calibration, &resp);
+                        } else if got.len() < items.len() {
+                            m.record_wasted_share(
+                                Stage::Calibration,
+                                &resp,
+                                (items.len() - got.len()) as f64 / items.len() as f64,
+                            );
+                        }
+                    }
+                }
+                for mut verdict in got {
+                    // The re-ask numbered its findings from 0: put back the originals' indices.
+                    let local = verdict["index"].as_u64().unwrap_or(0) as usize;
+                    verdict["index"] = serde_json::json!(missing[local]);
+                    answered.push(verdict);
+                }
+            }
+            Err(e) => meter_failed(meter, Stage::Calibration, &e),
+        }
+    }
+    serde_json::json!({ "verdicts": answered }).to_string()
+}
 
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
@@ -2080,21 +3634,17 @@ pub async fn verify_findings(
     if findings.is_empty() {
         return (findings, Vec::new());
     }
-    let system = verify_system_prompt();
-    // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
-    // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
-    // chunk never touches another's verdicts. The common case (findings.len() <=
-    // CALIBRATION_BATCH_SIZE) produces exactly one chunk equal to the whole input, so the
-    // prompt/session/output shape below is byte-for-byte what this function always sent.
-    let owned_chunks: Vec<Vec<Finding>> = findings
-        .chunks(CALIBRATION_BATCH_SIZE)
-        .map(<[Finding]>::to_vec)
-        .collect();
-    let n_chunks = owned_chunks.len();
-    let mut calibrated: Vec<Finding> = Vec::with_capacity(findings.len());
-
-    for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
-        let chunk_len = chunk.len();
+    // One delimiter token for every calibration batch of this call (see `crate::prompt_frame`),
+    // drawn so that it occurs in none of the evidence it will frame.
+    let evidence = finding_evidence_texts(&findings);
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(
+        &evidence.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let system = crate::prompt_frame::with_untrusted_clause(verify_system_prompt(), &nonce);
+    // The calibration prompt for `items`, labelled `[0]`, `[1]`, ... in the order given. The whole
+    // chunk is sent with its own indices; a re-ask of the findings a cut-off reply did not
+    // answer ([`reask_unanswered_verdicts`]) is the same prompt over just those findings.
+    let calibration_prompt = |items: &[&Finding]| -> String {
         let mut prompt = format!("Repository: {repo}\n");
         // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
         // small/young codebase must not be held to the architecture of a large one, and this
@@ -2106,26 +3656,69 @@ pub async fn verify_findings(
              debatable preference (low confidence, capped severity), not a violation.\n"
         ));
         prompt.push_str("\nScrutinize these findings:\n");
-        for (i, f) in chunk.iter().enumerate() {
-            prompt.push_str(&format!(
-                "[{i}] (severity {}) {}:{} — {} :: {}\n",
-                f.severity,
-                f.path,
-                f.line,
-                camerata_secrets::redact_str(&f.snippet),
-                camerata_secrets::redact_str(&f.detail)
+        for (i, f) in items.iter().enumerate() {
+            // The location, the quoted code and the detail all derive from the client's files.
+            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &nonce,
+                &format!("finding {i}"),
+                &format!(
+                    "{}:{} — {} :: {}",
+                    f.path,
+                    f.line,
+                    camerata_secrets::redact_str(&f.snippet),
+                    camerata_secrets::redact_str(&f.detail)
+                ),
             ));
         }
+        prompt
+    };
+    // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
+    // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
+    // chunk never touches another's verdicts. The common case (findings.len() <=
+    // CALIBRATION_BATCH_SIZE) produces exactly one chunk equal to the whole input, so the
+    // prompt/session/output shape below is byte-for-byte what this function always sent.
+    let owned_chunks: Vec<Vec<Finding>> = findings
+        .chunks(CALIBRATION_BATCH_SIZE)
+        .map(<[Finding]>::to_vec)
+        .collect();
+    let n_chunks = owned_chunks.len();
+    // Each chunk's findings, in chunk order, so a chunk whose calls failed can be tried once more
+    // at the end and its result put back where it belongs.
+    let mut chunk_results: Vec<Vec<Finding>> = Vec::with_capacity(n_chunks);
+    // Chunks whose every call failed in a way worth another try: (chunk index, prompt, size).
+    let mut deferred: Vec<(usize, String, usize)> = Vec::new();
+    let mut trail = StageTrail::default();
+    // Per chunk: its own failed calls, and whether it is still without a verdict. A chunk left
+    // without one after the second try is a failed part naming its findings (see below).
+    let mut chunk_trails: Vec<StageTrail> = vec![StageTrail::default(); n_chunks];
+    let mut uncalibrated: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+
+    for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
+        // SPEND CAP, between batches: once the cap is reached the remaining batches do not run.
+        // Their findings pass through exactly as the scan produced them (none dropped) and the
+        // stage is recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_CALIBRATION).await {
+            Err(CapReached) => {
+                chunk_results.push(chunk);
+                continue;
+            }
+            Ok(permit) => permit,
+        };
+        let chunk_len = chunk.len();
+        let prompt = calibration_prompt(&chunk.iter().collect::<Vec<_>>());
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
         // request per pass (LlmRequest is consumed by complete_streaming).
         let build_req = || {
-            let mut req = LlmRequest::new(prompt.clone())
-                .with_system(system.clone())
-                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING));
-            if let Some(m) = calibration_model {
-                req = req.with_model(m.to_string());
-            }
-            req
+            with_stage_effort(
+                LlmRequest::new(prompt.clone())
+                    .with_system(system.clone())
+                    .with_max_tokens(calibration_max_tokens(chunk_len))
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_response_schema(reply_schemas::calibration_reply_schema(chunk_len))
+                    .with_model(stage_model(calibration_model)),
+                Stage::Calibration,
+            )
         };
 
         // Register (or replace) this pass's transcript entry with the REAL prompt before the
@@ -2165,6 +3758,7 @@ pub async fn verify_findings(
         // single pass (unchanged behavior).
         let passes = if thorough { 3 } else { 1 };
         let mut votes: Vec<String> = Vec::new();
+        let mut last_error: Option<anyhow::Error> = None;
         for pass_idx in 0..passes {
             // Routed through the STREAMING transport (not the flat `complete`) even when
             // there is no live transcript to feed — the CLI leg's heartbeat resets on any
@@ -2174,10 +3768,34 @@ pub async fn verify_findings(
             // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
             // byte-for-byte identical to before this change.
             let mut on_delta = |_: &str| {};
-            if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
+            let req = build_req();
+            note_request(meter, &req);
+            let calibration = llm.complete_streaming(req, &mut on_delta).await;
+            if let Err(e) = &calibration {
+                meter_failed(meter, Stage::Calibration, e);
+            }
+            if let Err(e) = calibration {
+                last_error = Some(e);
+            } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
                 }
+                // A reply cut off at the output limit still holds every verdict written out in
+                // full; the findings it never reached are asked again, alone (the telemetry counts
+                // the cut-off call as wasted by the share it left unanswered).
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk_len),
+                    },
+                    &calibration_prompt,
+                )
+                .await;
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
                     // transcript's output is exactly the model's text. THOROUGH mode's 3
@@ -2192,7 +3810,7 @@ pub async fn verify_findings(
                         store.append_output(key, &session, &resp.text);
                     }
                 }
-                votes.push(resp.text);
+                votes.push(text);
             }
         }
         let chunk_calibrated = match votes.len() {
@@ -2213,21 +3831,118 @@ pub async fn verify_findings(
                 store.set_status(key, &session, "done");
             }
         }
-        calibrated.extend(chunk_calibrated);
+        // Every call for this chunk failed: set it aside for one more try once the other chunks
+        // are done, when the provider has had time to recover.
+        if votes.is_empty() {
+            if let Some(e) = &last_error {
+                trail.note_error(e, false);
+                chunk_trails[chunk_idx].note_error(e, false);
+                uncalibrated.insert(chunk_idx);
+                if second_try_allowed(e, meter) {
+                    deferred.push((chunk_idx, prompt.clone(), chunk_len));
+                }
+            }
+        }
+        chunk_results.push(chunk_calibrated);
     }
+    // END-OF-RUN SECOND TRY for the chunks set aside above, through the same admission and spend
+    // checks; a stopped run sends nothing.
+    for (chunk_idx, prompt, _chunk_len) in deferred {
+        if meter.is_some_and(UsageMeter::outage_stopped) {
+            break;
+        }
+        let Ok(_permit) = admit_stage(meter, repo, STAGE_CALIBRATION).await else {
+            // The spend limit stopped the run; it records that, so the chunk is not also a
+            // failed part.
+            uncalibrated.remove(&chunk_idx);
+            continue;
+        };
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.clone())
+                .with_max_tokens(calibration_max_tokens(chunk_results[chunk_idx].len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(
+                    chunk_results[chunk_idx].len(),
+                ))
+                .with_model(stage_model(calibration_model)),
+            Stage::Calibration,
+        );
+        let mut on_delta = |_: &str| {};
+        note_request(meter, &req);
+        match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(resp) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::Calibration, &resp);
+                }
+                let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
+                let text = reask_unanswered_verdicts(
+                    llm,
+                    meter,
+                    calibration_model,
+                    &system,
+                    &chunk,
+                    CalibrationCall {
+                        reply: &resp,
+                        cap: calibration_max_tokens(chunk.len()),
+                    },
+                    &calibration_prompt,
+                )
+                .await;
+                chunk_results[chunk_idx] = apply_verdicts(&text, chunk);
+                uncalibrated.remove(&chunk_idx);
+            }
+            Err(e) => {
+                meter_failed(meter, Stage::Calibration, &e);
+                trail.note_error(&e, true);
+                chunk_trails[chunk_idx].note_error(&e, true);
+            }
+        }
+    }
+    // A chunk that still has no verdict after both tries (or because the run stopped before the
+    // second) leaves its findings uncalibrated. Recorded below as a failed part naming them.
+    let failed_chunks: Vec<(usize, Vec<Finding>)> = uncalibrated
+        .iter()
+        .map(|&i| (i, chunk_results[i].clone()))
+        .collect();
+    let calibrated: Vec<Finding> = chunk_results.into_iter().flatten().collect();
     // C3-1b: a run-wide (not per-chunk/per-finding) disclosure — every finding calibration
     // was handed came back with NO usable effort estimate at all. Neither D5 (severity floor)
     // nor D6 (severity ceiling) below ever sets `effort`, so checking it here, before those
     // text-derived passes run, is equivalent to checking the final output and reads clearer.
     let mut estimation_failed_passes = Vec::new();
     if !calibrated.is_empty() && calibrated.iter().all(|f| f.effort.is_none()) {
+        if trail.attempts.is_empty() {
+            trail.note_unusable(
+                "the calibration reply held no usable remediation-effort estimate",
+                false,
+                Vec::new(),
+            );
+        }
         estimation_failed_passes.push(FailedPass {
             repo: repo.to_string(),
             pass: "hour estimation".to_string(),
             reason: "the calibration pass returned no usable remediation-effort estimate for \
                      any finding this run"
                 .to_string(),
+            files_not_reviewed: 0,
+            class: trail.class(),
+            files: Vec::new(),
+            attempts: trail.attempts.clone(),
+            scope_note: false,
         });
+    } else {
+        // Some findings were estimated, so the run-wide miss above does not apply, but a chunk
+        // that never got its verdict is still a part that failed.
+        for (idx, chunk) in failed_chunks {
+            estimation_failed_passes.push(failed_calibration_chunk(
+                repo,
+                idx,
+                n_chunks,
+                &chunk,
+                &chunk_trails[idx],
+            ));
+        }
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
@@ -2236,6 +3951,53 @@ pub async fn verify_findings(
     // reason — both are text-derived and safe regardless of whether calibration ran.
     let calibrated = apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated));
     (calibrated, estimation_failed_passes)
+}
+
+/// The failed part for one calibration chunk whose calls all failed: names the findings it left
+/// uncalibrated (as `path:line`, at most five spelled out) and the files they sit in, so the
+/// operator can see what was not checked and the resume can run the chunk again.
+fn failed_calibration_chunk(
+    repo: &str,
+    chunk_idx: usize,
+    n_chunks: usize,
+    chunk: &[Finding],
+    trail: &StageTrail,
+) -> FailedPass {
+    let mut files: Vec<String> = chunk.iter().map(|f| f.path.clone()).collect();
+    files.sort();
+    files.dedup();
+    let named: Vec<String> = chunk
+        .iter()
+        .take(5)
+        .map(|f| format!("{}:{}", f.path, f.line))
+        .collect();
+    let more = chunk.len().saturating_sub(named.len());
+    let pass = if n_chunks > 1 {
+        format!("calibration batch {} of {n_chunks}", chunk_idx + 1)
+    } else {
+        "calibration".to_string()
+    };
+    FailedPass {
+        repo: repo.to_string(),
+        pass,
+        reason: format!(
+            "the calibration step failed for {} finding{} left without a severity check or an \
+             effort estimate: {}{}",
+            chunk.len(),
+            if chunk.len() == 1 { "" } else { "s" },
+            named.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        ),
+        files_not_reviewed: 0,
+        class: trail.class(),
+        files,
+        attempts: trail.attempts.clone(),
+        scope_note: false,
+    }
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
@@ -2532,6 +4294,7 @@ fn fallback_recommendations(
                 .clone()
                 .or_else(|| a.options.first().map(|o| o.id.clone()))?;
             Some(RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: id,
                 recommendation_reasoning: reason.to_string(),
@@ -2725,6 +4488,7 @@ pub fn parse_alternative_recommendations(
                     && (!observed_options.is_empty() || evidence.is_some())
                 {
                     out.push(RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         // Kept only so the field is never a meaningless empty string; a
                         // no-convention rule is never judged against ANY option (audit_repo
@@ -2761,6 +4525,7 @@ pub fn parse_alternative_recommendations(
                         reasoning
                     };
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning,
@@ -2779,6 +4544,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: raw_id,
                         recommendation_reasoning: reasoning,
@@ -2793,6 +4559,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else if raw_id.is_empty() {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning: "The model did not return a valid option id \
@@ -2809,6 +4576,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning: format!(
@@ -2845,6 +4613,7 @@ pub fn parse_alternative_recommendations(
                 rec
             }
             None => RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: fallback_id(),
                 recommendation_reasoning: "The model did not return a recommendation for this \
@@ -2867,6 +4636,30 @@ pub fn parse_alternative_recommendations(
     out
 }
 
+/// Most file chunks a rule judged "not applicable" is asked about again (M7). Beyond this the
+/// judgment stands and says how many chunks it covers.
+const ALTERNATIVES_MAX_FILE_CHUNKS: usize = 4;
+
+/// A path a model named in `needs_files` or a scan reply, in the form the scan lists files: no
+/// leading `./` or `/`, forward slashes, trimmed of quotes and backticks (M6).
+pub(crate) fn normalize_requested_path(raw: &str) -> String {
+    let t = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '`' | '"' | '\''))
+        .replace('\\', "/");
+    let mut t = t.trim();
+    loop {
+        if let Some(rest) = t.strip_prefix("./") {
+            t = rest;
+        } else if let Some(rest) = t.strip_prefix('/') {
+            t = rest;
+        } else {
+            break;
+        }
+    }
+    t.to_string()
+}
+
 /// Run the dedicated recommendation pass: ONE LLM call deciding `recommended_option_id` +
 /// `recommendation_reasoning` for every rule in `alternatives`, grounded in the repo map plus
 /// a representative code digest. Deciding this ONCE (rather than once per file-chunk, as the
@@ -2882,29 +4675,47 @@ pub fn parse_alternative_recommendations(
 /// whose defining pattern lives entirely in a later chunk may get a less-informed pick; this
 /// is a disclosed limitation, not a silent one.
 ///
-/// Returns `Ok(vec![])` when `alternatives` is empty (nothing to decide — no call made).
+/// Returns `Ok((vec![], None))` when `alternatives` is empty (nothing to decide — no call made).
+///
+/// A reply cut off at the output limit is not read as "no answer". The entries that closed before
+/// the cut are kept ([`salvage_alternative_answers`]); the rules it never reached are asked again
+/// ONCE as a smaller batch; a rule still unanswered then gets no entry (it keeps its default
+/// directive) and the second value of the result is the plain-words reason the caller records
+/// as a pass, naming those rules. `None` when every rule was decided.
 #[allow(clippy::too_many_arguments)]
 async fn recommend_alternatives(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
     map_files: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
     alternatives: &[RuleAlternatives],
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
-) -> anyhow::Result<Vec<RuleRecommendation>> {
+) -> anyhow::Result<(Vec<RuleRecommendation>, Option<String>)> {
     if alternatives.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    let repo_map = build_repo_map(map_files);
+    let repo_map = build_repo_map(map_files, nonce);
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-    let digest = file_chunks
-        .first()
-        .map(|c| build_digest(c))
-        .unwrap_or_default();
+    // M7: a rule judged "not applicable" on the first chunk's digest is asked again on each
+    // further chunk, because the code that makes it applicable may sit in any of them. Rules
+    // already judged applicable (or with no convention) are not asked again, so the common case
+    // is still ONE call per rule batch. A rule is "not applicable" only when EVERY chunk says so.
+    let total_chunks = file_chunks.len().max(1);
+    let digests: Vec<String> = if file_chunks.is_empty() {
+        vec![String::new()]
+    } else {
+        file_chunks
+            .iter()
+            .take(ALTERNATIVES_MAX_FILE_CHUNKS)
+            .map(|c| build_digest(c, nonce))
+            .collect()
+    };
+    let chunks_read = digests.len();
 
-    // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) — each rule-batch is an
+    // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) - each rule-batch is an
     // independent streamed call, so no single completion is asked to decide every
     // multi-option rule in the scan at once. The common case (alternatives.len() <=
     // ALTERNATIVES_BATCH_SIZE) is exactly one chunk equal to the whole input, so the
@@ -2913,52 +4724,360 @@ async fn recommend_alternatives(
         alternatives.chunks(ALTERNATIVES_BATCH_SIZE).collect();
     let n_chunks = rule_chunks.len();
     let mut recommendations = Vec::with_capacity(alternatives.len());
+    let mut gaps = AlternativesGaps::default();
 
     for (chunk_idx, alt_chunk) in rule_chunks.into_iter().enumerate() {
-        let prompt = format!(
-            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-            build_alternatives_block(alt_chunk)
-        );
-        // Single-chunk runs keep the EXACT session id + role this function always used
-        // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
-        // there's more than one chunk.
-        let session = if n_chunks > 1 {
-            format!("audit-{repo}-alternatives-b{chunk_idx}")
-        } else {
-            format!("audit-{repo}-alternatives")
+        // The best answer so far for each rule of this batch, in the batch's order.
+        let mut best: Vec<Option<RuleRecommendation>> = vec![None; alt_chunk.len()];
+        // Rules whose MOST RECENT ask (a first send and its smaller retry included) got no
+        // answer because the reply was cut off at the output limit.
+        let mut unanswered_ids: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        // The digests to ask, in order. A digest whose ask failed in a way worth another try is
+        // asked once more at the END of this list, after the others, inside this stage, so the
+        // decision exists before the scan reads it.
+        let mut work: Vec<(usize, bool)> = (0..digests.len()).map(|i| (i, false)).collect();
+        let mut first_failures: std::collections::HashMap<usize, anyhow::Error> =
+            std::collections::HashMap::new();
+        let mut next_work = 0usize;
+        while next_work < work.len() {
+            let (digest_idx, is_second) = work[next_work];
+            next_work += 1;
+            let digest = &digests[digest_idx];
+            let pending: Vec<RuleAlternatives> = alt_chunk
+                .iter()
+                .zip(&best)
+                .filter(|(_, b)| b.as_ref().is_none_or(|r| !r.applicable))
+                .map(|(a, _)| a.clone())
+                .collect();
+            if pending.is_empty() {
+                break;
+            }
+            // Later digests of a SPEND-CAPPED run are skipped, not sent: the answers so far stand.
+            if digest_idx > 0 && meter.is_some_and(UsageMeter::retry_blocked) {
+                break;
+            }
+            // Single-call runs keep the EXACT session id + role this function always used
+            // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
+            // there's more than one chunk, and `-dN` once a rule is asked on a further digest.
+            let mut session = if n_chunks > 1 {
+                format!("audit-{repo}-alternatives-b{chunk_idx}")
+            } else {
+                format!("audit-{repo}-alternatives")
+            };
+            if digest_idx > 0 {
+                session.push_str(&format!("-d{digest_idx}"));
+            }
+            let role = format!(
+                "recommending {} alternative(s), {repo}{}{}",
+                pending.len(),
+                if n_chunks > 1 {
+                    format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                } else {
+                    String::new()
+                },
+                if digest_idx > 0 {
+                    format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
+                } else {
+                    String::new()
+                }
+            );
+            let ask = AlternativesAsk {
+                llm,
+                repo,
+                repo_map: &repo_map,
+                digest,
+                n_rule_batches: n_chunks,
+                n_digests: digests.len(),
+                nonce,
+                audit_model,
+                feedback,
+                meter,
+            };
+            let resp = match ask.send(&pending, &session, &role).await {
+                Ok(resp) => resp,
+                Err(e) if is_second => {
+                    return Err(match first_failures.remove(&digest_idx) {
+                        Some(first) => error_with_both_tries(&first, e),
+                        None => e,
+                    });
+                }
+                Err(e) if second_try_allowed(&e, meter) => {
+                    first_failures.insert(digest_idx, e);
+                    work.push((digest_idx, true));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let (mut answered, unanswered) = if resp.truncated {
+                // A reply cut off at the output limit: the entries that closed before the cut
+                // are answers; the rest were never reached.
+                gaps.attempts = gaps.attempts.max(1);
+                let (recs, rest) = salvage_alternative_answers(&resp.text, &pending);
+                if recs.is_empty() {
+                    if let Some(m) = meter {
+                        m.record_wasted(Stage::Alternatives, &resp);
+                    }
+                }
+                (recs, rest)
+            } else {
+                (
+                    parse_alternative_recommendations(&resp.text, &pending),
+                    Vec::new(),
+                )
+            };
+            let mut still_unanswered: Vec<RuleAlternatives> = Vec::new();
+            if !unanswered.is_empty() {
+                // ONE retry of what the cut-off reply left out, as a smaller batch: the rules not
+                // yet answered, and when the first reply answered none of them, half of the
+                // batch at a time, so the retry is never the same size as the send that failed.
+                let why_not = if !efficiency_of(meter).truncation_retry {
+                    Some("the retry of a cut-off reply is switched off".to_string())
+                } else {
+                    None
+                };
+                let sizes = if unanswered.len() == pending.len() && unanswered.len() > 1 {
+                    unanswered.len().div_ceil(2)
+                } else {
+                    unanswered.len()
+                };
+                for (n, group) in unanswered.chunks(sizes).enumerate() {
+                    if let Some(why) = &why_not {
+                        gaps.retry_note.get_or_insert_with(|| why.clone());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    if meter.is_some_and(UsageMeter::retry_blocked) {
+                        gaps.retry_note
+                            .get_or_insert_with(|| retry_blocked_cause(meter).1.to_string());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    gaps.attempts = gaps.attempts.max(2);
+                    let retry_session = format!("{session}-r{n}");
+                    let retry_role = format!(
+                        "recommending {} alternative(s), {repo} (retry of a cut-off reply)",
+                        group.len()
+                    );
+                    match ask.send(group, &retry_session, &retry_role).await {
+                        Ok(retry) if retry.truncated => {
+                            let (recs, rest) = salvage_alternative_answers(&retry.text, group);
+                            if recs.is_empty() {
+                                if let Some(m) = meter {
+                                    m.record_wasted(Stage::Alternatives, &retry);
+                                }
+                            }
+                            answered.extend(recs);
+                            still_unanswered.extend(rest);
+                        }
+                        Ok(retry) => {
+                            answered.extend(parse_alternative_recommendations(&retry.text, group));
+                        }
+                        // The failed call is already on the meter; the answers so far stand.
+                        Err(e) => {
+                            gaps.retry_note
+                                .get_or_insert_with(|| format!("the retry did not complete: {e}"));
+                            still_unanswered.extend_from_slice(group);
+                        }
+                    }
+                }
+            }
+            for a in &pending {
+                unanswered_ids.remove(&a.rule_id);
+            }
+            for a in &still_unanswered {
+                unanswered_ids.insert(a.rule_id.clone());
+            }
+            for rec in answered {
+                if let Some(at) = alt_chunk.iter().position(|a| a.rule_id == rec.rule_id) {
+                    // The first answer is kept unless a later digest finds the rule applicable.
+                    if best[at]
+                        .as_ref()
+                        .is_none_or(|b| !b.applicable && rec.applicable)
+                    {
+                        best[at] = Some(rec);
+                    }
+                }
+            }
+        }
+        // A rule whose last ask was cut off and never answered keeps its default directive (it has
+        // no entry here); one that an earlier file chunk did answer keeps that answer, and says it
+        // was judged on fewer chunks.
+        for (a, b) in alt_chunk.iter().zip(best.iter_mut()) {
+            if !unanswered_ids.contains(&a.rule_id) {
+                continue;
+            }
+            match b {
+                None => gaps.undecided.push(a.rule_id.clone()),
+                Some(rec) => {
+                    rec.recommendation_reasoning.push_str(
+                        " A reply for a later file chunk was cut off, so this was judged on fewer \
+                         file chunks.",
+                    );
+                    gaps.partial.push(a.rule_id.clone());
+                }
+            }
+        }
+        // A rule still judged not applicable after reading fewer chunks than the repo has says
+        // so: the judgment covers part of the code only.
+        for rec in best.iter_mut().flatten() {
+            if !rec.applicable && chunks_read < total_chunks {
+                rec.recommendation_reasoning.push_str(&format!(
+                    " Judged over {chunks_read} of {total_chunks} file chunks."
+                ));
+            }
+        }
+        recommendations.extend(best.into_iter().flatten());
+    }
+    Ok((recommendations, gaps.reason()))
+}
+
+/// What the recommendation pass could not settle because a reply was cut off at the output limit
+/// and the one smaller retry did not finish the job. Plain data; [`Self::reason`] words it.
+#[derive(Default)]
+struct AlternativesGaps {
+    /// Rules no reply answered. They keep their default directive.
+    undecided: Vec<String>,
+    /// Rules an earlier file chunk answered whose later-chunk reply was cut off.
+    partial: Vec<String>,
+    /// The most sends one rule batch needed (the first, then the retry).
+    attempts: usize,
+    /// Why the retry was not sent or did not complete, when that is the case.
+    retry_note: Option<String>,
+}
+
+impl AlternativesGaps {
+    /// The sentence the run records for what was left undecided, or `None` when nothing was. No
+    /// failure wording: the rules named keep their default directive and the sentence says so.
+    fn reason(&self) -> Option<String> {
+        if self.undecided.is_empty() && self.partial.is_empty() {
+            return None;
+        }
+        let list = |ids: &[String]| {
+            const SHOWN: usize = 8;
+            let mut out = ids
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if ids.len() > SHOWN {
+                out.push_str(&format!(" and {} more", ids.len() - SHOWN));
+            }
+            out
         };
+        let plural = |n: usize| if n == 1 { "rule" } else { "rules" };
+        let mut text = format!(
+            "the model's reply deciding which option each rule follows was cut off at the output \
+             limit after {} attempt{}",
+            self.attempts.max(1),
+            if self.attempts <= 1 { "" } else { "s" }
+        );
+        if let Some(note) = &self.retry_note {
+            text.push_str(&format!(" ({note})"));
+        }
+        if !self.undecided.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) keep their default directive",
+                self.undecided.len(),
+                plural(self.undecided.len()),
+                list(&self.undecided)
+            ));
+        }
+        if !self.partial.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) judged on fewer file chunks than the repo has",
+                self.partial.len(),
+                plural(self.partial.len()),
+                list(&self.partial)
+            ));
+        }
+        Some(text)
+    }
+}
+
+/// The inputs every call of the recommendation pass shares, so the first send and a retry build
+/// the same request.
+struct AlternativesAsk<'a> {
+    llm: &'a dyn LlmPort,
+    repo: &'a str,
+    repo_map: &'a str,
+    digest: &'a str,
+    /// How many rule batches the stage sends in all: every one of them re-sends `digest`.
+    n_rule_batches: usize,
+    /// How many file-chunk digests the stage asks about: every one re-sends `repo_map`.
+    n_digests: usize,
+    nonce: &'a crate::prompt_frame::FrameNonce,
+    audit_model: Option<&'a str>,
+    feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+    meter: Option<&'a UsageMeter>,
+}
+
+impl AlternativesAsk<'_> {
+    /// One call asking for `rules`. A transport error is recorded on the meter and returned; a
+    /// reply (cut off or not) is recorded as the alternatives stage's and returned for the caller
+    /// to read.
+    async fn send(
+        &self,
+        rules: &[RuleAlternatives],
+        session: &str,
+        role: &str,
+    ) -> anyhow::Result<crate::llm::LlmResponse> {
+        let Self {
+            llm,
+            repo,
+            repo_map,
+            digest,
+            n_rule_batches,
+            n_digests,
+            nonce,
+            audit_model,
+            feedback,
+            meter,
+        } = *self;
+        // The shared prefix (repo map, then digest) leads and the rules, which differ per batch,
+        // trail, so the digest the stage re-sends with every rule batch is one cached prefix.
+        let map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+        let static_prefix = format!("{map_prefix}{digest}\n\n");
+        let cache_breakpoints = alternatives_cache_breakpoints(
+            map_prefix.len(),
+            static_prefix.len(),
+            n_rule_batches,
+            n_digests,
+        );
+        let prompt = format!("{static_prefix}{}", build_alternatives_block(rules));
         if let Some((store, key)) = feedback {
             store.register(
                 key,
                 crate::transcript::AgentTranscript {
-                    session_id: session.clone(),
-                    role: format!(
-                        "recommending {} alternative(s) — {repo}{}",
-                        alt_chunk.len(),
-                        if n_chunks > 1 {
-                            format!(" (batch {}/{n_chunks})", chunk_idx + 1)
-                        } else {
-                            String::new()
-                        }
-                    ),
+                    session_id: session.to_string(),
+                    role: role.to_string(),
                     prompt: prompt.clone(),
                     output: String::new(),
                     status: "running".to_string(),
                 },
             );
         }
-        let mut req = LlmRequest::new(prompt)
-            .with_system(alternatives_system_prompt())
-            .with_max_tokens(4096);
-        if let Some(m) = audit_model {
-            req = req.with_model(m.to_string());
-        }
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(crate::prompt_frame::with_untrusted_clause(
+                    alternatives_system_prompt(),
+                    nonce,
+                ))
+                .with_max_tokens(alternatives_max_tokens(rules.len()))
+                .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::alternatives_reply_schema())
+                .with_cache_breakpoints(cache_breakpoints)
+                .with_model(stage_model(audit_model)),
+            Stage::Alternatives,
+        );
+        note_request(meter, &req);
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
-        // feed (`feedback = None`) — the CLI leg's heartbeat resets on any progress and
+        // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
         // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
         // fixed 300s deadline with no partial credit for a near-complete run.
         let resp_result = if let Some((store, key)) = feedback {
-            let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+            let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
             llm.complete_streaming(req, &mut on_delta).await
         } else {
             let mut on_delta = |_: &str| {};
@@ -2967,7 +5086,7 @@ async fn recommend_alternatives(
         if let Some((store, key)) = feedback {
             store.set_status(
                 key,
-                &session,
+                session,
                 if resp_result.is_ok() {
                     "done"
                 } else {
@@ -2975,13 +5094,76 @@ async fn recommend_alternatives(
                 },
             );
         }
-        let resp = resp_result?;
+        let resp = match resp_result {
+            Ok(r) => r,
+            Err(e) => {
+                meter_failed(meter, Stage::Alternatives, &e);
+                return Err(e);
+            }
+        };
         if let Some(m) = meter {
             m.record_stage(Stage::Alternatives, &resp);
         }
-        recommendations.extend(parse_alternative_recommendations(&resp.text, alt_chunk));
+        Ok(resp)
     }
-    Ok(recommendations)
+}
+
+/// The cache breakpoints of an alternatives request: byte offsets into its prompt, each the end
+/// of a prefix a later request of the stage repeats exactly. The repo map is repeated by every
+/// request over another file-chunk digest (`n_digests > 1`); the digest after it is repeated by
+/// every further rule batch (`n_rule_batches > 1`), which is the saving: the stage re-sent the
+/// whole digest, 25k to 40k input tokens, uncached with each rule batch. A stage that sends one
+/// request over one digest repeats nothing (a cache write costs more than the plain input and
+/// nothing would read it), so it carries none. The same placement as the scan's
+/// ([`cache_breakpoints_for_pass`]); the schema and the system prompt are the same on every
+/// request of the stage, so the prefix is one cache entry.
+fn alternatives_cache_breakpoints(
+    map_prefix_len: usize,
+    static_prefix_len: usize,
+    n_rule_batches: usize,
+    n_digests: usize,
+) -> Vec<usize> {
+    let mut breakpoints = Vec::new();
+    if n_digests > 1 {
+        breakpoints.push(map_prefix_len);
+    }
+    if n_rule_batches > 1 {
+        breakpoints.push(static_prefix_len);
+    }
+    breakpoints
+}
+
+/// What a cut-off recommendation reply still answers: the recommendations for the rules in
+/// `pending` whose entry closed before the cut (read by the same brace-balanced walker the scan
+/// uses, [`complete_array_objects`]), and the rules it never reached. A rule the reply did not
+/// reach gets NO entry here (not the fallback answer a whole reply's omission gets): the caller
+/// asks again or leaves the rule at its default directive and says so.
+fn salvage_alternative_answers(
+    text: &str,
+    pending: &[RuleAlternatives],
+) -> (Vec<RuleRecommendation>, Vec<RuleAlternatives>) {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for object in complete_array_objects(text, "recommendations") {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(object) else {
+            continue;
+        };
+        let Some(id) = v["rule_id"].as_str().map(str::trim) else {
+            continue;
+        };
+        if pending.iter().any(|a| a.rule_id == id) && answered.insert(id.to_string()) {
+            kept.push(object);
+        }
+    }
+    let (done, rest): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = pending
+        .iter()
+        .cloned()
+        .partition(|a| answered.contains(&a.rule_id));
+    if kept.is_empty() {
+        return (Vec::new(), rest);
+    }
+    let synthetic = format!("{{\"recommendations\":[{}]}}", kept.join(","));
+    (parse_alternative_recommendations(&synthetic, &done), rest)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3006,11 +5188,59 @@ async fn recommend_alternatives(
 /// guessing again blind.
 const MAX_FIX_REGENERATIONS: usize = 2;
 
+/// Rank 10: the model the fix stage runs on when no fix model is set and the `fix_on_haiku`
+/// efficiency measure is on (the default). Defined in `camerata-api-types` beside
+/// [`DEFAULT_MODEL`] (the cockpit and the CLI print its name); re-exported here for the server.
+pub use camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
+
+/// Rank 10: the `output_config.effort` the fix call sends, on every model. The 5.x models think
+/// adaptively at `medium` unless told otherwise; the fix task is bounded by its evidence and
+/// re-checked, so `low` is the starting point (see `docs/TECHNICAL.md`, "Fix stage model and
+/// effort"). Raise it only when the give-up rate or a fix-quality sample says the fixes need
+/// more.
+pub const FIX_STAGE_EFFORT: &str = camerata_ui_core::scan::FIX_EFFORT;
+
+/// The model the fix stage runs on, in precedence order:
+///
+/// 1. `explicit`: the fix model the operator set (the project's fix step model, or
+///    `camerata inspect --fix-model`). Blank counts as unset.
+/// 2. With `fix_on_haiku` on: [`FIX_STAGE_HAIKU_MODEL`].
+/// 3. With it off: `calibration_model.or(model)`, exactly the pre-rank-10 choice (`None` lets
+///    the transport pick its default, as it always has).
+///
+/// The ONE place this is decided: the fix call and the spend-limit preflight
+/// ([`crate::cost_cap::models_the_run_will_use`]) both come through here, so the model that is
+/// checked for a price is the model that is called.
+pub fn resolve_fix_model<'a>(
+    explicit: Option<&'a str>,
+    fix_on_haiku: bool,
+    model: Option<&'a str>,
+    calibration_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|m| !m.is_empty()) {
+        return Some(explicit);
+    }
+    if fix_on_haiku {
+        return Some(FIX_STAGE_HAIKU_MODEL);
+    }
+    calibration_model.or(model)
+}
+
+/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whatever the fix model is,
+/// because the effort belongs to the STAGE, not the model (Opus 5.5 and Haiku 5.5 both default
+/// to `medium`, Sonnet 5.5 to `high`; a fix is one bounded sentence per finding at any of
+/// them). The request carries it only to a model that accepts an effort setting
+/// (`camerata_llm::model_registry::accepts_effort`), so an explicit pick of an older model keeps
+/// the request it always had.
+pub fn fix_effort() -> &'static str {
+    FIX_STAGE_EFFORT
+}
+
 /// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
 /// NOT re-judge severity/confidence/effort (calibration already did that) and does NOT
 /// explain the violation (the finding's own `detail` already does) — its ONLY job is a
 /// concrete "change X in file Y" sentence grounded in the evidence it's given.
-fn fix_specific_system_prompt() -> String {
+pub(crate) fn fix_specific_system_prompt() -> String {
     r#"You write ONE concrete, codebase-specific fix per finding for a paying client's audit
 report. You are NOT re-explaining what is wrong — the finding's own detail already does that.
 Your only job is telling the developer EXACTLY what to change, in THIS codebase.
@@ -3018,11 +5248,21 @@ Your only job is telling the developer EXACTLY what to change, in THIS codebase.
 Rules, every fix:
 - Name the REAL file/symbol/column/function from the evidence given for that finding (its own
   path, snippet, detail, captured objects, and surrounding code). NEVER invent a name that
-  isn't present anywhere in the evidence you were given for that finding.
+  isn't present anywhere in the evidence you were given for that finding: a name or file path
+  in backticks must appear in that evidence, and so must every table, column, function, file
+  or variable name inside a code snippet (ordinary words and universal names such as
+  `Authorization`, `console.error` and try/catch/finally are fine). Each finding's block ends
+  with a `Names you may use:` line: the identifiers and file names in its evidence. As a
+  backticked name or inside a snippet, use only those, names you know exist elsewhere in this
+  repository (another file, a column in the schema), ordinary words and the universal names; a
+  name that exists nowhere in the repository is rejected. When the fix needs a NEW name, or you
+  are not sure a name exists, describe it in plain words ("a new helper that returns the signed
+  URL") instead of naming it in backticks or in a snippet.
 - When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
   point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
   app/auth/signout/route.ts does") instead of describing the pattern generically.
-- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight.
+- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight;
+  the snippet is yours to write, only the existing names it uses must come from the evidence.
 - Say WHAT to change and WHERE — NEVER how this finding was detected. Do not mention
   Camerata, a scanner, a linter, a rule id, a regex, "the audit", or any detection mechanism.
 - NEVER assert something about the codebase's current state that contradicts the finding's own
@@ -3035,9 +5275,10 @@ Rules, every fix:
   omit it from your response entirely rather than guessing.
 
 Return ONLY JSON, no prose:
-{"fixes":[{"index":0,"fix":"..."}]}
-One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
-could not confidently ground — an omitted fix is far better than an invented one."#
+{"fixes":[{"id":"<the finding's id, copied exactly>","fix":"..."}]}
+One entry per finding you could ground a fix for, addressed by the id in square brackets that
+opens its block. Omit any id you could not confidently ground — an omitted fix is far better
+than an invented one."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -3080,52 +5321,125 @@ fn fix_context_window(
 /// [`find_ungrounded_identifier`] (validation) so the two can never silently drift apart.
 fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     let context = fix_context_window(files, &f.path, f.line, 8);
-    let captures = f.captures.values().cloned().collect::<Vec<_>>().join(" ");
+    let captures = object_captures(f)
+        .map(|(_, v)| v.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "{} {} {} {} {}",
         f.path, f.snippet, f.detail, captures, context
     )
 }
 
+/// The most names a finding's `Names you may use:` line lists.
+const MAX_FIX_NAMES_LISTED: usize = 40;
+
+/// The identifiers and file names of a finding's fix evidence (`evidence`, the blob
+/// [`fix_evidence_blob`] builds, which is exactly what the grounding check looks a name up in):
+/// every file-like word and every word shaped like a name somebody chose (`snake_case`,
+/// `camelCase`, `PascalCase` with two capitals), in order of first appearance, without repeats.
+/// The prompt prints it under `Names you may use:` so the model is told which names the check
+/// will find; a name in backticks or in a snippet that is not in the evidence is rejected
+/// ([`find_ungrounded_identifier`]), whether or not it is listed here (a plain word that the
+/// evidence holds is as good as a listed one).
+fn fix_names_available(evidence: &str) -> Vec<String> {
+    let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
+    // Position of each candidate, so the list reads in the order the evidence does.
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for m in path_re.find_iter(evidence) {
+        let word = m.as_str().trim_matches(|c: char| matches!(c, '.' | ','));
+        if is_file_like(word, false) {
+            found.push((m.start(), word.to_string()));
+        }
+    }
+    let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+    for m in word_re.find_iter(evidence) {
+        let part = m.as_str();
+        if part.len() >= 3 && is_chosen_name(part) {
+            found.push((m.start(), part.to_string()));
+        }
+    }
+    found.sort_by_key(|(pos, _)| *pos);
+    let mut out: Vec<String> = Vec::new();
+    for (_, name) in found {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+        if out.len() >= MAX_FIX_NAMES_LISTED {
+            break;
+        }
+    }
+    out
+}
+
+/// The "Captured objects" line of a finding's block, or nothing when it captured none.
+fn captured_objects_line(f: &Finding) -> String {
+    if object_captures(f).next().is_none() {
+        return String::new();
+    }
+    let caps = object_captures(f)
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Captured objects: {caps}\n")
+}
+
 /// Build the per-finding prompt body for a fix-generation round. `findings` are the
-/// findings THIS round is asking about (batch-local order); `feedback`, when present for a
+/// findings THIS round is asking about (batch-local order) and `ids` their opaque ids, parallel
+/// to it (the reply addresses a fix by id, never by position); `feedback`, when present for a
 /// batch-local position, is a one-line note on why that finding's PRIOR attempt was
 /// rejected, appended so the model corrects the specific problem instead of guessing again.
 fn build_fix_specific_block(
     findings: &[&Finding],
+    ids: &[String],
     files: &[(String, String)],
     corpus: Option<&camerata_rules::RuleSet>,
     feedback: &std::collections::HashMap<usize, String>,
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
+        let id = &ids[i];
         out.push_str(&format!(
-            "[{i}] rule {} — severity {} — {}:{}\n",
-            f.rule_id, f.severity, f.path, f.line
+            "[{id}] rule {} — severity {}\n",
+            f.rule_id, f.severity
         ));
+        // Everything that derives from the client's files (location, quoted code, detail,
+        // captured object names, the context window) sits inside one frame.
+        let mut evidence = format!("Location: {}:{}\n", f.path, f.line);
         if !f.snippet.is_empty() {
-            out.push_str(&format!(
+            evidence.push_str(&format!(
                 "Snippet: {}\n",
                 camerata_secrets::redact_str(&f.snippet)
             ));
         }
-        out.push_str(&format!(
+        evidence.push_str(&format!(
             "Detail: {}\n",
             camerata_secrets::redact_str(&f.detail)
         ));
-        if !f.captures.is_empty() {
-            let caps = f
-                .captures
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("Captured objects: {caps}\n"));
-        }
+        evidence.push_str(&captured_objects_line(f));
         let context = fix_context_window(files, &f.path, f.line, 8);
         if !context.is_empty() {
-            out.push_str(&format!("Surrounding code:\n{context}"));
+            evidence.push_str(&format!("Surrounding code:\n{context}"));
         }
+        // The names the grounding check will find, printed so the model is told what is checked.
+        let names =
+            fix_names_available(&camerata_secrets::redact_str(&fix_evidence_blob(f, files)));
+        if !names.is_empty() {
+            evidence.push_str(&format!(
+                "Names you may use: {}\n",
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        out.push_str(&crate::prompt_frame::frame_untrusted(
+            nonce,
+            &format!("finding {id}"),
+            &evidence,
+        ));
         if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
             if let Some(opt) = rule.resolved_option(f.evaluated_option_id.as_deref()) {
                 if let Some(rem) = opt.remediation.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -3147,12 +5461,12 @@ fn build_fix_specific_block(
     out
 }
 
-/// Parse the `{"fixes":[{"index":N,"fix":"..."}]}` response into batch-local index -> fix
-/// text. Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix`
-/// string for an entry all simply leave that index absent from the map — the caller treats
-/// an absent index exactly like "the model couldn't ground this one" (never a panic, never a
-/// fabricated empty string).
-fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
+/// Parse the `{"fixes":[{"id":"...","fix":"..."}]}` response into opaque id -> fix text.
+/// Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix` string for an
+/// entry all simply leave that id absent from the map — the caller treats an absent id exactly
+/// like "the model couldn't ground this one" (never a panic, never a fabricated empty string).
+/// An id that is not one of the batch's matches nothing: the caller looks up its own ids.
+fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let Some(json) = extract_json_object(raw) else {
         return out;
@@ -3164,7 +5478,11 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         return out;
     };
     for entry in arr {
-        let Some(idx) = entry["index"].as_u64() else {
+        let Some(id) = entry["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let Some(text) = entry["fix"].as_str() else {
@@ -3174,7 +5492,7 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
         if text.is_empty() {
             continue;
         }
-        out.insert(idx as usize, text.to_string());
+        out.insert(id.to_string(), text.to_string());
     }
     out
 }
@@ -3184,24 +5502,274 @@ fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
 /// could go looking for. Deliberately short: anything NOT on this list must be grounded.
 const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined", "todo"];
 
+/// Names that exist in every codebase or runtime and so are never "invented" by a fix: a
+/// fix may name them whether or not the finding's evidence happens to show them. Kept
+/// short on purpose; a name that is merely common in the repo does not belong here. Matched
+/// exactly (case-sensitive) against a backticked span or a path-like token.
+const UNIVERSAL_FIX_NAMES: &[&str] = &[
+    // A framework or runtime written with its dot reads as a file to the path regex; an
+    // abbreviation reads as one too; `void` is a keyword like `try`. None is a name a
+    // repository could hold, so none is asked for.
+    "Next.js",
+    "Node.js",
+    "React.js",
+    "Vue.js",
+    "Nuxt.js",
+    "Express.js",
+    "Deno.js",
+    "e.g",
+    "i.e",
+    "void",
+    "Authorization",
+    "console.error",
+    "console.log",
+    "console.warn",
+    "console.info",
+    "process.exit",
+    "process.env",
+    "finally",
+    "try",
+    "catch",
+    "devDependencies",
+    "dependencies",
+    "toString",
+    "toISOString",
+    "hasOwnProperty",
+    "addEventListener",
+    "setTimeout",
+    "setInterval",
+    "clearTimeout",
+    "encodeURIComponent",
+    "decodeURIComponent",
+    "parseInt",
+    "parseFloat",
+    "localStorage",
+    "sessionStorage",
+    "preventDefault",
+    "stopPropagation",
+    "current_user",
+    "session_user",
+    "current_setting",
+    "set_config",
+    "gen_random_uuid",
+];
+
+/// File extensions that make a dotted token inside a code snippet a file name worth
+/// grounding (`lib/x.ts`, `.env.local`) rather than a member access (`console.error`).
+const FIX_FILE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "sql", "env", "md", "yml", "yaml", "toml",
+    "py", "rs", "css", "scss", "html", "sh", "lock", "txt", "conf", "cfg", "ini", "xml", "local",
+    "example",
+];
+
+/// Characters that separate the words of a code snippet.
+const SNIPPET_SEPARATORS: &str = "(){}[]<>=+*,;\"'|&!?`";
+
+/// True when a backticked span is a code snippet (whitespace, call parentheses, brackets,
+/// operators, quotes or separators in it) rather than one name. A fix quoting its own new
+/// code is not in the evidence by construction, so such a span is not checked as one
+/// identifier: only the names chosen inside it are (see [`snippet_names`]).
+fn is_code_snippet(span: &str) -> bool {
+    span.chars()
+        .any(|c| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+}
+
+/// Whether a dotted or slashed word in a snippet is a file name (`lib/x.ts`, `seed.sql`,
+/// `.env.local`) rather than a member access (`console.error`, `req.json`). `followed_by_call`
+/// is true when the word is immediately followed by `(`, which makes it a call.
+fn is_file_like(word: &str, followed_by_call: bool) -> bool {
+    if followed_by_call {
+        return false;
+    }
+    if word.contains('/') {
+        return word.contains('.');
+    }
+    word.rsplit_once('.').is_some_and(|(stem, ext)| {
+        FIX_FILE_EXTENSIONS.contains(&ext) && (ext != "env" || stem.is_empty())
+    })
+}
+
+/// The tokens of a code snippet worth grounding: any file name in it, any schema-qualified
+/// table or environment variable it names (see [`qualified_object`]), and any word of 3 or
+/// more characters shaped like a name somebody chose (see [`is_chosen_name`]). Ordinary
+/// words, language keywords, SQL keywords and single-word builtins (`err`, `catch`, `table`,
+/// `Promise`) are never asked for: the snippet is the fix's own new code.
+fn snippet_names(span: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = span;
+    while !rest.is_empty() {
+        let skip = rest
+            .find(|c: char| !(c.is_whitespace() || SNIPPET_SEPARATORS.contains(c)))
+            .unwrap_or(rest.len());
+        rest = &rest[skip..];
+        if rest.is_empty() {
+            break;
+        }
+        let len = rest
+            .find(|c: char| c.is_whitespace() || SNIPPET_SEPARATORS.contains(c))
+            .unwrap_or(rest.len());
+        let (raw, after) = rest.split_at(len);
+        rest = after;
+        let word = raw.trim_matches(|c: char| matches!(c, ':' | '-'));
+        let followed_by_call = after.starts_with('(');
+        let word_trimmed = word.trim_end_matches('.');
+        if is_file_like(word_trimmed, followed_by_call) {
+            out.push(word_trimmed.to_string());
+            continue;
+        }
+        // `public.documents`, `storage.objects`: a schema-qualified name is a table (or, when
+        // called, a function) somebody chose, even as one lowercase word; `process.env.SECRET`
+        // is an environment variable somebody chose, even with no underscore. Neither shape is
+        // caught by `is_chosen_name`, so the object name is asked for here. A qualified CALL
+        // (`auth.uid()`) is a builtin or an existing function, not a table.
+        if let Some(obj) = qualified_object(word_trimmed, followed_by_call) {
+            if obj.len() >= 3 {
+                out.push(obj.to_string());
+            }
+        }
+        for tok in word.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if tok.len() >= 3 && is_chosen_name(tok) {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Database schemas whose qualified names (`public.documents`) name a table or function.
+const SCHEMA_QUALIFIERS: &[&str] = &["public", "auth", "internal", "storage", "extensions"];
+
+/// The object a qualified word in a snippet names: the table of `schema.table` (not when the
+/// word is called, which makes it a function such as `auth.uid()`), or the variable of
+/// `process.env.NAME`. `None` for any other word.
+fn qualified_object(word: &str, followed_by_call: bool) -> Option<&str> {
+    if let Some(name) = word.strip_prefix("process.env.") {
+        return Some(name).filter(|n| !n.is_empty());
+    }
+    if followed_by_call {
+        return None;
+    }
+    let (schema, name) = word.split_once('.')?;
+    if SCHEMA_QUALIFIERS.contains(&schema) && !name.is_empty() && !name.contains('.') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Whether a token looks like a name its author chose (`snake_case`, `camelCase`, or a
+/// `PascalCase` word with two or more capitals) rather than a plain word, keyword or acronym.
+fn is_chosen_name(tok: &str) -> bool {
+    if tok.contains('_') {
+        // `NODE_ENV`, `owner_id`, `member_contacts`; not a bare run of underscores or digits.
+        return tok.chars().any(|c| c.is_ascii_alphabetic());
+    }
+    let first_upper = tok.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+    let uppers = tok.chars().filter(|c| c.is_ascii_uppercase()).count();
+    let has_lower = tok.chars().any(|c| c.is_ascii_lowercase());
+    has_lower
+        && if first_upper {
+            uppers >= 2
+        } else {
+            uppers >= 1
+        }
+}
+
 /// **Identifier-grounding validator (pure).** Every concrete identifier a generated `fix`
 /// names — a `` `backticked` `` symbol/column, or a bare file-path-like token
 /// (`lib/redirect.ts`, `schema.sql`, `package.json`) — must appear verbatim in `evidence`
 /// (the finding's own path/snippet/detail/captures/surrounding code — see
-/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`]. Returns the FIRST offending
-/// identifier found, so the caller can hand the model a concrete, specific correction
-/// ("you named X, which isn't in the evidence") rather than a vague rejection. Returns
-/// `None` when every named identifier is grounded (including a fix that names none at all —
-/// pure prose is never rejected on this axis).
+/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`] / [`UNIVERSAL_FIX_NAMES`].
+/// A backticked span that is a code snippet (see [`is_code_snippet`]) is the fix's own new
+/// code, so only the names chosen inside it (and any file path in it) are checked, never the
+/// whole span. Returns the FIRST offending identifier found, so the caller can hand the
+/// model a concrete, specific correction ("you named X, which isn't in the evidence") rather
+/// than a vague rejection. Returns `None` when every named identifier is grounded (including
+/// a fix that names none at all — pure prose is never rejected on this axis).
+#[cfg(test)]
 pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
+    find_ungrounded_identifier_in(fix, evidence, None)
+}
+
+/// The names a repository holds: the paths of its files and every identifier its files and paths
+/// spell. A name a fix uses that sits outside the finding's own evidence window but exists in the
+/// repository (`actor_id` two screens down, `tsconfig.json`, `.env.example`, a helper in another
+/// file) is a real name, not an invented one; a name found nowhere in the repository still is
+/// ([`find_ungrounded_identifier_in`]). Built once per repo from the file set the fix stage
+/// already holds.
+pub(crate) struct RepoNames<'a> {
+    files: &'a [(String, String)],
+    /// Every identifier-shaped word of a path or a file's content (`[A-Za-z0-9_]+`).
+    words: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> RepoNames<'a> {
+    pub(crate) fn new(files: &'a [(String, String)]) -> Self {
+        let word_re = regex::Regex::new(r"[A-Za-z0-9_]+").expect("static regex");
+        let mut words: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+        for (path, content) in files {
+            for text in [path.as_str(), content.as_str()] {
+                words.extend(word_re.find_iter(text).map(|m| m.as_str()));
+            }
+        }
+        Self { files, words }
+    }
+
+    /// Whether the repository holds `name`. A path-like name (a slash, or a file extension)
+    /// is a file or directory of the set (exact, a trailing part of a path, a directory on it,
+    /// or a file's base name), or is written in some file's content; any other name is known
+    /// when every identifier word in it is one the repository spells.
+    pub(crate) fn knows(&self, name: &str) -> bool {
+        let name = name.trim_start_matches("./").trim_end_matches('/');
+        if name.is_empty() {
+            return false;
+        }
+        if name.contains('/') || is_file_like(name, false) {
+            // `env.example` is how a fix trimmed of its dot names `.env.example`: a dotfile's
+            // base name is read with or without its leading dot.
+            let on_a_path = self.files.iter().any(|(p, _)| {
+                let base = p.rsplit('/').next().unwrap_or(p);
+                p == name
+                    || p.ends_with(&format!("/{name}"))
+                    || p.starts_with(&format!("{name}/"))
+                    || p.contains(&format!("/{name}/"))
+                    || base.strip_prefix('.') == Some(name)
+            });
+            return on_a_path || self.files.iter().any(|(_, c)| c.contains(name));
+        }
+        let mut parts = name
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|p| !p.is_empty())
+            .peekable();
+        parts.peek().is_some() && parts.all(|p| self.words.contains(p))
+    }
+}
+
+/// [`find_ungrounded_identifier`] with the repository to look a name up in when the finding's
+/// evidence does not hold it. `None` is the evidence alone.
+pub(crate) fn find_ungrounded_identifier_in(
+    fix: &str,
+    evidence: &str,
+    repo: Option<&RepoNames<'_>>,
+) -> Option<String> {
     let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
     let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
 
     let mut candidates: Vec<String> = Vec::new();
+    // The fix with its snippet spans blanked: a `console.error` or `process.exit` inside a
+    // snippet is code, not a file name, and the snippet's own file names are collected from
+    // the snippet itself.
+    let mut prose = fix.to_string();
     for cap in backtick_re.captures_iter(fix) {
-        candidates.push(cap[1].to_string());
+        let span = &cap[1];
+        if is_code_snippet(span) {
+            candidates.extend(snippet_names(span));
+            prose = prose.replace(&cap[0], " ");
+        } else {
+            candidates.push(span.to_string());
+        }
     }
-    for m in path_re.find_iter(fix) {
+    for m in path_re.find_iter(&prose) {
         candidates.push(m.as_str().to_string());
     }
 
@@ -3210,10 +5778,12 @@ pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<St
         if trimmed.is_empty() {
             continue;
         }
-        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str())
+            || UNIVERSAL_FIX_NAMES.contains(&trimmed)
+        {
             continue;
         }
-        if !evidence.contains(trimmed) {
+        if !evidence.contains(trimmed) && !repo.is_some_and(|r| r.knows(trimmed)) {
             return Some(trimmed.to_string());
         }
     }
@@ -3336,6 +5906,128 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Why each of `pending` still has no fix, as the failed part records it: the place of the
+/// finding and the reason its latest reply was turned down. A finding with no reason on file
+/// never got a reply back (the call failed in transport, or the spend limit stopped it).
+fn fix_rejections(
+    findings: &[Finding],
+    pending: &[usize],
+    feedback: &std::collections::HashMap<usize, String>,
+    ledger: &FixLedger,
+) -> Vec<String> {
+    pending
+        .iter()
+        .map(|&i| {
+            let f = &findings[i];
+            let earlier = feedback.get(&i).map(String::as_str);
+            let why = match (ledger.last_miss.get(&i), earlier) {
+                (Some(FixMiss::TransportFailed), Some(e)) => {
+                    format!(
+                        "the last call failed in transport (an earlier reply was turned down: {e})"
+                    )
+                }
+                (Some(FixMiss::TransportFailed), None) => {
+                    "the last call failed in transport".to_string()
+                }
+                (Some(FixMiss::CapStopped), _) => "the spend limit stopped the call".to_string(),
+                (None, Some(e)) => e.to_string(),
+                (None, None) => "no reply came back for it".to_string(),
+            };
+            format!("{}:{} {}: {why}", f.path, f.line, f.rule_id)
+        })
+        .collect()
+}
+
+/// Why a finding never got a response from the fix model on its last attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixMiss {
+    /// The spend limit refused the batch the finding was in; no call was made.
+    CapStopped,
+    /// The call was made and failed in transport (timeout, HTTP error, dropped stream).
+    TransportFailed,
+}
+
+/// What happened to each finding sent through the fix rounds, kept per finding so the give-up
+/// rate counts only what it means: a finding the model ANSWERED (at least one call returned and
+/// was parsed) and still produced no fix that passed the self-check. A finding that was never
+/// answered (the spend limit stopped it, or every call failed in transport) is not a model
+/// give-up and is reported as its own figure. Filled by [`run_fix_specifics_round`], summed into
+/// a [`crate::stage_telemetry::FixOutcome`] by [`FixLedger::outcome`].
+#[derive(Default)]
+struct FixLedger {
+    /// Findings a call was actually made for, at least once.
+    sent: std::collections::HashSet<usize>,
+    /// Findings whose call returned a response that was parsed, at least once.
+    answered: std::collections::HashSet<usize>,
+    /// For a finding that missed its latest attempt without an answer: why.
+    last_miss: std::collections::HashMap<usize, FixMiss>,
+    /// Findings whose latest attempt failed in transport (see [`second_try_allowed`]): the only
+    /// ones the end-of-run second try sends again.
+    retry_at_end: std::collections::HashSet<usize>,
+}
+
+impl FixLedger {
+    fn miss(&mut self, batch: &[usize], why: FixMiss) {
+        for &i in batch {
+            self.last_miss.insert(i, why);
+        }
+    }
+
+    /// A call is about to be made for `batch`: how each of its findings last failed starts afresh.
+    fn sent(&mut self, batch: &[usize]) {
+        self.sent.extend(batch.iter().copied());
+        for i in batch {
+            self.retry_at_end.remove(i);
+        }
+    }
+
+    /// The call for `batch` failed in transport and the run may still send it again at the end.
+    fn retryable_at_end(&mut self, batch: &[usize]) {
+        self.retry_at_end.extend(batch.iter().copied());
+    }
+
+    /// The members of `pending` the end-of-run second try covers (transport failures only).
+    fn split_for_second_try(&self, pending: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        pending
+            .iter()
+            .copied()
+            .partition(|i| self.retry_at_end.contains(i))
+    }
+
+    /// A call for `batch` returned a response.
+    fn answered(&mut self, batch: &[usize]) {
+        self.answered.extend(batch.iter().copied());
+        for i in batch {
+            self.last_miss.remove(i);
+        }
+    }
+
+    /// The run's tally once the rounds are over, given the findings still `pending` (no fix that
+    /// passed the self-check) and how many the pre-filter handled with no model call.
+    fn outcome(
+        &self,
+        pending: &[usize],
+        authored_without_model: usize,
+    ) -> crate::stage_telemetry::FixOutcome {
+        let mut out = crate::stage_telemetry::FixOutcome {
+            sent_to_model: self.sent.len() as u64,
+            answered: self.answered.len() as u64,
+            authored_without_model: authored_without_model as u64,
+            ..Default::default()
+        };
+        for i in pending {
+            if self.answered.contains(i) {
+                out.gave_up += 1;
+            } else if self.last_miss.get(i) == Some(&FixMiss::CapStopped) {
+                out.cap_stopped += 1;
+            } else {
+                out.transport_failed += 1;
+            }
+        }
+        out
+    }
+}
+
 /// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
 /// [`generate_fix_specifics`] so a normal `FIX_BATCH_SIZE`-batched round and the final
 /// single-finding retry share IDENTICAL request-building, streaming, and self-check logic —
@@ -3348,14 +6040,19 @@ async fn run_fix_specifics_round(
     llm: &dyn LlmPort,
     repo: &str,
     system: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     fix_model: Option<&str>,
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
     files: &[(String, String)],
+    repo_names: &RepoNames<'_>,
     findings: &mut [Finding],
     feedback: &mut std::collections::HashMap<usize, String>,
     pending: &[usize],
     batch_size: usize,
+    ledger: &mut FixLedger,
+    trail: &mut StageTrail,
+    second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent streamed
@@ -3364,6 +6061,23 @@ async fn run_fix_specifics_round(
     // chunk (the whole set) when `batch_size >= pending.len()`, so the request/self-check
     // shape below is unchanged from before this fix in that case.
     for batch in pending.chunks(batch_size.max(1)) {
+        // SPEND CAP, between batches: a batch the cap refuses is re-queued like a failed one
+        // (so its findings still reach the authored-remediation fallback) and the stage is
+        // recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_FIX).await {
+            Err(CapReached) => {
+                ledger.miss(batch, FixMiss::CapStopped);
+                still_pending.extend(batch.iter().copied());
+                continue;
+            }
+            Ok(permit) => permit,
+        };
+        // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
+        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
+        for &i in batch {
+            let id = detail_regen::opaque_id(repo, i, &findings[i], &ids);
+            ids.push(id);
+        }
         let prompt = {
             let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
             let local_feedback: std::collections::HashMap<usize, String> = batch
@@ -3373,42 +6087,61 @@ async fn run_fix_specifics_round(
                 .collect();
             format!(
                 "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, files, corpus, &local_feedback)
+                build_fix_specific_block(&refs, &ids, files, corpus, &local_feedback, nonce)
             )
         };
-        let mut req = LlmRequest::new(prompt)
-            .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING));
-        if let Some(m) = fix_model {
-            req = req.with_model(m.to_string());
-        }
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.to_string())
+                .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_response_schema(reply_schemas::fix_reply_schema(&ids))
+                .with_model(stage_model(fix_model)),
+            Stage::FixGeneration,
+        );
         // Routed through the STREAMING transport (not the flat `complete`) so a large
         // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
         // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
         // transcript sink to feed.
         let mut on_delta = |_: &str| {};
+        ledger.sent(batch);
+        let request_key = crate::run_store::journal::request_key(&req);
+        note_request(meter, &req);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
             // Re-queue exactly this chunk's findings so the next round retries them (or,
             // on the last round, the instantiated-fallback below picks them up) — a
             // failure never re-queues findings OUTSIDE this chunk.
-            Err(_) => {
+            Err(e) => {
+                meter_failed(meter, Stage::FixGeneration, &e);
+                trail.note_error(&e, second_try);
+                if second_try_allowed(&e, meter) {
+                    ledger.retryable_at_end(batch);
+                }
+                ledger.miss(batch, FixMiss::TransportFailed);
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
         };
+        ledger.answered(batch);
         if let Some(m) = meter {
             m.record_stage(Stage::FixGeneration, &resp);
         }
         let parsed = parse_fix_specifics(&resp.text);
         let rejected_before = still_pending.len();
+        // Why each fix of THIS reply was turned down, named by place; the reply carries them.
+        let mut turned_down: Vec<String> = Vec::new();
+        let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
-            let Some(text) = parsed.get(&pos) else {
+            let Some(text) = parsed.get(&ids[pos]) else {
                 feedback
                     .entry(orig_idx)
                     .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    "the reply held no fix for this finding",
+                ));
                 still_pending.push(orig_idx);
                 continue;
             };
@@ -3417,23 +6150,36 @@ async fn run_fix_specifics_round(
             let redacted_text = camerata_secrets::redact_str(text).into_owned();
             let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
-            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+            if let Some(bad) = find_ungrounded_identifier_in(text, &evidence, Some(repo_names)) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!(
+                        "named `{bad}`, which is not in the finding's evidence or anywhere in \
+                         the repository"
+                    ),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
-                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence"
+                        "you named `{bad}`, which appears neither in this finding's evidence \
+                         nor anywhere in the repository; keep your fix and its code snippet, \
+                         but use only names that exist, or describe a new name in plain words"
                     ),
                 );
                 still_pending.push(orig_idx);
                 continue;
             }
             if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                turned_down.push(place(&findings[orig_idx], &reason));
                 feedback.insert(orig_idx, reason);
                 still_pending.push(orig_idx);
                 continue;
             }
             if let Some(leak) = fix_leaks_methodology(text) {
+                turned_down.push(place(
+                    &findings[orig_idx],
+                    &format!("described detection methodology (\"{leak}\")"),
+                ));
                 feedback.insert(
                     orig_idx,
                     format!(
@@ -3445,6 +6191,18 @@ async fn run_fix_specifics_round(
                 continue;
             }
             findings[orig_idx].fix_specific = Some(text.clone());
+        }
+        // The reply records the reasons, and only this reply. It is set aside only when EVERY
+        // fix in it was turned down: a reply with an accepted fix stays good, so a resume
+        // replays that fix instead of paying for the whole batch again.
+        if !turned_down.is_empty() {
+            let why = format!(
+                "{} of {} fix(es) turned down: {}",
+                turned_down.len(),
+                batch.len(),
+                turned_down.join("; ")
+            );
+            llm.note_rejected_reply(&request_key, &why, turned_down.len() == batch.len());
         }
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
@@ -3528,7 +6286,7 @@ fn apply_authored_remediation_without_model(
 /// This is a PIPELINE failure (the model never produced a validated, codebase-specific fix),
 /// not a confidence judgement about the finding itself, so it must NEVER set `needs_review`,
 /// NEVER hedge, and NEVER tag `detail` with pipeline-state text (C3-1b,
-/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`) — the ONLY thing that sets
+/// the cycle-2 queue-hardening notes) — the ONLY thing that sets
 /// `needs_review`/`confidence = "needs-review"` is a calibration doubt verdict
 /// (`apply_verdicts`). A row that STILL has no fix from ANY source (no model-generated
 /// specific, no instantiated authored remediation) is never dropped and never refused here —
@@ -3568,6 +6326,8 @@ pub async fn generate_fix_specifics(
     // The fix prompt carries eight raw lines either side of each finding: redact them.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
+    // The names the repository holds, for grounding a name the finding's own window lacks.
+    let repo_names = RepoNames::new(files);
 
     // PRE-FILTER (no model call). A finding with no surrounding code to read (line 0, or its file
     // is not among the scanned files) was the bulk of the fix retries that were paid for and
@@ -3576,8 +6336,11 @@ pub async fn generate_fix_specifics(
     // remediation, instantiated against the finding's captures, is where they were always going
     // to end up, so go there directly. Only when that fallback actually exists: skipping the model
     // for a rule with no authored remediation would leave the row with no fix at all.
-    let (indices, authored_directly) =
-        apply_authored_remediation_without_model(&mut findings, indices, files, corpus);
+    let (indices, authored_directly) = if efficiency_of(meter).fix_prefilter {
+        apply_authored_remediation_without_model(&mut findings, indices, files, corpus)
+    } else {
+        (indices, 0)
+    };
     if authored_directly > 0 {
         eprintln!(
             "[camerata-server] fix-specific generation: {authored_directly} finding(s) in {repo} \
@@ -3585,11 +6348,24 @@ pub async fn generate_fix_specifics(
              remediation with no model call."
         );
     }
+    // Telemetry: what became of each finding is tallied per finding (`FixLedger`) and recorded
+    // once after the last round. When nothing is left for the model, only the pre-filter's count.
     if indices.is_empty() {
+        if let Some(m) = meter {
+            m.record_fix_outcome(FixLedger::default().outcome(&[], authored_directly));
+        }
         return (findings, Vec::new());
     }
+    let mut ledger = FixLedger::default();
+    let mut trail = StageTrail::default();
 
-    let system = fix_specific_system_prompt();
+    // One delimiter token for every round, regeneration rounds included (see `crate::prompt_frame`),
+    // drawn so that it occurs in none of the evidence or files it will frame.
+    let evidence = finding_evidence_texts(&findings);
+    let mut avoid: Vec<&str> = evidence.iter().map(String::as_str).collect();
+    avoid.extend(files.iter().flat_map(|(p, c)| [p.as_str(), c.as_str()]));
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(&avoid);
+    let system = crate::prompt_frame::with_untrusted_clause(fix_specific_system_prompt(), &nonce);
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
     // pass their self-check or exhaust retries. Original-index -> rejection reason, fed
     // back into the NEXT round's prompt for that finding only.
@@ -3604,14 +6380,19 @@ pub async fn generate_fix_specifics(
             llm,
             repo,
             &system,
+            &nonce,
             fix_model,
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
             FIX_BATCH_SIZE,
+            &mut ledger,
+            &mut trail,
+            false,
         )
         .await;
     }
@@ -3624,16 +6405,68 @@ pub async fn generate_fix_specifics(
             llm,
             repo,
             &system,
+            &nonce,
             fix_model,
             meter,
             corpus,
             files,
+            &repo_names,
             &mut findings,
             &mut feedback,
             &pending,
             1,
+            &mut ledger,
+            &mut trail,
+            false,
         )
         .await;
+    }
+
+    // END-OF-RUN SECOND TRY, for transport trouble only. A finding whose last attempt could not
+    // reach the provider gets one more solo try, when the provider has had the whole stage to
+    // recover, through the same admission and spend checks. A finding the model answered and the
+    // self-check turned down is not sent again: the rounds already changed the request for it
+    // (a feedback line, then a batch of one), and the same solo request a second time pays twice
+    // for the same answer. A run that has stopped sends nothing. Only a part that is still
+    // without a fix after this is a give-up (and so a failed part, which locks a client export).
+    if !pending.is_empty() {
+        trail.note_unusable(
+            "no usable fix was returned after the stage's own rounds",
+            false,
+            fix_rejections(&findings, &pending, &feedback, &ledger),
+        );
+    }
+    let (retry, left_alone) = ledger.split_for_second_try(&pending);
+    if !retry.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        let still = run_fix_specifics_round(
+            llm,
+            repo,
+            &system,
+            &nonce,
+            fix_model,
+            meter,
+            corpus,
+            files,
+            &repo_names,
+            &mut findings,
+            &mut feedback,
+            &retry,
+            1,
+            &mut ledger,
+            &mut trail,
+            true,
+        )
+        .await;
+        if !still.is_empty() {
+            trail.note_unusable(
+                "no usable fix was returned on the second try",
+                true,
+                fix_rejections(&findings, &still, &feedback, &ledger),
+            );
+        }
+        pending = left_alone;
+        pending.extend(still);
+        pending.sort_unstable();
     }
 
     // C6-B3: a give-up is never silent and never leaves the finding with no fix line when a
@@ -3644,6 +6477,9 @@ pub async fn generate_fix_specifics(
     // one. A finding whose rule carries no authored remediation at all keeps `fix_specific`
     // as `None`; `report_export::is_action_row_missing_a_fix` is what re-routes THAT case to
     // `"held"` rather than shipping an action-bucket row with no fix text anywhere.
+    if let Some(m) = meter {
+        m.record_fix_outcome(ledger.outcome(&pending, authored_directly));
+    }
     let mut failed_passes = Vec::new();
     if !pending.is_empty() {
         let gave_up = pending.len();
@@ -3679,6 +6515,11 @@ pub async fn generate_fix_specifics(
                  and {uncovered} had no authored remediation to fall back to either (routed \
                  to held for manual review rather than shipped with no fix at all)"
             ),
+            files_not_reviewed: 0,
+            class: trail.class(),
+            files: Vec::new(),
+            attempts: trail.attempts.clone(),
+            scope_note: false,
         });
     }
 
@@ -3708,8 +6549,9 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
-/// Coarse total-time backstop for NON-streaming calls only (the calibration pass and the
-/// no-feedback path), which have no per-token progress signal to watch. Streaming calls do
+/// Coarse total-time backstop for the deep tier's no-feedback calls (a bounded 8,192-token
+/// reply). The scan, calibration, alternatives, detail and fix stages do not use it: they
+/// stream, which shows progress, so only silence fails them. Streaming calls do
 /// NOT use this — they self-bound on an idle/stall timeout inside the transport, which
 /// scales with repo size (a big scan keeps streaming and never trips it; only a true hang
 /// does). Set high so it never kills legitimate work. `CAMERATA_LLM_MAX_SECS` (default 600).
@@ -3806,7 +6648,12 @@ fn cache_breakpoints_for_pass(
 /// request shares. Rules-first is therefore not built; see the telemetry before revisiting.
 ///
 /// Returns `(prompt, cache_breakpoints)`.
+///
+/// This is the prompt with the `label_after_prefix` efficiency measure ON (every test and the
+/// reference layout use it); [`build_pass_prompt_with`] is the one implementation and takes the
+/// switch.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_pass_prompt(
     repo: &str,
     repo_map: &str,
@@ -3818,16 +6665,145 @@ fn build_pass_prompt(
     task_line: &str,
     rules_block: &str,
 ) -> (String, Vec<usize>) {
+    build_pass_prompt_with(
+        true,
+        repo,
+        repo_map,
+        label,
+        ci,
+        n_c,
+        digest,
+        n_b,
+        task_line,
+        rules_block,
+    )
+}
+
+/// [`build_pass_prompt`] with the `label_after_prefix` switch explicit. ON (the default): the
+/// label line leads the uncached suffix. OFF: the label line sits between the repo map and the
+/// digest, inside the cached digest segment, exactly as before rank 3 (so routing groups over
+/// the same files can no longer share a cached digest). Same bytes either way, rearranged.
+#[allow(clippy::too_many_arguments)]
+fn build_pass_prompt_with(
+    label_after_prefix: bool,
+    repo: &str,
+    repo_map: &str,
+    label: &str,
+    ci: usize,
+    n_c: usize,
+    digest: &str,
+    n_b: usize,
+    task_line: &str,
+    rules_block: &str,
+) -> (String, Vec<usize>) {
     let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+    let label_line = format!("({label} {}/{n_c})\n\n", ci + 1);
+    if !label_after_prefix {
+        let digest_segment = format!("{label_line}{digest}\n\n");
+        let static_prefix = format!("{repo_map_prefix}{digest_segment}");
+        let cache_breakpoints =
+            cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
+        return (
+            format!("{static_prefix}{task_line}\n\n{rules_block}"),
+            cache_breakpoints,
+        );
+    }
     let digest_segment = format!("{digest}\n\n");
     let static_prefix = format!("{repo_map_prefix}{digest_segment}");
     let cache_breakpoints =
         cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
-    let prompt = format!(
-        "{static_prefix}({label} {}/{n_c})\n\n{task_line}\n\n{rules_block}",
-        ci + 1
-    );
+    let prompt = format!("{static_prefix}{label_line}{task_line}\n\n{rules_block}");
     (prompt, cache_breakpoints)
+}
+
+/// The instruction line that closes a scan pass's prompt. ONE definition for the real-time
+/// passes, the batch items and the pre-flight sample, so the three can never disagree about what
+/// a pass asks. `advisory` adds the "also flag other genuine issues" task (first rule-batch of a
+/// chunk only). `terse` is the `terse_output` switch: the terse system prompt carries no
+/// `proposed_rules` array, so the advisory line (the only pass that may propose rules) adds it
+/// back here, in the uncached suffix, where it cannot disturb the shared cache prefix. With
+/// `terse` off the line is exactly what it always was.
+fn pass_task_line(advisory: bool, bi: usize, n_b: usize, terse: bool) -> String {
+    if advisory {
+        let line = format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1);
+        if terse {
+            format!("{line}\n{ADVISORY_PROPOSED_RULES_INSTRUCTION}")
+        } else {
+            line
+        }
+    } else {
+        format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
+    }
+}
+
+/// The request the exact-token sample counts for a pass whose prompt and cache layout are
+/// already built: the audit system prompt plus the prompt, split at the same breakpoints the
+/// real call uses. ONE builder for the batch path's sample and the pre-flight sample.
+fn sample_count_request(
+    prompt: &str,
+    cache_breakpoints: &[usize],
+    terse: bool,
+    nonce: &crate::prompt_frame::FrameNonce,
+) -> LlmRequest {
+    LlmRequest::new(prompt.to_string())
+        .with_system(crate::prompt_frame::with_untrusted_clause(
+            audit_system_prompt_with(terse),
+            nonce,
+        ))
+        .with_cache_breakpoints(cache_breakpoints.to_vec())
+}
+
+/// A representative scan pass for a repo: the first (chunk, rule-batch) pair, built exactly as
+/// the scan builds it (redacted files, repo map, digest, rules block, cache layout), so
+/// `count_tokens` on it is the real input size of one pass. Used by the pre-flight estimate in
+/// `camerata inspect`.
+pub struct ScanSample {
+    pub request: LlmRequest,
+    /// Chunks times rule-batches for the main scan (the real pass count, before routing).
+    pub passes: usize,
+}
+
+/// The [`ScanSample`] for `files` under `selected`; `None` when there are no files.
+pub fn representative_scan_sample(
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[(String, String)],
+    mode: ScanMode,
+    efficiency: crate::efficiency::EfficiencyConfig,
+) -> Option<ScanSample> {
+    if files.is_empty() {
+        return None;
+    }
+    let model_files = crate::onboard::redact::files_for_model(files);
+    // A token of the real length, so the counted size is the real size.
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[&model_files]);
+    let repo_map = build_repo_map(&model_files, &nonce);
+    let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
+    let first_chunk = chunks.first()?;
+    let (_, batch_size) = mode.tuning(efficiency);
+    let empty: &[(String, String)] = &[];
+    let batches: Vec<&[(String, String)]> = if selected.is_empty() {
+        vec![empty]
+    } else {
+        selected.chunks(batch_size.max(1)).collect()
+    };
+    let digest = build_digest(first_chunk, &nonce);
+    let (prompt, bps) = build_pass_prompt_with(
+        efficiency.label_after_prefix,
+        repo,
+        &repo_map,
+        "pass",
+        0,
+        chunks.len(),
+        &digest,
+        batches.len(),
+        &pass_task_line(true, 0, batches.len(), efficiency.terse_output),
+        &build_rules_block(batches[0]),
+    );
+    Some(ScanSample {
+        request: sample_count_request(&prompt, &bps, efficiency.terse_output, &nonce),
+        passes: chunks.len() * batches.len(),
+    })
 }
 
 /// One audit pass: build the request, run it (streaming into the transcript when feedback
@@ -3845,50 +6821,363 @@ async fn audit_pass(
     audit_model: Option<&str>,
     prompt: String,
     cache_breakpoints: Vec<usize>,
+    nonce: &crate::prompt_frame::FrameNonce,
     repo: &str,
     adopted: &std::collections::HashSet<String>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
     meter: Option<&UsageMeter>,
+    // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
+    n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
-    let mut req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt())
-        .with_max_tokens(8192);
-    if let Some(m) = audit_model {
-        req = req.with_model(m.to_string());
-    }
+    let mut req = with_stage_effort(
+        LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                audit_system_prompt_with(terse_output_of(meter)),
+                nonce,
+            ))
+            .with_max_tokens(scan_max_tokens(n_rules))
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_response_schema(reply_schemas::scan_reply_schema())
+            .with_model(stage_model(audit_model)),
+        Stage::ScanPass,
+    );
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    let resp = match send_audit_request(llm, req.clone(), feedback, session, meter).await {
+        Ok(r) => r,
+        Err(e) => {
+            meter_failed(meter, Stage::ScanPass, &e);
+            return Err(e);
+        }
+    };
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
-    // TRUNCATION-ONLY RETRY. A reply cut off at `max_tokens` is the one failure a repeat can
-    // recover: the same request with a higher cap returns the whole answer, where the cut-off
-    // one parses to nothing and the chunk's findings are lost. Any OTHER unusable reply (a
-    // complete answer that is simply not JSON) is NOT retried: the same prompt at the same cap
-    // tends to return the same thing and the spend is paid again. At most one retry, and a retry
-    // that itself fails leaves the pass exactly as it was before this existed: the first
-    // response, parsed as it always was.
-    let mut wasted_counted = false;
+    let ScanReply {
+        resp,
+        malformed_retries,
+        truncation_retried,
+        stopped_by_cap,
+    } = retry_unusable_scan_reply(
+        llm,
+        &req,
+        resp,
+        feedback,
+        session,
+        meter,
+        MALFORMED_REPLY_RETRIES,
+    )
+    .await;
+    // The spend limit stopped a retry the reply needed: the pass has no usable answer, and it
+    // says why rather than parsing a cut-off or malformed reply as "no findings".
+    if stopped_by_cap {
+        return Err(retry_blocked_error(meter));
+    }
+    // A reply that is still not JSON is a FAILED pass, never "no findings": parsing it would
+    // return an empty list indistinguishable from a clean chunk. The caller records it as a
+    // failed pass naming the files it did not review.
+    if !resp.truncated && scan_output_is_malformed(&resp.text) {
+        anyhow::bail!("{}", malformed_reply_reason(1 + malformed_retries));
+    }
+    // A reply STILL cut off at the output limit after the retry is not a clean pass: the part
+    // that never arrived may hold findings. The complete findings that did arrive are kept and
+    // the pass is reported as failed, naming the files it did not finish (H1).
     if resp.truncated {
+        let attempts = 1 + usize::from(truncation_retried) + malformed_retries;
+        return Err(PartialPassReply::from_cut_off(repo, &resp.text, adopted, attempts).into());
+    }
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
+/// The failure reason for a scan reply that was still cut off at the output limit after
+/// `attempts` sends in all, with `recovered` complete findings salvaged from the part that
+/// arrived.
+pub(crate) fn cut_off_reply_reason(attempts: Option<usize>, recovered: usize) -> String {
+    let sent = match attempts {
+        Some(1) => " after 1 attempt".to_string(),
+        Some(n) => format!(" after {n} attempts"),
+        None => String::new(),
+    };
+    format!(
+        "the model's reply was cut off at the output limit{sent}; {recovered} finding{} \
+         recovered, the remainder of this pass was not reviewed",
+        if recovered == 1 { "" } else { "s" }
+    )
+}
+
+/// A scan pass whose reply was cut off at the output limit and stayed cut off: the complete
+/// findings that arrived (`findings`), and the reason the pass is nevertheless a FAILED one. It
+/// travels as the `Err` of a pass so every pass runner keeps the recovered findings AND records
+/// the failure; nothing that arrived is dropped and the unreviewed remainder is never read as
+/// "no findings".
+#[derive(Debug)]
+struct PartialPassReply {
+    findings: Vec<Finding>,
+    proposed: Vec<ProposedRule>,
+    needs: Vec<String>,
+    reason: String,
+}
+
+impl PartialPassReply {
+    /// Salvage what a cut-off reply holds (see [`salvage_complete_findings`]).
+    fn from_cut_off(
+        repo: &str,
+        text: &str,
+        adopted: &std::collections::HashSet<String>,
+        attempts: usize,
+    ) -> Self {
+        let (findings, proposed) = salvage_complete_findings(repo, text, adopted);
+        let reason = cut_off_reply_reason(Some(attempts), findings.len());
+        Self {
+            findings,
+            proposed,
+            needs: Vec::new(),
+            reason,
+        }
+    }
+}
+
+impl std::fmt::Display for PartialPassReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for PartialPassReply {}
+
+/// Recover every COMPLETE finding object from a reply cut off mid-way: the `{...}` entries of
+/// the `findings` array that closed before the output limit hit. The last, unfinished object and
+/// anything after it are not guessed at. The recovered objects go through the ordinary
+/// [`parse_ai_findings`], so they are shaped, redacted and typed exactly like a whole reply's.
+fn salvage_complete_findings(
+    repo: &str,
+    text: &str,
+    adopted: &std::collections::HashSet<String>,
+) -> (Vec<Finding>, Vec<ProposedRule>) {
+    let valid = complete_array_objects(text, "findings");
+    if valid.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
+    parse_ai_findings(repo, &synthetic, adopted)
+}
+
+/// The COMPLETE `{...}` objects of the array under `key` in a reply that may have been cut off
+/// mid-way, each valid JSON on its own: the shared salvage walker (the scan's findings and the
+/// detail regeneration's entries both use it). The last, unfinished object and anything after it
+/// are not guessed at. Anchored at the first `{`: prose before it that happens to contain the
+/// key is not the key, and the key must open the object or follow a comma. Objects are parsed
+/// one at a time, so a complete-looking object that is not valid JSON is skipped on its own and
+/// does not cost the others. Strings and escapes are tracked, so a brace inside a string does
+/// not move an object boundary.
+pub(crate) fn complete_array_objects<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
+    let Some(obj_start) = text.find('{') else {
+        return Vec::new();
+    };
+    let json = &text[obj_start..];
+    let quoted = format!("\"{key}\"");
+    let Some(key_at) = json
+        .match_indices(quoted.as_str())
+        .map(|(i, _)| i)
+        .find(|&i| {
+            json[..i]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c == '{' || c == ',')
+        })
+    else {
+        return Vec::new();
+    };
+    let after = &json[key_at + quoted.len()..];
+    let Some(open) = after.find('[') else {
+        return Vec::new();
+    };
+    // Only whitespace and a colon may sit between the key and its array.
+    if !after[..open].chars().all(|c| c.is_whitespace() || c == ':') {
+        return Vec::new();
+    }
+    let body = &after[open + 1..];
+    let bytes = body.as_bytes();
+    let mut objects: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                let start = i;
+                let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+                let mut end = None;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if in_str {
+                        if esc {
+                            esc = false;
+                        } else if b == b'\\' {
+                            esc = true;
+                        } else if b == b'"' {
+                            in_str = false;
+                        }
+                    } else if b == b'"' {
+                        in_str = true;
+                    } else if b == b'{' {
+                        depth += 1;
+                    } else if b == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                match end {
+                    Some(e) => {
+                        objects.push(&body[start..=e]);
+                        i = e + 1;
+                    }
+                    // The object never closed: the cut-off point. Nothing after it is read.
+                    None => break,
+                }
+            }
+            b']' => break,
+            _ => i += 1,
+        }
+    }
+    objects
+        .into_iter()
+        .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
+        .collect()
+}
+
+/// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut
+/// off or malformed, and sending it again would have gone past the limit).
+pub(crate) const SPEND_LIMIT_BEFORE_RETRY: &str =
+    "spend limit reached before the reply could be retried";
+
+/// The failure reason for a scan reply that is still not JSON after `attempts` sends in all
+/// (the first plus any retries). States the attempt count so the operator sees how many calls
+/// were spent.
+pub(crate) fn malformed_reply_reason(attempts: usize) -> String {
+    format!(
+        "the model's reply was not valid JSON after {attempts} {}",
+        if attempts == 1 { "attempt" } else { "attempts" }
+    )
+}
+
+/// What [`retry_unusable_scan_reply`] hands back.
+struct ScanReply {
+    /// The reply the pass should use.
+    resp: crate::llm::LlmResponse,
+    /// How many malformed-reply retries were sent.
+    malformed_retries: usize,
+    /// True when the truncation retry was sent (the first reply was cut off and the retry ran).
+    truncation_retried: bool,
+    /// True when the spend limit stopped a retry the reply needed (the reply is still cut off or
+    /// malformed). The caller decides what that means for its pass.
+    stopped_by_cap: bool,
+}
+
+/// THE RETRY STEP every scan pass uses: a real-time pass from [`audit_pass`] and a batch item
+/// from [`run_passes_batch`] alike. `resp` is the reply `req` got, already recorded on the meter.
+///
+/// 1. TRUNCATION RETRY. A reply cut off at `max_tokens` is recovered by the same request with a
+///    higher cap, which returns the whole answer where the cut-off one parses to nothing and the
+///    chunk's findings are lost. At most one retry, and a retry that itself fails leaves the
+///    first response in place.
+/// 2. MALFORMED-REPLY RETRY (H4). A complete reply (not cut off) that holds no JSON object the
+///    parser can read is asked again with [`MALFORMED_REPLY_NOTE`] added to the prompt (never
+///    the identical request: a retry after a content failure changes the request), at most
+///    `malformed_retries_allowed` times (a batch item passes zero: its reply is reported as a
+///    failed pass instead). A transport error on a retry ends the retries and leaves the
+///    malformed reply in place.
+///
+/// Every retry is one more billed call, so each checks the spend limit before sending: with the
+/// limit reached the retry is not sent and `stopped_by_cap` is set.
+async fn retry_unusable_scan_reply(
+    llm: &dyn LlmPort,
+    req: &LlmRequest,
+    mut resp: crate::llm::LlmResponse,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+    meter: Option<&UsageMeter>,
+    malformed_retries_allowed: usize,
+) -> ScanReply {
+    let cap_reached = || meter.is_some_and(UsageMeter::retry_blocked);
+    let mut wasted_counted = false;
+    let mut stopped_by_cap = false;
+    let mut truncation_retried = false;
+    // The retry must CHANGE the request: it raises the cap. A reply already cut off at the runaway
+    // ceiling has no higher cap to ask for, and the same request again would be paid for twice
+    // and cut off the same way, so there it is not sent (the pass is reported as cut off).
+    let retry_cap = req
+        .max_tokens
+        .saturating_mul(2)
+        .min(AGGREGATE_MAX_TOKENS_CEILING);
+    if resp.truncated && efficiency_of(meter).truncation_retry && retry_cap > req.max_tokens {
+        if cap_reached() {
+            stopped_by_cap = true;
+        } else {
+            truncation_retried = true;
+            if let Some(m) = meter {
+                m.record_wasted(Stage::ScanPass, &resp);
+            }
+            wasted_counted = true;
+            match send_audit_request(
+                llm,
+                req.clone().with_max_tokens(retry_cap),
+                feedback,
+                session,
+                meter,
+            )
+            .await
+            {
+                Ok(retry) => {
+                    if let Some(m) = meter {
+                        m.record_stage(Stage::ScanPass, &retry);
+                    }
+                    resp = retry;
+                    wasted_counted = false;
+                }
+                // The retry failed (possibly refused, and billed): the first reply stands.
+                Err(e) => meter_failed(meter, Stage::ScanPass, &e),
+            }
+        }
+    }
+    let mut malformed_retries = 0usize;
+    while !stopped_by_cap
+        && !resp.truncated
+        && scan_output_is_malformed(&resp.text)
+        && malformed_retries < malformed_retries_allowed
+    {
+        if cap_reached() {
+            stopped_by_cap = true;
+            break;
+        }
+        malformed_retries += 1;
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
-        wasted_counted = true;
-        let retry_cap = req
-            .max_tokens
-            .saturating_mul(2)
-            .min(AGGREGATE_MAX_TOKENS_CEILING);
-        if let Ok(retry) =
-            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
-        {
-            if let Some(m) = meter {
-                m.record_stage(Stage::ScanPass, &retry);
+        // Never the same request again: the retry says what was wrong with the reply. Built
+        // from the ORIGINAL request each time, so the note appears once whatever the count.
+        let mut retry_req = req.clone();
+        retry_req.prompt.push_str("\n\n");
+        retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
+        match send_audit_request(llm, retry_req, feedback, session, meter).await {
+            Ok(retry) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::ScanPass, &retry);
+                }
+                resp = retry;
             }
-            resp = retry;
-            wasted_counted = false;
+            Err(e) => {
+                meter_failed(meter, Stage::ScanPass, &e);
+                wasted_counted = true;
+                break;
+            }
         }
     }
     // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
@@ -3898,9 +7187,12 @@ async fn audit_pass(
             m.record_wasted(Stage::ScanPass, &resp);
         }
     }
-    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-    let needs = parse_needs_files(&resp.text);
-    Ok((f, p, needs))
+    ScanReply {
+        resp,
+        malformed_retries,
+        truncation_retried,
+        stopped_by_cap,
+    }
 }
 
 /// One scan-pass request: streamed into the transcript when feedback is present, else bounded
@@ -3910,7 +7202,10 @@ async fn send_audit_request(
     req: LlmRequest,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
+    meter: Option<&UsageMeter>,
 ) -> anyhow::Result<crate::llm::LlmResponse> {
+    // What this request could cost joins the spend limit's reserve before it is sent.
+    note_request(meter, &req);
     if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
         // repo size and only a genuine hang (no output for the idle window) aborts. No
@@ -3918,11 +7213,11 @@ async fn send_audit_request(
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
         llm.complete_streaming(req, &mut on_delta).await
     } else {
-        // Non-streaming has no progress signal; bound it with the coarse total backstop.
-        let cap = total_backstop();
-        tokio::time::timeout(cap, llm.complete(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
+        // Streamed as well, with no listener: the idle window governs here too. A fixed total
+        // backstop around a reply that may legitimately run for minutes (a large `max_tokens`)
+        // would fail a healthy call and pay for it twice; only silence is a failure.
+        let mut on_delta = |_: &str| {};
+        llm.complete_streaming(req, &mut on_delta).await
     }
 }
 
@@ -3984,41 +7279,51 @@ fn extract_public_symbols(content: &str) -> Vec<String> {
 /// not in this pass. The map gives every chunk that architecture without every file body,
 /// so chunking doesn't reintroduce cross-file misses. (Bodies still only appear in their
 /// own chunk — a rule needing the full body of a type in another chunk is the known limit.)
-fn build_repo_map(files: &[(String, String)]) -> String {
+fn build_repo_map(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
     let mut out = String::from(
         "REPO MAP — every file in the repo and the public symbols it defines. Only SOME file \
          bodies appear in THIS pass; use this map for cross-file architectural context (which \
          directories are repositories vs services vs controllers, where a named type lives):\n",
     );
+    // Paths and symbol names come from the client's files: framed like a file body.
+    let mut listing = String::new();
     for (path, content) in files {
-        let syms = extract_public_symbols(content);
-        if syms.is_empty() {
-            out.push_str(&format!("  {path}\n"));
-        } else {
-            out.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
-        }
+        listing.push_str(&repo_map_line(path, content));
     }
+    out.push_str(&crate::prompt_frame::frame_untrusted(
+        nonce, "repo map", &listing,
+    ));
     out.push('\n');
     out
+}
+
+/// One file's line of the repo map: its path and the public symbols it defines. ONE definition
+/// for the map every scan pass reads and for the detail regeneration's view of a file the
+/// finding names.
+fn repo_map_line(path: &str, content: &str) -> String {
+    let syms = extract_public_symbols(content);
+    if syms.is_empty() {
+        format!("  {path}\n")
+    } else {
+        format!("  {path}  [{}]\n", syms.join(", "))
+    }
 }
 
 /// Max concurrent LLM calls + rules-per-batch for the parallel mode. Tunable.
 const PARALLEL_CONCURRENCY: usize = 6;
 const RULE_BATCH_SIZE: usize = 15;
 
-/// Rules-per-batch for `ScanMode::Batch`.
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` on (rank 2): the same 15 rules per
+/// prompt the parallel path uses, which is the prompt shape the fixtures were graded on. One
+/// prompt per chunk holding EVERY rule shares one 8192-token output cap across all of them, so a
+/// chunk with many violations truncates (SPIKE_TOKEN_EFFICIENCY_RESULTS.md, item 1).
 ///
-/// The Batch path compiles ALL (chunk × rule-batch) pairs into a SINGLE Anthropic
-/// Message Batch and lets the API schedule them — there is no per-item concurrency
-/// cost for splitting into finer batches. Using `RULE_BATCH_SIZE` (15) from the
-/// parallel path was a design mismatch (BUG-6): smaller batches add BatchItems but
-/// don't reduce latency; a LARGER batch keeps more adopted rules visible together in
-/// one prompt context, which improves coherence and reduces cross-batch re-flagging.
-///
-/// Set to `usize::MAX` so each chunk becomes a SINGLE BatchItem containing all rules.
-/// This can be overridden at runtime via the `CAMERATA_BATCH_RULE_BATCH_SIZE` env var
-/// (parsed as `usize`; falls back to this constant when absent or unparseable).
-const BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
+/// `CAMERATA_BATCH_RULE_BATCH_SIZE` (a `usize`) overrides it at runtime in either switch state.
+const BATCH_RULE_BATCH_SIZE: usize = RULE_BATCH_SIZE;
+
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` off: every rule in ONE item per
+/// chunk, the pre-rank-2 shape (BUG-6).
+const LEGACY_BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
 
 /// How the semantic (LLM) audit executes — the SPEED/SCALE knob, orthogonal to model tier
 /// (quality) and rule selection (coverage). The free deterministic floor is unaffected; it
@@ -4045,38 +7350,51 @@ pub enum ScanMode {
 }
 
 impl ScanMode {
-    /// Returns `(max_concurrent_calls, rules_per_batch)`.
+    /// The values [`Self::parse`] accepts, for its error message. `auto` (or nothing) asks for
+    /// the run's default, which [`resolve_scan_mode`] decides.
+    pub const WIRE_VALUES: &'static [&'static str] = &["auto", "parallel", "sequential", "batch"];
+
+    /// Returns `(max_concurrent_calls, rules_per_batch)` under the run's efficiency switches.
     ///
-    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API
-    /// parallelism. For `Batch` mode the concurrency value is unused (all items are
-    /// submitted in one Anthropic Message Batch); only `rules_per_batch` matters and
-    /// it should be LARGE so each BatchItem includes all adopted rules for maximum
-    /// coherence (BUG-6: using `RULE_BATCH_SIZE = 15` was a design mismatch — it
-    /// fragmented Batch items without any latency benefit).
+    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API parallelism. For
+    /// `Batch` the concurrency value is unused (the API schedules the items); only
+    /// `rules_per_batch` matters: [`BATCH_RULE_BATCH_SIZE`] with `batch_default` on,
+    /// [`LEGACY_BATCH_RULE_BATCH_SIZE`] with it off.
     ///
     /// `CAMERATA_BATCH_RULE_BATCH_SIZE` overrides the Batch rule batch size at runtime.
-    fn tuning(self) -> (usize, usize) {
+    fn tuning(self, eff: crate::efficiency::EfficiencyConfig) -> (usize, usize) {
         match self {
             ScanMode::Sequential => (1, usize::MAX),
             ScanMode::Parallel => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
             ScanMode::Batch => {
-                // Batch mode: all rules in one item per chunk is the efficient default;
-                // the env var allows the operator to cap it (e.g. for very large rule sets
-                // where a single prompt would exceed the model's context window).
+                let default = if eff.batch_default {
+                    BATCH_RULE_BATCH_SIZE
+                } else {
+                    LEGACY_BATCH_RULE_BATCH_SIZE
+                };
                 let batch_rule_size = std::env::var("CAMERATA_BATCH_RULE_BATCH_SIZE")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(BATCH_RULE_BATCH_SIZE);
+                    .unwrap_or(default);
                 (PARALLEL_CONCURRENCY, batch_rule_size)
             }
         }
     }
-    /// Parse the wire value; unknown / empty → Parallel (the efficient default floor).
-    pub fn parse(s: Option<&str>) -> Self {
+
+    /// Parse the wire value. `Ok(None)` = no mode was asked for (absent, blank or `auto`), so
+    /// the run's default applies ([`resolve_scan_mode`]). An unknown value is an ERROR naming
+    /// the choices, never a silent fallback: a typo such as `batchh` must not quietly run the
+    /// scan at twice the price.
+    pub fn parse(s: Option<&str>) -> Result<Option<Self>, String> {
         match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("sequential") => ScanMode::Sequential,
-            Some("batch") => ScanMode::Batch,
-            _ => ScanMode::Parallel,
+            None | Some("") | Some("auto") => Ok(None),
+            Some("parallel") => Ok(Some(ScanMode::Parallel)),
+            Some("sequential") => Ok(Some(ScanMode::Sequential)),
+            Some("batch") => Ok(Some(ScanMode::Batch)),
+            Some(other) => Err(format!(
+                "unknown scan mode `{other}`; the scan modes are: {}",
+                Self::WIRE_VALUES.join(", ")
+            )),
         }
     }
 }
@@ -4096,25 +7414,23 @@ async fn run_passes(
     llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     chunks: &[&[(String, String)]],
+    // Rank 8: the candidate digests that replace the chunks' whole-file digests (one per chunk),
+    // for a candidate pass set (`candidate_passes`); `None` builds the whole-file digests.
+    digests_override: Option<&[String]>,
     batches: &[&[(String, String)]],
     concurrency: usize,
     label: &str,
     session_prefix: &str,
     meter: Option<&UsageMeter>,
     advisory_disabled: bool,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+) -> PassesOut {
+    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
     let n_c = chunks.len();
     let n_b = batches.len();
     // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
@@ -4132,107 +7448,252 @@ async fn run_passes(
             })
         })
         .collect();
+    // `None` = the spend cap refused the pass (it is recorded on the meter as NOT RUN).
     type PassOut = (
         usize,
         usize,
-        anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
+        Option<anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>>,
     );
-    let results: Vec<PassOut> =
-        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, |(ci, bi)| {
-            let digest = &digests[ci];
-            let batch = batches[bi];
-            async move {
-                let rb = build_rules_block(batch);
-                // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
-                // issues beyond the adopted rules" task only depends on the code (the whole
-                // chunk is visible every pass), not on which rule-batch this is — so asking
-                // for it in all N batches just re-derives the SAME novel issue under N
-                // independently-invented names (one `.expect()` → AI-HANDLER-PANICS +
-                // AI-HANDLER-UNHANDLED-PANIC + AI-HANDLER-PANICS-ON-ERROR). Gate it to the
-                // first batch of each chunk; later batches check ONLY their adopted rules.
-                //
-                // ROUTING INTERACTION: when `advisory_disabled` is set (language-scoped groups),
-                // the advisory pass is suppressed in every batch, not just later ones. The
-                // cross-cutting All group keeps advisory enabled so novel issues are surfaced
-                // exactly once — against every file — with no per-language re-flagging.
-                let advisory = !advisory_disabled && bi == 0;
-                let task_line = if advisory {
-                    format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
-                } else {
-                    format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
-                };
-                // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
-                // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
-                // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
-                // scan modes can't drift):
-                //
-                //   Repository: {repo}\n\n{repo_map}   <- IDENTICAL across every chunk in scan
-                //   ({label} n/n_c)\n\n{digest}\n\n     <- stable across this chunk's rule-batches
-                //   {task_line}\n\n{rb}                 <- varies every rule-batch, never cached
-                //
-                // The repo-map segment is deliberately free of the chunk index/label — that's
-                // what the OLD ordering got wrong (the label sat in front of the repo map, so
-                // the "static" prefix actually differed at ~byte 30 on every chunk and could
-                // never cache-hit across chunks). Leading with the byte-identical repo map
-                // instead means chunk 2, 3, ... of the SAME scan can cache-HIT it instead of
-                // re-billing the repo map on every chunk. Bonus: rules landing last = most
-                // recent context = strongest rule-following (unchanged).
-                //
-                // CACHING: `cache_breakpoints_for_pass` marks a breakpoint after the repo-map
-                // segment (re-reads across chunks) and, when there's more than one rule-batch,
-                // a second one after the chunk (label+digest) segment (re-reads across this
-                // chunk's rule-batches — the existing parallel-mode win). The CLI backend
-                // ignores these breakpoints entirely.
-                let (prompt, cache_bps) =
-                    build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
-                let session = format!("{session_prefix}-c{ci}-b{bi}");
-                if let Some((store, key)) = feedback {
-                    store.register(
-                        key,
-                        crate::transcript::AgentTranscript {
-                            session_id: session.clone(),
-                            role: format!("{label} {}/{n_c} · rules {}/{n_b} — {repo}", ci + 1, bi + 1),
-                            prompt: prompt.clone(),
-                            output: String::new(),
-                            status: "running".to_string(),
-                        },
-                    );
-                }
-                let r = audit_pass(llm, audit_model, prompt, cache_bps, repo, adopted, feedback, &session, meter).await;
-                if let Some((store, key)) = feedback {
-                    store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
-                }
-                // Stream this pass's findings + progress into the job (live preview) as it
-                // completes — so a Mode-3 poller sees findings appear incrementally. A failed
-                // pass still counts toward `done` so the progress bar can reach 100%.
-                if let Some((jstore, jid)) = job {
-                    if let Ok((f, _, _)) = &r {
-                        jstore.add_findings(jid, f.clone());
+    let eff = efficiency_of(meter);
+    // Set while the end-of-run second try is running, so a retried pass does not count twice in
+    // the job's progress.
+    let second_try = std::sync::atomic::AtomicBool::new(false);
+    let run_one = |(ci, bi): (usize, usize)| {
+        let digest = &digests[ci];
+        let batch = batches[bi];
+        let second_try = &second_try;
+        async move {
+            // SPEND CAP: asked before anything is built or sent, and held until the pass
+            // (its truncation retry included) has finished, so a pass is never cut off
+            // mid-response. A refused pass is recorded as NOT RUN, never skipped silently.
+            let _permit = match admit_pass(meter).await {
+                Err(CapReached) => {
+                    // The end-of-round second try of a pass that already failed: the failure
+                    // stands as its record, so the refusal is not recorded a second time.
+                    if second_try.load(std::sync::atomic::Ordering::SeqCst) {
+                        return (ci, bi, None);
                     }
+                    if let Some(m) = meter {
+                        m.record_not_run(crate::cost_cap::NotRunPass {
+                            repo: repo.to_string(),
+                            group: label.to_string(),
+                            chunk: ci + 1,
+                            n_chunks: n_c,
+                            rule_batch: bi + 1,
+                            n_rule_batches: n_b,
+                            rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
+                            files: chunks[ci].iter().map(|(path, _)| path.clone()).collect(),
+                            class: camerata_llm::failure::FailureClass::SpendLimit,
+                        });
+                    }
+                    if let Some((jstore, jid)) = job {
+                        jstore.inc_not_run(jid, 1);
+                    }
+                    return (ci, bi, None);
+                }
+                Ok(permit) => permit,
+            };
+            let rb = build_rules_block(batch);
+            // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
+            // issues beyond the adopted rules" task only depends on the code (the whole
+            // chunk is visible every pass), not on which rule-batch this is — so asking
+            // for it in all N batches just re-derives the SAME novel issue under N
+            // independently-invented names (one `.expect()` → AI-HANDLER-PANICS +
+            // AI-HANDLER-UNHANDLED-PANIC + AI-HANDLER-PANICS-ON-ERROR). Gate it to the
+            // first batch of each chunk; later batches check ONLY their adopted rules.
+            //
+            // ROUTING INTERACTION: when `advisory_disabled` is set (language-scoped groups),
+            // the advisory pass is suppressed in every batch, not just later ones. The
+            // cross-cutting All group keeps advisory enabled so novel issues are surfaced
+            // exactly once — against every file — with no per-language re-flagging.
+            let advisory = !advisory_disabled && bi == 0;
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
+            // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
+            // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
+            // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
+            // scan modes can't drift):
+            //
+            //   Repository: {repo}\n\n{repo_map}   <- IDENTICAL across every chunk in scan
+            //   ({label} n/n_c)\n\n{digest}\n\n     <- stable across this chunk's rule-batches
+            //   {task_line}\n\n{rb}                 <- varies every rule-batch, never cached
+            //
+            // The repo-map segment is deliberately free of the chunk index/label — that's
+            // what the OLD ordering got wrong (the label sat in front of the repo map, so
+            // the "static" prefix actually differed at ~byte 30 on every chunk and could
+            // never cache-hit across chunks). Leading with the byte-identical repo map
+            // instead means chunk 2, 3, ... of the SAME scan can cache-HIT it instead of
+            // re-billing the repo map on every chunk. Bonus: rules landing last = most
+            // recent context = strongest rule-following (unchanged).
+            //
+            // CACHING: `cache_breakpoints_for_pass` marks a breakpoint after the repo-map
+            // segment (re-reads across chunks) and, when there's more than one rule-batch,
+            // a second one after the chunk (label+digest) segment (re-reads across this
+            // chunk's rule-batches — the existing parallel-mode win). The CLI backend
+            // ignores these breakpoints entirely.
+            let (prompt, cache_bps) = build_pass_prompt_with(
+                eff.label_after_prefix,
+                repo,
+                repo_map,
+                label,
+                ci,
+                n_c,
+                digest,
+                n_b,
+                &task_line,
+                &rb,
+            );
+            let session = format!("{session_prefix}-c{ci}-b{bi}");
+            if let Some((store, key)) = feedback {
+                store.register(
+                    key,
+                    crate::transcript::AgentTranscript {
+                        session_id: session.clone(),
+                        role: format!("{label} {}/{n_c} · rules {}/{n_b} — {repo}", ci + 1, bi + 1),
+                        prompt: prompt.clone(),
+                        output: String::new(),
+                        status: "running".to_string(),
+                    },
+                );
+            }
+            let r = audit_pass(
+                llm,
+                audit_model,
+                prompt,
+                cache_bps,
+                nonce,
+                repo,
+                adopted,
+                feedback,
+                &session,
+                meter,
+                batch.len(),
+            )
+            .await;
+            if let Some((store, key)) = feedback {
+                store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
+            }
+            // Stream this pass's findings + progress into the job (live preview) as it
+            // completes — so a Mode-3 poller sees findings appear incrementally. A failed
+            // pass still counts toward `done` so the progress bar can reach 100%.
+            if let Some((jstore, jid)) = job {
+                match &r {
+                    Ok((f, _, _)) => jstore.add_findings(jid, f.clone()),
+                    Err(e) => {
+                        if let Some(partial) = e.downcast_ref::<PartialPassReply>() {
+                            jstore.add_findings(jid, partial.findings.clone());
+                        }
+                    }
+                }
+                if !second_try.load(std::sync::atomic::Ordering::SeqCst) {
                     jstore.inc_done(jid, 1);
                 }
-                (ci, bi, r)
             }
+            (ci, bi, Some(r))
+        }
+    };
+    let mut results: Vec<PassOut> = if eff.warm_schedule {
+        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, &run_one).await
+    } else {
+        crate::warm_schedule::run_unscheduled(jobs, concurrency, &run_one).await
+    };
+
+    // ── END-OF-RUN SECOND TRY ────────────────────────────────────────────────────────────
+    // Every pass that failed on the transport or on its content (after its own retries) is set
+    // aside while the rest of the round runs, then tried ONCE more here, when the provider has
+    // had the whole round to recover. The same admission and spend checks apply (`run_one` asks
+    // first), and a stopped run sends nothing. An auth or billing failure is not tried again:
+    // waiting does not fix it. A pass that fails again keeps both tries on its record.
+    let mut prior_attempts: std::collections::HashMap<(usize, usize), Vec<AttemptRecord>> =
+        std::collections::HashMap::new();
+    let mut second_tried: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    let retry_list: Vec<(usize, usize)> = results
+        .iter()
+        .filter_map(|(ci, bi, r)| match r {
+            Some(Err(e)) if classify_pass_error(e).is_retried_at_end() => Some((*ci, *bi)),
+            _ => None,
         })
-        .await;
+        .collect();
+    if !retry_list.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        for (ci, bi, r) in &results {
+            if let (true, Some(Err(e))) = (retry_list.contains(&(*ci, *bi)), r) {
+                let first = PassFailure::named(String::new(), e).caused_by(e);
+                prior_attempts.insert((*ci, *bi), first.attempts);
+            }
+        }
+        second_try.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut retry_jobs = retry_list.clone();
+        retry_jobs.sort_unstable();
+        let second_jobs: Vec<crate::warm_schedule::ScheduledJob<(usize, usize)>> = retry_jobs
+            .into_iter()
+            .map(|(c, b)| crate::warm_schedule::ScheduledJob {
+                group: c,
+                payload: (c, b),
+            })
+            .collect();
+        let retried =
+            crate::warm_schedule::run_unscheduled(second_jobs, concurrency, &run_one).await;
+        for (ci, bi, r) in retried {
+            // Refused at admission (the spend limit, an outage stop): the first failure stands.
+            let Some(r) = r else { continue };
+            let Some(slot) = results.iter_mut().find(|(c, b, _)| *c == ci && *b == bi) else {
+                continue;
+            };
+            // A first reply that was cut off keeps the complete findings it carried unless the
+            // second try did better or failed the same way.
+            let keep_first = matches!(&slot.2, Some(Err(e)) if e.downcast_ref::<PartialPassReply>().is_some())
+                && matches!(&r, Err(e2) if e2.downcast_ref::<PartialPassReply>().is_none());
+            second_tried.insert((ci, bi));
+            if !keep_first {
+                slot.2 = Some(r);
+            }
+        }
+    }
 
     let mut findings = Vec::new();
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err = None;
-    for (_ci, _bi, r) in results {
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for (ci, bi, r) in results {
         match r {
-            Ok((f, p, needs)) => {
+            Some(Ok((f, p, needs))) => {
                 findings.extend(f);
                 proposed.extend(p);
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => last_err = Some(e),
+            Some(Err(e)) => {
+                let mut failure = PassFailure::at(label, ci, n_c, bi, n_b, &e)
+                    .with_files(chunks[ci].len())
+                    .with_file_names(chunks[ci].iter().map(|(path, _)| path))
+                    .caused_by(&e)
+                    .with_model(audit_model);
+                if second_tried.contains(&(ci, bi)) {
+                    // Both tries on the record, the first one's first and the second one marked.
+                    let mut merged = prior_attempts.remove(&(ci, bi)).unwrap_or_default();
+                    merged.extend(failure.attempts.drain(..).map(|mut a| {
+                        a.second_try = true;
+                        a
+                    }));
+                    failure.attempts = merged;
+                }
+                // A reply cut off at the output limit keeps the complete findings that arrived.
+                match e.downcast::<PartialPassReply>() {
+                    Ok(partial) => {
+                        failures.push(failure.with_recovered(partial.findings.len()));
+                        findings.extend(partial.findings);
+                        proposed.extend(partial.proposed);
+                        requested.extend(partial.needs);
+                    }
+                    Err(_) => failures.push(failure),
+                }
+            }
+            // Refused by the spend cap: already recorded as NOT RUN on the meter.
+            None => {}
         }
     }
-    (findings, proposed, requested, ok, last_err)
+    (findings, proposed, requested, ok, failures)
 }
 
 /// How many CONSECUTIVE poll failures `poll_batch_until_ended` tolerates before giving up.
@@ -4297,32 +7758,44 @@ where
 }
 
 /// Batch execution mode (#61): compile ALL (chunk × rule-batch) pairs into Anthropic Message
-/// Batch items, submit in ONE request, poll to completion, then reassemble by `custom_id`.
+/// Batch items, submit, poll to completion, then reassemble by `custom_id`.
 ///
 /// ADVANTAGES vs. parallel: 50% discount on all input + output tokens; no per-call
 /// rate-limit pressure; the API schedules + parallelizes internally. TRADE-OFF: latency is
 /// asynchronous — the batch typically completes in seconds to a few minutes for small scans,
-/// but up to 24h for very large ones. Best suited for large/multi-repo scans where total
-/// cost matters more than wall-clock time.
+/// but up to 24h for very large ones.
 ///
-/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests and 256MB body.
-/// When `chunks.len() * batches.len() > 100_000`, this function splits into sub-batches,
-/// submits them sequentially, and unions the results. The 256MB size cap is not checked
-/// per-item (each Camerata item is typically 5-50KB; 100k items is the binding constraint
-/// in practice). Exceeding the cap logs a warning and falls back gracefully.
+/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests per batch;
+/// [`batch_mode::submit_round`] splits larger work into sub-batches.
 ///
-/// FALLBACK: if the `api` backend / key is not available, the function returns an error so
-/// the caller can fall back to parallel mode. The job's `batch_id` field is set on submit
-/// and cleared on finish.
+/// RANK 2 (`batch_default` on; off reproduces the pre-rank-2 path exactly):
+///
+/// * RESUBMISSION RULE: every item that errored, expired or is missing from the results is
+///   resubmitted ONCE, all of them together in one follow-up batch (never real time: the
+///   follow-up keeps the discount and passes through the same spend gate as the first
+///   submission). An item that fails again is a [`PassFailure`], the same shape a failed
+///   real-time pass gets, so the export says the inspection is incomplete.
+/// * A failed submit fails only that sub-batch's items (nothing was accepted, so they are
+///   resubmitted like any other failure) instead of discarding replies already paid for. A
+///   failed poll or fetch AFTER a successful submit is retried a bounded number of times and,
+///   if it still fails, disclosed as failed passes naming the batch id; the batch is never
+///   resubmitted, because it may still be running and billed.
+/// * An item cut off at the output limit gets [`retry_unusable_scan_reply`], the real-time
+///   passes' own truncation retry (sent in real time, admitted under the spend limit).
+///
+/// FALLBACK: without an API key this returns an error so the caller can say so.
 #[allow(clippy::too_many_arguments)]
 async fn run_passes_batch(
-    llm: &crate::llm::Llm,
+    llm: &dyn batch_mode::BatchApi,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     chunks: &[&[(String, String)]],
+    // Rank 8: as `run_passes`' `digests_override`.
+    digests_override: Option<&[String]>,
     batches: &[&[(String, String)]],
     label: &str,
     meter: Option<&UsageMeter>,
@@ -4331,16 +7804,12 @@ async fn run_passes_batch(
     // every (chunk, batch) pair, so batch mode does not re-introduce duplicate novel
     // findings when called from a language-scoped routing group.
     advisory_disabled: bool,
-) -> anyhow::Result<(
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-)> {
-    use crate::llm::{build_batch_item, reassemble_batch_results, LlmRequest};
+) -> anyhow::Result<PassesOut> {
+    use batch_mode::{submit_round, BatchWork, ItemFailure, RoundContext};
 
-    if llm.api_key().is_none() {
+    let eff = efficiency_of(meter);
+
+    if !llm.has_api_key() {
         anyhow::bail!(
             "batch mode requires the Api backend with an Anthropic API key; \
              switch this project's backend to Api and add an Anthropic API key in the app \
@@ -4350,154 +7819,428 @@ async fn run_passes_batch(
 
     let model = resolve_audit_model(audit_model);
 
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
     let n_c = chunks.len();
     let n_b = batches.len();
 
-    // Build the full cartesian product of (chunk, rule-batch) items.
-    let mut items = Vec::with_capacity(n_c * n_b);
-    // Retain the (ci, bi, prompt, cache_breakpoints) tuples so we can parse results.
-    let mut work_meta: Vec<(usize, usize, String, Vec<usize>)> = Vec::with_capacity(n_c * n_b);
-
+    // The full cartesian product of (chunk, rule-batch) items, each with the request it sends.
+    let mut work: Vec<BatchWork> = Vec::with_capacity(n_c * n_b);
     for (ci, digest) in digests.iter().enumerate() {
         for (bi, batch) in batches.iter().enumerate() {
             let rb = build_rules_block(batch);
             // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
-            // only when advisory_disabled is false. Without this check, every language-scoped
-            // batch group would re-run the novel-issue pass on its first batch, reproducing
-            // duplicate novel findings for each language group (the problem advisory_disabled
-            // was introduced to prevent in the parallel path).
+            // only when advisory_disabled is false.
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = if advisory {
-                format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
-            } else {
-                format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
-            };
-            // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
-            // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
-            // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
-            // rule-batch (`n_b == 1`), so `cache_breakpoints_for_pass` drops the
-            // chunk-segment breakpoint entirely (it would be written once and never
-            // re-read, paying a pure ~1.25x write premium for zero benefit) and keeps only
-            // the repo-map breakpoint, which DOES re-read across this batch submission's
-            // other chunks.
-            let (prompt, cache_bps) =
-                build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
-
-            let custom_id = format!("c{ci}-b{bi}");
-            let req = {
-                let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt())
-                    .with_max_tokens(8192)
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
+            // Same `build_pass_prompt` builder as `run_passes` — see the comment there and on
+            // `cache_breakpoints_for_pass`. With one rule-batch per chunk (`batch_default` off,
+            // or a small rule set) the chunk-segment breakpoint is dropped (it would be written
+            // once and never re-read) and only the repo-map breakpoint stays, which re-reads
+            // across the submission's other chunks.
+            let (prompt, cache_bps) = build_pass_prompt_with(
+                eff.label_after_prefix,
+                repo,
+                repo_map,
+                label,
+                ci,
+                n_c,
+                digest,
+                n_b,
+                &task_line,
+                &rb,
+            );
+            let req = with_stage_effort(
+                LlmRequest::new(prompt)
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        audit_system_prompt_with(terse_output_of(meter)),
+                        nonce,
+                    ))
+                    .with_max_tokens(scan_max_tokens(batch.len()))
                     .with_model(model.clone())
-                    .with_cache_breakpoints(cache_bps.clone());
-                // audit_model overrides the default; already folded into `model` above.
-                let _ = &mut r; // avoid unused_mut lint
-                r
-            };
-            items.push(build_batch_item(&custom_id, &req, &model));
-            work_meta.push((ci, bi, prompt, cache_bps));
+                    .with_cache_breakpoints(cache_bps)
+                    .with_response_schema(reply_schemas::scan_reply_schema())
+                    .with_temperature(AUDIT_TEMPERATURE),
+                Stage::ScanPass,
+            );
+            work.push(BatchWork {
+                custom_id: format!("c{ci}-b{bi}"),
+                ci,
+                bi,
+                req,
+            });
         }
     }
 
-    // GAP-4 (compliance-audit housekeeping): best-effort EXACT pre-audit input-token count
-    // for the first (chunk, rule-batch) pair, via `count_tokens` (free — Anthropic does not
-    // bill this endpoint). This is a precision upgrade over the char-based heuristic
-    // estimate (`camerata_ui_core::scan::estimate_audit_cost`) the UI shows before the scan
-    // starts. Logged only for now (the heuristic estimate remains the persisted/displayed
-    // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
-    // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
-    // never a reason to fail or stall the audit itself.
-    if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-        let sample_req = LlmRequest::new(prompt0.clone())
-            .with_system(audit_system_prompt())
-            .with_cache_breakpoints(cache_bps0.clone());
-        if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await {
-            eprintln!(
-                "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
-                 {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
-                work_meta.len()
+    // GAP-4: best-effort EXACT input-token count for the first (chunk, rule-batch) pair, via
+    // `count_tokens` (free; Anthropic does not bill it). Logged, and used for the spend gate's
+    // projection. Skipped gracefully on any failure.
+    //
+    // SPEND CAP (batch): a submitted batch cannot be cancelled cheaply, so the cap is checked
+    // BEFORE every submission (`submit_round`), the resubmission included. The sample is only
+    // counted when the spend so far plus the caller's pre-flight estimate (no network needed)
+    // has not already refused the run.
+    let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(Some(0.0)).is_some());
+    let mut per_item_usd: Option<f64> = None;
+    if !hint_refuses {
+        if let Some(first) = work.first() {
+            let sample_req = sample_count_request(
+                &first.req.prompt,
+                &first.req.cache_breakpoints,
+                terse_output_of(meter),
+                nonce,
             );
+            if let Some(exact) = llm.count_input_tokens(&sample_req, &model).await {
+                eprintln!(
+                    "[camerata-server] batch mode: exact input-token count for chunk {} rule-batch \
+                     {} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
+                    first.ci,
+                    first.bi,
+                    work.len()
+                );
+                // One item's input side at the batch price, sized like the sample and with no
+                // cache credit: a projection of what a submission commits, not a quote (output
+                // is not projected). No cache write is projected, so the TTL does not move it.
+                per_item_usd = crate::llm::input_cost_usd(
+                    &model,
+                    exact,
+                    crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+                );
+            }
+        }
+        // No exact projection (the count failed, or the model is unpriced): fall back to the
+        // shared estimator, spread over the items. Still `None` when it cannot price either,
+        // and the gate then refuses rather than guessing.
+        if per_item_usd.is_none() && !work.is_empty() {
+            per_item_usd = batch_estimate_usd(&model, chunks, batches, terse_output_of(meter))
+                .map(|total| total / work.len() as f64);
         }
     }
 
     // Tell the job the total pass count so the progress bar can be pre-seeded.
-    let total = items.len();
     if let Some((jstore, jid)) = job {
-        jstore.add_total(jid, total);
+        jstore.add_total(jid, work.len());
     }
 
-    // CAP ENFORCEMENT: split into sub-batches of 100k items each.
-    const BATCH_CAP: usize = 100_000;
-    let sub_batches: Vec<_> = items.chunks(BATCH_CAP).collect();
-    if sub_batches.len() > 1 {
-        eprintln!(
-            "[camerata-server] batch mode: {} items exceed the 100k cap — splitting into {} sub-batches",
-            total,
-            sub_batches.len()
-        );
-    }
+    let ctx = RoundContext {
+        api: llm,
+        repo,
+        label,
+        model: &model,
+        n_c,
+        n_b,
+        chunks,
+        batches,
+        job,
+        meter,
+        per_item_usd,
+        fatal_errors: !eff.batch_default,
+    };
+    let all: Vec<&BatchWork> = work.iter().collect();
+    let mut round = submit_round(&ctx, &all).await?;
 
-    // Submit all sub-batches (sequentially — the API is async so there's no rate-limit
-    // pressure; we just need the batch_id from each one).
-    let mut all_responses: std::collections::HashMap<String, crate::llm::LlmResponse> =
-        std::collections::HashMap::new();
-    for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
-        let submit_result = llm.submit_batch(sub_items.to_vec()).await?;
-        let batch_id = submit_result.batch_id;
-        eprintln!(
-            "[camerata-server] batch mode: sub-batch {}/{} submitted as {batch_id} ({} items)",
-            sub_idx + 1,
-            sub_batches.len(),
-            sub_items.len(),
-        );
-        // Record the batch id on the job so the UI can surface it.
-        if let Some((jstore, jid)) = job {
-            jstore.set_batch_id(jid, &batch_id);
-        }
-
-        // Poll until the batch is done. The Anthropic spec recommends >= 1s between polls;
-        // we use 10s to be gentle. `CAMERATA_BATCH_POLL_SECS` overrides.
-        let poll_secs = std::env::var("CAMERATA_BATCH_POLL_SECS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(10);
-        poll_batch_until_ended(
-            || llm.poll_batch_status(&batch_id),
-            std::time::Duration::from_secs(poll_secs),
-            MAX_CONSECUTIVE_POLL_FAILURES,
-            |status| {
-                eprintln!(
-                    "[camerata-server] batch {batch_id}: status={} (processing={}, succeeded={}, errored={})",
-                    status.processing_status,
-                    status.request_counts.processing,
-                    status.request_counts.succeeded,
-                    status.request_counts.errored,
+    // RESUBMISSION (rank 2): every item that came back without a reply goes out once more, all
+    // together in one follow-up batch. Only an item the API ANSWERED with an error (or left out
+    // of its results) is resubmitted: a sub-batch whose poll or fetch failed after a successful
+    // submit is NOT (see `submit_round`), because its items may still be running and paid for.
+    if eff.batch_default {
+        let failed: Vec<&BatchWork> = work
+            .iter()
+            .filter(|w| !round.refused.contains(&w.custom_id))
+            .filter(|w| match round.results.get(&w.custom_id) {
+                Some(Ok(_)) => false,
+                Some(Err(failure)) => failure.resubmittable,
+                // Left out of the results the API returned.
+                None => true,
+            })
+            .collect();
+        if !failed.is_empty() {
+            eprintln!(
+                "[camerata-server] batch mode: {} item(s) errored, expired or went missing; \
+                 resubmitting them once in a follow-up batch",
+                failed.len()
+            );
+            let mut retry = submit_round(&ctx, &failed).await?;
+            for w in &failed {
+                let first = match round.results.get(&w.custom_id) {
+                    Some(Err(first)) => first.reason.clone(),
+                    _ => "missing from the batch results".to_string(),
+                };
+                if retry.refused.contains(&w.custom_id) {
+                    // The follow-up was refused by the spend limit: the item is NOT RUN on the
+                    // meter (the cap's own disclosure), and this note says it had already
+                    // failed once, so the gap is not read as a pass that never started.
+                    if let Some(m) = meter {
+                        m.record_note(format!(
+                            "batch item {} (chunk {}, rule-batch {}) failed in the first \
+                             submission ({first}) and its resubmission was not run: the spend \
+                             limit was reached",
+                            w.custom_id,
+                            w.ci + 1,
+                            w.bi + 1
+                        ));
+                    }
+                    continue;
+                }
+                // A second failure that was a model refusal (billed) is a content failure: the
+                // real-time second try does not send the item a third time.
+                let (again, second_tryable) = match retry.results.remove(&w.custom_id) {
+                    Some(Ok(resp)) => {
+                        round.results.insert(w.custom_id.clone(), Ok(resp));
+                        continue;
+                    }
+                    Some(Err(again)) => (again.reason, again.second_tryable),
+                    None => ("missing from the batch results again".to_string(), true),
+                };
+                round.results.insert(
+                    w.custom_id.clone(),
+                    Err(ItemFailure {
+                        reason: format!("{first}; resubmitted once and failed again: {again}"),
+                        resubmittable: false,
+                        second_tryable,
+                    }),
                 );
-            },
-        )
-        .await?;
-
-        // Fetch + parse results.
-        let rows = llm.fetch_batch_results(&batch_id).await?;
-        let sub_map = reassemble_batch_results(rows);
-        all_responses.extend(sub_map);
+            }
+            round.refused.extend(retry.refused);
+        }
     }
 
-    // Reassemble: look up each (ci, bi) pair's response by its deterministic custom_id.
+    // END-OF-RUN SECOND TRY. An item that is still without a reply after the follow-up batch is
+    // sent once more, in real time, through the same admission and spend checks (a stopped run
+    // sends nothing). An item whose batch was accepted is NOT sent again: it may be running and
+    // billed. A reply from the second try is used exactly like a batch reply; a failure keeps
+    // both tries on the record.
+    let mut second_try_errors: Vec<(&BatchWork, anyhow::Error)> = Vec::new();
+    if eff.batch_default && !meter.is_some_and(UsageMeter::outage_stopped) {
+        let realtime = llm.realtime();
+        let again: Vec<&BatchWork> = work
+            .iter()
+            .filter(|w| !round.refused.contains(&w.custom_id))
+            .filter(|w| match round.results.get(&w.custom_id) {
+                Some(Ok(_)) => false,
+                Some(Err(failure)) => failure.second_tryable,
+                None => true,
+            })
+            .collect();
+        for w in again {
+            let Ok(_permit) = admit_pass(meter).await else {
+                continue;
+            };
+            let session = format!("audit-{repo}-batch-{}-second-try", w.custom_id);
+            match send_audit_request(realtime, w.req.clone(), None, &session, meter).await {
+                Ok(resp) => {
+                    if let Some(m) = meter {
+                        m.record_stage(Stage::ScanPass, &resp);
+                    }
+                    round.results.insert(w.custom_id.clone(), Ok(resp));
+                }
+                Err(e) => {
+                    meter_failed(meter, Stage::ScanPass, &e);
+                    second_try_errors.push((w, e));
+                }
+            }
+        }
+    }
+
+    // Each reply goes through the scan pass's own post-processing. With `batch_default` on a
+    // reply cut off at the output limit gets the shared truncation retry, sent in real time
+    // and admitted under the spend limit like a real-time pass; these run concurrently.
+    let mut replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = Vec::new();
+    let mut results = crate::llm::BatchResults::default();
+    for w in &work {
+        if round.refused.contains(&w.custom_id) {
+            continue;
+        }
+        match round.results.remove(&w.custom_id) {
+            Some(Ok(resp)) => replies.push((w, resp)),
+            Some(Err(why)) => {
+                results.errors.insert(w.custom_id.clone(), why.reason);
+            }
+            // Not in the results at all: `reassemble_batch_passes` reports it as missing.
+            None => {}
+        }
+    }
+    let replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = if eff.batch_default {
+        use futures::stream::StreamExt;
+        let realtime = llm.realtime();
+        // Collected first so the stream's type names no closure (a `Send` bound on the spawned
+        // scan future cannot be proven through a borrowing closure inside the combinator).
+        let retries: Vec<_> = replies
+            .into_iter()
+            .map(|(w, resp)| async move {
+                if !(resp.truncated && eff.truncation_retry) {
+                    // No retry for this reply (complete but not JSON, or cut off with the
+                    // retry switched off): it bought nothing, and the telemetry says so.
+                    if resp.truncated || scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                        }
+                    }
+                    return (w, resp);
+                }
+                // SPEND CAP: the retry is one more real-time call. Refused, the cut-off reply is
+                // used as it came (and counted as wasted), exactly as with the retry switched off.
+                let _permit = match admit_pass(meter).await {
+                    Ok(permit) => permit,
+                    Err(CapReached) => {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                            m.record_note(format!(
+                                "the truncation retry of batch item {} was not run: {}",
+                                w.custom_id,
+                                crate::cost_cap::cause_for(m.cost_unknown())
+                            ));
+                        }
+                        return (w, resp);
+                    }
+                };
+                let session = format!("audit-{repo}-batch-{}", w.custom_id);
+                // A batch item gets the truncation retry only: a reply that is complete but not
+                // JSON is reported by the reassembly as a failed pass naming its files.
+                let resp =
+                    retry_unusable_scan_reply(realtime, &w.req, resp, None, &session, meter, 0)
+                        .await
+                        .resp;
+                (w, resp)
+            })
+            .collect();
+        futures::stream::iter(retries)
+            .buffer_unordered(PARALLEL_CONCURRENCY)
+            .collect()
+            .await
+    } else {
+        replies
+    };
+    for (w, resp) in replies {
+        results.responses.insert(w.custom_id.clone(), resp);
+    }
+
+    // The replies were metered as they arrived (`submit_round`, so the resubmission's spend gate
+    // counted them), so the shared reassembly gets no meter: recording again would bill twice.
+    let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
+    let chunk_files: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+    // Every reply was staged as it arrived, so the reassembly stages nothing. With batch_default
+    // on, every unusable reply was already counted wasted above: by the retry step, or by the
+    // branch that sends no retry. Only the legacy path, which has neither, needs it here.
+    let wasted_meter = if eff.batch_default { None } else { meter };
+    let mut out = reassemble_batch_passes(
+        repo,
+        label,
+        n_c,
+        n_b,
+        &pairs,
+        &chunk_files,
+        &results,
+        &round.refused,
+        adopted,
+        wasted_meter,
+        true,
+        job,
+    );
+    // A second try that failed too: the pass keeps its class and both tries.
+    for (w, e) in &second_try_errors {
+        let name = format!("{label} {}/{n_c} \u{b7} rules {}/{n_b}", w.ci + 1, w.bi + 1);
+        if let Some(failure) = out.4.iter_mut().find(|f| f.pass == name) {
+            let mut trail = StageTrail::default();
+            trail.note_unusable(&failure.error, false, Vec::new());
+            trail.note_error(e, true);
+            failure.class = trail.class();
+            failure.attempts = trail.attempts;
+        }
+    }
+    Ok(out)
+}
+
+/// Turn a finished batch's per-item outcomes into the shared pass result: each (chunk,
+/// rule-batch) pair's answer is parsed, and each pair WITHOUT one becomes a [`PassFailure`]
+/// carrying the per-item reason the API gave (`errors`), so a model refusal reads as a refusal
+/// rather than a generic "missing from results". Pure apart from the optional meter/job sinks,
+/// so the failure naming is unit-testable without a live batch. `meter` records each reply and
+/// each billed failure; a caller that already metered them as they arrived passes `None`.
+#[allow(clippy::too_many_arguments)]
+fn reassemble_batch_passes(
+    repo: &str,
+    label: &str,
+    n_c: usize,
+    n_b: usize,
+    pairs: &[(usize, usize)],
+    chunk_files: &[usize],
+    results: &crate::llm::BatchResults,
+    refused_ids: &std::collections::HashSet<String>,
+    adopted: &std::collections::HashSet<String>,
+    meter: Option<&UsageMeter>,
+    replies_already_metered: bool,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+) -> PassesOut {
     let mut findings = Vec::new();
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut failures: Vec<PassFailure> = Vec::new();
+    // A caller that metered each reply as it arrived still needs the replies that bought nothing
+    // counted as wasted; it must not stage them a second time.
+    let stage = |m: &UsageMeter, resp: &crate::llm::LlmResponse| {
+        if !replies_already_metered {
+            m.record_stage(Stage::ScanPass, resp);
+        }
+    };
 
-    for (ci, bi, _prompt, _cache_bps) in &work_meta {
+    for &(ci, bi) in pairs {
         let custom_id = format!("c{ci}-b{bi}");
-        match all_responses.get(&custom_id) {
+        if refused_ids.contains(&custom_id) {
+            // Refused by the spend cap before submission: recorded as NOT RUN on the meter.
+            if let Some((jstore, jid)) = job {
+                jstore.inc_not_run(jid, 1);
+            }
+            continue;
+        }
+        match results.responses.get(&custom_id) {
+            // A malformed batch answer (complete, not JSON) cannot be retried inside a finished
+            // batch; it is a failed pass naming its files, never "no findings" (H4).
+            Some(resp) if !resp.truncated && scan_output_is_malformed(&resp.text) => {
+                if let Some(m) = meter {
+                    stage(m, resp);
+                    m.record_wasted(Stage::ScanPass, resp);
+                }
+                failures.push(
+                    PassFailure::at(
+                        label,
+                        ci,
+                        n_c,
+                        bi,
+                        n_b,
+                        &"the model's reply was not valid JSON (a batch item cannot be retried)",
+                    )
+                    .with_files(chunk_files.get(ci).copied().unwrap_or(0)),
+                );
+                if let Some((jstore, jid)) = job {
+                    jstore.inc_done(jid, 1);
+                }
+            }
+            // A batch item still cut off at the output limit (after the one retry a batch item
+            // gets, or with no retry on the legacy path) is a failed pass naming its files, and
+            // the complete findings that arrived are kept (H2). It never reads as "no findings".
+            Some(resp) if resp.truncated => {
+                if let Some(m) = meter {
+                    stage(m, resp);
+                    m.record_wasted(Stage::ScanPass, resp);
+                }
+                let (f, p) = salvage_complete_findings(repo, &resp.text, adopted);
+                let reason = cut_off_reply_reason(None, f.len());
+                failures.push(
+                    PassFailure::at(label, ci, n_c, bi, n_b, &reason)
+                        .with_files(chunk_files.get(ci).copied().unwrap_or(0))
+                        .with_recovered(f.len()),
+                );
+                if let Some((jstore, jid)) = job {
+                    jstore.add_findings(jid, f.clone());
+                    jstore.inc_done(jid, 1);
+                }
+                findings.extend(f);
+                proposed.extend(p);
+            }
             Some(resp) => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                 }
                 let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                 let needs = parse_needs_files(&resp.text);
@@ -4512,12 +8255,29 @@ async fn run_passes_batch(
                 ok += 1;
             }
             None => {
-                // The item failed or was not in the result set.
-                let e = anyhow::anyhow!(
-                    "batch item {custom_id} missing from results (chunk {ci}, rule-batch {bi})"
+                // The item failed or was not in the result set. Prefer the per-item reason
+                // the API gave (a refusal reads as a refusal) over a generic "missing".
+                // A failed item that was still billed (a refusal) counts toward the spend cap.
+                if let (Some(m), Some(billed)) = (meter, results.billed.get(&custom_id)) {
+                    stage(m, billed);
+                }
+                let reason = results
+                    .errors
+                    .get(&custom_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("batch item {custom_id} missing from results"));
+                eprintln!(
+                    "[camerata-server] batch item {custom_id} (chunk {ci}, rule-batch {bi}) \
+                     failed: {reason}"
                 );
-                eprintln!("[camerata-server] {e}");
-                last_err = Some(e);
+                // Classed from the reason (a fetch or submit failure is transport, a refusal is
+                // content) with one record of it, so the failure report says what happened and
+                // an accepted batch's id (in the reason) is there for a later resume to fetch.
+                failures.push(
+                    PassFailure::at(label, ci, n_c, bi, n_b, &reason)
+                        .with_files(chunk_files.get(ci).copied().unwrap_or(0))
+                        .caused_by(&anyhow::anyhow!("{reason}")),
+                );
                 // Still count as done so the progress bar can reach 100%.
                 if let Some((jstore, jid)) = job {
                     jstore.inc_done(jid, 1);
@@ -4526,7 +8286,7 @@ async fn run_passes_batch(
         }
     }
 
-    Ok((findings, proposed, requested, ok, last_err))
+    (findings, proposed, requested, ok, failures)
 }
 
 /// Severity rank for keeping the most-severe representative when merging duplicates.
@@ -4542,7 +8302,7 @@ fn severity_rank(s: &str) -> u8 {
 
 // ── P1: finding_class (Security vs Hygiene) + shared primary-selection ranking ───────────────
 //
-// docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. The regression this section
+// the codebase-inspection hardening notes, P1. The regression this section
 // exists to prevent: a low structural/style row (e.g. an `ARCH-MIDDLEWARE-FIRST-1`-shaped
 // layering rule) sitting at the SAME code location or defect cluster as a genuine security
 // finding (e.g. a reflected-Origin CORS-with-credentials misconfiguration) must never win
@@ -4568,7 +8328,7 @@ enum FindingClass {
 /// secrets/credentials, RLS/access policy, authn/authz, injection (SQL/XSS/SSRF/deserialization/
 /// RCE), transport security (TLS/CORS), resource exposure, open redirect, weak crypto/
 /// randomness, and CSRF concerns — exactly the families
-/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 names as Security. This is a
+/// the codebase-inspection hardening notes P1 names as Security. This is a
 /// CONTENT scan over the rule id's hyphen-delimited WORDS ([`security_token_matches`]), not a
 /// prefix rule: `SEC-*`/`SUPABASE-*` deterministic floor rules match via their own prefix
 /// shortcut below (belt-and-suspenders — every current one also matches a token), but so do
@@ -4633,6 +8393,9 @@ const SECURITY_RULE_TOKENS: &[&str] = &[
     "TLS", "SSL", "HTTPS", "CERT", "CORS", "EXPOSE", "EXPOSURE", "EXPOSED", "PUBLIC-BUCKET",
     // Redirect / crypto / tokens
     "REDIRECT", "CRYPTO", "RANDOM", "NONCE", "TOKEN",
+    // Object-level access, path handling and privilege (H5): ids the model invents for these
+    // classes ("AI-IDOR-INVOICES", "AI-PATH-TRAVERSAL-DOWNLOAD") carry none of the tokens above.
+    "IDOR", "TRAVERSAL", "MASS-ASSIGNMENT", "UNAUTHENTICATED", "PRIVILEGE",
     // Explicit "security" naming (CI security-scan rules, security-headers/method-security
     // rules) — a rule that names itself "security" in its own id is Security almost by
     // definition, and this token catches `CICD-*-SECURITY-SCAN-1`,
@@ -4798,7 +8561,7 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 }
 
 /// The shared primary-selection ranking for BOTH merge passes (design point 3, reordered by
-/// C5-1 — see `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 for the original and
+/// C5-1 — see the codebase-inspection hardening notes P1 for the original and
 /// the REG-1/REG-2 work item for this reordering). Higher tuples win via `max_by_key`. Order:
 /// (0) W7: kind actionability ([`kind_actionability_rank`]) — an actionable row
 /// (Defect/Deviation/legacy) beats an informational one unconditionally, so a defect can
@@ -4821,12 +8584,20 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 /// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
 /// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
 /// final deterministic tiebreak so output never depends on hash/iteration order.
-fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, u8, usize) {
+fn primary_rank(
+    f: &Finding,
+    group_len: usize,
+    index: usize,
+) -> (u8, u8, u8, u8, u8, u8, u8, usize) {
     (
         kind_actionability_rank(f),
         // Firebase review: an asserted row is never ranked beneath a held one, whatever the
         // class — see `kinds_merge_compatible`, which keeps such a group from forming at all.
         asserted_rank(f),
+        // A row about a real secret leads a row about a placeholder (smoke run: an
+        // `.env.example` placeholder took the headline and absorbed the real `.env.production`
+        // key). Ahead of class and origin, which two secret rows share anyway.
+        u8::from(!is_placeholder_secret_row(f)),
         class_rank(finding_class(f)),
         origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
@@ -4835,6 +8606,199 @@ fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8,
         // EARLIEST appearance — see BUG-7's original comment on this idiom.
         group_len - index,
     )
+}
+
+/// The severity a row about a placeholder is held at: a committed example value is worth a row
+/// but is not a live credential.
+const PLACEHOLDER_SEVERITY_CEILING: &str = "low";
+
+/// The floor rule about committed secret-bearing files (`.env.production`, key files): a secret
+/// rule with no value shape of its own.
+const SECRET_FILE_RULE: &str = "SEC-NO-SECRET-FILE-1";
+
+/// Whether `rule_id` is one of the secret rules: a rule the secrets crate detects values for, or
+/// the secret-file rule. NOT every `SEC-` rule: the prefix also covers injection, transport and
+/// sink rules, which an example file name or a template token says nothing about.
+fn is_secret_rule(rule_id: &str) -> bool {
+    rule_id == SECRET_FILE_RULE || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
+}
+
+/// Whether `path` names an example or sample file: `.env.example`, `.env.sample` or anything
+/// ending `.example`. Deliberately narrow: a `templates/prod.env` or `config.template.ts` may be
+/// the file a deployment actually loads, so a name alone does not make it an example.
+fn is_example_file_path(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    name == ".env.example" || name == ".env.sample" || name.ends_with(".example")
+}
+
+/// Whether `value` (quotes and whitespace trimmed) is one of the literal weak words a default
+/// configuration ships with (`password`, `changeme`, `secret`, `token`). These are real default
+/// credentials an attacker tries first, not unfilled templates: they are placeholders only inside
+/// an example file, which [`is_example_file_path`] already covers.
+fn is_weak_default_word(value: &str) -> bool {
+    let value = value
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+    [
+        "password",
+        "secret",
+        "token",
+        "changeme",
+        "change_me",
+        "change-me",
+    ]
+    .iter()
+    .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// Whether one assigned value (the text after `=` or `:` on a line) is wholly an unfilled template
+/// token and so leaks no credential: empty, a closed template (`${VAR}`, `{{ var }}`,
+/// `<your-key>`, `[KEY]`) or a run of filler (`xxxx`, `****`). A bracketed value with a quote or a
+/// comma inside it is a list of values (`["s3cr3t"]`), not a template. A literal weak word
+/// (`changeme`) is NOT a template: see [`is_weak_default_word`].
+fn assigned_value_is_template(raw: &str) -> bool {
+    let value = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ';' | ',') || c.is_whitespace());
+    let closed = |open: &str, close: char| {
+        value.len() > open.len() && value.starts_with(open) && value.ends_with(close)
+    };
+    let single_token = || !value.contains(['"', '\'', '`', ',']);
+    value.is_empty()
+        || closed("${", '}')
+        || closed("{{", '}')
+        || (closed("<", '>') && single_token())
+        || (closed("[", ']') && single_token())
+        || (value.chars().count() >= 3 && value.chars().all(|c| matches!(c, 'x' | 'X' | '*')))
+}
+
+/// Whether the value `snippet` cites is wholly an unfilled template token, in any file: either
+/// every secret-shaped match the secrets crate finds is a template token (and none is a literal
+/// weak word, which the crate also files under that twin), or (when it finds none) every line
+/// assigns a template, an empty string or filler. A placeholder WORD inside a value that is
+/// otherwise secret-shaped (`sb_secret_FAKE_...`) is not this: it proves nothing outside an
+/// example file. A snippet with no assignment at all is not a template.
+fn snippet_value_is_template(snippet: &str) -> bool {
+    use camerata_secrets::Twin;
+    let found = camerata_secrets::detect_all(snippet);
+    if !found.is_empty() {
+        return found.iter().all(|m| match m.twin {
+            Some(Twin::TemplateToken) => !is_weak_default_word(&snippet[m.value.clone()]),
+            // A placeholder word makes the value a template only when the value is nothing but
+            // filler (`xxxxxxxx`); a word inside a longer secret-shaped value is not.
+            Some(Twin::PlaceholderWord(_)) => assigned_value_is_template(&snippet[m.value.clone()]),
+            _ => false,
+        });
+    }
+    let lines: Vec<&str> = snippet
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    !lines.is_empty()
+        && lines.iter().all(|line| {
+            line.find(['=', ':'])
+                .is_some_and(|at| assigned_value_is_template(&line[at + 1..]))
+        })
+}
+
+/// Whether `snippet` cites a real credential value: one the secrets crate classes as a secret (a
+/// raw value, as the floor sees the line before redaction) or one already redacted (the redaction
+/// ellipsis is left only where a real value was). A real key pasted into `.env.example` is a
+/// leak, whatever the file is called.
+fn snippet_holds_real_secret(snippet: &str) -> bool {
+    snippet.contains('\u{2026}')
+        || camerata_secrets::detect_all(snippet)
+            .iter()
+            .any(camerata_secrets::SecretMatch::is_secret)
+}
+
+/// Whether `f` is a secret row about a placeholder: a secret rule whose row cites no real value
+/// and either (a) sits in an example or sample file, or (b) whose value is wholly an unfilled
+/// template token wherever it sits. A placeholder word inside an otherwise secret-shaped value
+/// outside an example file keeps its rating: the word is not proof the value is fake.
+fn is_placeholder_secret_row(f: &Finding) -> bool {
+    is_secret_rule(&f.rule_id)
+        && !snippet_holds_real_secret(&f.snippet)
+        && (is_example_file_path(&f.path) || snippet_value_is_template(&f.snippet))
+}
+
+/// A placeholder row is never above [`PLACEHOLDER_SEVERITY_CEILING`], whether it stands alone,
+/// leads a merged row or is absorbed into one; the lowering is recorded in words.
+fn cap_placeholder_severity(f: &mut Finding) {
+    if severity_rank(&f.severity) <= severity_rank(PLACEHOLDER_SEVERITY_CEILING)
+        || !is_placeholder_secret_row(f)
+    {
+        return;
+    }
+    let from = f.severity.clone();
+    record_severity_adjustment(
+        f,
+        &from,
+        PLACEHOLDER_SEVERITY_CEILING,
+        "the value is a placeholder or sits in an example file, not a live secret",
+    );
+    f.severity = PLACEHOLDER_SEVERITY_CEILING.to_string();
+}
+
+/// Record that `from` became `to` on `f`, and why, as one sentence through the ONE shared
+/// writer ([`crate::severity_bounds::record_adjustment`], which de-duplicates and caps); the
+/// exporters read it back with `recorded_adjustments`. A no-op when the two are the same. The
+/// reason is flattened to one line and capped so the entry stays one sentence.
+pub(crate) fn record_severity_adjustment(f: &mut Finding, from: &str, to: &str, reason: &str) {
+    if from == to {
+        return;
+    }
+    let verb = if severity_rank(to) < severity_rank(from) {
+        "lowered"
+    } else {
+        "raised"
+    };
+    let mut why: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if why.chars().count() > 300 {
+        why = why.chars().take(297).collect::<String>() + "...";
+    }
+    let sentence = if why.is_empty() {
+        format!("severity {verb} from {from} to {to}")
+    } else {
+        format!("severity {verb} from {from} to {to}: {why}")
+    };
+    crate::severity_bounds::record_adjustment(f, sentence);
+}
+
+/// The one-line headline of a finding: its title (the text before the first `HEADLINE_SEP` in
+/// `detail`), or the start of its detail when it carries no title. Capped.
+pub(crate) fn finding_headline(f: &Finding) -> String {
+    let head = match f.detail.split_once(HEADLINE_SEP) {
+        Some((title, _)) => title.trim(),
+        None => f.detail.trim(),
+    };
+    // Model text reaches client prose through this headline: no em dashes, and no hyphen standing
+    // in for one (house style); a dash between clauses becomes a comma.
+    let head = head.replace(" \u{2014} ", ", ").replace('\u{2014}', ", ");
+    let one_line: String = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > 160 {
+        one_line.chars().take(157).collect::<String>() + "..."
+    } else {
+        one_line
+    }
+}
+
+/// `f`'s own evidence site as an absorbed [`MergedLocation`], keeping its OWN severity and
+/// headline so the merge never hides a higher rating or the defect it named (H5).
+fn absorbed_site(f: &Finding) -> MergedLocation {
+    MergedLocation::site(
+        f.repo.clone(),
+        f.path.clone(),
+        f.line,
+        f.rule_id.clone(),
+        f.snippet.clone(),
+        !f.located,
+    )
+    .with_rating(f.severity.clone(), finding_headline(f))
 }
 
 /// C5-1: the merged row's severity. The default — and the ONLY behavior when every member of
@@ -4870,7 +8834,8 @@ fn merged_severity(primary: &Finding, max_sev: String, all_same_tier: bool) -> S
 /// primacy regardless of severity, hiding the security defect. `primary_rank`'s class-first
 /// ordering fixes that while leaving same-class ties resolved exactly as before (now
 /// origin-before-severity within a class — C5-1).
-fn merge_location_group(group: Vec<Finding>) -> Finding {
+fn merge_location_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -4888,7 +8853,6 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
 
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     // Every OTHER distinct rule id, in first-seen order, minus the primary's own.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4899,7 +8863,46 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
             also.push(f.rule_id.clone());
         }
     }
+    // H5: every absorbed member leaves its own rule id, severity and headline behind, so a
+    // critical AI finding folded into a medium deterministic row stays visible with the rating
+    // and the title it carried. The members' own already-nested sites are carried too.
+    //
+    // The sites ALREADY nested (the primary's own, and each member's) are de-duplicated by
+    // (repo, path, line, rule) as `merge_semantic_group` does; each member's FRESH own-site
+    // entry is always kept, so every absorbed member leaves one.
+    let mut nested = std::mem::take(&mut primary.also_locations);
+    for f in &group {
+        nested.extend(f.also_locations.iter().cloned());
+    }
+    let mut nested_seen: std::collections::HashSet<(String, String, usize, String)> =
+        std::collections::HashSet::new();
+    nested.retain(|l| {
+        nested_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
+    });
+    primary.also_locations = nested;
+    for f in &group {
+        primary.also_locations.push(absorbed_site(f));
+    }
+    let max_sev_seen = max_sev.clone();
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
+    if primary.severity != max_sev_seen {
+        let top = group
+            .iter()
+            .find(|f| f.severity == max_sev_seen)
+            .map(|f| f.rule_id.clone())
+            .unwrap_or_default();
+        let kept = primary.severity.clone();
+        let own = primary.rule_id.clone();
+        record_severity_adjustment(
+            &mut primary,
+            &max_sev_seen,
+            &kept,
+            &format!(
+                "{top} at {max_sev_seen} was merged into the grounded rule {own} at this \
+                 location, which keeps its own rating"
+            ),
+        );
+    }
     // C5-1: a deterministic primary with no codebase-specific fix of its own yet (normally
     // `fix_specific` is only populated in a LATER pipeline pass — see `Finding::fix_specific`'s
     // doc comment — but a finding carried forward from a prior incremental run can already carry
@@ -4913,6 +8916,61 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
     // member from an older cache would not be.
     crate::onboard::redact::redact_finding(&mut primary);
     primary
+}
+
+/// The snippet as a dedup key: whitespace collapsed and lowercased, so two chunks quoting the
+/// same line with different spacing still agree.
+fn dedup_snippet_key(snippet: &str) -> String {
+    snippet
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Whether two normalized snippets name the same code: equal, or one is inside the other (a
+/// chunk quoting the whole statement and another only the call in it) when the shorter has at
+/// least [`MIN_CONTAINED_SNIPPET`] characters. An empty snippet matches only another empty one.
+fn same_snippet(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() || a == b {
+        return a == b;
+    }
+    // Containment counts only for a substantial shorter snippet: a short token such as `id`
+    // sits inside almost any line and proves nothing.
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.chars().count() >= MIN_CONTAINED_SNIPPET && long.contains(short)
+}
+
+/// Shortest normalized snippet that may match by being contained in another (M5).
+const MIN_CONTAINED_SNIPPET: usize = 12;
+
+/// Drop the repeats of one finding reported by several passes, keyed on
+/// `(path, line, rule id)` plus the snippet (M5): two findings are repeats when their
+/// normalized snippets are equal or one contains the other. A different snippet is a different
+/// problem (two things one rule found at line 0 of a file, or at one unresolved line
+/// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
+/// any repeat carried. Order is preserved.
+fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
+    let mut by_key: std::collections::HashMap<(String, usize, String), Vec<(String, usize)>> =
+        std::collections::HashMap::new();
+    let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
+    for f in std::mem::take(findings) {
+        let key = (f.path.clone(), f.line, f.rule_id.clone());
+        let snip = dedup_snippet_key(&f.snippet);
+        let entry = by_key.entry(key).or_default();
+        match entry.iter().find(|(s, _)| same_snippet(s, &snip)) {
+            Some(&(_, at)) => {
+                if severity_rank(&f.severity) > severity_rank(&kept[at].severity) {
+                    kept[at].severity = f.severity;
+                }
+            }
+            None => {
+                entry.push((snip, kept.len()));
+                kept.push(f);
+            }
+        }
+    }
+    *findings = kept;
 }
 
 /// Resolve each finding's line DETERMINISTICALLY from its verbatim snippet. LLMs can't count
@@ -5104,6 +9162,13 @@ pub(crate) fn categorize_rule_id(rule_id: &str) -> Option<String> {
         || has("APIKEY")
         || has("PASSWORD")
     {
+        // NOT the floor's private-key and vendor-token rules, nor the Supabase service-role
+        // rule: a category here is a MERGE key ("same file, same category, within five lines"),
+        // and two credentials a few lines apart are two defects that a redacted snippet gives
+        // `objects_conflict` no way to tell apart. See
+        // `a_floor_private_key_and_a_different_ai_secret_two_lines_apart_stay_two_rows`. The
+        // cockpit's decision memory identifies those rows by rule id instead
+        // (`FindingView::is_secret_exposure`).
         "secret-exposure"
     } else if has("RAW-SQL")
         || has("STRING-SQL")
@@ -5296,15 +9361,48 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     out
 }
 
+/// `Finding::captures` keys that are BOOKKEEPING about the row, not objects the finding is
+/// about: the producer, the commit a carried finding came from, the severity-adjustment
+/// sentences and the commit-history sentence. Two unrelated findings can carry the same such
+/// value (the same ceiling sentence, the same commit, the templated history sentence), so they
+/// are never identity evidence for a merge, a veto, a backfill or a credential-identity match.
+///
+/// This is the ONE list. `onboard`'s take and restore of these keys around the merge stages
+/// reads it too, so a key added here is held aside there and ignored as an object here. The keys
+/// are put back on the surviving rows before `report_export` runs
+/// [`root_cause_credential_identities`], which is why they must be excluded here as well and not
+/// only while the merge stages run.
+pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    crate::onboard::PRODUCED_TIER_CAPTURE,
+    crate::report_export::CARRIED_FROM_CAPTURE,
+    // The sentence a severity bound or verdict leaves when it moves a severity. The AI tier writes
+    // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
+    // says the same bound applied, not that they are about the same object.
+    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
+    crate::onboard::HISTORY_STATUS_CAPTURE,
+    // The templated sentences `enrich_secret_context` puts on every secret-shaped floor finding
+    // before the cross-family merge: two different secrets in two files share them, so they
+    // would otherwise read as one object and fuse the two findings.
+    "gitignore-status",
+    "secret-kind",
+];
+
+/// The captures that name an object: every capture except the bookkeeping keys.
+fn object_captures(f: &Finding) -> impl Iterator<Item = (&String, &String)> {
+    f.captures
+        .iter()
+        .filter(|(k, _)| !BOOKKEEPING_CAPTURE_KEYS.contains(&k.as_str()))
+}
+
 /// W7 (C4): a finding's normalized detector-capture VALUES — the same normalization
 /// [`shared_captured_object`] applies (trimmed, lowercased, length-floored at
 /// [`MIN_SHARED_CAPTURE_LEN`] so a bare `id`/`ok` value proves nothing). The STRUCTURED
 /// identity a detector emitted when it matched, as opposed to whatever the prose happens to
 /// mention.
 fn normalized_capture_values(f: &Finding) -> std::collections::HashSet<String> {
-    f.captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
+    object_captures(f)
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
         .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
         .collect()
 }
@@ -5383,19 +9481,13 @@ const MIN_SHARED_CAPTURE_LEN: usize = 3;
 /// the object they each independently identified (one might key it `table`, the other
 /// `object-name`); the object identity is what matters, not the label.
 fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
-    if a.captures.is_empty() || b.captures.is_empty() {
+    if object_captures(a).next().is_none() || object_captures(b).next().is_none() {
         return false;
     }
-    let a_values: std::collections::HashSet<String> = a
-        .captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
-        .collect();
-    b.captures.values().any(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v.len() >= MIN_SHARED_CAPTURE_LEN && a_values.contains(&v)
-    })
+    let a_values = normalized_capture_values(a);
+    normalized_capture_values(b)
+        .iter()
+        .any(|v| a_values.contains(v))
 }
 
 /// C4-P1 design point 2: backfill a `captures` entry from the finding's own structural-object
@@ -5414,7 +9506,7 @@ fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
 /// opportunity for a finding that previously had none, never silently pick the wrong object out
 /// of several. Never overwrites a `captures` entry a detector already set.
 fn backfill_captured_object(f: &mut Finding) {
-    if !f.captures.is_empty() {
+    if object_captures(f).next().is_some() {
         return;
     }
     let mut objs = structural_objects(f).into_iter();
@@ -5518,7 +9610,7 @@ fn credential_identifier_tokens(text: &str) -> std::collections::BTreeSet<String
 /// conservatively left two same-root-cause rows distinct.
 pub(crate) fn root_cause_credential_identities(f: &Finding) -> std::collections::BTreeSet<String> {
     let mut out = credential_identifier_tokens(&format!("{} {}", f.snippet, f.detail));
-    for v in f.captures.values() {
+    for (_, v) in object_captures(f) {
         out.extend(credential_identifier_tokens(v));
     }
     out
@@ -5662,7 +9754,7 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// vocabulary.
 ///
 /// Lowered from `0.6` to `0.5` (MERGE cycle-3, observed-failure 1:
-/// `docs/plans/2026-09-30_cycle3-queue-hardening.md`): a real duplicate pair — one defect
+/// the cycle-3 queue-hardening notes): a real duplicate pair — one defect
 /// reported under two rule ids/tiers more than [`SEMANTIC_MERGE_WINDOW`] lines apart in the same
 /// file, each paraphrased in the generator's OWN words rather than copy-pasted — routinely lands
 /// in the high-0.5s on raw Jaccard once ordinary paraphrase (synonyms, reordered clauses, a
@@ -5677,6 +9769,72 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// security/hygiene vocabulary but name DISJOINT structural objects (different tables, different
 /// policies) are still kept apart.
 const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
+
+/// Whether a row is about an exposed secret (the `secret-exposure` category the merge pass
+/// backfills from the rule id, or the model or calibration set).
+fn is_secret_exposure(f: &Finding) -> bool {
+    f.category.as_deref() == Some("secret-exposure")
+}
+
+/// The redacted fingerprints of the credential values a row's snippet holds: the prefix and last
+/// four characters [`camerata_secrets::redact_str`] leaves (`sk_live_…ab12`), and for a value too
+/// short to show a tail the prefix and the length (`…|12`). A raw value is redacted first, so a
+/// floor row that kept the raw line and an AI row that quoted the redacted line give the same
+/// fingerprint. Empty when the snippet holds no credential value.
+fn credential_fingerprints(f: &Finding) -> std::collections::BTreeSet<String> {
+    const ELLIPSIS: char = '\u{2026}';
+    let redacted = camerata_secrets::redact_str(&f.snippet);
+    let chars: Vec<char> = redacted.chars().collect();
+    let is_body = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut out = std::collections::BTreeSet::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c != ELLIPSIS {
+            continue;
+        }
+        let mut start = i;
+        while start > 0 && is_body(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = i + 1;
+        while end < chars.len() && is_body(chars[end]) {
+            end += 1;
+        }
+        let prefix: String = chars[start..i].iter().collect();
+        let tail: String = chars[i + 1..end].iter().collect();
+        // A value that shows no prefix and no tail (a password) leaves only its length, which
+        // every 12-character password shares: it proves nothing, so it makes no fingerprint.
+        if prefix.is_empty() && tail.is_empty() {
+            continue;
+        }
+        let mut print = format!("{prefix}{ELLIPSIS}{tail}");
+        if tail.is_empty() {
+            let rest: String = chars[end..].iter().collect();
+            if let Some(count) = rest.strip_prefix(" (") {
+                let digits: String = count.chars().take_while(char::is_ascii_digit).collect();
+                print.push_str(&format!("|{digits}"));
+            }
+        }
+        out.insert(print);
+    }
+    out
+}
+
+/// Whether two secret rows are the same credential: the same exact location in one repository,
+/// or a shared redacted fingerprint ([`credential_fingerprints`]). A row that cites no credential
+/// value, at a different place, is not proven to be the same credential.
+fn same_credential(a: &Finding, b: &Finding) -> bool {
+    if a.repo != b.repo {
+        return false;
+    }
+    if a.path == b.path && a.line != 0 && a.line == b.line {
+        return true;
+    }
+    let a_prints = credential_fingerprints(a);
+    !a_prints.is_empty()
+        && credential_fingerprints(b)
+            .iter()
+            .any(|print| a_prints.contains(print))
+}
 
 /// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2, the MERGE
 /// cycle-2/cycle-3 hardening passes, and C4-P1's defect-shaped merge redesign). `a` and `b`
@@ -5800,6 +9958,19 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     // Signal (b): a shared captured object, general and cross-file (design point 2b).
     let shared_object = shared_captured_object(a, b);
 
+    // Credential-identity guard: two secret rows are one finding only when they are the same
+    // credential. "Both are a leaked secret" and "a few lines apart in one file" prove nothing,
+    // and fusing two credentials lets one reviewer decision dispose of both. A shared named
+    // credential (signal (b)) still links two rows; a row never links across repositories.
+    if is_secret_exposure(a) && is_secret_exposure(b) {
+        if a.repo != b.repo {
+            return false;
+        }
+        if !shared_object && !same_credential(a, b) {
+            return false;
+        }
+    }
+
     // Signal (c): near-identical description prose, general and same-file-only (design MERGE
     // gap (i)).
     let description_overlap =
@@ -5873,7 +10044,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
 /// marked `consequence: true` there, so it folds in as an "also affects" location rather than
 /// reading as a peer, independently-actionable site. C5-1: a primary with no `fix_specific` of
 /// its own inherits the first member's (see `merge_location_group`'s matching comment).
-fn merge_semantic_group(group: Vec<Finding>) -> Finding {
+fn merge_semantic_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -5890,7 +10062,6 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     let all_same_tier = group
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(primary.rule_id.clone());
@@ -5905,7 +10076,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     // `also_locations`. Deliberately kept separate from each member's FRESH own-site entry
     // below: this list alone is what the "same already-absorbed record reachable via two
     // paths" dedup further down is allowed to collapse.
-    let mut nested_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
+    let mut nested_locations: Vec<MergedLocation> = std::mem::take(&mut primary.also_locations);
     // FRESH sites only — THIS stage's own absorption of each group member. See the dedup
     // comment below for why these must never be deduplicated away.
     let mut fresh_locations: Vec<MergedLocation> = Vec::new();
@@ -5926,14 +10097,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
                 also.push(r.clone());
             }
         }
-        fresh_locations.push(MergedLocation {
-            repo: f.repo.clone(),
-            path: f.path.clone(),
-            line: f.line,
-            rule_id: f.rule_id.clone(),
-            snippet: f.snippet.clone(),
-            consequence: !f.located,
-        });
+        fresh_locations.push(absorbed_site(f));
         nested_locations.extend(f.also_locations.iter().cloned());
     }
     // De-duplicate identical NESTED sites only (the same already-absorbed record can arrive
@@ -5962,7 +10126,21 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     });
     let mut also_locations = nested_locations;
     also_locations.extend(fresh_locations);
+    let max_sev_seen = max_sev.clone();
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
+    if primary.severity != max_sev_seen {
+        let kept = primary.severity.clone();
+        let own = primary.rule_id.clone();
+        record_severity_adjustment(
+            &mut primary,
+            &max_sev_seen,
+            &kept,
+            &format!(
+                "a member of this merge was rated {max_sev_seen}; the row keeps the rating of \
+                 the grounded rule {own}"
+            ),
+        );
+    }
     primary.also_matches = also;
     primary.also_locations = also_locations;
     if primary.fix_specific.is_none() {
@@ -5972,7 +10150,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     primary
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): drop any finding whose rule
+/// P7 (the codebase-inspection hardening notes): drop any finding whose rule
 /// carries a [`camerata_rules::StackException`] that applies to the repo's DETECTED stack +
 /// this finding's own file path — e.g. `ARCH-MONOLITH-FIRST-1` flagging a `supabase/functions/`
 /// directory on a Supabase-stack repo, where a second Edge Functions deployable is the
@@ -6006,7 +10184,7 @@ pub fn apply_stack_exceptions(
         .collect()
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`, item 4 — needs-review noise):
+/// P7 (the codebase-inspection hardening notes, item 4 — needs-review noise):
 /// a rule the calibrator flagged as a debatable STRUCTURAL/consistency preference
 /// (`category == "arch-conformance"`, `confidence == "needs-review"`) commonly fires at many
 /// unrelated locations across a repo — one row per occurrence drowns the report ("23
@@ -6030,10 +10208,13 @@ pub fn apply_stack_exceptions(
 /// (C5-4), OUTSIDE the curated do_now/do_next/plan action tiers, via the PRE-EXISTING
 /// `report_export::is_held_for_review` gate — no new bucketing logic needed on that side.
 ///
-/// Runs across the WHOLE scan (every repo the caller passes in), so a rule flagged in more than
-/// one repo still collapses to one row with every repo's site listed.
+/// Runs across the WHOLE scan (every repo the caller passes in), but groups by (repo, rule): a
+/// rule flagged in two repos is two services' observations, so it stays two rows, each naming
+/// its own repo. Collapsing them would put one service's sites under another service's name
+/// (the group takes the repo of its first occurrence) and hide that the same path, say
+/// `src/index.ts:12`, is a different place in each.
 pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut groups: std::collections::BTreeMap<String, Vec<Finding>> =
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<Finding>> =
         std::collections::BTreeMap::new();
     let mut rest = Vec::with_capacity(findings.len());
     for f in findings {
@@ -6047,12 +10228,15 @@ pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
             && f.confidence.as_deref() == Some("needs-review")
             && !matches!(severity.as_str(), "critical" | "high");
         if is_structural_needs_review {
-            groups.entry(f.rule_id.clone()).or_default().push(f);
+            groups
+                .entry((f.repo.clone(), f.rule_id.clone()))
+                .or_default()
+                .push(f);
         } else {
             rest.push(f);
         }
     }
-    for (rule_id, mut occurrences) in groups {
+    for ((_repo, rule_id), mut occurrences) in groups {
         occurrences.sort_by(|a, b| {
             (a.repo.as_str(), a.path.as_str(), a.line).cmp(&(
                 b.repo.as_str(),
@@ -6120,14 +10304,14 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     let mut also_locations: Vec<MergedLocation> = Vec::new();
     for (i, f) in occurrences.iter().enumerate() {
         if i > 0 {
-            also_locations.push(MergedLocation {
-                repo: f.repo.clone(),
-                path: f.path.clone(),
-                line: f.line,
-                rule_id: f.rule_id.clone(),
-                snippet: f.snippet.clone(),
-                consequence: false,
-            });
+            also_locations.push(MergedLocation::site(
+                f.repo.clone(),
+                f.path.clone(),
+                f.line,
+                f.rule_id.clone(),
+                f.snippet.clone(),
+                false,
+            ));
         }
         also_locations.extend(f.also_locations.iter().cloned());
     }
@@ -6172,7 +10356,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
 }
 
 /// The SECOND merge pass (design §1, extended by P1 — see
-/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` — and by C4-P1's defect-shaped merge
+/// the codebase-inspection hardening notes — and by C4-P1's defect-shaped merge
 /// redesign): after `resolve_finding_lines` + `merge_by_location` have collapsed exact-location
 /// duplicates, fuse cross-TIER duplicates — the same defect flagged by two rule families a few
 /// lines apart (an AI RLS finding + the native RLS checker; a service-role-bypass + a
@@ -6405,32 +10589,226 @@ fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings
 }
 
+/// One route group's share of a scan, ready to run: the files its scope covers (re-chunked on
+/// their own, so a chunk only holds files its rules can apply to), its rules, and how the
+/// advisory pass is wired for it.
+///
+/// [`routed_units`] is the ONE place that decides which (chunk, rule) pairs a scan sends. The
+/// real-time path ([`run_routed_passes`]), the batch path ([`run_routed_passes_batch`]) and the
+/// routing telemetry all read it, so they cannot send different pairs.
+struct RoutedUnit {
+    /// Index of the group in the route plan (stable session-id component).
+    index: usize,
+    /// `pass[<lang>]`, `pass[<declared scope>]` or `pass[all]`.
+    label: String,
+    /// What to tell the report when this group matched no file.
+    empty_note: String,
+    /// The files this group's scope covers.
+    files: Vec<(String, String)>,
+    /// The group's `(id, directive)` pairs, in plan order.
+    rules: Vec<(String, String)>,
+    /// True for a scoped group when a cross-cutting `All` group also runs this scan; see
+    /// [`routed_units`].
+    advisory_disabled: bool,
+}
+
+/// Turn a route plan into the units that run. Every group of the plan becomes a unit (a group
+/// that matched no file has empty `files`; the caller records it, see [`runnable_units`]).
+///
+/// # Advisory wiring (W2)
+///
+/// The advisory "flag novel issues beyond the adopted rules" pass must fire exactly once per
+/// file chunk. A scoped group (id-prefix language or declared `applies_to`) disables it ONLY when
+/// a cross-cutting `All` group ALSO runs this scan: that group already sees every file, so
+/// advisory in a scoped group too would re-flag the same novel issue under a second invented
+/// name. When there is no `All` group at all (every selected rule is scoped), nothing else would
+/// ever ask "is there anything wrong beyond the listed rules?", so every scoped group keeps
+/// advisory on. Id-prefix language groups are mutually exclusive by file, so that never
+/// duplicates; two DECLARED scopes can overlap on a file, in which case that file's advisory
+/// runs once per overlapping group and the duplicates collapse in the cross-chunk dedup and
+/// location merge. That costs a few repeated advisory tokens in an unusual selection (every
+/// cross-cutting rule scoped); the alternative, dropping advisory for a file, would lose findings.
+fn routed_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+) -> Vec<RoutedUnit> {
+    use crate::scan_routing::Scope;
+    let has_all_group = route_plan
+        .groups
+        .iter()
+        .any(|g| matches!(g.scope, Scope::All));
+    route_plan
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let (label, empty_note) = match &group.scope {
+                Scope::Language(lang) => (
+                    format!("pass[{lang}]"),
+                    format!("no {lang} files matched this scan's file set"),
+                ),
+                Scope::Declared { language, .. } => (
+                    format!(
+                        "pass[{}]",
+                        language.map_or_else(|| "scoped".to_string(), str::to_string)
+                    ),
+                    "no file in this scan's file set is one this rule applies to".to_string(),
+                ),
+                Scope::All => (
+                    "pass[all]".to_string(),
+                    "no files matched this scan's file set".to_string(),
+                ),
+            };
+            RoutedUnit {
+                index,
+                label,
+                empty_note,
+                files: crate::scan_routing::files_in_scope(files, &group.scope),
+                rules: group.rule_pairs(),
+                advisory_disabled: has_all_group && !matches!(group.scope, Scope::All),
+            }
+        })
+        .collect()
+}
+
+/// The units that actually run: [`routed_units`] without the groups that matched no file.
+///
+/// Pass-1 W3 (A5.6, `NotAssessed`): a group that matched ZERO files was ARMED but nothing was
+/// ever judged against it. Each of its rules is pushed to `skipped_rules` for the caller
+/// (`audit_repo`) to turn into one honest `not_assessed` row, rather than leaving "never
+/// evaluated" indistinguishable from "assessed and clean". Real-time and batch mode both go
+/// through here, so both disclose the same skipped rules.
+///
+/// Also records the routing telemetry (how many (chunk, rule) pairs routing did not send) when
+/// there is a `meter`.
+fn runnable_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    let units = routed_units(files, route_plan);
+    if let Some(m) = meter {
+        // (chunk, rule) pairs: what an un-routed scan would send (every rule with every chunk)
+        // against what the units send (each group's rules with that group's own chunks).
+        let n_rules: usize = units.iter().map(|u| u.rules.len()).sum();
+        let total = chunk_files(files, CHUNK_DIGEST_CHARS).len() * n_rules;
+        let sent: usize = units
+            .iter()
+            .map(|u| chunk_files(&u.files, CHUNK_DIGEST_CHARS).len() * u.rules.len())
+            .sum();
+        m.record_routing(total as u64, total.saturating_sub(sent) as u64);
+    }
+    let mut runnable = Vec::with_capacity(units.len());
+    for unit in units {
+        if unit.files.is_empty() {
+            skipped_rules.extend(
+                unit.rules
+                    .iter()
+                    .map(|(id, _)| (id.clone(), unit.empty_note.clone())),
+            );
+        } else {
+            runnable.push(unit);
+        }
+    }
+    runnable
+}
+
+/// The units a Message Batch scan submits, one Message Batch each.
+///
+/// With `applies_to_routing` ON these are exactly the real-time path's [`runnable_units`], so
+/// batch and real-time send the same (chunk, rule) pairs. With it OFF this is the batch scan as
+/// it was before routing reached batch mode: ONE submission of every rule against every file,
+/// labelled `pass`, advisory on. The switch therefore isolates routing completely: OFF in batch
+/// mode is "no routing at all", not "language routing only".
+fn batch_units(
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    applies_to_routing: bool,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    if applies_to_routing {
+        return runnable_units(files, route_plan, meter, skipped_rules);
+    }
+    vec![RoutedUnit {
+        index: 0,
+        label: "pass".to_string(),
+        empty_note: String::new(),
+        files: files.to_vec(),
+        rules: crate::scan_routing::rule_pairs(selected),
+        advisory_disabled: false,
+    }]
+}
+
+/// Drop the "armed but nothing matched" disclosures that the scan's file set cannot support.
+///
+/// `runnable_units` reports a rule whose group matched no file in `files`. On an INCREMENTAL scan
+/// `files` is only the changed files, so a rule whose matching files exist in the repo but did
+/// not change this time would be reported as never assessed, while its earlier findings are
+/// carried forward. A rule is only reported when the FULL file set (`full_files`) has no match
+/// either.
+fn drop_skips_with_matches_in_full_set(
+    skipped_rules: &mut Vec<(String, String)>,
+    route_plan: &crate::scan_routing::RoutePlan,
+    full_files: &[(String, String)],
+) {
+    let covered: std::collections::HashSet<String> = route_plan
+        .groups
+        .iter()
+        .filter(|g| {
+            full_files
+                .iter()
+                .any(|(p, c)| crate::scan_routing::file_in_scope(p, c, &g.scope))
+        })
+        .flat_map(|g| g.rules.iter().map(|r| r.id.to_ascii_uppercase()))
+        .collect();
+    skipped_rules.retain(|(id, _)| !covered.contains(&id.to_ascii_uppercase()));
+}
+
+/// The `(chunk, rule)` pairs a scan sends, as `(chunk's file paths, rule id)`, for a unit list.
+#[cfg(test)]
+fn pair_set_of(units: &[RoutedUnit]) -> std::collections::BTreeSet<(Vec<String>, String)> {
+    units
+        .iter()
+        .flat_map(|u| {
+            let chunk_paths: Vec<Vec<String>> = chunk_files(&u.files, CHUNK_DIGEST_CHARS)
+                .iter()
+                .map(|c| c.iter().map(|(p, _)| p.clone()).collect())
+                .collect();
+            u.rules.iter().flat_map(move |(id, _)| {
+                chunk_paths
+                    .iter()
+                    .map(move |paths| (paths.clone(), id.clone()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
 /// Run the real-time audit passes with rule-routing applied.
 ///
-/// Groups `selected` rules by [`crate::scan_routing::Scope`] using the pre-computed
-/// `route_plan`, then for each group:
+/// Runs each [`RoutedUnit`] of `route_plan` (see [`runnable_units`] and [`routed_units`]):
 ///
-/// - Filters `files` to only the files that group's scope covers.
-/// - Chunks those filtered files for context-window sizing.
-/// - Runs [`run_passes`] over the group's rules, with `advisory_disabled = true` for a
-///   language-specific group ONLY when a cross-cutting `All` group ALSO runs this scan (so the
-///   "flag novel issues" pass fires exactly once per file chunk there, instead of once per
-///   group × chunk). When no `All` group exists at all (a purely language-scoped rule
-///   selection), every language group keeps advisory enabled instead — see the `has_all_group`
-///   doc comment in this function's body for why that never duplicates a finding (W2).
+/// - The unit's files are chunked for context-window sizing.
+/// - [`run_passes`] runs over the unit's rules, with `advisory_disabled` as [`routed_units`]
+///   decides it (so the "flag novel issues" pass fires exactly once per file chunk when a
+///   cross-cutting `All` group exists).
 ///
 /// When routing produces no savings (all rules are cross-cutting, or only one group), this
 /// degenerates to the previous single-group behavior with no overhead.
 ///
-/// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, last_err)`.
+/// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, failures)`.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_passes(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -6443,19 +10821,13 @@ async fn run_routed_passes(
     // for the caller (`audit_repo`) to synthesize one honest `not_assessed` row per rule,
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
-    use crate::scan_routing::Scope;
-
+    // Rank 8: the candidate locators and their time limit (production in `audit_repo`).
+    candidate_env: candidate_passes::CandidateEnv,
+) -> PassesOut {
     // When there are no rules (free-form audit), skip routing and run one pass over all files.
     if selected.is_empty() {
         let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-        let empty_batch: &[(String, String)] = selected;
+        let empty_batch: &[(String, String)] = &[];
         let batches: Vec<&[(String, String)]> = vec![empty_batch];
         if let Some((jstore, jid)) = job {
             jstore.add_total(jid, chunks.len() * batches.len());
@@ -6464,11 +10836,13 @@ async fn run_routed_passes(
             llm,
             repo,
             repo_map,
+            nonce,
             adopted,
             audit_model,
             feedback,
             job,
             &chunks,
+            None,
             &batches,
             concurrency,
             "pass",
@@ -6479,29 +10853,25 @@ async fn run_routed_passes(
         .await;
     }
 
+    let units = runnable_units(files, route_plan, meter, skipped_rules);
+    // Rank 8: what each unit's chunks look like to its rules (whole files, or candidate sites).
+    let pass_sets = candidate_passes::plan_pass_sets(
+        &units,
+        selected,
+        repo,
+        efficiency_of(meter).candidates_prefilter,
+        candidate_env,
+        nonce,
+        meter,
+    )
+    .await;
+
     // Pre-seed the job's total pass count across ALL route groups so the progress bar is
-    // accurate from the start. We need to compute chunk counts per group first.
-    //
-    // For each group: count its files → chunk count × batch count = pass count.
-    let total_pass_count: usize = route_plan
-        .groups
+    // accurate from the start: per pass set, chunk count x rule-batch count.
+    let total_pass_count: usize = pass_sets
         .iter()
-        .map(|g| {
-            // Filter files to this group's scope.
-            let group_files: Vec<&(String, String)> = files
-                .iter()
-                .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &g.scope))
-                .collect();
-            // The group's rules split into batches.
-            let n_batches = g.rules.chunks(batch_size.max(1)).count().max(1);
-            // chunk_files needs owned slices; approximate chunk count from raw sizes.
-            let total_sz: usize = group_files
-                .iter()
-                .map(|(p, c)| p.len() + c.len() + 32)
-                .sum();
-            let n_chunks = (total_sz / CHUNK_DIGEST_CHARS).max(1);
-            n_chunks * n_batches
-        })
+        .flatten()
+        .map(|set| set.pass_count(batch_size))
         .sum();
     // Only seed when > 0 (empty groups are no-ops and contribute 0 passes).
     if total_pass_count > 0 {
@@ -6514,99 +10884,41 @@ async fn run_routed_passes(
     let mut all_proposed: Vec<ProposedRule> = Vec::new();
     let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_ok: usize = 0;
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut failures: Vec<PassFailure> = Vec::new();
 
-    // W2 (closes a real zero-row semantic-tier defect, previously documented as an accepted
-    // "known limitation" in `routing_single_language_repo_with_language_rules`): a project whose
-    // SELECTED rule set is entirely language-scoped (e.g. only `RUST-*` rules — no `ARCH-*`/
-    // `SEC-*`/other cross-cutting rule) produces a `route_plan` with NO `Scope::All` group at
-    // all. The old unconditional `!matches!(group.scope, Scope::All)` then disabled advisory in
-    // EVERY group, which means the "ALSO flag any other genuine issues NOT covered by an adopted
-    // rule" instruction (the model's one and only backstop for issues no selected rule names —
-    // see `audit_system_prompt`'s doc comment) was never sent to the model AT ALL for that scan.
-    // That is the silent-collapse mechanism: a repo scanned with a language-only rule selection
-    // gets zero chance at any novel/security finding outside those rules, indistinguishable from
-    // "the model looked and found nothing."
-    //
-    // Fix: advisory is disabled for a language group ONLY when a SEPARATE cross-cutting All
-    // group also exists to run it (the original duplicate-novel-finding concern this flag
-    // exists for). When there is no All group, every language group keeps advisory enabled
-    // instead — safe to do because `Scope::Language` groups are mutually exclusive by
-    // construction (`scan_routing::file_language` maps each file to AT MOST one language), so no
-    // file can receive the advisory instruction from more than one group.
-    let has_all_group = route_plan
-        .groups
-        .iter()
-        .any(|g| matches!(g.scope, Scope::All));
+    for (unit, sets) in units.iter().zip(&pass_sets) {
+        let unit_chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        for set in sets {
+            let chunks = set.chunks_of(&unit_chunks);
+            let batches = set.batches(batch_size);
 
-    for (gi, group) in route_plan.groups.iter().enumerate() {
-        // The advisory pass is suppressed in a language-specific group only when a cross-cutting
-        // All group ALSO runs this scan — that All group already sees every file, so re-running
-        // advisory per language group would produce duplicate novel findings for every file
-        // (every language file is also an All-group file). When there is no All group, nothing
-        // else will ever ask "is there anything wrong beyond the listed rules?", so each
-        // (mutually exclusive) language group runs it itself — see the `has_all_group` doc
-        // comment above.
-        let advisory_disabled = has_all_group && !matches!(group.scope, Scope::All);
+            // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as
+            // that would double-count. run_passes calls inc_done per completed pass.
+            let (gf, gp, gr, gok, ge) = run_passes(
+                llm,
+                repo,
+                repo_map,
+                nonce,
+                adopted,
+                audit_model,
+                feedback,
+                job,
+                &chunks,
+                set.digests.as_deref(),
+                &batches,
+                concurrency,
+                &set.label,
+                &set.session_prefix,
+                meter,
+                set.advisory_disabled,
+            )
+            .await;
 
-        // Materialize the owned file list for this group's scope.
-        let group_files: Vec<(String, String)> = files
-            .iter()
-            .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &group.scope))
-            .cloned()
-            .collect();
-
-        if group_files.is_empty() {
-            // No files match this language group in this repo — nothing was audited for these
-            // rules. W3: record each armed rule so the caller emits a `not_assessed` honesty
-            // row (A5.6) instead of silently skipping.
-            let note = match &group.scope {
-                Scope::Language(lang) => {
-                    format!("no {lang} files matched this scan's file set")
-                }
-                Scope::All => "no files matched this scan's file set".to_string(),
-            };
-            skipped_rules.extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
-            continue;
-        }
-
-        let chunks = chunk_files(&group_files, CHUNK_DIGEST_CHARS);
-        let group_rules: &[(String, String)] = &group.rules;
-        let batches: Vec<&[(String, String)]> = group_rules.chunks(batch_size.max(1)).collect();
-
-        let scope_label = match &group.scope {
-            Scope::Language(lang) => format!("pass[{lang}]"),
-            Scope::All => "pass[all]".to_string(),
-        };
-        let session_prefix = format!("audit-{repo}-g{gi}");
-
-        // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as that
-        // would double-count. run_passes calls inc_done per completed pass, which is correct.
-
-        let (gf, gp, gr, gok, ge) = run_passes(
-            llm,
-            repo,
-            repo_map,
-            adopted,
-            audit_model,
-            feedback,
-            job,
-            &chunks,
-            &batches,
-            concurrency,
-            &scope_label,
-            &session_prefix,
-            meter,
-            advisory_disabled,
-        )
-        .await;
-
-        all_findings.extend(gf);
-        all_proposed.extend(gp);
-        all_requested.extend(gr);
-        total_ok += gok;
-        if ge.is_some() {
-            last_err = ge;
+            all_findings.extend(gf);
+            all_proposed.extend(gp);
+            all_requested.extend(gr);
+            total_ok += gok;
+            failures.extend(ge);
         }
     }
 
@@ -6615,8 +10927,145 @@ async fn run_routed_passes(
         all_proposed,
         all_requested,
         total_ok,
-        last_err,
+        failures,
     )
+}
+
+/// [`run_routed_passes`] for Message Batch mode: with `applies_to_routing` on, the same
+/// [`runnable_units`], so batch mode sends exactly the (chunk, rule) pairs real-time mode does;
+/// with it off, the unrouted batch scan ([`batch_units`]). Each route group is submitted as its own
+/// Message Batch, one after the other (so the spend cap sees the cost of the earlier groups
+/// before it admits the next, and a group's `advisory_disabled` is honoured per group, which is
+/// what [`run_passes_batch`]'s own parameter is for).
+///
+/// A batch error in one group (only possible with `batch_default` off; see [`run_passes_batch`])
+/// is that group's failed pass and the other groups' findings are kept. If no group completed,
+/// the first error is returned, exactly as the single batch did before.
+#[allow(clippy::too_many_arguments)]
+async fn run_routed_passes_batch(
+    llm: &dyn batch_mode::BatchApi,
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
+    adopted: &std::collections::HashSet<String>,
+    audit_model: Option<&str>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    batch_size: usize,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+    candidate_env: candidate_passes::CandidateEnv,
+) -> anyhow::Result<PassesOut> {
+    if selected.is_empty() {
+        let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+        let empty_batch: &[(String, String)] = &[];
+        return run_passes_batch(
+            llm,
+            repo,
+            repo_map,
+            nonce,
+            adopted,
+            audit_model,
+            job,
+            &chunks,
+            None,
+            &[empty_batch],
+            "pass",
+            meter,
+            false,
+        )
+        .await;
+    }
+
+    let units = batch_units(
+        files,
+        selected,
+        route_plan,
+        efficiency_of(meter).applies_to_routing,
+        meter,
+        skipped_rules,
+    );
+    let pass_sets = candidate_passes::plan_pass_sets(
+        &units,
+        selected,
+        repo,
+        efficiency_of(meter).candidates_prefilter,
+        candidate_env,
+        nonce,
+        meter,
+    )
+    .await;
+    let mut all_findings: Vec<Finding> = Vec::new();
+    let mut all_proposed: Vec<ProposedRule> = Vec::new();
+    let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total_ok: usize = 0;
+    let mut failures: Vec<PassFailure> = Vec::new();
+    let mut groups_completed: usize = 0;
+    let mut first_error: Option<anyhow::Error> = None;
+    for (unit, sets) in units.iter().zip(&pass_sets) {
+        let unit_chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        for set in sets {
+            let chunks = set.chunks_of(&unit_chunks);
+            let batches = set.batches(batch_size);
+            let group = run_passes_batch(
+                llm,
+                repo,
+                repo_map,
+                nonce,
+                adopted,
+                audit_model,
+                job,
+                &chunks,
+                set.digests.as_deref(),
+                &batches,
+                &set.label,
+                meter,
+                set.advisory_disabled,
+            )
+            .await;
+            match group {
+                Ok((gf, gp, gr, gok, ge)) => {
+                    all_findings.extend(gf);
+                    all_proposed.extend(gp);
+                    all_requested.extend(gr);
+                    total_ok += gok;
+                    failures.extend(ge);
+                    groups_completed += 1;
+                }
+                // With `batch_default` off a failed submit, poll or fetch is fatal to its own
+                // group (see `run_passes_batch`). Another group's replies are already paid for,
+                // so the failure is this group's failed pass, not the whole scan's: it is
+                // disclosed by name and the other groups' findings are kept. Only when NO group
+                // completed (nothing was paid for, as with the single unrouted batch) does the
+                // error propagate. A candidate pass set is its own group here.
+                Err(error) => {
+                    eprintln!(
+                        "[camerata-server] batch mode: group {} failed: {error:#}",
+                        set.label
+                    );
+                    failures.push(PassFailure::named(
+                        format!("{} (the whole group)", set.label),
+                        &format!("{error:#}"),
+                    ));
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    }
+    if groups_completed == 0 {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    Ok((
+        all_findings,
+        all_proposed,
+        all_requested,
+        total_ok,
+        failures,
+    ))
 }
 
 /// D7 — strip the corpus's `Rejected:` AUTHORING token from prose about to reach a client.
@@ -6658,7 +11107,7 @@ fn strip_authoring_token(why: &str) -> String {
     }
 }
 
-/// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): decide what happens
+/// Pass-1 W2 (A5.4, the audit findings tracker): decide what happens
 /// to `effective_selected`'s directive entry for `rule_id`, given the OPTION that was DECIDED
 /// for this rule this scan (forced by the operator, or model-recommended) — and, when that
 /// option is the degenerate/absent form of the requirement, build the finding that must be
@@ -6696,7 +11145,7 @@ fn strip_authoring_token(why: &str) -> String {
 ///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
 ///   point at.
 fn apply_alternative_decision(
-    effective_selected: &mut [(String, String)],
+    effective_selected: &mut [crate::scan_routing::AuditRule],
     repo: &str,
     rule_id: &str,
     option: &RuleOptionView,
@@ -6706,9 +11155,9 @@ fn apply_alternative_decision(
     if !option.violates {
         if let Some(entry) = effective_selected
             .iter_mut()
-            .find(|(id, _)| id.eq_ignore_ascii_case(rule_id))
+            .find(|r| r.id.eq_ignore_ascii_case(rule_id))
         {
-            entry.1 = option.directive.clone();
+            entry.directive = option.directive.clone();
         }
         return None;
     }
@@ -7095,17 +11544,28 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
 /// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
 /// scoped rules skip unmatched files, and no finding is missed.
 ///
+/// ### Declared scope (`applies_to`)
+///
+/// A rule may also declare `applies_to` in its TOML (file globs and languages). With the
+/// `applies_to_routing` efficiency switch on, such a rule is grouped under its declared scope
+/// (intersected with its id-prefix language, if any) and sent only with the files that scope
+/// covers; a file whose language cannot be determined still gets it. With the switch off the
+/// field is ignored and only the id-prefix routing above applies.
+///
 /// ### Batch mode
 ///
-/// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
-/// submits every rule against every file as a single Anthropic Message Batch. Routing for the
-/// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
+/// The Batch execution path honours the SAME plan: [`run_routed_passes_batch`] reads the same
+/// [`runnable_units`] as the real-time path and submits one Message Batch per route group, so
+/// both modes send the same (chunk, rule) pairs.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    // The rules to audit, with the routing metadata the corpus declares for each
+    // (`AuditRule::applies_to`). Rule metadata, not `(id, directive)` pairs, so the next piece
+    // of per-rule routing metadata is one more field on `AuditRule` and not a signature change.
+    selected: &[crate::scan_routing::AuditRule],
     // MULTI-OPTION semantic rules present in `selected` for this repo (built by the caller
     // from the loaded corpus — see `onboard::build_rule_alternatives`). Empty when this
     // project/repo has no multi-option semantic rules selected, or when the caller is a
@@ -7141,50 +11601,55 @@ pub async fn audit_repo(
     // below (the digest, the repo map, the fix context window, line anchoring) reads this model-
     // facing set: same paths, same line numbers, every credential value replaced by its redacted
     // form, so a `path:line` the model cites still resolves and a snippet it quotes still anchors.
-    let model_files = crate::onboard::redact::files_for_model(files);
+    let mut model_files = crate::onboard::redact::files_for_model(files);
+    let mut model_map_files = map_files.map(crate::onboard::redact::files_for_model);
+    // H5: one canonical input order. The file walk follows the filesystem's directory order and
+    // the rule selection its caller's, and either reorders every prompt (and so the answer) when
+    // it changes. Path order for files, id order for rules, so the same inputs always produce
+    // the same prompts. Stable sorts: equal keys keep their relative order.
+    model_files.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(m) = model_map_files.as_mut() {
+        m.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    let mut ordered_selected = selected.to_vec();
+    ordered_selected.sort_by(|a, b| a.id.cmp(&b.id));
+    let selected = ordered_selected.as_slice();
     let files = model_files.as_slice();
-    let model_map_files = map_files.map(crate::onboard::redact::files_for_model);
     let map_files = model_map_files.as_deref();
     // W1: this call's own merge/calibration stage samples, returned alongside the normal
     // result (mirroring the EXISTING `Vec<FailedPass>` accumulation pattern already used
     // throughout this function) rather than threading a `&mut ScanLedger` through this
     // already-large parameter list — see `crate::scan_ledger::StageSample`'s doc comment.
     let mut stage_samples: Vec<crate::scan_ledger::StageSample> = Vec::new();
+    // The delimiter token for every model call of this audit (alternatives, scan and resolution
+    // passes). One per run, so the passes keep sharing their cached prefix; see `crate::prompt_frame`.
+    // Drawn so that it occurs in no path or file body the run frames (the repo map's set included).
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[
+        files,
+        map_files.unwrap_or(files),
+    ]);
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
-    let repo_map = build_repo_map(map_files.unwrap_or(files));
+    let repo_map = build_repo_map(map_files.unwrap_or(files), &nonce);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
-    let adopted: std::collections::HashSet<String> = selected
-        .iter()
-        .map(|(id, _)| id.to_ascii_uppercase())
-        .collect();
-    // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
-    let audit_model = model.map(str::to_string).or_else(|| {
-        std::env::var("CAMERATA_AUDIT_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    });
-    // Calibration model: the user's calibration pick wins; else CAMERATA_CALIBRATION_MODEL;
-    // else fall back to the SCAN model so the audit is end-to-end on one model by default
-    // (no silent default-model calibration). The UI exposes this as its own picker.
-    //
-    // BUG-AI-3: when `calibration_model` is None, CAMERATA_CALIBRATION_MODEL is unset,
-    // AND `audit_model` is also None (both model param and CAMERATA_AUDIT_MODEL absent),
-    // `calib_model` is None — which means `verify_findings` passes None to `build_req` and
-    // the LLM client uses its compiled-in default model. This is correct: if neither scan
-    // nor calibration model is pinned, both default to the same LLM default, so the audit
-    // IS end-to-end on one model. The comment above was slightly misleading ("fall back to
-    // the SCAN model") when scan_model is itself None — the accurate statement is "fall
-    // back to the same source as the scan, which may itself be the LLM default."
-    let calib_model = calibration_model
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("CAMERATA_CALIBRATION_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or_else(|| audit_model.clone());
+    let adopted: std::collections::HashSet<String> =
+        selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
+    // Model selection: the USER's per-audit choice wins; else the built-in default. ALWAYS resolved here, to the same id the pre-flight priced and the
+    // ledger records (`resolve_audit_model`). It used to stay `None` when nothing was pinned, on
+    // the theory that the transport's own default would then serve both scan and calibration;
+    // but that default was the PROCESS default (an environment variable, now removed), which the pre-flight, the
+    // ledger key, the batch path and the spend limit's price check never consult. A run then
+    // reported one model and called another, and when the other was unpriced the spend limit
+    // could not count its calls and refused the rest of the run (2026-10-29).
+    let audit_model: Option<String> = Some(resolve_audit_model(model));
+    // Calibration model: the user's calibration pick wins; else the SCAN model, so the audit is end to end on one model by default (no silent
+    // default-model calibration). The UI exposes this as its own picker. The same resolution
+    // the pre-flight lists the calibration model by.
+    let calib_model: Option<String> = Some(resolve_calibration_model(
+        calibration_model,
+        audit_model.as_deref().unwrap_or_default(),
+    ));
 
     // ── Multi-option semantic rules: decide (or accept the operator's forced choice of) ONE
     // option per rule, then REWRITE that rule's entry in `effective_selected` to the decided
@@ -7194,7 +11659,7 @@ pub async fn audit_repo(
     // always relative to ONE chosen alternative" (the design doc's coherence principle) without
     // any cross-chunk coordination. See `recommend_alternatives`'s doc comment for the chunk-0
     // grounding tradeoff.
-    let mut effective_selected: Vec<(String, String)> = selected.to_vec();
+    let mut effective_selected: Vec<crate::scan_routing::AuditRule> = selected.to_vec();
     let mut recommendations: Vec<RuleRecommendation> = Vec::new();
     // W6: any pass that fails/times out for this repo, captured so the export can disclose it
     // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
@@ -7230,6 +11695,7 @@ pub async fn audit_repo(
                 (fb, true)
             };
             recommendations.push(RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: final_id.clone(),
                 recommendation_reasoning: if hallucinated {
@@ -7269,12 +11735,17 @@ pub async fn audit_repo(
         // rule left. Fail-soft — a failed recommendation pass leaves those rules at their
         // pre-existing (project-selected/default) directive, exactly today's behavior, rather
         // than aborting the whole audit.
-        if !ask_alts.is_empty() {
+        // SPEND CAP: a stage that would start after the cap was reached is skipped and recorded
+        // as NOT RUN; its rules keep their pre-existing directive, as when the pass fails.
+        let alternatives_blocked = !ask_alts.is_empty()
+            && meter.is_some_and(|m| m.stage_blocked(repo, STAGE_ALTERNATIVES));
+        if !ask_alts.is_empty() && !alternatives_blocked {
             match recommend_alternatives(
                 llm,
                 repo,
                 files,
                 map_files.unwrap_or(files),
+                &nonce,
                 &ask_alts,
                 audit_model.as_deref(),
                 feedback,
@@ -7282,7 +11753,21 @@ pub async fn audit_repo(
             )
             .await
             {
-                Ok(recs) => {
+                Ok((recs, unfinished)) => {
+                    // Rules a cut-off reply never reached keep their default directive (they
+                    // have no entry in `recs`); the run says so rather than saying nothing.
+                    if let Some(reason) = unfinished {
+                        failed_passes.push(FailedPass {
+                            repo: repo.to_string(),
+                            pass: "rule-alternative recommendations".to_string(),
+                            reason,
+                            files_not_reviewed: 0,
+                            class: crate::ai_audit::FailureClass::Content,
+                            files: Vec::new(),
+                            attempts: Vec::new(),
+                            scope_note: false,
+                        });
+                    }
                     for rec in &recs {
                         let Some(a) = ask_alts.iter().find(|a| a.rule_id == rec.rule_id) else {
                             continue;
@@ -7293,8 +11778,7 @@ pub async fn audit_repo(
                             // drop it from the directive set the violation passes actually
                             // check, so it emits ZERO findings instead of checking violations
                             // against a convention nothing in the repo established.
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if rec.no_convention {
@@ -7307,8 +11791,7 @@ pub async fn audit_repo(
                             // finding the model free-associates under it anyway, and exactly
                             // ONE informational `no_convention` row is synthesized from this
                             // recommendation (see `no_convention_findings`).
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if let Some(opt) =
@@ -7337,6 +11820,11 @@ pub async fn audit_repo(
                         repo: repo.to_string(),
                         pass: "rule-alternative recommendations".to_string(),
                         reason: e.to_string(),
+                        files_not_reviewed: 0,
+                        class: classify_pass_error(&e),
+                        files: Vec::new(),
+                        attempts: camerata_llm::failure::attempts_of(&e),
+                        scope_note: false,
                     });
                 }
             }
@@ -7346,19 +11834,22 @@ pub async fn audit_repo(
     // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
     // rule-batches × file-chunks run concurrently; Batch = one Anthropic Message Batch at
     // 50% discount, reassembled by custom_id.
-    let (concurrency, batch_size) = mode.tuning();
+    let (concurrency, batch_size) = mode.tuning(efficiency_of(meter));
 
     // Pass-1 W3 (A5.6): rules whose routing group matched zero files — see
-    // `run_routed_passes`'s `skipped_rules` doc comment. The Batch execution path applies no
-    // per-rule routing yet (every rule runs against every file), so it can never skip a rule
-    // this way and contributes nothing here — a documented asymmetry, not a gap.
+    // `run_routed_passes`'s `skipped_rules` doc comment. Real-time and batch mode both fill it
+    // (they share `runnable_units`), so both disclose the same skipped rules.
     let mut skipped_rules: Vec<(String, String)> = Vec::new();
 
     // ── Rule-routing plan ───────────────────────────────────────────────────────────
-    // Group `effective_selected` rules by scope so each language group only audits its own
-    // files. The plan is computed even for Batch mode (so the savings estimate is available),
-    // but the Batch execution path does not yet apply the routing (see doc comment above).
-    let route_plan = crate::scan_routing::plan_routes(&effective_selected, files);
+    // Group `effective_selected` rules by scope so each group only audits the files its scope
+    // covers: the rule id's language prefix, and (with the `applies_to_routing` switch on) the
+    // rule's declared `applies_to`. Real-time and batch mode execute the SAME plan.
+    let route_plan = crate::scan_routing::plan_routes(
+        &effective_selected,
+        files,
+        efficiency_of(meter).applies_to_routing,
+    );
     if route_plan.saved_fraction() > 0.0 {
         eprintln!(
             "[camerata-server] rule-routing: {:.0}% input reduction for {repo} ({} groups, {} rules routed)",
@@ -7369,44 +11860,46 @@ pub async fn audit_repo(
     }
 
     // ── Dispatch to the appropriate execution engine ─────────────────────────────────
-    let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) =
+    let (mut all_findings, mut all_proposed, requested, ok_passes, pass_failures) =
         if mode == ScanMode::Batch {
-            // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
-            // completion, reassemble by custom_id. The job's add_total is called inside
-            // run_passes_batch (it knows the full item count before any network I/O).
-            // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
-            let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-            let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-                vec![&effective_selected]
-            } else {
-                effective_selected.chunks(batch_size.max(1)).collect()
-            };
+            // Batch path: submit every route group's (chunk × rule-batch) pairs as a Message
+            // Batch, poll to completion, reassemble by custom_id. The job's add_total is called
+            // inside run_passes_batch (it knows the full item count before any network I/O).
+            //
             // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
             // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
             // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
             // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
             // can only drive the non-batch real-time path; batch mode is not reachable for it.
-            let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "batch mode requires the concrete Llm client (the Message-Batches API is not \
-                 part of the LlmPort seam); use parallel/sequential mode with a custom completer"
-                )
-            })?;
-            run_passes_batch(
-                llm_concrete,
+            // A `BatchSeam` (a test double carrying its own `BatchApi`) is the one other
+            // completer that can drive the batch path.
+            let batch_api: &dyn batch_mode::BatchApi =
+                if let Some(seam) = llm.as_any().downcast_ref::<batch_mode::BatchSeam>() {
+                    seam.api()
+                } else {
+                    llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "batch mode requires the concrete Llm client (the Message-Batches \
+                             API is not part of the LlmPort seam); use parallel/sequential mode \
+                             with a custom completer"
+                        )
+                    })?
+                };
+            run_routed_passes_batch(
+                batch_api,
                 repo,
+                files,
+                &effective_selected,
+                &route_plan,
                 &repo_map,
+                &nonce,
                 &adopted,
                 audit_model.as_deref(),
                 job,
-                &chunks,
-                &batches,
-                "pass",
+                batch_size,
                 meter,
-                // Batch mode does not yet apply per-rule routing (all rules vs all files), so
-                // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
-                // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
-                false,
+                &mut skipped_rules,
+                candidate_passes::CandidateEnv::production(),
             )
             .await?
         } else {
@@ -7423,6 +11916,7 @@ pub async fn audit_repo(
                 &effective_selected,
                 &route_plan,
                 &repo_map,
+                &nonce,
                 &adopted,
                 audit_model.as_deref(),
                 feedback,
@@ -7431,17 +11925,39 @@ pub async fn audit_repo(
                 batch_size,
                 meter,
                 &mut skipped_rules,
+                candidate_passes::CandidateEnv::production(),
             )
             .await
         };
 
+    // A rule is only "not assessed" when the WHOLE repo has no file in its scope: on an
+    // incremental scan `files` is just the changed files.
+    drop_skips_with_matches_in_full_set(
+        &mut skipped_rules,
+        &route_plan,
+        map_files.unwrap_or(files),
+    );
+
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
     // its own transcript status, so the UI spinner stops regardless.
-    if ok_passes == 0 {
-        if let Some(e) = last_err {
-            return Err(e);
+    // A cut-off reply that still yielded complete findings is not "nothing came back": those
+    // findings are kept and the failure is disclosed as a failed pass below (H1).
+    if ok_passes == 0 && all_findings.is_empty() {
+        if let Some(last) = pass_failures.last() {
+            return Err(anyhow::anyhow!(
+                "all {} audit pass(es) failed; last: {}: {}",
+                pass_failures.len(),
+                last.pass,
+                last.error
+            ));
         }
+    } else {
+        // PARTIAL failure: some passes answered, others did not (a timeout, an HTTP error, or
+        // a model REFUSAL, `stop_reason: "refusal"`). Those passes' findings are missing from
+        // this result, so the export must say so, naming every failed pass, rather than
+        // present the survivors as the whole audit.
+        failed_passes.extend(failed_pass_rows(repo, ok_passes, &pass_failures));
     }
 
     // ── Resolution round ────────────────────────────────────────────────────────────
@@ -7454,16 +11970,82 @@ pub async fn audit_repo(
     // The resolution round runs the FULL selected rule set against the requested files (no
     // per-rule routing) so no cross-file deferred judgment is inadvertently skipped. Advisory
     // is enabled (default) since this is an independent pass over a small file set.
+    let requested_norm: std::collections::HashSet<String> = requested
+        .iter()
+        .map(|p| normalize_requested_path(p))
+        .collect();
     let resolution: Vec<(String, String)> = files
         .iter()
-        .filter(|(p, _)| requested.contains(p))
+        .filter(|(p, _)| requested_norm.contains(&normalize_requested_path(p)))
         .cloned()
         .collect();
+    // M6: a file a pass asked for but that cannot be put in front of the model is DISCLOSED, not
+    // forgotten: the judgment that wanted it stays unresolved and the report says so.
+    {
+        let have: std::collections::HashSet<String> = files
+            .iter()
+            .map(|(p, _)| normalize_requested_path(p))
+            .collect();
+        let in_repo: std::collections::HashSet<String> = map_files
+            .unwrap_or(files)
+            .iter()
+            .map(|(p, _)| normalize_requested_path(p))
+            .collect();
+        let mut missing: Vec<&String> = requested_norm
+            .iter()
+            .filter(|p| !p.is_empty() && !have.contains(*p))
+            .collect();
+        missing.sort();
+        let (unchanged, unknown): (Vec<&String>, Vec<&String>) =
+            missing.into_iter().partition(|p| in_repo.contains(*p));
+        let name_list = |v: &[&String]| {
+            let shown: Vec<&str> = v.iter().take(10).map(|s| s.as_str()).collect();
+            let more = v.len().saturating_sub(shown.len());
+            if more > 0 {
+                format!("{} and {more} more", shown.join(", "))
+            } else {
+                shown.join(", ")
+            }
+        };
+        if !unknown.is_empty() {
+            failed_passes.push(FailedPass {
+                repo: repo.to_string(),
+                pass: "deferred judgment".to_string(),
+                reason: format!(
+                    "requested files not in scan: {}. A rule that needed them could not be \
+                     judged.",
+                    name_list(&unknown)
+                ),
+                files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
+                scope_note: false,
+            });
+        }
+        if !unchanged.is_empty() {
+            failed_passes.push(FailedPass {
+                repo: repo.to_string(),
+                pass: "deferred judgment".to_string(),
+                reason: format!(
+                    "requested files not re-read in this run (unchanged since the last \
+                     inspection): {}. A rule that needed them was not re-judged.",
+                    name_list(&unchanged)
+                ),
+                files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
+                scope_note: false,
+            });
+        }
+    }
     if !resolution.is_empty() {
-        let batches_res: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-            vec![&effective_selected]
+        let effective_pairs = crate::scan_routing::rule_pairs(&effective_selected);
+        let batches_res: Vec<&[(String, String)]> = if effective_pairs.is_empty() {
+            vec![&effective_pairs]
         } else {
-            effective_selected.chunks(batch_size.max(1)).collect()
+            effective_pairs.chunks(batch_size.max(1)).collect()
         };
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
         // BUG-4 fix: in Batch mode, run_passes_batch already called add_total with the
@@ -7488,15 +12070,17 @@ pub async fn audit_repo(
         } else {
             concurrency
         };
-        let (rf, rp, _rn, _rok, _re) = run_passes(
+        let (rf, rp, _rn, res_ok, res_failures) = run_passes(
             llm,
             repo,
             &repo_map,
+            &nonce,
             &adopted,
             audit_model.as_deref(),
             feedback,
             job,
             &res_chunks,
+            None,
             &batches_res,
             res_concurrency,
             "resolution",
@@ -7507,6 +12091,11 @@ pub async fn audit_repo(
         .await;
         all_findings.extend(rf);
         all_proposed.extend(rp);
+        // The resolution round's failures are disclosed the same way as the scan passes': a
+        // refused or timed-out resolution pass yields zero findings for the files it was to
+        // re-judge, which must never read as "resolved clean". The main round answered, so even
+        // a total resolution failure is a disclosure row, not an `Err`.
+        failed_passes.extend(failed_pass_rows(repo, res_ok, &res_failures));
     }
 
     // Resolve each finding's line DETERMINISTICALLY from its verbatim snippet before dedup,
@@ -7525,8 +12114,7 @@ pub async fn audit_repo(
     // is N-in / M-out (M < N), a true dedup, not the calibration pass's N-in/N-out scoring.
     {
         let rows_in = all_findings.len();
-        let mut seen = std::collections::HashSet::new();
-        all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+        dedup_findings_keep_max_severity(&mut all_findings);
         let rows_after_dedup = all_findings.len();
         all_findings = merge_by_location(all_findings, files);
         let rows_out = all_findings.len();
@@ -7553,6 +12141,34 @@ pub async fn audit_repo(
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
 
+    // RANK 4 `terse_output`: the scan asked for a one-sentence `detail`; the survivors of the
+    // first merge get their full detail written NOW, before calibration, because calibration
+    // (its prompt, the precondition check, the D5 floor and D6 ceiling), the cross-family merge
+    // that runs after this function and the fix self-check all decide from the explanation.
+    // `merge_by_location` above reads no `detail`, so it ran on the short one. A finding whose
+    // detail could not be written stays, marked, and is reported as a failed pass. See
+    // `detail_regen`'s module comment for the per-consumer table.
+    if meter.is_none() {
+        warn_terse_needs_meter(repo);
+    }
+    if terse_output_of(meter) {
+        // The whole redacted file set, not just the files this run scanned: on an incremental
+        // run `files` is only the changed ones, and a statement can name any file of the repo.
+        let (regenerated, regen_failed) = regenerate_full_details(
+            llm,
+            repo,
+            std::mem::take(&mut all_findings),
+            map_files.unwrap_or(files),
+            &crate::scan_routing::rule_pairs(&effective_selected),
+            &nonce,
+            audit_model.as_deref(),
+            meter,
+        )
+        .await;
+        all_findings = regenerated;
+        failed_passes.extend(regen_failed);
+    }
+
     // Calibration pass over ALL aggregated findings: recalibrate severity + flag
     // low-confidence findings. It does NOT drop anything — recall-first discovery hands
     // every finding to the architect. Skipped entirely when there's nothing to calibrate
@@ -7566,7 +12182,11 @@ pub async fn audit_repo(
     // content instead of a mystery hang or an empty placeholder. (Dedup/merge also
     // shrinks N, so this round is now faster too.)
     let pre_calibration_len = all_findings.len();
-    let verified = if all_findings.is_empty() {
+    let verified = if all_findings.is_empty()
+        || meter.is_some_and(|m| m.stage_blocked(repo, STAGE_CALIBRATION))
+    {
+        // Nothing to calibrate, or the spend cap was reached (recorded as NOT RUN): the
+        // findings go on exactly as the scan produced them, none dropped.
         all_findings
     } else {
         // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
@@ -7982,7 +12602,15 @@ If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
 /// [`parse_ai_findings`] parses it directly and the UI renders security findings in the
 /// familiar table. Deterministic-floor concerns are excluded (they are already covered).
 pub fn deep_security_system_prompt() -> String {
-    r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
+    deep_security_system_prompt_with(false)
+}
+
+/// [`deep_security_system_prompt`] with the `terse_output` switch explicit; the same rule as
+/// [`audit_system_prompt_with`]: OFF is byte-identical to the prompt before rank 4, ON asks for
+/// a one-sentence `detail` and drops the (always empty, never read) `proposed_rules` array. The
+/// lens's survivors get their full detail regenerated after its location merge.
+pub fn deep_security_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
 
 This is DEEPER than the always-on deterministic floor (which already finds hardcoded secrets, raw SQL string concatenation, secrets-in-URLs, and path-escape writes — DO NOT re-report those). Go beyond line-level lint and reason about:
 - AUTHORIZATION: write/mutation/delete paths with no authz check; horizontal/vertical privilege gaps; missing ownership checks on resources; admin actions reachable without role checks.
@@ -8008,7 +12636,26 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail":"why it's exploitable and the fix direction"}"#,
+        r#""detail":"ONE sentence, at most 25 words: why this is exploitable, naming any other file or symbol it depends on"}"#,
+    );
+    let base = replace_expected(&base, "  \"proposed_rules\": [],\n", "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings":[],"proposed_rules":[],"needs_files":[]}."#,
+        r#"return {"findings":[],"needs_files":[]}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
 }
 
 /// SYSTEM PROMPT — threat-model lens.
@@ -8152,6 +12799,17 @@ async fn run_prose_lens(
         "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
+    // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
+    // lens result and recorded as the deep tier stopped part way.
+    let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+        Err(CapReached) => {
+            let mut result = DeepLensResult::empty(lens);
+            result.error =
+                Some("not run: the spend limit set for this run was reached".to_string());
+            return result;
+        }
+        Ok(permit) => permit,
+    };
     let session = format!("deep-{}-{repo}", lens.id());
     if let Some((store, key)) = feedback {
         store.register(
@@ -8165,13 +12823,13 @@ async fn run_prose_lens(
             },
         );
     }
-    let mut req = LlmRequest::new(prompt)
+    let req = LlmRequest::new(prompt)
         .with_system(system)
         // Whole-repo structured output can be sizable (many controls / many threats).
-        .with_max_tokens(8192);
-    if let Some(m) = audit_model {
-        req = req.with_model(m.to_string());
-    }
+        .with_max_tokens(8192)
+        .with_model(stage_model(audit_model));
+    // What this request may cost joins the spend limit's reserve, as for every other stage.
+    note_request(meter, &req);
     let resp = if let Some((store, key)) = feedback {
         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
         llm.complete_streaming(req, &mut on_delta).await
@@ -8210,6 +12868,7 @@ async fn run_prose_lens(
             }
         }
         Err(e) => {
+            meter_failed(meter, Stage::DeepTier, &e);
             result.error = Some(format!("{e}"));
             if let Some((store, key)) = feedback {
                 store.set_status(key, &session, "blocked");
@@ -8231,6 +12890,7 @@ async fn run_security_lens(
     repo: &str,
     files: &[(String, String)],
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     audit_model: Option<&str>,
     mode: ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -8242,15 +12902,16 @@ async fn run_security_lens(
     }
     // The security lens has no adopted-rule corpus — it is a free-form security read — so it
     // runs as a single empty batch per chunk (one pass each), like the no-rules audit path.
-    let (concurrency, _batch_size) = mode.tuning();
+    let (concurrency, _batch_size) = mode.tuning(efficiency_of(meter));
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let empty_batch: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = vec![empty_batch];
     let adopted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let (findings, _proposed, _requested, _ok, _err) = run_security_passes(
+    let (findings, _proposed, _requested, sec_ok, sec_failures) = run_security_passes(
         llm,
         repo,
         repo_map,
+        nonce,
         &adopted,
         audit_model,
         feedback,
@@ -8264,10 +12925,40 @@ async fn run_security_lens(
     // so one smell reported under several names at one line is ONE row.
     let mut findings = findings;
     resolve_finding_lines(&mut findings, files);
-    let mut seen = std::collections::HashSet::new();
-    findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+    dedup_findings_keep_max_severity(&mut findings);
     let findings = merge_by_location(findings, files);
+    // `terse_output`: the lens asked for a one-sentence `detail`; write the full one for the
+    // survivors. A lens finding that could not get one keeps the short detail plus the
+    // incomplete marker, and the lens reports it in its `error` note (the deep tier's own
+    // failed-pass path), so it is never dropped and never silently short.
+    let mut lens_notes: Vec<String> = Vec::new();
+    let findings = if terse_output_of(meter) {
+        let (findings, failed) =
+            regenerate_full_details(llm, repo, findings, files, &[], nonce, audit_model, meter)
+                .await;
+        lens_notes.extend(failed.iter().map(|f| format!("{}: {}", f.pass, f.reason)));
+        findings
+    } else {
+        findings
+    };
     result.security_findings = findings;
+    // A failed (or refused) security pass must not read as "no security findings": say so on
+    // the lens result, the same field the other lenses use when they fail.
+    if !sec_failures.is_empty() {
+        lens_notes.push(format!(
+            "{} of {} security pass(es) failed, so findings from them are missing: {}",
+            sec_failures.len(),
+            sec_ok + sec_failures.len(),
+            sec_failures
+                .iter()
+                .map(|f| format!("{}: {}", f.pass, f.error))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if !lens_notes.is_empty() {
+        result.error = Some(lens_notes.join("; "));
+    }
     result
 }
 
@@ -8280,6 +12971,7 @@ async fn run_security_passes(
     llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -8287,15 +12979,9 @@ async fn run_security_passes(
     batches: &[&[(String, String)]],
     concurrency: usize,
     meter: Option<&UsageMeter>,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
+) -> PassesOut {
     use futures::stream::StreamExt;
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
     let n_c = chunks.len();
     let n_b = batches.len().max(1);
     let work: Vec<usize> = (0..n_c).collect();
@@ -8307,6 +12993,18 @@ async fn run_security_passes(
         .map(|ci| {
             let digest = &digests[ci];
             async move {
+                // SPEND CAP: each deep-security pass is admitted like a scan pass.
+                let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+                    Err(CapReached) => {
+                        return (
+                            ci,
+                            Err(anyhow::anyhow!(
+                                "not run: the spend limit set for this run was reached"
+                            )),
+                        );
+                    }
+                    Ok(permit) => permit,
+                };
                 let prompt = format!(
                     "Repository: {repo} (security pass {}/{n_c})\n\n{repo_map}{digest}\n\n── Perform a DEEP SECURITY AUDIT of the code above. Use the REPO MAP for cross-file context. Return the JSON described in the system prompt. ──",
                     ci + 1,
@@ -8326,24 +13024,55 @@ async fn run_security_passes(
                 }
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
-                let mut req = LlmRequest::new(prompt)
-                    .with_system(deep_security_system_prompt())
-                    .with_max_tokens(8192);
-                if let Some(m) = audit_model {
-                    req = req.with_model(m.to_string());
-                }
+                let req = LlmRequest::new(prompt)
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        deep_security_system_prompt_with(terse_output_of(meter)),
+                        nonce,
+                    ))
+                    .with_max_tokens(8192)
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_model(stage_model(audit_model));
+                // What this request may cost joins the spend limit's reserve.
+                note_request(meter, &req);
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
-                    let resp = if let Some((store, key)) = feedback {
+                    let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-                        llm.complete_streaming(req, &mut on_delta).await?
+                        llm.complete_streaming(req, &mut on_delta).await
                     } else {
                         let cap = total_backstop();
                         tokio::time::timeout(cap, llm.complete(req))
                             .await
-                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
+                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))
+                            .and_then(|r| r)
+                    };
+                    let resp = match call {
+                        Ok(r) => r,
+                        Err(e) => {
+                            meter_failed(meter, Stage::DeepTier, &e);
+                            return Err(e);
+                        }
                     };
                     if let Some(m) = meter {
                         m.record_stage(Stage::DeepTier, &resp);
+                    }
+                    // A complete reply that holds no JSON is a FAILED pass, never "no findings":
+                    // parsing it would return an empty list indistinguishable from a clean
+                    // chunk. (No retry here: the deep tier is a single opt-in pass per chunk.)
+                    if !resp.truncated && scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::DeepTier, &resp);
+                        }
+                        anyhow::bail!("{}", malformed_reply_reason(1));
+                    }
+                    // Cut off at the output limit: the complete findings that arrived are kept
+                    // and the chunk is reported as not fully reviewed (H1).
+                    if resp.truncated {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::DeepTier, &resp);
+                        }
+                        return Err(
+                            PartialPassReply::from_cut_off(repo, &resp.text, adopted, 1).into()
+                        );
                     }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
@@ -8364,8 +13093,8 @@ async fn run_security_passes(
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err = None;
-    for (_ci, r) in results {
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for (ci, r) in results {
         match r {
             Ok((f, p, needs)) => {
                 findings.extend(f);
@@ -8373,11 +13102,23 @@ async fn run_security_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                let failure = PassFailure::named(format!("deep security {}/{n_c}", ci + 1), &e)
+                    .with_files(chunks[ci].len());
+                match e.downcast::<PartialPassReply>() {
+                    Ok(partial) => {
+                        failures.push(failure.with_recovered(partial.findings.len()));
+                        findings.extend(partial.findings);
+                        proposed.extend(partial.proposed);
+                        requested.extend(partial.needs);
+                    }
+                    Err(_) => failures.push(failure),
+                }
+            }
         }
     }
     let _ = n_b; // single batch; kept for parity/readability with run_passes.
-    (findings, proposed, requested, ok, last_err)
+    (findings, proposed, requested, ok, failures)
 }
 
 /// Run the full DEEP COMPLIANCE & SECURITY tier (#55) over one repo's files: the three lenses
@@ -8406,18 +13147,16 @@ pub async fn run_deep_tier(
     // The deep tier reads the whole repo: redact before any lens sees it.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
-    let repo_map = build_repo_map(files);
+    // One delimiter token for all three lenses (see `crate::prompt_frame`).
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[files]);
+    let repo_map = build_repo_map(files, &nonce);
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
-    let digest = build_digest(files);
+    let digest = build_digest(files, &nonce);
 
-    // Resolve the model the same way the standard audit does: explicit pick wins, else
-    // CAMERATA_AUDIT_MODEL, else provider default. The deep tier is meant to run on the strong
-    // (Opus) model; the caller passes that through `audit_model`.
-    let model = audit_model.map(str::to_string).or_else(|| {
-        std::env::var("CAMERATA_AUDIT_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    });
+    // Resolve the model the same way the standard audit does: explicit pick wins, else the
+    // built-in default (the transport has no default of its own: see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
+    // passes that through `audit_model`.
+    let model = Some(resolve_audit_model(audit_model));
 
     let threat = run_prose_lens(
         llm,
@@ -8425,7 +13164,7 @@ pub async fn run_deep_tier(
         repo,
         &repo_map,
         &digest,
-        threat_model_system_prompt(),
+        crate::prompt_frame::with_untrusted_clause(threat_model_system_prompt(), &nonce),
         model.as_deref(),
         feedback,
         meter,
@@ -8435,6 +13174,7 @@ pub async fn run_deep_tier(
         repo,
         files,
         &repo_map,
+        &nonce,
         model.as_deref(),
         mode,
         feedback,
@@ -8449,7 +13189,7 @@ pub async fn run_deep_tier(
             repo,
             &repo_map,
             &digest,
-            soc2_gap_system_prompt(),
+            crate::prompt_frame::with_untrusted_clause(soc2_gap_system_prompt(), &nonce),
             model.as_deref(),
             feedback,
             meter,
@@ -8474,6 +13214,18 @@ pub async fn run_deep_tier(
     }
 }
 
+pub(crate) mod detail_regen;
+pub(crate) mod reply_schemas;
+use detail_regen::regenerate_full_details;
+
+#[cfg(test)]
+mod detail_regen_tests;
+
+mod batch_mode;
+pub use batch_mode::{
+    resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
+};
+
 #[cfg(test)]
 mod redaction_tests;
 
@@ -8485,6 +13237,74 @@ mod cache_schedule_tests;
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod run_completion_tests;
+
+#[cfg(test)]
+mod second_try_tests;
+
+#[cfg(test)]
+mod rejection_reason_tests;
+
+#[cfg(test)]
+mod injection_tests;
+
+#[cfg(test)]
+mod efficiency_cap_tests;
+
+#[cfg(test)]
+mod fix_model_tests;
+
+#[cfg(test)]
+mod batch_default_tests;
+
+#[cfg(test)]
+mod applies_to_routing_tests;
+
+mod candidate_passes;
+
+#[cfg(test)]
+mod candidate_prefilter_tests;
+
+#[cfg(test)]
+mod malformed_reply_tests;
+
+#[cfg(test)]
+mod fn_batch_a_tests;
+
+#[cfg(test)]
+mod smoke_findings_tests;
+
+#[cfg(test)]
+mod drift_tests;
+
+#[cfg(test)]
+mod output_caps_tests;
+
+#[cfg(test)]
+mod structured_output_tests;
+
+#[cfg(test)]
+mod opaque_id_tests;
+
+#[cfg(test)]
+mod check_prompt_tests;
+
+#[cfg(test)]
+mod why_fix_direction_tests;
+
+#[cfg(test)]
+mod alternatives_cache_tests;
+
+#[cfg(test)]
+mod repo_grounding_tests;
+
+#[cfg(test)]
+mod stored_replay_tests;
+
+#[cfg(test)]
+mod resume_rejected_tests;
 
 #[cfg(test)]
 mod tests {
@@ -8857,6 +13677,27 @@ mod tests {
         );
     }
 
+    /// The same rule flagged in two repos is two groups, each in its own repo: one service's
+    /// sites never appear under another service's name.
+    #[test]
+    fn the_same_structural_rule_in_two_repos_is_two_groups_each_in_its_own_repo() {
+        let mut a1 = structural_needs_review("src/index.ts", 12);
+        a1.repo = "acme/web".to_string();
+        let mut a2 = structural_needs_review("src/list.ts", 3);
+        a2.repo = "acme/web".to_string();
+        let mut b = structural_needs_review("src/index.ts", 12);
+        b.repo = "acme/api".to_string();
+        let out = group_structural_needs_review(vec![a1, a2, b]);
+        assert_eq!(out.len(), 2, "one group per repo: {out:?}");
+        let web = out.iter().find(|f| f.repo == "acme/web").unwrap();
+        let api = out.iter().find(|f| f.repo == "acme/api").unwrap();
+        assert_eq!(web.also_locations.len(), 1);
+        assert!(web.also_locations.iter().all(|l| l.repo == "acme/web"));
+        assert!(api.also_locations.is_empty());
+        assert!(web.detail.contains("src/index.ts:12") && web.detail.contains("src/list.ts:3"));
+        assert!(!api.detail.contains("src/list.ts"));
+    }
+
     /// Different RULES never merge into the same group — grouping is per-rule.
     #[test]
     fn different_structural_rules_get_separate_groups() {
@@ -8959,14 +13800,14 @@ mod tests {
         // id's own site in `also_locations`.
         let mut a = structural_needs_review("a.rs", 10);
         a.also_matches = vec!["AI-ALREADY-MERGED-1".to_string()];
-        a.also_locations = vec![MergedLocation {
-            repo: a.repo.clone(),
-            path: "already-merged-site.rs".to_string(),
-            line: 99,
-            rule_id: "AI-ALREADY-MERGED-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        a.also_locations = vec![MergedLocation::site(
+            a.repo.clone(),
+            "already-merged-site.rs".to_string(),
+            99,
+            "AI-ALREADY-MERGED-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let b = structural_needs_review("b.rs", 20);
 
         let out = group_structural_needs_review(vec![a, b]);
@@ -9227,7 +14068,7 @@ mod tests {
                 "pub struct AdminStats {}".to_string(),
             ),
         ];
-        let map = build_repo_map(&files);
+        let map = build_repo_map(&files, &crate::prompt_frame::FrameNonce::generate());
         // Every file is in the map even though a chunk may only hold one of them.
         assert!(map.contains("crates/api/src/repositories/user_repo.rs"));
         assert!(map.contains("crates/ui/src/services/admin_stats.rs"));
@@ -9273,14 +14114,15 @@ mod tests {
             ("a.rs".to_string(), "fn a() {}".to_string()),
             ("b.rs".to_string(), "fn b() {}".to_string()),
         ];
-        let d = build_digest(&files);
-        assert!(d.contains("FILE: a.rs"));
-        assert!(d.contains("FILE: b.rs"));
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let d = build_digest(&files, &nonce);
+        assert!(d.contains(&format!("<<<UNTRUSTED {nonce} \"a.rs\">>>")));
+        assert!(d.contains(&format!("<<<UNTRUSTED {nonce} \"b.rs\">>>")));
         assert!(d.contains("fn a()"));
 
         // A file larger than the cap truncates and notes it.
         let big = vec![("big.rs".to_string(), "x".repeat(MAX_DIGEST_CHARS + 1000))];
-        let d2 = build_digest(&big);
+        let d2 = build_digest(&big, &nonce);
         assert!(d2.len() <= MAX_DIGEST_CHARS + 200);
         assert!(d2.contains("truncated"));
     }
@@ -9846,14 +14688,15 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             self.streaming_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            on_delta(&self.text);
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
+            on_delta(&text);
             Ok(LlmResponse {
-                text: self.text.clone(),
+                text,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,
@@ -9931,6 +14774,7 @@ mod tests {
             "me/api",
             &files,
             &files,
+            &crate::prompt_frame::FrameNonce::generate(),
             &[alt],
             None,
             None,
@@ -10019,12 +14863,21 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "a full single chunk makes exactly one call");
-        let expected = scaled_max_tokens(CALIBRATION_BATCH_SIZE, VERIFY_TOKENS_PER_FINDING);
+        let expected = calibration_max_tokens(CALIBRATION_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
         );
         assert_eq!(seen[0].max_tokens, expected);
+        assert_eq!(
+            seen[0].effort.as_deref(),
+            Some("medium"),
+            "calibration runs at medium effort"
+        );
+        assert!(
+            expected >= CALIBRATION_BATCH_SIZE as u32 * VERIFY_TOKENS_PER_FINDING + 4_000,
+            "the cap covers the verdicts' text plus the thinking allowance"
+        );
     }
 
     /// A SMALL finding set must see ZERO behavior change — it stays pinned at the original
@@ -10047,7 +14900,8 @@ mod tests {
         .await;
 
         let seen = completer.seen.lock().unwrap();
-        assert_eq!(seen[0].max_tokens, 4096);
+        assert_eq!(seen[0].max_tokens, calibration_max_tokens(1));
+        assert!(seen[0].max_tokens >= 4096, "never under the old flat floor");
     }
 
     /// A fake that streams a FEW tokens of real output and then returns `Ok` with only that
@@ -10069,7 +14923,7 @@ mod tests {
         }
         async fn complete_streaming(
             &self,
-            _req: LlmRequest,
+            req: LlmRequest,
             on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
         ) -> anyhow::Result<LlmResponse> {
             let call = self
@@ -10092,6 +14946,7 @@ mod tests {
                     .collect();
                 format!(r#"{{"fixes":[{}]}}"#, entries.join(","))
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             on_delta(&text);
             Ok(LlmResponse {
                 text,
@@ -11931,22 +16786,13 @@ mod tests {
             ),
         ];
         let rules = vec![
-            (
-                "RUST-ENTITIES-1".to_string(),
-                "Rust entities rule".to_string(),
-            ),
-            ("REACT-HOOKS-1".to_string(), "React hooks rule".to_string()),
-            (
-                "ARCH-STRICT-LAYERING-1".to_string(),
-                "Layering rule".to_string(),
-            ),
-            (
-                "SEC-NO-RAW-SQL-1".to_string(),
-                "No raw SQL rule".to_string(),
-            ),
+            crate::scan_routing::AuditRule::new("RUST-ENTITIES-1", "Rust entities rule"),
+            crate::scan_routing::AuditRule::new("REACT-HOOKS-1", "React hooks rule"),
+            crate::scan_routing::AuditRule::new("ARCH-STRICT-LAYERING-1", "Layering rule"),
+            crate::scan_routing::AuditRule::new("SEC-NO-RAW-SQL-1", "No raw SQL rule"),
         ];
 
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Should have 3 groups: rust, web, and All.
         assert_eq!(
@@ -11976,11 +16822,11 @@ mod tests {
         // Rust group: only .rs files should be in scope.
         let rust_g = rust_group.unwrap();
         assert_eq!(rust_g.rules.len(), 1);
-        assert_eq!(rust_g.rules[0].0, "RUST-ENTITIES-1");
+        assert_eq!(rust_g.rules[0].id, "RUST-ENTITIES-1");
 
         // Verify file_in_scope correctly filters for each group.
         for (path, _) in &files {
-            let in_rust = crate::scan_routing::file_in_scope(path, &rust_g.scope);
+            let in_rust = crate::scan_routing::file_in_scope(path, "", &rust_g.scope);
             let expected_in_rust = path.ends_with(".rs");
             assert_eq!(
                 in_rust, expected_in_rust,
@@ -11991,7 +16837,7 @@ mod tests {
         // Web group: only .tsx files should be in scope.
         let web_g = web_group.unwrap();
         for (path, _) in &files {
-            let in_web = crate::scan_routing::file_in_scope(path, &web_g.scope);
+            let in_web = crate::scan_routing::file_in_scope(path, "", &web_g.scope);
             let expected_in_web = path.ends_with(".tsx")
                 || path.ends_with(".ts")
                 || path.ends_with(".js")
@@ -12008,7 +16854,7 @@ mod tests {
         );
         for (path, _) in &files {
             assert!(
-                crate::scan_routing::file_in_scope(path, &all_g.scope),
+                crate::scan_routing::file_in_scope(path, "", &all_g.scope),
                 "{path} must be in scope for the All group"
             );
         }
@@ -12033,11 +16879,11 @@ mod tests {
             ("schema.sql".to_string(), "SELECT 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
-            ("ARCH-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // The advisory_disabled flag is true for language groups, false for All.
         // This mirrors the check in run_routed_passes.
@@ -12056,6 +16902,9 @@ mod tests {
                         "{lang} language group must have advisory disabled (advisory_disabled=true)"
                     );
                 }
+                Scope::Declared { .. } => {
+                    unreachable!("no rule in this fixture declares applies_to")
+                }
             }
         }
     }
@@ -12071,8 +16920,8 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         // Empty rules slice.
-        let rules: Vec<(String, String)> = vec![];
-        let plan = plan_routes(&rules, &files);
+        let rules: Vec<crate::scan_routing::AuditRule> = vec![];
+        let plan = plan_routes(&rules, &files, true);
 
         // No rules → no groups: the free-form path handles this specially in run_routed_passes.
         assert_eq!(plan.groups.len(), 0, "empty rules → no route groups");
@@ -12090,10 +16939,10 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("ARCH-1".to_string(), "d".to_string()),
-            ("SEC-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
+            crate::scan_routing::AuditRule::new("SEC-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(plan.groups.len(), 1, "all cross-cutting → single All group");
         assert_eq!(plan.groups[0].scope, Scope::All);
@@ -12115,10 +16964,10 @@ mod tests {
             ("src/b.rs".to_string(), "pub fn b() {}".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("RUST-2".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("RUST-2", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Only one group — the rust language group.
         assert_eq!(plan.groups.len(), 1);
@@ -12163,10 +17012,10 @@ mod tests {
             ("web/app.ts".to_string(), "export const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(
             plan.groups.len(),
@@ -12348,31 +17197,31 @@ mod tests {
 
     // ── BUG-6 regression: ScanMode::Batch uses larger rule batch size ─────────────
 
-    /// Before BUG-6 fix: `ScanMode::Batch` returned `RULE_BATCH_SIZE` (15) from
-    /// `tuning()`, fragmenting Batch items unnecessarily (the Batch path submits all
-    /// items at once — there is no latency benefit to smaller rule batches). After the
-    /// fix, `ScanMode::Batch` returns `BATCH_RULE_BATCH_SIZE` (usize::MAX by default),
-    /// so each chunk becomes a single BatchItem with all adopted rules in one context.
+    /// BUG-6 kept for `batch_default` off: every rule in one item per chunk, larger than the
+    /// parallel rule-batch. With `batch_default` on (rank 2) Batch uses the parallel path's 15,
+    /// the graded prompt shape. (The `CAMERATA_BATCH_RULE_BATCH_SIZE` override is not set in
+    /// the test environment, so the constants apply.)
     #[test]
-    fn bug6_batch_mode_uses_larger_rule_batch_size_than_parallel() {
-        let (_, parallel_batch_size) = ScanMode::Parallel.tuning();
-        let (_, batch_batch_size) = ScanMode::Batch.tuning();
-
-        // The Batch rule batch size must be LARGER than the Parallel one (BUG-6 fix).
-        // PARALLEL = 15; BATCH = usize::MAX (or the env-var override, but the env var
-        // is not set in the test environment so the constant applies).
-        assert!(
-            batch_batch_size > parallel_batch_size,
-            "ScanMode::Batch rule batch size ({batch_batch_size}) must be larger than \
-             ScanMode::Parallel ({parallel_batch_size}) — BUG-6: batching all rules per \
-             chunk improves coherence in async Batch mode where concurrency is irrelevant"
+    fn batch_rule_batch_size_is_fifteen_with_batch_default_on_and_all_rules_off() {
+        let on = crate::efficiency::EfficiencyConfig::default();
+        let mut off = on;
+        off.batch_default = false;
+        let (_, parallel_batch_size) = ScanMode::Parallel.tuning(on);
+        assert_eq!(ScanMode::Batch.tuning(on).1, 15);
+        assert_eq!(ScanMode::Batch.tuning(on).1, parallel_batch_size);
+        assert_eq!(ScanMode::Batch.tuning(off).1, usize::MAX);
+        assert_eq!(
+            ScanMode::Parallel.tuning(off),
+            ScanMode::Parallel.tuning(on),
+            "the switch changes only the batch shape"
         );
     }
 
     /// Sequential mode must keep its existing tuning (1 concurrent call, all rules at once).
     #[test]
     fn bug6_sequential_mode_tuning_unchanged() {
-        let (concurrency, batch_size) = ScanMode::Sequential.tuning();
+        let (concurrency, batch_size) =
+            ScanMode::Sequential.tuning(crate::efficiency::EfficiencyConfig::default());
         assert_eq!(concurrency, 1, "sequential must be single-threaded");
         assert_eq!(
             batch_size,
@@ -12447,8 +17296,9 @@ mod tests {
 
         // Build file-1 content sized to leave exactly `small_drop + budget_for_header_2`
         // chars remaining in the budget.
-        // Header for file-2: "// ===== FILE: src/f2.rs =====\n" ≈ 32 chars.
-        let header2_len = "// ===== FILE: src/f2.rs =====\n".len();
+        // The frame around file-2 (its opening and closing delimiter lines).
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let header2_len = crate::prompt_frame::frame_untrusted(&nonce, "src/f2.rs", "").len();
         let file1_budget = MAX_DIGEST_CHARS
             .saturating_sub(header2_len)
             .saturating_sub(small_drop + 500); // 500-char "remaining" slice of file-2
@@ -12464,7 +17314,7 @@ mod tests {
             ("src/f1.rs".to_string(), file1_content),
             ("src/f2.rs".to_string(), file2_content),
         ];
-        let digest = build_digest(&files);
+        let digest = build_digest(&files, &nonce);
 
         // The truncation was trivial (< TRUNCATION_NOTICE_MIN_DROP bytes dropped) →
         // notice must NOT appear (BUG-8 fix).
@@ -12488,7 +17338,7 @@ mod tests {
             ("src/small.rs".to_string(), small),
             ("src/large.rs".to_string(), large),
         ];
-        let digest = build_digest(&files);
+        let digest = build_digest(&files, &crate::prompt_frame::FrameNonce::generate());
         // The large file drops a significant fraction → notice must appear.
         assert!(
             digest.contains("[digest truncated"),
@@ -12580,36 +17430,94 @@ mod tests {
         );
     }
 
-    // ── BUG-AI-3 regression: calibration-model fallback when audit_model is None ─────
+    // ── BUG-AI-3 regression: calibration-model fallback when nothing is pinned ──────────
 
-    /// BUG-AI-3: when calibration_model, CAMERATA_CALIBRATION_MODEL, and audit_model are
-    /// all None/absent, calib_model resolves to None. This is CORRECT — the LLM uses its
-    /// default for both scan and calibration, keeping the audit end-to-end on one model.
-    /// The test documents the expected None behavior so any future refactor that changes
-    /// the fallback chain is caught explicitly.
+    /// BUG-AI-3, corrected 2026-10-29. The earlier form of this test pinned `calib_model` to
+    /// `None` when no model was chosen anywhere, on the theory that the transport's default would
+    /// then serve scan and calibration alike. That default is the PROCESS default
+    /// (`CAMERATA_LLM_MODEL`), not the model the pre-flight prices, the ledger records or the
+    /// batch path sends (`resolve_audit_model`); a run reported one model and called another, and
+    /// with an unpriced process default the spend limit refused the whole run. With nothing
+    /// pinned, scan and calibration now both resolve to the registry default, and the audit is
+    /// end to end on ONE model that the run can name and price.
     #[test]
-    fn bug_ai3_calib_model_none_when_all_sources_absent() {
-        // Replicate the fallback chain from audit_repo (with no env vars set in this test).
-        // We cannot call audit_repo directly (it needs a live LLM), so we test the chain
-        // logic in isolation — same three-level or_else chain the function uses.
-        let calibration_model: Option<&str> = None;
-        let audit_model: Option<String> = None; // CAMERATA_AUDIT_MODEL not set
-
-        let calib_model = calibration_model
-            .map(str::to_string)
-            .or_else(|| {
-                // In the test environment CAMERATA_CALIBRATION_MODEL is not set.
-                std::env::var("CAMERATA_CALIBRATION_MODEL")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .or_else(|| audit_model.clone());
-
+    fn bug_ai3_calibration_follows_the_resolved_scan_model_when_nothing_is_pinned() {
+        let scan = resolve_audit_model(None);
+        assert!(!scan.trim().is_empty(), "the scan model is never empty");
         assert!(
-            calib_model.is_none(),
-            "BUG-AI-3: calib_model must be None when all three sources are absent; \
-             both scan and calibration will use the LLM default (correct end-to-end-on-one-model \
-             behavior). Got: {calib_model:?}"
+            crate::llm::is_priced(&scan),
+            "the registry default `{scan}` is priced"
+        );
+        assert_eq!(resolve_calibration_model(None, &scan), scan);
+        assert_eq!(resolve_calibration_model(Some(""), &scan), scan);
+        assert_eq!(
+            resolve_calibration_model(Some("claude-opus-5"), &scan),
+            "claude-opus-5"
+        );
+        // A stage request never leaves with an empty model.
+        assert_eq!(stage_model(None), scan);
+        assert_eq!(stage_model(Some(" ")), scan);
+        assert_eq!(stage_model(Some("claude-opus-5")), "claude-opus-5");
+    }
+
+    /// The meter's last line of defence, as the 2026-10-29 run met it: a capped run records a
+    /// call that reported tokens but no dollars on an id the registry cannot price. The limit can
+    /// no longer be enforced, so the next admission is refused, the record says the cost was
+    /// unknown, and the disclosure says the limit could not be enforced, never that it was
+    /// reached (two calls had cost under a cent of a $10 limit).
+    #[tokio::test]
+    async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unenforceable() {
+        let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+            max_cost_usd: Some(10.0),
+            ..crate::cost_cap::RunControls::default()
+        });
+        meter.record_stage(
+            Stage::Alternatives,
+            &LlmResponse {
+                text: String::new(),
+                model: "claude-sonnet-4-6".to_string(),
+                backend: "api".to_string(),
+                cost_usd: None,
+                input_tokens: Some(30_201),
+                output_tokens: Some(4_681),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            },
+        );
+        assert!(meter.cost_unknown());
+        assert!(meter.admit().await.is_err(), "nothing more is admitted");
+        assert!(meter.retry_blocked());
+        meter.record_not_run(crate::cost_cap::NotRunPass {
+            repo: "acme/shop".into(),
+            group: "pass[all]".into(),
+            chunk: 1,
+            n_chunks: 1,
+            rule_batch: 1,
+            n_rule_batches: 8,
+            rule_ids: vec!["A-1".into()],
+            files: vec!["src/a.ts".into()],
+            class: FailureClass::SpendLimit,
+        });
+        let record = meter.cost_cap_record().expect("a limit was set");
+        assert!(record.cost_unknown);
+        assert!(record.stopped_the_run());
+        assert_eq!(
+            record.spent_usd, 0.0,
+            "an uncosted call adds nothing to spend"
+        );
+        let reason = &record.failed_passes()[0].reason;
+        assert!(reason.contains("could not be enforced"), "{reason}");
+        assert!(!reason.contains("was reached"), "{reason}");
+        assert!(
+            record
+                .notes
+                .iter()
+                .any(|n| n.contains("`claude-sonnet-4-6`")
+                    && n.contains(&format!("{} stage", Stage::Alternatives.label()))),
+            "the ledger names the model and the call: {:?}",
+            record.notes
         );
     }
 
@@ -12792,7 +17700,7 @@ mod tests {
             &stub,
             "acme/app",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -12895,11 +17803,13 @@ mod tests {
             &completer,
             "acme/widgets",
             &repo_map,
+            &crate::prompt_frame::FrameNonce::generate(),
             &adopted,
             None,
             None,
             None,
             &chunks,
+            None,
             &batches,
             4,
             "parallel",
@@ -12908,7 +17818,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert!(err.is_empty(), "no pass should fail: {err:?}");
         assert_eq!(ok, 4, "2 chunks x 2 rule-batches = 4 passes");
 
         let seen = completer.seen.lock().unwrap();
@@ -13001,11 +17911,13 @@ mod tests {
             &completer,
             "acme/widgets",
             &repo_map,
+            &crate::prompt_frame::FrameNonce::generate(),
             &adopted,
             None,
             None,
             None,
             &chunks,
+            None,
             &batches,
             4,
             "parallel",
@@ -13014,7 +17926,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert!(err.is_empty(), "no pass should fail: {err:?}");
         assert_eq!(ok, 2, "2 chunks x 1 rule-batch = 2 passes");
 
         let seen = completer.seen.lock().unwrap();
@@ -13050,7 +17962,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[], // alternatives (none — no multi-option rules in this test)
             &std::collections::HashMap::new(), // forced
             None, // model
@@ -13090,7 +18002,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -13107,6 +18019,322 @@ mod tests {
         assert!(
             err.to_string().contains("simulated LLM unavailable"),
             "streaming-path error should carry the underlying failure, got: {err}"
+        );
+    }
+
+    /// A completer whose FIRST call comes back as a model refusal (`stop_reason: "refusal"`,
+    /// which the transport turns into an error via `refusal_error`) and whose later calls
+    /// answer `{"findings":[]}`. `refuse_all` makes every call refuse.
+    struct RefusingCompleter {
+        calls: std::sync::atomic::AtomicUsize,
+        refuse_all: bool,
+        /// Also refuses the third call, which is the end-of-round second try of the pass the
+        /// first call refused.
+        refuse_second_try: bool,
+    }
+
+    impl RefusingCompleter {
+        fn respond(&self) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.refuse_all || n == 0 || (self.refuse_second_try && n == 2) {
+                let refusal = crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal", "content": []
+                }))
+                .expect("a refusal stop_reason is an error");
+                return Err(refusal);
+            }
+            Ok(LlmResponse {
+                text: r#"{"findings":[]}"#.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for RefusingCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A model REFUSAL is a failed pass, never an empty finding list: when every pass is
+    /// refused the audit returns `Err` (it does not report a clean Ok([])).
+    #[tokio::test]
+    async fn audit_repo_treats_a_total_refusal_as_failure_not_a_clean_scan() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: true,
+            refuse_second_try: false,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let res = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &crate::scan_routing::rules_from_pairs(&selected),
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let err = res.expect_err("every pass refused -> Err, never Ok([])");
+        assert!(err.to_string().contains("refus"), "{err}");
+    }
+
+    /// One refused pass among several that answered: the survivors' findings are returned but
+    /// the gap is DISCLOSED in `failed_passes` (so the export is marked incomplete), not
+    /// swallowed.
+    #[tokio::test]
+    async fn audit_repo_discloses_a_single_refused_pass_as_a_failed_pass() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: false,
+            refuse_second_try: true,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        // More rules than one rule-batch holds, so Parallel mode issues more than one pass.
+        let selected: Vec<(String, String)> = (0..(RULE_BATCH_SIZE + 1))
+            .map(|i| {
+                (
+                    format!("ARCH-NO-DIRECT-DB-{i}"),
+                    "Controllers must not call the database directly.".to_string(),
+                )
+            })
+            .collect();
+        let (_findings, _proposed, _recs, failed_passes, _samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &crate::scan_routing::rules_from_pairs(&selected),
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("some passes answered -> Ok with the gap disclosed");
+        let rows: Vec<_> = failed_passes
+            .iter()
+            .filter(|f| f.reason.contains("refus"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly the one refused pass is disclosed, by name: {failed_passes:?}"
+        );
+        assert!(
+            rows[0].pass.starts_with("audit pass[all] "),
+            "{}",
+            rows[0].pass
+        );
+        assert!(
+            rows[0]
+                .reason
+                .contains("1 of 2 passes in this round answered"),
+            "the row says how many passes answered: {}",
+            rows[0].reason
+        );
+    }
+
+    /// Every failed pass gets its own named row, and the row carries how many passes answered,
+    /// so 2-of-40 and 39-of-40 are told apart.
+    #[test]
+    fn failed_pass_rows_name_every_failed_pass_and_the_round_size() {
+        let failures: Vec<PassFailure> = (0..2)
+            .map(|i| PassFailure::at("pass[rust]", i, 5, 0, 8, &"model refused (refusal)"))
+            .collect();
+        let rows = failed_pass_rows("me/api", 38, &failures);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pass, "audit pass[rust] 1/5 · rules 1/8");
+        assert_eq!(rows[1].pass, "audit pass[rust] 2/5 · rules 1/8");
+        for r in &rows {
+            assert_eq!(r.repo, "me/api");
+            assert!(r.reason.contains("38 of 40 passes in this round answered"));
+            assert!(r.reason.contains("refus"));
+        }
+        let all_but_one = failed_pass_rows("me/api", 1, &failures);
+        assert!(all_but_one[0].reason.contains("1 of 3 passes"));
+    }
+
+    /// BATCH: a refused item's per-item reason reaches the failed pass. It must say it was a
+    /// refusal, not "missing from results".
+    #[test]
+    fn a_refused_batch_item_is_reported_as_a_refusal_not_as_missing() {
+        let mut results = crate::llm::BatchResults::default();
+        results.responses.insert(
+            "c0-b0".to_string(),
+            LlmResponse {
+                text: r#"{"findings":[]}"#.to_string(),
+                model: "m".to_string(),
+                backend: "api/batch".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            },
+        );
+        results.errors.insert(
+            "c0-b1".to_string(),
+            crate::llm::refusal_error(&serde_json::json!({"stop_reason": "refusal"}))
+                .unwrap()
+                .to_string(),
+        );
+        // c0-b2 is in neither map: genuinely missing.
+        let (_f, _p, _r, ok, failures) = reassemble_batch_passes(
+            "me/api",
+            "pass",
+            1,
+            3,
+            &[(0, 0), (0, 1), (0, 2)],
+            &[1],
+            &results,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            None,
+            false,
+            None,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].pass, "pass 1/1 · rules 2/3");
+        assert!(failures[0].error.contains("refus"), "{}", failures[0].error);
+        assert!(failures[1].error.contains("missing from results"));
+        let rows = failed_pass_rows("me/api", ok, &failures);
+        assert!(rows[0].reason.contains("refus"));
+    }
+
+    /// First call answers and asks for another file; every later call (the resolution round)
+    /// is refused.
+    struct NeedsFileThenRefuses {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl NeedsFileThenRefuses {
+        fn respond(&self) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n > 0 {
+                return Err(crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal"
+                }))
+                .unwrap());
+            }
+            Ok(LlmResponse {
+                text: r#"{"findings":[],"needs_files":["src/b.rs"]}"#.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for NeedsFileThenRefuses {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// H2: a refused RESOLUTION pass yields zero findings for the files it was to re-judge;
+    /// that must be a disclosed failed pass, never "resolved clean".
+    #[tokio::test]
+    async fn a_refused_resolution_pass_is_disclosed_as_a_failed_pass() {
+        let llm = NeedsFileThenRefuses {
+            calls: Default::default(),
+        };
+        let files = vec![
+            ("src/a.rs".to_string(), "fn a() {}\n".to_string()),
+            (
+                "src/b.rs".to_string(),
+                "fn b() { db.execute(q); }\n".to_string(),
+            ),
+        ];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let (_findings, _proposed, _recs, failed_passes, _samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &crate::scan_routing::rules_from_pairs(&selected),
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the main round answered, so the audit returns");
+        assert!(
+            failed_passes
+                .iter()
+                .any(|f| f.pass.starts_with("audit resolution") && f.reason.contains("refus")),
+            "the refused resolution pass must be disclosed: {failed_passes:?}"
         );
     }
 
@@ -13132,7 +18360,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -13670,7 +18898,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(), // forced — none, this is the "ask the model" path
             None,
@@ -13730,7 +18958,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -13785,7 +19013,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -13836,7 +19064,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -13911,7 +19139,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -13960,7 +19188,7 @@ mod tests {
     }
 
     // ---- Pass-1 W2 (A5.4): the alternatives pass may never silence a rule -----------------
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+    // (the audit findings tracker)
 
     /// req_a5_4: selecting an option marked `violates` must NOT rewrite the rule's effective
     /// directive, and must emit a `Finding` carrying the rule's citation (`rule_id`) and
@@ -13975,8 +19203,10 @@ mod tests {
     /// returned.
     #[test]
     fn req_a5_4_violates_option_does_not_rewrite_directive_and_emits_a_finding() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives_opt_b_violates("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -13994,7 +19224,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the A way.",
+            effective_selected[0].directive, "Do it the A way.",
             "a violates option must NEVER rewrite the rule's effective directive"
         );
         let f = finding.expect("a violates option must emit a finding");
@@ -14089,7 +19319,10 @@ mod tests {
             .expect("the rule must still have a non-degenerate option")
             .directive
             .clone();
-        let mut effective_selected = vec![(RULE_ID.to_string(), correct_directive.clone())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            RULE_ID,
+            correct_directive.clone(),
+        )];
         let rejected_view = RuleOptionView {
             id: rejected.id.clone(),
             label: rejected.label.clone(),
@@ -14108,7 +19341,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, correct_directive,
+            effective_selected[0].directive, correct_directive,
             "the degenerate option must NEVER become this project's effective directive — \
              that is how an unsanitized upload path got adopted as a convention"
         );
@@ -14148,6 +19381,7 @@ mod tests {
             kind: rule.kind(),
         }];
         let recommendations = vec![RuleRecommendation {
+            repo: String::new(),
             rule_id: RULE_ID.to_string(),
             recommended_option_id: rejected.id.clone(),
             recommendation_reasoning: "the repo keeps the client filename as the key".to_string(),
@@ -14170,8 +19404,10 @@ mod tests {
     /// would also break the ordinary, non-defect multi-option case.
     #[test]
     fn req_a5_4_non_violates_option_rewrites_directive_and_emits_no_defect() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -14189,7 +19425,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the B way.",
+            effective_selected[0].directive, "Do it the B way.",
             "a genuine alternative DOES rewrite the directive, same as before this fix"
         );
         assert!(
@@ -14237,7 +19473,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -14273,6 +19509,7 @@ mod tests {
             .filter(|f| f.rule_id == "MULTI-RULE-1")
             .count();
         ledger.record_rule(
+            "",
             "MULTI-RULE-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -14313,6 +19550,7 @@ mod tests {
         assessed_sites: Option<usize>,
     ) -> RuleRecommendation {
         RuleRecommendation {
+            repo: String::new(),
             rule_id: rule.to_string(),
             recommended_option_id: option.to_string(),
             recommendation_reasoning: "the repo does it the A way nearly everywhere".to_string(),
@@ -14344,14 +19582,14 @@ mod tests {
                 // A merged row that ABSORBED one more site under the same rule — the
                 // numerator must count it (2 rows + 1 absorbed = 3 deviating sites).
                 let mut f = deviation_fixture("MULTI-RULE-1", "src/b.rs", 20);
-                f.also_locations.push(MergedLocation {
-                    repo: "me/api".to_string(),
-                    path: "src/c.rs".to_string(),
-                    line: 30,
-                    rule_id: "MULTI-RULE-1".to_string(),
-                    snippet: "third site".to_string(),
-                    consequence: false,
-                });
+                f.also_locations.push(MergedLocation::site(
+                    "me/api".to_string(),
+                    "src/c.rs".to_string(),
+                    30,
+                    "MULTI-RULE-1".to_string(),
+                    "third site".to_string(),
+                    false,
+                ));
                 f
             },
             // An unrelated rule's row must be untouched.
@@ -14439,6 +19677,7 @@ mod tests {
     fn req_a5_3_no_convention_findings_emit_exactly_one_row_per_rule() {
         use camerata_api_types::audit::ObservedOptionUsage;
         let mk = |sites: Option<usize>| RuleRecommendation {
+            repo: String::new(),
             rule_id: "MULTI-RULE-1".to_string(),
             recommended_option_id: "opt-a".to_string(),
             recommendation_reasoning: "used both ways with no majority".to_string(),
@@ -14706,7 +19945,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -14780,7 +20019,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -14830,7 +20069,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -15029,7 +20268,7 @@ mod tests {
     }
 
     // ── P1: deduplication + cross-tier merge ────────────────────────────────────────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Synthetic findings only —
+    // the codebase-inspection hardening notes, P1. Synthetic findings only —
     // never keyed to any one benchmark's rule/file/table names.
 
     #[test]
@@ -15271,7 +20510,7 @@ mod tests {
         );
     }
 
-    // ── MERGE (cycle-2 queue-hardening, docs/plans/2026-09-30_cycle2-queue-hardening.md) ────
+    // ── MERGE (cycle-2 queue-hardening, the cycle-2 queue-hardening notes) ────
     // Gap (ii): two deterministic findings sharing a captured object (same root cause — e.g. two
     // secret-detectors naming the SAME committed secret) were blocked from ever merging by the
     // unconditional det+det guard. Synthetic findings only, fixture-independent.
@@ -16774,6 +22013,27 @@ mod tests {
         }
     }
 
+    /// The floor's private-key and vendor-token rules get NO category from the rule-id map, and
+    /// the Supabase service-role rule keeps `authorization`. A `secret-exposure` category on
+    /// them would be a merge key, and two credentials a few lines apart (a private key under a
+    /// Stripe key) would fuse into one row. The cockpit's decision memory keeps their repos
+    /// apart by rule id (`FindingView::is_secret_exposure`), so it needs no category here.
+    #[test]
+    fn floor_credential_rules_carry_no_secret_exposure_merge_category() {
+        for id in ["SEC-NO-PRIVATE-KEY-1", "SEC-NO-VENDOR-TOKEN-1"] {
+            assert_eq!(categorize_rule_id(id), None, "{id}");
+        }
+        assert_eq!(
+            categorize_rule_id("SUPABASE-KEY-SERVICE-ROLE-CLIENT-1").as_deref(),
+            Some("authorization")
+        );
+        // The hardcoded-secret rule is categorized, as it always was.
+        assert_eq!(
+            categorize_rule_id("SEC-NO-HARDCODED-SECRETS-1").as_deref(),
+            Some("secret-exposure")
+        );
+    }
+
     // ── D5 pt.2: categorize_rule_id word-boundary matching ────────────────────────────────
     //
     // Mirrors the p1_finding_class_* tests above: `categorize_rule_id` had the SAME raw-
@@ -16994,6 +22254,141 @@ mod tests {
         );
     }
 
+    #[test]
+    fn find_ungrounded_identifier_accepts_a_code_snippet_whose_names_are_all_ordinary_words() {
+        // The fix IS the new code, so the snippet is not in the evidence; its plain words
+        // (`err`, `console`, `process`, `catch`) are not identifiers to ground.
+        let evidence = "scripts/seed.ts line 3: main();";
+        let fix = "Wrap the entry point: `main().catch((err) => { console.error(err); \
+                    process.exit(1); })`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_checks_only_identifier_like_names_inside_a_snippet() {
+        let evidence = "create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.member_contacts enable row level security;`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+
+        let fix = "Run `alter table public.billing_accounts enable row level security;`.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("billing_accounts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_camel_case_symbol_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        let fix = "Call `await rotateServiceKey(client)` before returning.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("rotateServiceKey".to_string())
+        );
+        let fix = "Use `const res = NextResponse.next({ request })` here.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("NextResponse".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_an_invented_table_or_env_var_inside_a_snippet() {
+        // A schema-qualified name (`public.documents`) names a table or function somebody chose,
+        // even when it is one lowercase word; an environment variable read (`process.env.SECRET`)
+        // is a chosen name even when it has no underscore. Neither is in this evidence.
+        let evidence =
+            "supabase/migrations/0004_contacts.sql: create table public.member_contacts (id uuid, owner_id uuid)";
+        let fix = "Run `alter table public.documents enable row level security;` in the migration.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("documents".to_string())
+        );
+        let fix = "Read it as `const key = process.env.SECRET;` instead of hard-coding it.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("SECRET".to_string())
+        );
+        // The real table, and a schema-qualified CALL (`auth.uid()`), are fine.
+        let fix = "Run `alter table public.member_contacts enable row level security;` then add \
+                   `create policy p on public.member_contacts using (owner_id = auth.uid());`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_bare_invented_symbol() {
+        let evidence = "app/api/keys/route.ts calls `loadKey` at line 4";
+        assert_eq!(
+            find_ungrounded_identifier("Replace it with `rotateServiceKey`.", evidence),
+            Some("rotateServiceKey".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_skips_universal_names_absent_from_the_evidence() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Read the `Authorization` header.",
+            "Close the client in a `finally` block.",
+            "Log it with `console.error` and rethrow.",
+            "Move it under `devDependencies`.",
+            "Wrap it in `try` and `catch`.",
+            "Log with console.error(err) in a catch block.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+    }
+
+    /// A framework name written with its dot (`Next.js`), an abbreviation (`e.g.`) and the `void`
+    /// keyword look like a file or a chosen name to the regexes but are no name the repository
+    /// could hold: the stored efficiency runs lost eight fixes to them.
+    #[test]
+    fn find_ungrounded_identifier_skips_framework_names_abbreviations_and_void() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Move the charge into a Next.js route handler in app/api/keys/route.ts.",
+            "Add a client query library (e.g. a cached fetch) only with an explicit decision, i.e. in the PR.",
+            "Return `void` from the handler and log instead.",
+            "Keep the handler in app/api/keys/route.ts and declare it `async function run(): Promise<void>`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+        // The list is not a blanket pass for dotted names: an unknown file is still rejected.
+        assert_eq!(
+            find_ungrounded_identifier("Move it into lib/charge.ts.", evidence),
+            Some("lib/charge.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_still_rejects_a_path_named_inside_a_snippet() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Add `import { admin } from \"lib/supabase/missing.ts\"` at the top.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("lib/supabase/missing.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_does_not_read_a_member_call_in_a_snippet_as_a_file() {
+        let evidence = "app/api/keys/route.ts line 4";
+        let fix = "Parse it with `const body = await req.json()` and validate it.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn the_fix_prompt_and_the_checker_agree_on_snippets() {
+        let prompt = fix_specific_system_prompt();
+        assert!(prompt.contains("code snippet"));
+        assert!(prompt.contains("describe it in plain words"));
+        // The prompt invites a snippet, and the checker accepts one made of ordinary words.
+        assert_eq!(
+            find_ungrounded_identifier("Add `if (!user) { return null; }` first.", "x"),
+            None
+        );
+    }
+
     // ── fix_contradicts_detail (pure, rule-based) ───────────────────────────────────────
 
     #[test]
@@ -17052,19 +22447,20 @@ mod tests {
 
     #[test]
     fn parse_fix_specifics_reads_a_well_formed_response() {
-        let raw =
-            r#"{"fixes":[{"index":0,"fix":"Do the thing."},{"index":2,"fix":"Do another."}]}"#;
+        let raw = r#"{"fixes":[{"id":"a1b2c3","fix":"Do the thing."},{"id":"d4e5f6","fix":"Do another."}]}"#;
         let out = parse_fix_specifics(raw);
-        assert_eq!(out.get(&0).map(String::as_str), Some("Do the thing."));
-        assert_eq!(out.get(&2).map(String::as_str), Some("Do another."));
+        assert_eq!(out.get("a1b2c3").map(String::as_str), Some("Do the thing."));
+        assert_eq!(out.get("d4e5f6").map(String::as_str), Some("Do another."));
         assert_eq!(out.len(), 2);
+        // A position is no address any more: an entry with only an `index` matches nothing.
+        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":"Do it."}]}"#).is_empty());
     }
 
     #[test]
     fn parse_fix_specifics_is_empty_on_garbage_input() {
         assert!(parse_fix_specifics("not json at all").is_empty());
         assert!(parse_fix_specifics(r#"{"nope":true}"#).is_empty());
-        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":""}]}"#).is_empty());
+        assert!(parse_fix_specifics(r#"{"fixes":[{"id":"a1b2c3","fix":""}]}"#).is_empty());
     }
 
     // ── generate_fix_specifics (async, stubbed LlmPort — no real model calls) ──────────
@@ -17088,7 +22484,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for SequencedCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut q = self.responses.lock().unwrap();
@@ -17097,6 +22493,7 @@ mod tests {
             } else {
                 q.front().cloned().unwrap_or_default()
             };
+            let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
             Ok(LlmResponse {
                 text,
                 model: "stub".to_string(),
@@ -17400,7 +22797,8 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
-        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4).
+        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4). A rejected
+        // fix is a content failure and gets no end-of-run second try.
         assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
         assert_eq!(
             failed_passes.len(),
@@ -17594,7 +22992,7 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
-        let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
+        let expected = fix_max_tokens(FIX_BATCH_SIZE);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
@@ -17628,8 +23026,8 @@ mod tests {
 
         let seen = completer.seen.lock().unwrap();
         let batched_rounds = MAX_FIX_REGENERATIONS + 1;
-        let batched_max_tokens = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
-        let solo_max_tokens = scaled_max_tokens(1, FIX_TOKENS_PER_FINDING);
+        let batched_max_tokens = fix_max_tokens(FIX_BATCH_SIZE);
+        let solo_max_tokens = fix_max_tokens(1);
         assert!(
             seen.len() > batched_rounds,
             "expected solo-round calls after the batched rounds, got {} total calls",
@@ -17712,11 +23110,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for CountingFixCompleter {
-        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(LlmResponse {
-                text: self.canned.clone(),
+                text: super::reply_schemas::check::address_by_id(&req.prompt, &self.canned),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
                 cost_usd: None,
@@ -17740,5 +23138,138 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    // ── Floor credential rules never fuse with a NEIGHBOURING different secret ─────────────
+    //
+    // The cross-family merge's same-category signal is "same file, same category, within five
+    // lines or one construct". That is the right key for an authorization or injection pair,
+    // but two credentials are two defects (two values to rotate, two places to delete) however
+    // close they sit, and a secret row has no structural object for `objects_conflict` to tell
+    // them apart by: a redacted snippet names nothing. So the floor's private-key, vendor-token
+    // and Supabase service-role rows carry NO `secret-exposure` category from
+    // `categorize_rule_id`; the cockpit identifies them by rule id instead
+    // (`FindingView::is_secret_exposure`). A same-credential pair at the SAME line is already one
+    // row through `merge_by_location`, which needs no category.
+
+    fn floor_credential_row(rule: &str, line: usize, snippet: &str, detail: &str) -> Finding {
+        Finding {
+            repo: "acme/api".to_string(),
+            path: "src/config.ts".to_string(),
+            line,
+            rule_id: rule.to_string(),
+            severity: "critical".to_string(),
+            snippet: snippet.to_string(),
+            detail: detail.to_string(),
+            status: "active".to_string(),
+            located: true,
+            effort: Some("low".to_string()),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            ..Finding::default()
+        }
+    }
+
+    /// A committed private key at line 12 and a live Stripe key the model flagged at line 10 are
+    /// two credentials. With the floor row categorized `secret-exposure` they became ONE row
+    /// headlined "private key", the Stripe key demoted to a location of it, and one triage
+    /// decision ("false positive: fixture key") would have disposed of both.
+    #[test]
+    fn a_floor_private_key_and_a_different_ai_secret_two_lines_apart_stay_two_rows() {
+        let key = floor_credential_row(
+            "SEC-NO-PRIVATE-KEY-1",
+            12,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "No private key material in source",
+        );
+        let mut stripe = floor_credential_row(
+            "AI-SECRET-IN-CONFIG-1",
+            10,
+            "stripe: \"sk_live_…x7Yq (32 chars)\"",
+            "A live Stripe secret key is hardcoded in the config object.",
+        );
+        stripe.confidence = Some("high".to_string());
+        stripe.category = Some("secret-exposure".to_string());
+        let out = merge_semantic_groups(vec![stripe, key], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two different credentials two lines apart are two rows: {out:?}"
+        );
+        assert!(out.iter().all(|f| f.also_locations.is_empty()), "{out:?}");
+    }
+
+    /// A vendor token and a private key in ONE object literal are two credentials. With both
+    /// floor rows in one category the same-construct security override fused them, bypassing
+    /// the "two deterministic rows are two defects" guard.
+    #[test]
+    fn two_different_floor_credentials_in_one_construct_stay_two_rows() {
+        let content = "const config = {\n  owner: \"acme\",\n  token: \"ghp_yyy\",\n  cert: 1,\n  \
+                       key: `-----BEGIN RSA PRIVATE KEY-----`,\n};\n";
+        let token = floor_credential_row(
+            "SEC-NO-VENDOR-TOKEN-1",
+            3,
+            "token: \"ghp_…yyyy (40 chars)\"",
+            "No vendor API tokens in source",
+        );
+        let key = floor_credential_row(
+            "SEC-NO-PRIVATE-KEY-1",
+            5,
+            "key: `-----BEGIN RSA PRIVATE KEY-----`",
+            "No private key material in source",
+        );
+        let files = vec![("src/config.ts".to_string(), content.to_string())];
+        let out = merge_semantic_groups(vec![token, key], &files);
+        assert_eq!(
+            out.len(),
+            2,
+            "two floor credential rules in one construct are two rows: {out:?}"
+        );
+        let ids: Vec<&str> = out.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(ids.contains(&"SEC-NO-VENDOR-TOKEN-1") && ids.contains(&"SEC-NO-PRIVATE-KEY-1"));
+    }
+
+    /// The same credential flagged by the floor and by the model at the SAME line is still one
+    /// row: `merge_by_location` fuses exact co-location and needs no category for it.
+    #[test]
+    fn the_same_credential_at_the_same_line_is_still_one_row_by_location() {
+        let floor = floor_credential_row(
+            "SEC-NO-VENDOR-TOKEN-1",
+            10,
+            "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"",
+            "No vendor API tokens in source",
+        );
+        let mut model = floor_credential_row(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            10,
+            "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"",
+            "A GitHub personal access token is hardcoded in GITHUB_TOKEN.",
+        );
+        model.confidence = Some("high".to_string());
+        model.category = Some("secret-exposure".to_string());
+        let content = (1..=12)
+            .map(|n| {
+                if n == 10 {
+                    "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"".to_string()
+                } else {
+                    format!("const line{n} = {n};")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let files = vec![("src/config.ts".to_string(), content)];
+        let out = merge_by_location(vec![model, floor], &files);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(
+            out[0].rule_id, "SEC-NO-VENDOR-TOKEN-1",
+            "the floor row is primary"
+        );
+        assert_eq!(out[0].severity, "critical");
+        assert!(
+            out[0]
+                .also_matches
+                .contains(&"SEC-NO-HARDCODED-SECRETS-1".to_string()),
+            "{:?}",
+            out[0].also_matches
+        );
     }
 }

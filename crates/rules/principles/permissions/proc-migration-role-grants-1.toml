@@ -1,5 +1,5 @@
 id = "PROC-MIGRATION-ROLE-GRANTS-1"
-version = 1
+version = 4
 title = "Adding a permission seeds its role grants in the same migration"
 domain = "permissions"
 layer = "universal"
@@ -11,10 +11,10 @@ verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-CI-MIGRATION-HYGIENE-1 + SQL-AUDIT-COLUMNS-1 domain (migration grant pattern)"
+title = "Project policy: a migration that adds a permission also grants it to the roles that need it"
 
 [decision]
-question = "What position does the project take on: Adding a permission seeds its role grants in the same migration?"
+question = "When a migration adds a new permission, where and when do the role grants for it get written?"
 default = "adding-a-permission-seeds-its-role-grants-in-the"
 why = "A permission with no grants is a no-op. The feature gated on it silently does nothing for anyone, with no error to surface the gap until someone notices the feature is broken in production. The write that creates the permission and the writes that connect it to roles are inseparable parts of the same change; splitting them across migrations or deferring to a separate tool leaves the system in an intermediate state where the permission exists but produces no effect. Adding the permission row only and granting it later via a configuration tool creates a permanent gap whenever the tool does not cover the role in question, or when the role's grants were never meant to be runtime-managed in the first place. Splitting permission inserts and grant inserts across separate migrations leaves a window where the permission exists with no grants; any deploy that lands the first migration without the second is partially broken. Relying on a seed script outside the migration system lets the script and the migration drift independently, and rollbacks become incoherent across the two systems."
 
@@ -23,7 +23,7 @@ id = "adding-a-permission-seeds-its-role-grants-in-the"
 label = "Adding a permission seeds its role grants in the same migration"
 directive = "When a migration introduces a new permission, the same migration also writes the role-permission grants for every role that should have it. The permission row and its grant rows ship together, idempotently, in one atomic change. Roles whose grants are intentionally left for post-deploy configuration are exempt, but the migration declares that intent explicitly so a reviewer can tell the difference between a missing grant and a deliberate one."
 remediation = """
-Add the role-permission grant rows for every role that should have the new permission into the same migration that creates the permission row, rather than deferring the grant to a later migration, a seed script, or runtime configuration. Verify by running the migration against a fresh database and confirming the intended roles already have the permission granted immediately after migration, with no follow-up step required.
+Add the role-permission grant rows for every role that should have the new permission into the same migration that creates the permission row, rather than deferring the grant to a later migration, a seed script or runtime configuration. Verify by running the migration against a fresh database and confirming the intended roles already have the permission granted immediately after migration, with no follow-up step required.
 """
 why = "A permission with no grants is a no-op."
 

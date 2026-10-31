@@ -1986,6 +1986,7 @@ fn build_change_summary(
         let steps = [
             ("audit", &project.step_models.audit),
             ("calibration", &project.step_models.calibration),
+            ("fix", &project.step_models.fix),
             ("research_chat", &project.step_models.research_chat),
             ("story_authoring", &project.step_models.story_authoring),
             ("decomposition", &project.step_models.decomposition),
@@ -2474,7 +2475,9 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
 }
 
 /// Per-step model editor: one labeled `<select>` per NON-FLEET AI step (audit,
-/// calibration, research chat, story authoring, decomposition, escalation, clarification).
+/// calibration, fix, research chat, story authoring, decomposition, escalation, clarification).
+/// The fix row alone offers "Default" (an empty model id): its default is decided at run time by
+/// the `fix_on_haiku` efficiency switch, so it is not seeded with a model like the others.
 ///
 /// Reads each current value from `project.step_models` and saves on change via
 /// `POST /api/projects/:id/step-models` (one step per round-trip — patch semantics, mirrors
@@ -2486,25 +2489,32 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
     let models = use_resource(|| async move { fetch_audit_models().await });
     let models = models.read().clone().flatten();
 
-    // The (step-key, human label, current model id, tooltip hint) tuples, in display order.
+    // The (step-key, human label, current model id, tooltip hint, unset label) tuples, in
+    // display order. Only a step with an unset label may be left with no model.
     let sm = &project.step_models;
-    let rows: Vec<(&'static str, &'static str, String, &'static str)> = vec![
+    let fix_hint = format!(
+        "Writes one concrete fix per finding after calibration. Default: {}, or the calibration model when the fix_on_haiku efficiency measure is off.",
+        camerata_api_types::project::fix_stage_haiku_display_name()
+    );
+    let rows: Vec<(&'static str, &'static str, String, String, Option<&'static str>)> = vec![
         ("audit", "Audit", sm.audit.clone(),
-            "Onboarding scan that proposes governance rules for this project."),
+            "Onboarding scan that proposes governance rules for this project.".to_string(), None),
         ("calibration", "Calibration", sm.calibration.clone(),
-            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns."),
+            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns.".to_string(), None),
+        ("fix", "Fix", sm.fix.clone(),
+            fix_hint, Some("Default")),
         // NOTE: Research chat (the global assistant) is intentionally NOT listed here. Its model
         // is now an APP-LEVEL (cross-project) setting — see the "Chat assistant model" selector in
         // the cross-project Settings section. The `step_models.research_chat` field is retained for
         // back-compat but is no longer surfaced per-project nor used to resolve the chat model.
         ("story_authoring", "Story authoring", sm.story_authoring.clone(),
-            "The author-a-story screen: structures requirements into a governed work item."),
+            "The author-a-story screen: structures requirements into a governed work item.".to_string(), None),
         ("decomposition", "Decomposition", sm.decomposition.clone(),
-            "Splits a story or issue into sub-issues for parallel fleet execution."),
+            "Splits a story or issue into sub-issues for parallel fleet execution.".to_string(), None),
         ("escalation", "Escalation", sm.escalation.clone(),
-            "Restates your escalation answer as a resume directive the fleet can act on."),
+            "Restates your escalation answer as a resume directive the fleet can act on.".to_string(), None),
         ("clarification", "Clarification", sm.clarification.clone(),
-            "Generates the investigation clarification questions sent to the requester."),
+            "Generates the investigation clarification questions sent to the requester.".to_string(), None),
     ];
 
     rsx! {
@@ -2518,7 +2528,7 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
                  Each change saves immediately."
             }
             div { class: "tier-map-rows",
-                for (step_key , label , current , hint) in rows.into_iter() {
+                for (step_key , label , current , hint , unset_label) in rows.into_iter() {
                     StepModelRow {
                         key: "{project.id}-{step_key}",
                         project_id: project.id.clone(),
@@ -2526,6 +2536,7 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
                         label,
                         current,
                         hint,
+                        unset_label,
                         models: models.clone(),
                     }
                 }
@@ -2536,14 +2547,16 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
 
 /// One row of [`StepModelsEditor`]: a label + a model `<select>` that POSTs the chosen model
 /// for its single step on change. Self-contained (owns its local selection + saving signals)
-/// so a save on one step never touches another.
+/// so a save on one step never touches another. `unset_label`, when given, adds a first option
+/// with an empty model id (the step's run-time default; only the fix step has one).
 #[component]
 pub(super) fn StepModelRow(
     project_id: String,
     step_key: &'static str,
     label: &'static str,
     current: String,
-    hint: &'static str,
+    hint: String,
+    unset_label: Option<&'static str>,
     models: Option<AuditModelsResp>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -2579,6 +2592,9 @@ pub(super) fn StepModelRow(
                             saving.set(false);
                         });
                     },
+                    if let Some(unset) = unset_label {
+                        option { value: "", selected: selected().is_empty(), "{unset}" }
+                    }
                     for (group_label , opts) in m.grouped().into_iter() {
                         optgroup { label: "{group_label}",
                             for opt in opts.into_iter() {
@@ -2692,6 +2708,11 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
     let mut enabled = use_signal(|| project.l3_review.enabled);
     // Empty string = "use balanced tier" (the serde/server default).
     let mut model = use_signal(|| project.l3_review.model.clone());
+    // Reviewer policy: what a reviewer outage does, how many extra implementer passes a bounce
+    // gets, and which tier runs the review when no model is pinned. Defaults match today.
+    let mut on_error = use_signal(|| project.l3_review.on_error);
+    let mut fix_rounds = use_signal(|| project.l3_review.fix_rounds);
+    let mut tier = use_signal(|| project.l3_review.tier);
     let mut saving = use_signal(|| false);
 
     rsx! {
@@ -2763,6 +2784,85 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                         }
                     }
                 }
+
+                // ── Reviewer policy ──────────────────────────────────────────
+                div { class: "tier-map-row l3-review-on-error-row",
+                    label { class: "tier-map-band-label", "On reviewer error" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            on_error
+                                .set(
+                                    if e.value() == "fail_closed" {
+                                        ReviewOnError::FailClosed
+                                    } else {
+                                        ReviewOnError::Advisory
+                                    },
+                                );
+                        },
+                        option {
+                            value: "advisory",
+                            selected: on_error() == ReviewOnError::Advisory,
+                            "Advisory (run continues)"
+                        }
+                        option {
+                            value: "fail_closed",
+                            selected: on_error() == ReviewOnError::FailClosed,
+                            "Fail closed (run stops)"
+                        }
+                    }
+                }
+                div { class: "tier-map-row l3-review-fix-rounds-row",
+                    label { class: "tier-map-band-label", "Fix rounds after a bounce" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            fix_rounds.set(
+                                e.value().parse::<u8>().unwrap_or(0).min(MAX_L3_FIX_ROUNDS),
+                            );
+                        },
+                        for n in 0u8..=MAX_L3_FIX_ROUNDS {
+                            option {
+                                key: "{n}",
+                                value: "{n}",
+                                selected: fix_rounds() == n,
+                                "{n}"
+                            }
+                        }
+                    }
+                }
+                div { class: "tier-map-row l3-review-tier-row",
+                    label { class: "tier-map-band-label", "Reviewer model tier" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            tier.set(
+                                if e.value() == "strongest" {
+                                    ReviewTier::Strongest
+                                } else {
+                                    ReviewTier::Balanced
+                                },
+                            );
+                        },
+                        option {
+                            value: "balanced",
+                            selected: tier() == ReviewTier::Balanced,
+                            "Balanced"
+                        }
+                        option {
+                            value: "strongest",
+                            selected: tier() == ReviewTier::Strongest,
+                            "Strongest (unless a model is pinned above)"
+                        }
+                    }
+                }
+            }
+            p { class: "section-hint tier-map-hint",
+                "Each review is one model call with the whole diff as input, once per pass. \
+                 Fix rounds add implementer passes. Strongest costs more per call than balanced."
             }
 
             button {
@@ -2770,9 +2870,16 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                 disabled: saving(),
                 onclick: move |_| {
                     let (pid, en, mo) = (pid.clone(), enabled(), model());
+                    let config = L3ReviewView {
+                        enabled: en,
+                        model: mo.clone(),
+                        on_error: on_error(),
+                        fix_rounds: fix_rounds(),
+                        tier: tier(),
+                    };
                     saving.set(true);
                     spawn(async move {
-                        if set_project_l3_review(&pid, en, &mo).await {
+                        if set_project_l3_review(&pid, &config).await {
                             let msg = if en {
                                 if mo.is_empty() {
                                     "L3 review enabled (using Balanced tier model)."
@@ -2813,6 +2920,92 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
 /// compliance-relevant setting that must never silently drift from what the server actually
 /// persisted. A failed save reverts the control to its pre-click state rather than leaving it
 /// showing an unconfirmed value.
+/// Per-project **Client engagement** control (see `camerata_server::client_lock`). On
+/// (the default for every project) means client work: every AI call runs only on the Anthropic
+/// API with Anthropic models (the CLI backend and OpenRouter models are refused before anything
+/// is read), and steps that execute the client's own code (the `cargo clippy` preview, the dev
+/// loop's build and tests) run only with the separate opt-in below. Off is the maintainer's own
+/// development. Auto-saves on change and reconciles from the server's echoed values, like
+/// [`BackendEditor`]; a failed save reverts both controls.
+#[component]
+pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    let mut engagement = use_signal(|| project.client_engagement);
+    let mut opt_in = use_signal(|| project.client_tooling_opt_in);
+    let mut saving = use_signal(|| false);
+
+    let save = move |next_engagement: bool, next_opt_in: bool| {
+        let previous = (engagement(), opt_in());
+        engagement.set(next_engagement);
+        opt_in.set(next_opt_in);
+        saving.set(true);
+        let pid = pid.clone();
+        spawn(async move {
+            match set_project_client_engagement(&pid, next_engagement, next_opt_in).await {
+                Some((confirmed_engagement, confirmed_opt_in)) => {
+                    engagement.set(confirmed_engagement);
+                    opt_in.set(confirmed_opt_in);
+                }
+                None => {
+                    engagement.set(previous.0);
+                    opt_in.set(previous.1);
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Could not update the client engagement setting.",
+                    );
+                }
+            }
+            saving.set(false);
+        });
+    };
+    let mut save_engagement = save.clone();
+    let mut save_opt_in = save;
+
+    rsx! {
+        div { class: "tier-map-editor client-engagement-editor",
+            p { class: "tier-map-heading", "Client engagement" }
+            div { class: "tier-map-row l3-review-toggle-row",
+                label { class: "tier-map-band-label", "Client engagement" }
+                input {
+                    r#type: "checkbox",
+                    class: "l3-review-checkbox",
+                    checked: engagement(),
+                    disabled: saving(),
+                    onchange: move |e: Event<FormData>| save_engagement(e.checked(), opt_in()),
+                }
+                span { class: "l3-review-toggle-hint",
+                    if engagement() {
+                        "On. Client work runs only on the Anthropic API with Claude models; the CLI backend and OpenRouter models are refused before anything is read."
+                    } else {
+                        "Not a client engagement: your own development. Any backend and model may run, and so may the repository's own tooling."
+                    }
+                }
+            }
+            if engagement() {
+                div { class: "tier-map-row l3-review-toggle-row",
+                    label { class: "tier-map-band-label", "Run client tooling" }
+                    input {
+                        r#type: "checkbox",
+                        class: "l3-review-checkbox",
+                        checked: opt_in(),
+                        disabled: saving(),
+                        onchange: move |e: Event<FormData>| save_opt_in(engagement(), e.checked()),
+                    }
+                    span { class: "l3-review-toggle-hint",
+                        if opt_in() {
+                            "Opted in. The clippy preview and the dev loop build and run this repository's own code; the report says so."
+                        } else {
+                            "Off. Steps that build or run this repository's own code are skipped, and the report says which."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn BackendEditor(project: ProjectView) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -4398,6 +4591,7 @@ pub(super) fn ProposedRulesTable(
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
+                "data-tour": camerata_ui_core::walkthrough::target::RUN_INSPECTION,
                 disabled: auditing || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
@@ -7939,6 +8133,55 @@ mod render_tests {
         assert!(
             html.contains("CLI selected"),
             "a legacy project with no backend field defaults to Cli; html=\n{html}"
+        );
+    }
+
+    // ClientEngagementEditor (H2): reads only `project.client_engagement` /
+    // `project.client_tooling_opt_in` via use_signal, so SSR renders it deterministically.
+    fn render_client_engagement(project: ProjectView) -> String {
+        #[component]
+        fn Harness(project: ProjectView) -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                ClientEngagementEditor { project }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { project });
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    #[test]
+    fn client_engagement_editor_is_on_for_a_project_without_the_field() {
+        let html = render_client_engagement(project_with_no_backend_field());
+        assert!(html.contains("client-engagement-editor"), "html=\n{html}");
+        assert!(html.contains("Client engagement"), "html=\n{html}");
+        assert!(
+            html.contains("Client work runs only on the Anthropic API"),
+            "the on-state hint renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Run client tooling"),
+            "the opt-in renders while the engagement is on; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn client_engagement_editor_off_hides_the_tooling_opt_in() {
+        let project: ProjectView = serde_json::from_value(serde_json::json!({
+            "id": "proj-internal",
+            "name": "Own",
+            "client_engagement": false,
+        }))
+        .unwrap();
+        let html = render_client_engagement(project);
+        assert!(
+            html.contains("Not a client engagement"),
+            "the off-state hint renders; html=\n{html}"
+        );
+        assert!(
+            !html.contains("Run client tooling"),
+            "no opt-in to offer when nothing is withheld; html=\n{html}"
         );
     }
 }

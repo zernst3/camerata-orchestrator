@@ -1,5 +1,5 @@
 id = "SEC-NO-COMMAND-INJECTION-1"
-version = 1
+version = 3
 title = "OS commands and dynamic code/method dispatch are never invoked with data the function did not construct itself"
 domain = "universal"
 layer = "universal"
@@ -44,9 +44,9 @@ id = "fixed-argv-no-shell"
 label = "Invoke the target directly with a fixed argument list; never shell=True / a shell wrapper / eval / dynamic send"
 directive = "Every subprocess invocation passes the target binary and a separately-passed argument list directly to the OS (never shell=True, never a `sh -c`/`bash -c` wrapper, never a single interpolated command string). Dynamic code or method dispatch never evaluates a string the function did not construct itself via eval()/instance_eval()/class_eval(), and send()/public_send() is only ever called with a hardcoded symbol or a value validated against a fixed allowlist."
 remediation = """
-Replace the shell-interpreted call (shell=True, a `sh -c`/`bash -c` wrapper, or a single
+Replace the shell-interpreted call (shell=True, a `sh -c`/`bash -c` wrapper or a single
 interpolated command string) with a direct invocation of the target binary passing a fixed,
-separately-passed argument list — no shell sits between your code and the argument boundary.
+separately-passed argument list: no shell sits between your code and the argument boundary.
 For dynamic code/method dispatch, replace eval()/send() driven by a value the function did not
 construct itself with a fixed dispatch table (a hash or case/switch statement) mapping a known
 set of values to hardcoded methods, or validate the value against a fixed allowlist before using
@@ -58,7 +58,7 @@ finding_headline = "Your `<path>` file lets a value it did not construct itself 
 finding_detail = """
 When a value the function did not construct itself is handed to a shell-interpreted command or
 a dynamic eval/send call, an attacker who can influence that value can run their own commands or
-invoke methods they were never meant to reach — full remote code execution in the worst case.
+invoke methods they were never meant to reach: full remote code execution in the worst case.
 Rewrite the call in `<path>` to invoke the target directly with a fixed argument list (no shell),
 or route dynamic dispatch through a fixed allowlist instead of evaluating the value directly.
 """

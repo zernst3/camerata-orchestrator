@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// The default model used when a routine does not specify one. This mirrors the
 /// `DEFAULT_MODEL` constant in `camerata-server::llm`, but is declared here independently
 /// so this crate carries no dependency on the server adapter.
-pub const DEFAULT_ROUTINE_MODEL: &str = "claude-sonnet-5";
+pub const DEFAULT_ROUTINE_MODEL: &str = "claude-sonnet-5-5";
 
 /// The lifecycle status of a routine, persisted alongside it (issue #43).
 ///
@@ -416,7 +416,7 @@ pub struct DraftPromptReq {
     pub intent: String,
     #[serde(default)]
     pub scope: String,
-    /// The model to author the operational prompt on (blank -> server default).
+    /// The model to author the operational prompt on (blank -> the open project's setting).
     #[serde(default)]
     pub model: String,
 }

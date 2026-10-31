@@ -29,6 +29,7 @@ pub enum PurgedKind {
     ServerScanCache,
     CliScanCache,
     CliLedger,
+    SavedRun,
     ModelSessionFile,
     InMemory,
 }
@@ -42,6 +43,7 @@ impl PurgedKind {
             PurgedKind::ServerScanCache => "scan cache entry",
             PurgedKind::CliScanCache => "CLI scan cache",
             PurgedKind::CliLedger => "CLI ledger",
+            PurgedKind::SavedRun => "saved run",
             PurgedKind::ModelSessionFile => "model session file",
             PurgedKind::InMemory => "in-memory copy",
         }

@@ -1,5 +1,35 @@
 #let d = json("data.json")
 
+// ── W27 brand tokens (docs/design/2026-10-27_pdf-brand-guide.md) ─────────────────────
+// One place for every colour, font and size the report uses. When the brand guide changes,
+// change these values and the guide together, never a one-off literal further down.
+//
+// Vivid blue is the ONLY saturated colour: Critical severity, the logo bar, the eyebrow dots
+// and at most one accent rule per page. Every other severity is a neutral chip, so the page is
+// not a rainbow. The line/tint tokens are ink mixed into white rather than transparent ink,
+// so a printer renders exactly the shade the screen shows.
+#let ink = rgb("#0F1826")
+#let ink_soft = rgb("#47536A")
+#let ink_faint = rgb("#6B7690")
+#let accent = rgb("#2B5580")
+#let accent_deep = rgb("#1B3A56")
+#let vivid = rgb("#0C22F2")
+#let vivid_mist = rgb("#E5E8FE")
+#let bg_blue = rgb("#E9F0FA")
+#let card_fill = white
+#let line_c = color.mix((ink, 8%), (white, 92%))
+#let line_strong = color.mix((ink, 14%), (white, 86%))
+#let tint = color.mix((ink, 3.5%), (white, 96.5%))
+#let chip_fill = color.mix((ink, 4.5%), (white, 95.5%))
+
+// The two embedded families. `compile_pdf_from_data` writes the bundled font files next to
+// this template and passes `--font-path`, which Typst searches BEFORE system fonts, so the
+// deliverable never depends on what happens to be installed on the exporting machine. A
+// glyph neither family has (a CJK path, an emoji) still falls back to a system font rather
+// than vanishing.
+#let sans = "Inter"
+#let mono = "JetBrains Mono"
+
 // M6: an absent-or-empty option string both render as the placeholder — a client who
 // exports with no options modal input must never see a blank cover field.
 // No em/en dashes in the placeholder itself (house no-dash rule) — "N/A", not "\u{2014}".
@@ -69,6 +99,26 @@
   out.intersperse(h(0pt, weak: true)).join()
 }
 
+// Fix text (a rule's authored remediation, or the model's codebase-specific fix). Rust has
+// already joined the source's hard line wraps (`report_export::fix_text::prepare`), so a
+// single newline never reaches here; a blank line ("\n\n") is a paragraph break. A
+// `single-backtick span` is set as inline mono (raw), the way the authored text marks code,
+// instead of printing the backticks. Anything that is not a well-formed span (an unclosed
+// backtick, a run of two or more) stays literal. The regex matches non-empty, backtick-free
+// bodies only, and `breakable` keeps a long path from running off the page.
+#let fix_runs(s) = {
+  let out = ()
+  let pos = 0
+  for m in s.matches(regex("`[^`]+`")) {
+    if m.start > pos { out.push(s.slice(pos, m.start)) }
+    out.push(breakable(m.text.slice(1, -1)))
+    pos = m.end
+  }
+  if pos < s.len() { out.push(s.slice(pos)) }
+  out.join()
+}
+#let fix_body(s) = s.split("\n\n").map(fix_runs).join(parbreak())
+
 // Branding (2026-09-13 review, owner's hard constraint): Camerata is the licensable
 // APPLICATION; the auditing agency running it is not Camerata's to name. `d.cover.brand` is
 // already fully resolved (per-report ReportOptions.brand > CAMERATA_REPORT_BRAND env var > no
@@ -92,6 +142,20 @@
 }
 #set document(title: doc_title)
 
+// W27: the logo mark is the bundled brand kit's, so it renders only when the resolved brand IS
+// that kit's brand (`d.brand_mark`, decided server-side by `report_export::brand_kit_matches`).
+// Any other agency's brand gets the text wordmark alone; no brand gets neither. The template
+// never decides which agency a report belongs to.
+#let wordmark(size: 9pt) = text(font: sans, size: size, weight: 600, tracking: 0.14em, fill: ink)[#upper(d.cover.brand)]
+#let brand_lockup(mark_height, file, size: 9pt) = {
+  if d.cover.brand == none { return [] }
+  if d.brand_mark {
+    box(baseline: 30%, image(file, height: mark_height))
+    h(mark_height / 3)
+  }
+  wordmark(size: size)
+}
+
 // P5: `d.review_state` is `"raw"` when NO finding in this scan carries an explicit
 // THIS-SESSION auditor disposition (see `report_export::ReviewState`'s doc comment) — a nobody-
 // has-looked-at-this-yet export. `is_draft` gates a banner on EVERY page (header, so it survives
@@ -101,13 +165,26 @@
 
 #set page(
   paper: "us-letter",
-  margin: (x: 2.2cm, y: 2cm),
+  margin: (x: 2.4cm, top: 2.6cm, bottom: 2.6cm),
   numbering: "1",
   header: context [
+    #set text(font: sans, size: 8pt, fill: ink_faint)
+    // W27: a running header from page 2 on (the cover carries the full mark itself): the small
+    // mark and the wordmark on the left, the project title on the right.
+    #if counter(page).get().first() > 1 and (d.cover.brand != none or d.cover.project_title != "") [
+      #grid(
+        columns: (1fr, auto),
+        align: (left + horizon, right + horizon),
+        brand_lockup(10pt, "brand-mark-small.svg", size: 7.5pt),
+        [#d.cover.project_title],
+      )
+      #v(-4pt)
+      #line(length: 100%, stroke: 0.5pt + line_c)
+    ]
     #if is_draft [
       #align(center)[
-        #box(fill: rgb("#fdeaea"), stroke: 0.75pt + rgb("#c0392b"), inset: (x: 8pt, y: 3pt), radius: 2pt)[
-          #text(size: 8.5pt, weight: "bold", fill: rgb("#c0392b"))[DRAFT: not yet reviewed by a human reviewer]
+        #box(fill: vivid_mist, stroke: 0.75pt + vivid, inset: (x: 8pt, y: 3pt), radius: 99pt)[
+          #text(size: 8pt, weight: 600, tracking: 0.04em, fill: vivid)[DRAFT: not yet reviewed by a human reviewer]
         ]
       ]
     ]
@@ -119,50 +196,100 @@
   // extraction read back "...page 1 · DRAFTDRAFT: not yet reviewed...". The header banner
   // above already marks EVERY page unambiguously; render the draft state once per page, not
   // twice.
+  //
+  // Confidentiality (2026-10-24 decision): every page carries "Confidential, prepared for
+  // <client> on <date>" (`d.confidentiality.line`, from `report_export::confidentiality_marking`,
+  // the same producer the workbook's sheet footers use), above the advisory line.
   footer: context [
-    #set text(size: 8pt, fill: rgb("#808080"))
+    #set text(font: mono, size: 8pt, fill: ink_faint)
+    #line(length: 100%, stroke: 0.5pt + line_c)
+    #v(-2pt)
+    #align(center)[#d.confidentiality.line]
+    #v(-6pt)
     #align(center)[
       #if d.cover.brand != none [#d.cover.brand ]inspection report (advisory, not a certification), page #counter(page).display()
     ]
   ],
 )
-#set text(size: 10.5pt)
+
+// Body: Inter 10 pt, ink-soft, line height 1.6 (cap height plus leading, so a baseline-to-
+// baseline distance of 1.6em with the default cap-height/baseline text edges).
+#set text(font: sans, size: 10pt, fill: ink_soft, lang: "en")
+#set par(leading: 0.87em, spacing: 1.2em)
+// Weight 600 is the brand's only bold: `*strong*` markup lands on SemiBold, not Bold.
+#set strong(delta: 200)
 #set heading(numbering: none)
+// Section heading (h2 in the brand guide): 20 pt, 600, tracking -0.024em, ink.
 #show heading.where(level: 1): it => {
-  v(0.6cm)
-  block(text(size: 15pt, weight: "bold", it.body))
-  v(0.2cm)
-  line(length: 100%, stroke: 0.5pt + rgb("#cccccc"))
-  v(0.3cm)
+  block(above: 6pt, below: 14pt)[
+    #text(size: 20pt, weight: 600, tracking: -0.024em, fill: ink, it.body)
+  ]
 }
 // M8: raw text (paths, shas, snippets) rendered a touch smaller than body copy, and never
 // justified (justification widens the invisible breakable() gaps unevenly).
-#show raw: set text(size: 8.5pt)
+#show raw: set text(font: mono, size: 8.5pt)
 #show raw.where(block: true): set par(justify: false)
+#show link: set text(fill: accent)
+
+// Eyebrow (section label): 8.5 pt uppercase, 600, tracking 0.09em, accent, after a 4 pt vivid
+// dot. Rendered above each section heading by `section` below.
+#let eyebrow(label) = block(below: 6pt, sticky: true)[
+  #box(baseline: -1.5pt, circle(radius: 2pt, fill: vivid, stroke: none))
+  #h(4pt)
+  #text(size: 8.5pt, weight: 600, tracking: 0.09em, fill: accent)[#upper(label)]
+]
+
+// One report section: the eyebrow, then the level-1 heading the contents page lists.
+#let section(label, title) = {
+  eyebrow(label)
+  heading(level: 1, title)
+}
+
+// Sub-heading (h3): 13 pt, 600, tracking -0.012em, ink.
+#let subheading(body) = text(size: 13pt, weight: 600, tracking: -0.012em, fill: ink, body)
+
+// A highlighted panel (summary box, handling note): bg-blue, no border.
+#let panel(body) = block(fill: bg_blue, inset: 12pt, radius: 8pt, width: 100%, body)
+
+// A white card with a 1 px line border (finding cards, the disclaimer, the sign-off).
+#let card(body, breakable: true) = block(
+  fill: card_fill,
+  stroke: 0.75pt + line_c,
+  inset: 12pt,
+  radius: 8pt,
+  width: 100%,
+  breakable: breakable,
+  body,
+)
+
+// Table chrome: header text accent-deep 600 on a line-strong rule, line-colour row rules.
+#let table_stroke = (x, y) => if y == 0 { (bottom: 0.75pt + line_strong) } else { (bottom: 0.5pt + line_c) }
+#let th(body) = text(size: 8.5pt, weight: 600, fill: accent_deep, body)
 
 #let chip(label, kind) = {
-  let bg = if kind == "clean" { rgb("#e6f4ea") } else if kind == "attention" { rgb("#fff4e0") } else { rgb("#fdeaea") }
-  let fg = if kind == "clean" { rgb("#1e7d34") } else if kind == "attention" { rgb("#b06a00") } else { rgb("#c0392b") }
-  box(fill: bg, inset: (x: 6pt, y: 3pt), radius: 3pt, [#text(fill: fg, size: 8.5pt, weight: "bold")[#label]])
+  // Status chips stay neutral apart from "Action-needed", which takes the accent on the
+  // highlight-panel blue (vivid is reserved for Critical severity).
+  let bg = if kind == "action" { bg_blue } else { chip_fill }
+  let fg = if kind == "action" { accent_deep } else if kind == "attention" { ink_soft } else { ink_faint }
+  box(fill: bg, inset: (x: 7pt, y: 3pt), radius: 99pt, [#text(fill: fg, size: 8pt, weight: 600, tracking: 0.04em)[#label]])
 }
 
 #let status_kind(status) = {
   if status == "Clean" { "clean" } else if status == "Attention" { "attention" } else { "action" }
 }
 
-// S2: severity as a colored chip, not the lightest gray ink on the page — a "critical"
-// finding's severity word must be the most visible thing in its cell, not the least.
+// S2: severity as a chip, not the lightest gray ink on the page — a "critical" finding's
+// severity word must be the most visible thing in its cell, not the least. W27: Critical is
+// vivid on vivid-mist; High separates from Medium in print by taking the accent; Medium and
+// Low stay neutral.
 #let severity_chip(sev) = {
-  let bg = if sev == "critical" { rgb("#fdeaea") } else if sev == "high" { rgb("#fff0e6") } else if sev == "medium" { rgb("#fff4e0") } else { rgb("#eeeeee") }
-  let fg = if sev == "critical" { rgb("#c0392b") } else if sev == "high" { rgb("#c0392b") } else if sev == "medium" { rgb("#b06a00") } else { rgb("#555555") }
-  box(fill: bg, inset: (x: 5pt, y: 2pt), radius: 3pt, [#text(fill: fg, size: 8pt, weight: "bold")[#upper(sev)]])
+  let bg = if sev == "critical" { vivid_mist } else { chip_fill }
+  let fg = if sev == "critical" { vivid } else if sev == "high" { accent } else { ink_soft }
+  box(fill: bg, inset: (x: 6pt, y: 2.5pt), radius: 99pt, [#text(fill: fg, size: 8pt, weight: 600, tracking: 0.04em)[#upper(sev)]])
 }
 
-// Nice-to-have: effort/confidence as small neutral chips instead of plain inline text.
-#let mini_chip(label) = box(fill: rgb("#eeeeee"), inset: (x: 5pt, y: 2pt), radius: 2pt, [#text(size: 8pt, fill: rgb("#444444"))[#label]])
-
 // Item 6: the category scorecard as a compact heat-grid. Native Typst primitives only (no
-// packages) — a small, hand-picked light-to-dark palette per severity, indexed by count, so a
+// packages) — a small, hand-picked light-to-dark ramp per severity, indexed by count, so a
 // "critical" cell with 4 findings reads visibly heavier than one with 1. The owner's original
 // ruling made this the ONE approved visual addition and kept the severity x effort section a
 // plain bucketed list. FIX 6 (2026-09-13 review) revisited that second half: the bucketed list
@@ -170,33 +297,35 @@
 // its own heading promised, so the owner approved replacing it with a real severity-rows x
 // effort-columns `table()` (see `d.priority_grid` below) — still a plain Typst table, not a
 // new chart primitive. No OTHER decorative visual gets added beyond this heat-grid and that
-// table: restrained, engineer-made, not marketing.
+// table: restrained, engineer-made, not marketing. W27: the ramps are brand colours mixed into
+// white (vivid for Critical, accent for High, ink for Medium and Low), so the grid keeps its
+// intensity reading without introducing a second saturated hue.
 #let heat_bg(sev, n) = {
-  let palette = if sev == "critical" {
-    (rgb("#fdeaea"), rgb("#f8b8b0"), rgb("#f2887a"), rgb("#e2574a"), rgb("#c0392b"))
-  } else if sev == "high" {
-    (rgb("#fff0e6"), rgb("#ffd2ab"), rgb("#ffb570"), rgb("#f2953f"), rgb("#d9720d"))
-  } else if sev == "medium" {
-    (rgb("#fff9e6"), rgb("#ffedb0"), rgb("#ffe07a"), rgb("#f7cf4a"), rgb("#e0b400"))
-  } else {
-    (rgb("#f7f7f7"), rgb("#eaeaea"), rgb("#d8d8d8"), rgb("#c2c2c2"), rgb("#a8a8a8"))
-  }
+  let base = if sev == "critical" { vivid } else if sev == "high" { accent } else { ink }
+  let strengths = if sev == "critical" or sev == "high" { (0%, 12%, 30%, 60%, 90%) } else if sev == "medium" { (0%, 8%, 18%, 34%, 55%) } else { (0%, 5%, 12%, 22%, 36%) }
   let idx = if n == 0 { 0 } else if n == 1 { 1 } else if n <= 3 { 2 } else if n <= 6 { 3 } else { 4 }
-  palette.at(idx)
+  let s = strengths.at(idx)
+  if s == 0% { tint } else { color.mix((base, s), (white, 100% - s)) }
 }
 
 #let heat_cell(n, sev) = {
   let idx = if n == 0 { 0 } else if n == 1 { 1 } else if n <= 3 { 2 } else if n <= 6 { 3 } else { 4 }
-  let fg = if idx >= 3 { white } else { rgb("#333333") }
+  let fg = if idx >= 3 and (sev == "critical" or sev == "high") { white } else { ink }
   align(center)[
-    #box(fill: heat_bg(sev, n), inset: (x: 6pt, y: 4pt), radius: 2pt, width: 1.7cm)[
-      #align(center)[#text(fill: fg, weight: if n > 0 { "bold" } else { "regular" })[#str(n)]]
+    #box(fill: heat_bg(sev, n), inset: (x: 6pt, y: 4pt), radius: 4pt, width: 1.7cm)[
+      #align(center)[#text(fill: fg, weight: if n > 0 { 600 } else { 400 })[#str(n)]]
     ]
   ]
 }
 
-// One curated-finding site row — factored out so the FIRST site of a group can be kept
-// together with its heading (S4) while later sites are free to break across pages.
+// The card's location strip: the severity chip, then `repo / path, line N` in mono, ink-faint,
+// on a 3.5% ink tint with a 4 pt radius (the site's report-excerpt shape).
+#let location_strip(sev, repo, path, line) = block(fill: tint, radius: 4pt, inset: (x: 6pt, y: 4pt), width: 100%, below: 8pt)[
+  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), line #str(line)]
+]
+
+// One curated-finding site, as a finding card — factored out so the FIRST site of a group can
+// be kept together with its heading (S4) while later sites are free to break across pages.
 //
 // FIX 8 (2026-09-13 review): "the plain-English headline leads; the engineer-normative rule
 // title renders smaller/grey BENEATH it." `site.headline` was already the primary bold
@@ -205,19 +334,21 @@
 // put the engineer-facing rule id first after all. `after_headline` lets the caller inject
 // that subtitle (plus the citation) directly UNDER this site's headline instead, so it always
 // reads headline-first regardless of which site in the group is rendering.
+//
+// W27 card order (brand guide, "Finding card"): location strip, headline, impact, a divider,
+// the "Fix:" line in accent, then the card footer in mono ink-faint.
 #let render_site(site, after_headline: none) = {
-  block(inset: (left: 8pt, top: 4pt, bottom: 4pt))[
+  block(above: 10pt, below: 0pt, card[
+    #location_strip(site.severity, site.repo, site.path, site.line)
     // Item 1: the DEFECT at this object is the primary, bold heading — never the rule's own
     // invariant title (that reads as a clean bill of health out of context).
-    #text(size: 11pt, weight: "bold")[#site.headline]
+    #subheading[#site.headline]
     #if after_headline != none [
       #v(2pt)
       #after_headline
     ]
-    #v(2pt)
-    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #breakable(site.path):#str(site.line)] #severity_chip(site.severity)
     #if site.snippet != "" [
-      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#breakable(site.snippet, n: 70)]
+      #block(fill: tint, inset: 6pt, radius: 4pt, width: 100%)[#breakable(site.snippet, n: 70)]
     ]
     #site.detail
     // FIX 1 contract (report_export.rs's `CuratedSiteJson.fix`): `Option<String>` serializes
@@ -232,27 +363,66 @@
     // none` — a deterministic-only scan, or a needs-review "fix not generated" finding), the
     // generic `fix` — if any — is still shown, as the ONLY "Fix:" line, exactly like before
     // this pass. Nothing renders when BOTH are `none`.
+    #if site.fix_for_this_finding != none or site.fix != none [
+      #line(length: 100%, stroke: 0.5pt + line_c)
+    ]
     #if site.fix_for_this_finding != none [
-      #v(0.1cm)
-      #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix_for_this_finding]
+      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix_for_this_finding)
       #if site.fix != none [
         #v(0.05cm)
-        #text(size: 8pt, fill: rgb("#888888"))[General guidance: #site.fix]
+        #text(size: 8.5pt, fill: ink_faint)[General guidance: #fix_body(site.fix)]
       ]
     ] else if site.fix != none [
-      #v(0.1cm)
-      #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix]
+      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix)
     ]
-    #v(0.1cm)
-    #text(size: 8.5pt)[
-      #mini_chip("Effort: " + or_not_estimated(site.effort)) #mini_chip("Confidence: " + or_not_evaluated(site.confidence)) #text(weight: "bold")[#site.disposition]
-    ]
+    #v(2pt)
+    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition]
     // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
     // `report_export::also_matches_titles`'s doc comment.
     #if site.also_matches_titles.len() > 0 [
-      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches_titles.join(", ")]
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[Also violates: #site.also_matches_titles.join(", ")]
     ]
-  ]
+    // M2/M8: when a rule's ceiling, floor or the unlocated safety net moved this row's
+    // severity, say what it was and why. Prints nothing for a row no bound moved.
+    #if site.severity_adjustments.len() > 0 [
+      #for note in site.severity_adjustments [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[#note]
+      ]
+    ]
+    // H6: every site a merge folded into this row, so a row that stands for several places
+    // says so. The first ten are named; the rest are counted and point to the workbook, which
+    // lists them all.
+    #if site.also_sites.len() > 0 [
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
+      #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
+        #linebreak()
+        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
+        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]] else if also.headline != none [#text(size: 8pt, fill: ink_faint)[(#also.headline)]]
+        #if also.severity != none [#text(size: 8pt, fill: ink_faint)[(rated #also.severity)]]
+        #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
+      ]
+      #if site.also_sites.len() > 10 [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[and #str(site.also_sites.len() - 10) more, listed in full in the workbook and findings.json]
+      ]
+    ]
+    // Members of a merge flagged at this row's own place are the same site, not another one.
+    #if site.also_flagged_here.len() > 0 [
+      #for note in site.also_flagged_here [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[#note]
+      ]
+    ]
+    // A credential another repo of the project also flags under the same name. Display only:
+    // each service's row stays its own.
+    #if site.same_credential_note != "" [
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[#site.same_credential_note]
+    ]
+  ])
 }
 
 // ── 1. Cover ─────────────────────────────────────────────────────────────
@@ -263,17 +433,30 @@
 // Camerata-version row have moved off the cover into Methodology further down (see "Scanned
 // with Camerata v..." there): Camerata is the auditing INSTRUMENT, legitimately named where
 // methodology is discussed, not on the client-facing cover.
-#align(center)[
-  #v(2cm)
-  #text(size: 22pt, weight: "bold")[#brand_title]
-  #if d.cover.project_title != "" [
-    #v(0.4cm)
-    #text(size: 14pt)[#d.cover.project_title]
-  ]
-  #v(0.2cm)
-  #if d.cover.client_name != "" [#text(size: 12pt, fill: rgb("#666666"))[Prepared for #d.cover.client_name]]
-  #v(1cm)
+#brand_lockup(34pt, "brand-mark.svg", size: 10pt)
+#v(2.2cm)
+#block[
+  #set par(leading: 0.3em)
+  #text(size: 30pt, weight: 600, tracking: -0.03em, fill: ink)[#brand_title]
 ]
+#if d.cover.project_title != "" [
+  #v(0.2cm)
+  #text(size: 15pt, fill: ink_soft)[#d.cover.project_title]
+]
+#if d.cover.client_name != "" [
+  #v(0.1cm)
+  #text(size: 11pt, fill: ink_faint)[Prepared for #d.cover.client_name]
+]
+// An internal export of a run that did not complete says so, in red, on the cover. Absent from
+// every complete run's data, so a complete run's cover is unchanged.
+#if d.cover.at("internal_incomplete", default: none) != none [
+  #v(0.3cm)
+  #text(size: 11pt, weight: 700, fill: rgb("#b00020"))[#d.cover.internal_incomplete]
+]
+// The one vivid accent rule on this page.
+#v(0.5cm)
+#line(length: 1.4cm, stroke: 2.5pt + vivid)
+#v(0.6cm)
 
 // P6 (2026-09-29): real code volume, never "0 characters". `d.cover.code_volume` is `none`
 // whenever `report_export::build_report_json` has no real line count for this run (see that
@@ -282,10 +465,16 @@
 // character count reads as noise to a non-engineer reader next to a real line-count figure.
 #let code_volume_label(cv) = {
   let base = thousands(cv.lines) + " " + plural(cv.lines, "line", "lines") + " of code"
-  if cv.by_language.len() == 0 {
+  let with_languages = if cv.by_language.len() == 0 {
     base
   } else {
     base + " (" + cv.by_language.map(l => l.language + ": " + thousands(l.lines)).join(", ") + ")"
+  }
+  // A project of several repos also says how large each one is. The key is absent for one repo.
+  if not ("per_repo" in cv) or cv.per_repo.len() == 0 {
+    with_languages
+  } else {
+    with_languages + ". By repo: " + cv.per_repo.map(r => r.repo + ": " + thousands(r.lines)).join(", ")
   }
 }
 #let code_volume_rows = if d.cover.code_volume != none {
@@ -296,8 +485,9 @@
 
 #table(
   columns: (auto, 1fr),
-  stroke: none,
-  inset: 4pt,
+  stroke: (x, y) => (bottom: 0.5pt + line_c),
+  inset: (x: 0pt, y: 6pt),
+  column-gutter: 16pt,
   [*Repos inspected*], [#d.cover.repos.join(", ")],
   [*Files scanned*], [#thousands(d.cover.files_scanned) (#thousands(d.cover.files_excluded) excluded as noise)],
   ..code_volume_rows.flatten(),
@@ -309,15 +499,22 @@
 )
 
 // Nice-to-have: a cover stat strip so the story starts on page 1, not page 2.
-#v(0.2cm)
-#text(size: 9.5pt, fill: rgb("#444444"))[
+#v(0.3cm)
+#text(size: 9.5pt, fill: ink_soft)[
   #d.cover.stats.critical critical · #d.cover.stats.high high · #d.cover.stats.medium medium · #d.cover.stats.accepted accepted · #d.cover.stats.dependency_advisories #plural(d.cover.stats.dependency_advisories, "dependency advisory", "dependency advisories")
+]
+
+// H11: an incremental run says so on the first page, with how much it re-audited and how much it
+// carried forward. Prints nothing for a full scan.
+#if d.cover.incremental_note != none [
+  #v(0.3cm)
+  #text(size: 9.5pt, fill: ink_soft)[#d.cover.incremental_note]
 ]
 
 // Nice-to-have: gate the heading when there is nothing under it.
 #if d.cover.audited_refs.len() > 0 [
   #v(0.4cm)
-  #text(weight: "bold")[Inspected git state]
+  #text(weight: 600, fill: ink)[Inspected git state]
   #for r in d.cover.audited_refs [
     #block(above: 2pt, below: 2pt)[
       - *#r.repo*: #if r.sha == none and r.branch == none [
@@ -329,20 +526,30 @@
   ]
 ]
 
+// Confidentiality (2026-10-24 decision): the first page's handling note, who the report is
+// for and that it is not to be forwarded outside that company without consent.
+#v(0.6cm)
+#panel[
+  #text(size: 8.5pt, weight: 600, tracking: 0.09em, fill: accent)[CONFIDENTIAL]
+  #linebreak()
+  #text(size: 9pt)[#d.confidentiality.handling_note]
+]
+
 #pagebreak()
 
 // ── ToC (nice-to-have): one line of Typst, clickable bookmarks in every viewer ───────
-#outline(title: [Contents], depth: 1)
+#eyebrow("Contents")
+#outline(title: none, depth: 1)
 
 #pagebreak()
 
 // ── 2. Executive summary ──────────────────────────────────────────────────
-= Executive summary
+#section("Summary", [Executive summary])
 
 #d.executive_summary.narrative
 
 #if d.executive_summary.is_override [
-  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the reviewer.]
+  #text(size: 8.5pt, style: "italic", fill: ink_faint)[Summary text supplied by the reviewer.]
 ]
 
 // W6: a failed/timed-out pass must be disclosed, never omitted silently. Rendered here
@@ -350,8 +557,8 @@
 // see `report_export::failed_pass_disclosures`. Gated on non-empty so a clean run renders
 // nothing extra.
 #if d.executive_summary.failed_passes.len() > 0 [
-  #block(above: 8pt, below: 4pt, stroke: 0.6pt + rgb("#c0392b"), inset: 8pt, radius: 3pt)[
-    #text(weight: "bold", size: 9pt)[Not computed this run]
+  #block(above: 8pt, below: 4pt, stroke: 0.75pt + vivid, inset: 10pt, radius: 8pt, width: 100%)[
+    #text(weight: 600, size: 9pt, fill: ink)[Not run this inspection]
     #for note in d.executive_summary.failed_passes [
       - #note
     ]
@@ -369,39 +576,41 @@
 // A buyer pricing remediation reads "these two criticals are about four hours of work total"
 // as the sentence that converts anxiety into a purchase order — a half-page box, not a whole
 // new page, right after the executive summary.
-= If you only do three things this week
+#v(0.4cm)
+#section("Priorities", [If you only do three things this week])
 
 #if d.three_things.items.len() == 0 [
   No do-now items this run.
 ] else [
-  #block(stroke: 0.6pt + rgb("#c0392b"), inset: 10pt, radius: 3pt)[
+  #panel[
     #for item in d.three_things.items [
-      #block(above: 4pt, below: 8pt)[
-        #severity_chip(item.severity) *#item.headline*
-        #text(size: 8.5pt, fill: rgb("#666666"))[
-          #item.repo / #breakable(item.path):#str(item.line) (#item.rule_id)
+      #block(above: 4pt, below: 10pt)[
+        #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
+        #linebreak()
+        #text(font: mono, size: 8pt, fill: ink_faint)[
+          #item.repo / #breakable(item.path), line #str(item.line) (#item.rule_id)
         ]
-        #v(1pt)
+        #linebreak()
         #text(size: 9pt)[Rough estimate: #item.hours_label]
         // FIX 7 (2026-09-13 review): one factual sentence of what the exposure MEANS, when
         // one is authored for this rule (`report_export::business_impact_for_rule`) — omitted
         // gracefully (no blank line, no "impact unknown" filler) when it isn't.
         #if item.impact != none [
-          #v(1pt)
-          #text(size: 8.5pt, style: "italic", fill: rgb("#555555"))[#item.impact]
+          #linebreak()
+          #text(size: 8.5pt, style: "italic", fill: ink_soft)[#item.impact]
         ]
       ]
     ]
-    #line(length: 100%, stroke: 0.4pt + rgb("#dddddd"))
+    #line(length: 100%, stroke: 0.5pt + line_strong)
     #v(4pt)
-    #text(weight: "bold")[#d.three_things.total_hours_label]
+    #text(weight: 600, fill: ink)[#d.three_things.total_hours_label]
   ]
 ]
 
 #pagebreak()
 
 // ── 3. Category scorecard ─────────────────────────────────────────────────
-= Category scorecard
+#section("Scorecard", [Category scorecard])
 
 #if d.scorecard.rows.len() == 0 [
   No findings were produced by any inspected category.
@@ -414,9 +623,10 @@
     // ("N checked, M clean") rather than a bare "N/M" fraction that reads as a grade — widened
     // from `auto` to a fixed width to keep that longer text from cramping the table.
     columns: (1.3fr, 2.1cm, 2.1cm, 2.1cm, 2.1cm, 2.9cm, 1.1fr),
-    stroke: 0.5pt + rgb("#dddddd"),
-    inset: 5pt,
-    [*Category*], [*Critical*], [*High*], [*Medium*], [*Low*], [*Rules checked · Rules clean*], [*Status*],
+    stroke: table_stroke,
+    inset: (x: 4pt, y: 6pt),
+    align: horizon,
+    table.header(th[Category], th[Critical], th[High], th[Medium], th[Low], th[Rules checked · Rules clean], th[Status]),
     ..d.scorecard.rows.map(row => (
       [#row.category],
       heat_cell(row.critical, "critical"),
@@ -438,7 +648,7 @@
 // (`report_export::build_priority_grid`) is the ACTUAL severity-rows x effort-columns grid:
 // each open finding sits in exactly one cell. Accepted and Informational findings are
 // deliberately out of scope (a footnote, not a row/column) — see the struct's doc comment.
-= Severity × effort matrix
+#section("Prioritization", [Severity × effort matrix])
 
 #let effort_col_label(key) = {
   if key == "low" { "Low effort" }
@@ -456,10 +666,10 @@
 #let grid_cell_content(cell) = {
   if cell.findings.len() == 0 [] else [
     #for f in cell.findings [
-      #block(above: 2pt, below: 4pt)[
-        #text(size: 8pt)[#f.headline]
+      #block(above: 2pt, below: 6pt)[
+        #text(size: 8pt, fill: ink)[#f.headline]
         #linebreak()
-        #text(size: 7.5pt, fill: rgb("#888888"))[#f.repo / #breakable(f.path, n: 24):#str(f.line) (#f.rule_id)]
+        #text(font: mono, size: 7.5pt, fill: ink_faint)[#f.repo / #breakable(f.path, n: 24), line #str(f.line) (#f.rule_id)]
       ]
     ]
   ]
@@ -470,10 +680,9 @@
 ] else [
   #table(
     columns: (auto,) + d.priority_grid.columns.map(c => 1fr),
-    stroke: 0.5pt + rgb("#dddddd"),
-    inset: 6pt,
-    [*Severity*],
-    ..d.priority_grid.columns.map(c => [*#effort_col_label(c)*]),
+    stroke: table_stroke,
+    inset: (x: 5pt, y: 6pt),
+    table.header(th[Severity], ..d.priority_grid.columns.map(c => th[#effort_col_label(c)])),
     ..d.priority_grid.rows.map(row => (
       [#severity_chip(row.severity)],
       ..row.cells.map(cell => grid_cell_content(cell)),
@@ -483,7 +692,7 @@
 
 #if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 [
   #v(0.3cm)
-  #text(size: 8.5pt, fill: rgb("#888888"))[
+  #text(size: 8.5pt, fill: ink_faint)[
     #if d.priority_grid.accepted_count > 0 [
       #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "finding is", "findings are") accepted risk and out of scope for this grid (see Curated findings).
     ]
@@ -512,17 +721,21 @@
     #block(above: 12pt, below: 2pt)[
       #if group.sites.len() > 0 [
         #render_site(group.sites.at(0), after_headline: [
-          #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
+          #text(size: 8.5pt, fill: ink_faint)[#group.rule_id: #group.title] #text(size: 8.5pt, fill: ink_faint)[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
           // Item 5: show the citation ONCE. When real external sources exist, the bulleted
           // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
           // those same titles) is dropped. `label` is shown only when there are no external
           // sources to bullet (the advisory/preview case), where it is the sole honesty note.
           #if group.citation.sources.len() > 0 [
+            // H5: a keyword-matched standard is labelled as related, never as a rule check.
+            #if group.citation.kind == "related" [
+              #text(size: 8.5pt, fill: rgb("#555555"))[Related standard (matched by keyword, not a rule check):]
+            ]
             #for s in group.citation.sources [
-              #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
+              #text(size: 8.5pt, fill: ink_faint)[- #s.title #if s.url != "" [(#s.url)]]
             ]
           ] else [
-            #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
+            #text(size: 8.5pt, fill: ink_faint)[#group.citation.label]
           ]
         ])
       ]
@@ -537,7 +750,7 @@
 // C4-P4 (residual defect 5): `d.curated_findings` is already ordered by the server (severity
 // desc, then bucket do_now -> do_next -> plan -> accepted, then confidence) — see
 // `report_export::curated_group_sort_key` — never re-sorted (alphabetically or otherwise) here.
-= Curated findings
+#section("Findings", [Curated findings])
 
 #if d.curated_findings.len() == 0 [
   No open code findings survived triage.
@@ -559,12 +772,12 @@
 // (computed server-side, distinct wording for "informational" vs "held") — no bucket-specific
 // branching needed here. Same row-level content, own heading, own page, strictly AFTER every
 // curated finding above.
-= Held for review
+#section("Review", [Held for review])
 
 #if d.held_for_review_findings.len() == 0 [
   No findings held for a reviewer's judgment call this run.
 ] else [
-  #text(size: 9pt, style: "italic", fill: rgb("#666666"))[
+  #text(size: 9pt, style: "italic", fill: ink_faint)[
     Held for a human reviewer's judgment call — not an open action item, but worth a second \
     look.
   ]
@@ -574,11 +787,49 @@
   ]
 ]
 
+// ── Patterns across services ──────────────────────────────────────────────────────────
+// Present only for a project of more than one repo. An observation after the findings: no
+// severity glyph, no chip, in no total (`report_export::PatternsAcrossServicesJson`). A cell
+// that is not applicable or not reviewed is printed as such, never as clean.
+#if d.patterns_across_services != none [
+  #pagebreak()
+  #section("Observations", [Patterns across services])
+  #text(size: 9pt, style: "italic", fill: ink_faint)[#d.patterns_across_services.note]
+  #v(6pt)
+  #if d.patterns_across_services.rows.len() == 0 [
+    No rule was found violated in one service and clean in another.
+  ] else [
+    #for row in d.patterns_across_services.rows [
+      #block(breakable: false, below: 10pt)[
+        #text(weight: 600, fill: ink)[#row.title]
+        #v(2pt)
+        #text(size: 9.5pt)[#row.statement]
+        #v(3pt)
+        #table(
+          columns: (auto, 1fr),
+          stroke: table_stroke,
+          inset: (x: 5pt, y: 4pt),
+          table.header(th[Service], th[Result]),
+          ..row.cells.map(cell => (
+            [#cell.repo],
+            [#cell.label],
+          )).flatten()
+        )
+      ]
+    ]
+    #for theme in d.patterns_across_services.themes [
+      #block(below: 6pt)[
+        #text(weight: 600, fill: ink)[#theme.name]: #theme.note
+      ]
+    ]
+  ]
+]
+
 #pagebreak()
 
 // ── 6 + 7. What's healthy + Dependency snapshot (S1: share a page — each was ~85-90% ──
 // blank on its own) ─────────────────────────────────────────────────────────────────
-= What's healthy
+#section("Strengths", [What's healthy])
 
 #if d.whats_healthy.rules.len() == 0 and not d.whats_healthy.dependency_clean [
   No zero-finding rules to report this run.
@@ -587,26 +838,31 @@
     - No known vulnerable dependencies detected in this scan.
   ]
   #for r in d.whats_healthy.rules [
-    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: rgb("#888888"), size: 8.5pt)[(#r.citation.label)]]
+    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: ink_faint, size: 8.5pt)[(#r.citation.label)]]#if r.clean_in.len() > 0 [ #text(fill: ink_faint, size: 8.5pt)[Clean in #r.clean_in.join(", ")#if r.not_applicable_in.len() > 0 [; not applicable in #r.not_applicable_in.join(", ")].]]
   ]
   #if d.whats_healthy.further_clean_count > 0 [
-    #text(size: 8.5pt, fill: rgb("#888888"))[#str(d.whats_healthy.further_clean_count) further #plural(d.whats_healthy.further_clean_count, "rule", "rules") verified clean this run.]
+    #text(size: 8.5pt, fill: ink_faint)[#str(d.whats_healthy.further_clean_count) further #plural(d.whats_healthy.further_clean_count, "rule", "rules") verified clean this run.]
   ]
-  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[
+  #text(size: 8.5pt, style: "italic", fill: ink_faint)[
     Verified absent in THIS scan, not a guarantee against future regressions.
   ]
 ]
 
-= Dependency & CVE snapshot
+#v(0.6cm)
+#section("Dependencies", [Dependency & CVE snapshot])
 
 #if d.dependency_snapshot.clean [
   No known vulnerable dependencies detected.
+] else if d.dependency_snapshot.rows.len() == 0 [
+  // M11: no rows is not the same as clean. The audit did not run, or left manifests out, so
+  // this section cannot say that no dependency is vulnerable.
+  Dependencies were not fully checked in this scan, so this report cannot say that none are vulnerable. The notes below say what was not checked.
 ] else [
   #table(
     columns: (1fr, auto, 2fr, auto),
-    stroke: 0.5pt + rgb("#dddddd"),
-    inset: 5pt,
-    [*Package*], [*Repo*], [*Advisory*], [*Severity*],
+    stroke: table_stroke,
+    inset: (x: 5pt, y: 6pt),
+    table.header(th[Package], th[Repo], th[Advisory], th[Severity]),
     ..d.dependency_snapshot.rows.map(row => (
       [#breakable(row.package, n: 24)],
       [#row.repo],
@@ -618,7 +874,7 @@
 
 #for note in d.dependency_snapshot.coverage_notes [
   #block(above: 4pt, below: 4pt)[
-    #text(size: 8.5pt, fill: rgb("#888888"))[Coverage note: #note]
+    #text(size: 8.5pt, fill: ink_faint)[Coverage note: #note]
   ]
 ]
 
@@ -630,22 +886,29 @@
 // prose (`report_export::next_steps_note`, which also computes and states the run's real
 // numeric fix rate per promise 2), never an LLM call, same pattern as the deterministic/ai-tier
 // notes below.
-= Next steps
+#section("After this report", [Next steps])
 
 #d.methodology.next_steps
 
 // ── 8 + 9. Methodology & limitations + Disclaimer (S1: share a page) ────────────────
-= Methodology & limitations
+#v(0.6cm)
+#section("How this was done", [Methodology & limitations])
 
 #d.methodology.deterministic_note
 
 #d.methodology.ai_tier_note
 
+#d.methodology.citation_note
+
 // Branding (2026-09-13 review): Audit model / Calibration model / Camerata version used to sit
 // on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,
 // legitimately named where methodology is discussed, never on the client-facing cover (see
 // `brand_title` above) and never a substitute for the agency's own resolved brand.
-Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
+Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model). Model backend: #or_na(d.cover.model_backend).
+
+// H4: the exact engine build and rule library behind this report, the same values the README,
+// manifest.json and findings.json state. Each line renders only when the value was recorded.
+#if d.cover.engine_commit != none [Engine commit: #raw(d.cover.engine_commit). ]#if d.cover.corpus_version != none [Rule library lock hash: #raw(d.cover.corpus_version).]
 
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
@@ -671,15 +934,49 @@ Not performed in this engagement:
 // here for the more technical Methodology reader. Gated on non-empty.
 #if d.methodology.failed_passes.len() > 0 [
   #v(0.2cm)
-  Not computed this run (pass failed or timed out):
+  Not run this inspection:
   #for note in d.methodology.failed_passes [
     - #note
   ]
 ]
 
-= Disclaimer
+// H4: what this scan did not review, by pass and by path (`report_export::coverage_gaps`, the
+// same data the workbook's Coverage sheet and findings.json carry). A failed AI pass names how
+// many files it did not review; a skipped file is listed by path. The PDF lists the first 100
+// skipped files and points to the full list, which itself holds the first 1,000 per reason; the
+// rest are counted ("and K more").
+#let gaps = d.coverage_gaps
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or "scope_limited_note" in gaps [
+  #v(0.2cm)
+  #card[
+    #subheading[Coverage, not reviewed this scan]
+    #v(0.1cm)
+    #for line in gaps.failed_ai_passes [
+      - #line
+    ]
+    #for line in gaps.dependency_gaps [
+      - #line
+    ]
+    #let shown = calc.min(gaps.skipped_files.len(), 100)
+    #for skipped in gaps.skipped_files.slice(0, shown) [
+      - #skipped.repo, #raw(skipped.path): #skipped.reason
+    ]
+    #if gaps.skipped_files.len() > shown [
+      - and #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json
+    ]
+    #if "skipped_beyond_cap_note" in gaps [
+      - #gaps.skipped_beyond_cap_note
+    ]
+    #if "scope_limited_note" in gaps [
+      - #gaps.scope_limited_note
+    ]
+  ]
+]
 
-#block(stroke: 0.5pt + rgb("#cccccc"), inset: 10pt, radius: 2pt)[
+#v(0.6cm)
+#section("Terms", [Disclaimer])
+
+#card[
   #d.disclaimer
 ]
 
@@ -696,14 +993,14 @@ Not performed in this engagement:
 // reviewed run keeps the real name+date sign-off below; a raw/unreviewed draft gets no
 // name+date attestation at all, just an explicit unreviewed-draft label.
 #v(0.5cm)
-#block(stroke: 0.75pt + rgb("#333333"), inset: 10pt, radius: 2pt, width: 100%)[
+#block(stroke: 0.75pt + line_strong, inset: 12pt, radius: 8pt, width: 100%)[
   #text(size: 9pt)[
     #if is_draft [
-      Prepared by: #text(weight: "bold")[#d.cover.prepared_by] (unreviewed draft, not signed off)
+      Prepared by: #text(weight: 600, fill: ink)[#d.cover.prepared_by] (unreviewed draft, not signed off)
     ] else [
-      Prepared and signed off by: #text(weight: "bold")[#d.cover.prepared_by]
+      Prepared and signed off by: #text(weight: 600, fill: ink)[#d.cover.prepared_by]
       #linebreak()
-      #text(fill: rgb("#666666"))[#d.cover.generated_at]
+      #text(fill: ink_faint)[#d.cover.generated_at]
     ]
   ]
 ]

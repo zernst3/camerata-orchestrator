@@ -59,11 +59,47 @@ fn canned_finding_json() -> String {
     )
 }
 
+/// The `terse_output` measure asks a second question after the scan: the full explanation of each
+/// surviving finding. This stub answers it with the canned finding's own `detail` (what the scan
+/// "wrote" in full), and answers every other call with the canned scan response, as before.
+fn answer(req: &LlmRequest, canned: String) -> String {
+    let is_regeneration = req
+        .system
+        .as_deref()
+        .is_some_and(|s| s.starts_with("You write the full explanation"));
+    if !is_regeneration {
+        return canned;
+    }
+    let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
+    let finding = &scan["findings"][0];
+    // The block header the prompt addresses the finding by (`[<id>] rule ...`), then the
+    // `Location: <path>:<line>` line that opens the finding's frame.
+    let header = req
+        .prompt
+        .lines()
+        .find(|l| l.starts_with('[') && l.contains("] rule "))
+        .expect("the regeneration prompt addresses the finding by an id");
+    let id = &header[1..header.find(']').expect("a closing bracket")];
+    let place = req
+        .prompt
+        .lines()
+        .find_map(|l| l.strip_prefix("Location: "))
+        .expect("a location");
+    let (path, line) = place.rsplit_once(':').expect("path:line");
+    serde_json::json!({"details": [{
+        "id": id,
+        "path": path,
+        "line": line.parse::<u64>().expect("a line number"),
+        "detail": finding["detail"],
+    }]})
+    .to_string()
+}
+
 #[async_trait]
 impl LlmPort for StubModel {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: canned_finding_json(),
+            text: answer(&req, canned_finding_json()),
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -78,12 +114,12 @@ impl LlmPort for StubModel {
 
     async fn complete_streaming(
         &self,
-        _req: LlmRequest,
+        req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let text = canned_finding_json();
-        on_delta(&text);
-        self.complete(LlmRequest::new("")).await
+        let response = self.complete(req).await?;
+        on_delta(&response.text);
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -101,11 +137,17 @@ fn minimal_report(
     ledger: ScanLedger,
 ) -> ScanReport {
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/api".to_string()],
         stacks: Vec::new(),
         files_scanned: 1,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 60,
         code_lines: 1,
         code_lines_by_language: Vec::new(),
@@ -177,7 +219,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
     // disclosure is QUEUED (not yet attached to any entry — none exists yet).
     let mut ledger = ScanLedger::new();
     assert!(ledger.rule(RULE_CONFIG_GATED).is_none());
-    ledger.note_config_gated_rule(RULE_CONFIG_GATED);
+    ledger.note_config_gated_rule("", RULE_CONFIG_GATED);
 
     // ═══ STEP 3: the real semantic-tier function against a STUBBED model, over the EXACT ═══
     // selected set the per-repo filter would hand it for this unconfigured repo — nothing
@@ -191,7 +233,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         &stub,
         "acme/api",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model
@@ -200,7 +242,9 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         false, // thorough
         None,  // feedback
         None,  // job
-        None,  // meter
+        // A meter, so the default `terse_output` path (a short scan detail, the full one
+        // regenerated afterwards) is what this test drives; the stub answers both calls.
+        Some(&ai_audit::UsageMeter::default()),
         Some(&files),
     )
     .await
@@ -228,6 +272,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         .filter(|f| f.rule_id == RULE_CONFIG_GATED)
         .count();
     ledger.record_rule(
+        "",
         RULE_CONFIG_GATED,
         RuleTier::Semantic,
         true,

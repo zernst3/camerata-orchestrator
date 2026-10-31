@@ -19,6 +19,31 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked -- -D wa
 RUSTFLAGS="-D warnings" cargo test --workspace --locked
 ```
 
+CI also runs `scripts/check-personal-paths.sh`, which fails when a tracked file names a personal
+home directory or the private fixture folder. Write example paths as `/Users/auditor/...`. Run
+the script before you push.
+
+## Running the benchmark tests locally
+
+Some tests grade the scanner against private fixture repositories that are not part of this
+repository, and one `#[ignore]`d test serves a local Dioxus app. They read the fixtures from the
+folder named by the `CAMERATA_FIXTURES_DIR` environment variable:
+
+```
+export CAMERATA_FIXTURES_DIR=/path/to/your/fixtures
+cargo test -p camerata-server --test benchmark_supabase_fixture
+```
+
+- Variable unset: the tests print `skipping: ...` and pass. That is the normal state on CI and
+  on a fresh clone.
+- Variable set but wrong (the folder is missing or does not hold the expected fixture): the
+  tests panic with a message that says what is missing. A mistyped path never passes silently.
+  Fix the variable or unset it.
+
+`CAMERATA_BENCHMARK_FIXTURE` points at the benchmark repository itself and wins over
+`CAMERATA_FIXTURES_DIR`. `CAMERATA_SWEEP_EXPORTS` names the sweep exports directory for
+`release_gate_acceptance`, which is `#[ignore]`d and run by hand with `-- --ignored`.
+
 ## Changing the rule corpus
 
 - Editing a rule means bumping its `version` and regenerating the lock with
@@ -26,6 +51,18 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
   a bump. Commit `crates/rules/CORPUS_LOCK.toml` together with the rule change.
 - The README and `docs/OVERVIEW.md` state the rule and domain counts. A test in
   `crates/rules/tests/readme_rule_count.rs` fails when either doc disagrees with the corpus, and
-  its message says which number to change. Write the count as plain digits (for example
-  "437 rules across 22 domains").
+  its message says which number to change. The same test reads every other markdown file in the
+  repository for the headline shape "N rules across M domains", so any doc that quotes the
+  headline must quote the real one. The long technical docs the README links are held to the
+  same number wherever they state a whole-corpus count of 100 or more; say "every rule" where a
+  figure adds nothing. Write the count as plain digits in the shape "N rules across M domains".
 - The authoring workflow is in [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
+
+## Changing the crates
+
+The README carries a compact crate diagram and `PLATFORM.md` the full one. Both are generated
+from `cargo metadata`, and `crates/rules/tests/docs_crate_graph.rs` fails when a drawn arrow is
+not a real dependency, a real dependency is missing from the full graph or the crate count in
+either doc is stale. The same test holds the README's "over 500,000 lines" and "10,000+ tests"
+to the code, so they can only be floors the code meets. Regenerate the diagram when you add a
+crate or a dependency between workspace crates.

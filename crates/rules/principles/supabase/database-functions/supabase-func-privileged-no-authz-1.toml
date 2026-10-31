@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
-version = 1
+version = 6
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write
@@ -15,6 +15,16 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the DEFINER clause, the write, the authorization check (and any helper function it calls) and the GRANT EXECUTE are all routine statements); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: a mutating SECURITY DEFINER function reachable by a broad role with
 # no identity check is a privilege-escalation primitive — the RLS that would gate the write is
 # bypassed by the DEFINER privileges, and nothing inside the function replaces it (CWE-862). High,
@@ -30,11 +40,11 @@ title = "CWE-862: Missing Authorization"
 
 [[sources]]
 url = "https://owasp.org/www-project-application-security-verification-standard/"
-title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
+title = "OWASP Application Security Verification Standard (ASVS): V4 Access Control"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker"
-title = "Supabase docs — Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
+title = "Supabase docs: Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
 
 [decision]
 question = "Must a SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated check the caller's identity, role, or ownership (or a shared secret) before writing?"
@@ -75,7 +85,7 @@ directive = """
 A SECURITY DEFINER function executes with its creator's privileges whoever calls it, so the Row
 Level Security policies that would gate a write never run. When such a function performs an
 INSERT, UPDATE, DELETE, TRUNCATE or MERGE and is granted EXECUTE to `anon`, `public` or
-`authenticated` — roles reachable straight from the PostgREST RPC endpoint — its own body carries
+`authenticated` (roles reachable straight from the PostgREST RPC endpoint) its own body carries
 the authorization check, as the first statement, before the write. Three shapes satisfy that, all
 genuine server-side controls: a session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against an owner or role
@@ -95,7 +105,7 @@ owner/tenant column and `raise exception` on mismatch, or call a role-check help
 `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the function is
 not meant to be callable by any end-user role at all, instead run `revoke execute on function
 <function-name> from anon, authenticated, public;` and invoke it only from a trusted server-side
-context. A UI-only disable/hide of the triggering button is never sufficient — the function is
+context. A UI-only disable/hide of the triggering button is never sufficient: the function is
 still reachable directly via the PostgREST RPC endpoint regardless of what the UI renders. Verify
 by confirming a direct RPC call from a caller who does not own/is not entitled to the target row
 is rejected before any row is written.
@@ -106,6 +116,6 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 [[option]]
 id = "privileged-mutating-function-without-authz-check"
 violates = true
-label = "A broadly-granted SECURITY DEFINER function writes with no identity, role, or ownership check"
-directive = "A SECURITY DEFINER function whose body performs an INSERT/UPDATE/DELETE/TRUNCATE, granted to anon/public/authenticated, checks nothing about the caller before writing — no identity, no role, no ownership, no validated secret."
+label = "A broadly-granted SECURITY DEFINER function writes with no identity, role or ownership check"
+directive = "A SECURITY DEFINER function whose body performs an INSERT/UPDATE/DELETE/TRUNCATE, granted to anon/public/authenticated, checks nothing about the caller before writing: no identity, no role, no ownership, no validated secret."
 why = "Rejected: the DEFINER's privileges bypass RLS, so nothing else gates the write, and the PostgREST RPC endpoint reaches the function directly regardless of what the UI exposes."

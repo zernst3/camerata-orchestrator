@@ -308,11 +308,27 @@ pub enum LeadEngineerError {
 /// investigation agent is to a Story in architect mode. It returns an [`Intake`]
 /// so a future multi-turn clarify loop can branch on
 /// [`Intake::NeedsClarification`]; V1 drives the [`Intake::Ready`] arm.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait LeadEngineer: Send + Sync {
     /// Evaluate `form` and return either a buildable plan or clarifying
     /// questions.
-    async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError>;
+    fn evaluate<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        form: &'life1 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Intake, LeadEngineerError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic fallback ──────────────────────────────────────────────────
@@ -465,10 +481,9 @@ impl LeadEngineer for StubLeadEngineer {
 /// name the same id so the server default and the CLI fallback agree. Behind
 /// the seam: only this concrete type names a model.
 ///
-/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
-/// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
-/// runtime for CLI / one-off invocations.
-pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5";
+/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`]
+/// (the open project's setting). The environment is never consulted.
+pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
 /// reviewer) allow so the agent can SCAN the bound repo on demand. These cannot mutate the
@@ -547,17 +562,13 @@ struct ModelOutput {
 }
 
 impl ClaudeLeadEngineer {
-    /// Construct with the configured model: reads `CAMERATA_LEAD_ENGINEER_MODEL`
-    /// first, then falls back to [`DEFAULT_LEAD_ENGINEER_MODEL`]. Use
+    /// Construct on the built-in [`DEFAULT_LEAD_ENGINEER_MODEL`]; the environment is never
+    /// read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from the server's `/api/models` catalog or a per-project config).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_LEAD_ENGINEER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_LEAD_ENGINEER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_LEAD_ENGINEER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -1307,18 +1318,22 @@ mod tests {
         // Keep this in sync with camerata_server::llm::DEFAULT_MODEL.
         // If the catalog's default changes, this test will fail as a reminder to
         // update DEFAULT_LEAD_ENGINEER_MODEL in this crate too.
-        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5");
+        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5-5");
     }
 
     #[test]
-    fn new_without_env_var_uses_constant() {
-        // When CAMERATA_LEAD_ENGINEER_MODEL is absent, new() must fall back to
-        // DEFAULT_LEAD_ENGINEER_MODEL. We can only test this reliably when the env
-        // var is NOT set in the current process. The test is guarded so CI noise
-        // does not override a legitimately set var.
-        if std::env::var("CAMERATA_LEAD_ENGINEER_MODEL").is_err() {
-            let le = ClaudeLeadEngineer::new();
-            assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
-        }
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The lead engineer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LEAD_ENGINEER_MODEL", "env-model");
+        let le = ClaudeLeadEngineer::new();
+        assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
+        // An explicit model (the project's setting) is the only way to change it.
+        assert_eq!(ClaudeLeadEngineer::with_model("picked").model, "picked");
+        // A blank pick is the built-in default, not the environment.
+        assert_eq!(
+            ClaudeLeadEngineer::with_model("  ").model,
+            DEFAULT_LEAD_ENGINEER_MODEL
+        );
     }
 }

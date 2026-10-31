@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-CONFIGURATION-PROPERTIES-1"
-version = 1
+version = 4
 title = "@ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections"
 domain = "java:spring"
 layer = "framework"
@@ -10,20 +10,20 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: @ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections?"
+question = "How does the Spring application bind configuration values into its beans?"
 default = "configuration-properties-for-grouped-config"
 why = "@Value('${property.key}') injects a single environment property into a field by string key. The string key is opaque to tooling until runtime, there is no compile-time validation that the key exists, a misspelled key fails at startup (if the property has no default) or silently uses the default (if it has one), and a class with five @Value fields holds five individual string keys with no structural relationship between them. @ConfigurationProperties binds a prefix of the configuration namespace (application.yml or environment variables) to a typed POJO: all keys under the prefix are bound to fields by name, the binding is validated at startup via @Validated + Bean Validation annotations on the POJO, and the POJO is a self-contained description of the configuration section the class requires. IDE tooling (Spring Boot Configuration Processor) generates metadata from the POJO, enabling auto-completion and documentation in application.yml. The comparison: a JwtProperties class with @ConfigurationProperties(prefix = 'jwt') and fields secret, expiry, issuer is validated at startup, documented in the IDE, and testable by constructing a JwtProperties instance directly. Three @Value injections of jwt.secret, jwt.expiry, and jwt.issuer lack those properties unless ConfigurationProcessor metadata is added manually."
 
 [[sources]]
 url = "https://docs.spring.io/spring-boot/reference/features/external-config.html#features.external-config.typesafe-configuration-properties"
-title = "Spring Boot Reference — Type-safe Configuration Properties (@ConfigurationProperties vs @Value)"
+title = "Spring Boot Reference: Type-safe Configuration Properties (@ConfigurationProperties vs @Value)"
 
 [[option]]
 id = "configuration-properties-for-grouped-config"
 label = "@ConfigurationProperties for grouped settings; @Value only for isolated single-value cases"
 directive = "Any group of two or more related configuration keys is represented by a @ConfigurationProperties(prefix = '...') class (a POJO with public getters/setters or a Java record) validated with @Validated and Bean Validation annotations (@NotBlank, @NotNull, @Min, etc.). The class is registered as a @Bean or discovered via @EnableConfigurationProperties and @ConfigurationPropertiesScan. @Value may be used for genuinely isolated single-value injections (a single flag, a single URL with no related keys) but is not the default pattern for grouped settings. @Value with default values that mask missing-key failures is avoided."
 remediation = """
-Introduce a @ConfigurationProperties class for this group of related configuration keys, with Bean Validation annotations on its fields and @Validated enabled, and bind it in place of the scattered @Value injections or direct Environment lookups. Verify by removing a required property in a local environment and confirming the application fails fast at startup with a validation error instead of failing later at first use.
+Introduce a @ConfigurationProperties class for this group of related configuration keys, with Bean Validation annotations on its fields and @Validated enabled and bind it in place of the scattered @Value injections or direct Environment lookups. Verify by removing a required property in a local environment and confirming the application fails fast at startup with a validation error instead of failing later at first use.
 """
 why = "@ConfigurationProperties produces typed, validated, IDE-documented configuration bindings; the POJO is the self-contained contract of what configuration the component requires."
 

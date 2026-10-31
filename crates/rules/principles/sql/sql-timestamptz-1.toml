@@ -1,11 +1,16 @@
 id = "SQL-TIMESTAMPTZ-1"
-version = 1
+version = 4
 title = "A column recording when an EVENT happened uses timestamp WITH time zone, never the bare, zone-less timestamp type"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (a column type is declared in a CREATE or ALTER TABLE, TYPE or DOMAIN statement); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_tables" }
 # Severity floor, transcribed from this rule's own prose: "Flag as medium severity: 'Your
 # `<table>.<column>` column has no time zone ...'".
 min_severity = "medium"
@@ -15,7 +20,7 @@ qualifies = "Enforced by a scan over column type declarations for `timestamp` / 
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-datetime.html"
-title = "PostgreSQL — Date/Time Types: 'we recommend using date/time types that contain both date and time when using time zones' and, for timestamps specifically, timestamptz stores internally as UTC and converts for display, avoiding the ambiguity of a zone-less value"
+title = "PostgreSQL: Date/Time Types: 'we recommend using date/time types that contain both date and time when using time zones' and, for timestamps specifically, timestamptz stores internally as UTC and converts for display, avoiding the ambiguity of a zone-less value"
 
 [decision]
 question = "Does every column recording when an event happened use timestamp WITH time zone, rather than the bare, zone-less timestamp type?"
@@ -44,8 +49,8 @@ two apart from the name alone.
 id = "event-timestamps-are-timestamptz"
 label = "Flag zone-less timestamp columns whose name suggests an event instant; timestamptz is the default for created_at/occurred_at/expires_at-shaped columns"
 directive = """
-A column that records when an event happened — created_at, updated_at, occurred_at, started_at, completed_at,
-expires_at, and close variants — is declared `timestamp with time zone` (`timestamptz`), never the bare, zone-less
+A column that records when an event happened (created_at, updated_at, occurred_at, started_at, completed_at,
+expires_at and close variants) is declared `timestamp with time zone` (`timestamptz`), never the bare, zone-less
 `timestamp` type. The value is therefore stored normalized to UTC and represents one unambiguous instant regardless
 of which session time zone later reads it, rather than a wall-clock reading whose real-world moment shifts with the
 reader's zone. A column that intentionally represents a zone-agnostic wall-clock value (a recurring local time, a
@@ -67,4 +72,4 @@ id = "store-event-timestamps-as-zone-less-and-track-the-write-zone-separately"
 violates = true
 label = "Store event timestamps as zone-less `timestamp`, tracking the writing server's time zone in a separate column or application convention"
 directive = "Use timestamp without time zone for event-instant columns, relying on an application-level convention (e.g. 'the app always writes UTC wall-clock values into this column') or a separate zone-tracking column to recover the actual instant when needed."
-why = "Rejected: this reconstructs, by convention, exactly what timestamptz already does natively — and conventions are invisible to the database and to anyone querying it directly (a BI tool, a data migration, a different service), none of which know the unstated 'this column is secretly always UTC' rule unless it is documented and followed perfectly everywhere, forever. A single write that doesn't follow the convention (a developer testing locally, a script run with a different session time zone) silently corrupts the column's meaning with no error raised, since the type itself carries no zone information to catch the mistake."
+why = "Rejected: this reconstructs, by convention, exactly what timestamptz already does natively, and conventions are invisible to the database and to anyone querying it directly (a BI tool, a data migration, a different service), none of which know the unstated 'this column is secretly always UTC' rule unless it is documented and followed perfectly everywhere, forever. A single write that doesn't follow the convention (a developer testing locally, a script run with a different session time zone) silently corrupts the column's meaning with no error raised, since the type itself carries no zone information to catch the mistake."

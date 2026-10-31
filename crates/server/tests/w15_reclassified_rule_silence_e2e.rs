@@ -245,7 +245,7 @@ async fn req_w15_silent_failure_reports_its_discard_option_instead_of_recording_
         &stub,
         REPO,
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &alternatives,
         &HashMap::new(),
         None, // model

@@ -8,7 +8,7 @@
 //!
 //! # Scope: whole files, not symbols
 //!
-//! Owner ruling, 2026-10-21 (`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE): v1 reports a whole
+//! Owner ruling, 2026-10-21 (`docs/decisions/2026-10-28_consistency_rules_scope.md`): v1 reports a whole
 //! SOURCE FILE that nothing reaches. Unused individual exports are a separate future rule with
 //! its own id, because proving a symbol unused needs member-access analysis for namespace
 //! imports, a framework-export allowlist and decorator awareness before it can meet the
@@ -79,13 +79,13 @@ use crate::arch_checker::{ArchChecker, ArchViolation, RepoView};
 use crate::extract::{self, SourceLang};
 
 mod analysis;
-mod conventions;
+pub(crate) mod conventions;
 mod dynamic;
 mod emit;
 // `pub(crate)`: the clone detector reuses the generated-file, declaration-file and test-file
 // predicates rather than keeping a second copy of the marker lists.
 pub(crate) mod exclusions;
-mod manifests;
+pub(crate) mod manifests;
 mod mentions;
 mod roots;
 mod rust_pass;

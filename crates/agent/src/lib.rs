@@ -231,6 +231,13 @@ pub const RAISE_ESCALATION_TOOL: &str = "mcp__camerata__raise_escalation";
 /// NO new write path. Granted alongside `raise_escalation` to the governed dev agent.
 pub const PROPOSE_MEMORY_TOOL: &str = "mcp__camerata__propose_memory";
 
+/// The READ-CLASS decision-proposal tool: the investigation agent proposes one structured decision
+/// (question, options, recommendation, rationale) the architect then approves, changes or rejects.
+/// Like [`ASK_CLARIFICATION_TOOL`] it records to a per-session sink and creates NO new write path,
+/// and it does not pause the run. Granted wherever `ask_clarification` is granted (the
+/// investigation agent) via [`ClaudeCliDriver::with_clarification`].
+pub const PROPOSE_DECISION_TOOL: &str = "mcp__camerata__propose_decision";
+
 /// Read-only built-ins an agent always needs (they cannot mutate the worktree,
 /// so they are safe to allow alongside the governed write path).
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "LS"];
@@ -363,7 +370,7 @@ impl ClaudeCliDriver {
     }
 
     /// Allow this agent to raise structured clarifying questions (Phase 3b): adds the
-    /// READ-CLASS [`ASK_CLARIFICATION_TOOL`] to `--allowedTools`. Builder form. Used by
+    /// READ-CLASS [`ASK_CLARIFICATION_TOOL`] and [`PROPOSE_DECISION_TOOL`] to `--allowedTools`. Builder form. Used by
     /// the investigation runner. This does NOT loosen the gate: `ask_clarification`
     /// records a question (no repo write, no spawn), and every write/exec/spawn built-in
     /// stays on the disallowed denylist.
@@ -425,11 +432,22 @@ impl ClaudeCliDriver {
         let mut allowed = allowed_tools_for_role_with_mode(role, self.orchestrator);
         if self.clarification {
             allowed.push(ASK_CLARIFICATION_TOOL.to_string());
+            // The investigation agent also files its decisions through the recording tool.
+            allowed.push(PROPOSE_DECISION_TOOL.to_string());
         }
         if self.escalation {
             allowed.push(RAISE_ESCALATION_TOOL.to_string());
             // The governed dev agent that can self-escalate can also propose project memory.
             allowed.push(PROPOSE_MEMORY_TOOL.to_string());
+        }
+        // The CLI runs with --dangerously-skip-permissions, under which --allowedTools is
+        // advisory only. So a recording tool that was NOT granted is denied outright: the
+        // clarification and decision tools exist on every session's gateway, but only the
+        // investigation agent may call them.
+        let mut disallowed = self.disallowed_builtins.clone();
+        if !self.clarification {
+            disallowed.push(ASK_CLARIFICATION_TOOL.to_string());
+            disallowed.push(PROPOSE_DECISION_TOOL.to_string());
         }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
@@ -440,7 +458,7 @@ impl ClaudeCliDriver {
             "--allowedTools".to_string(),
             allowed.join(" "),
             "--disallowedTools".to_string(),
-            self.disallowed_builtins.join(" "),
+            disallowed.join(" "),
             "--dangerously-skip-permissions".to_string(),
             "--output-format".to_string(),
             "json".to_string(),
@@ -766,6 +784,74 @@ mod tests {
         // ask_clarification is NOT a write tool: it is not gated_write, delegate, or any
         // built-in writer.
         assert_ne!(ASK_CLARIFICATION_TOOL, GATED_WRITE_TOOL);
+    }
+
+    #[test]
+    fn propose_decision_rides_with_ask_clarification_and_adds_no_write_path() {
+        let allowed_of = |d: &ClaudeCliDriver| {
+            let args = d.build_args(&role(), "task");
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        // Absent by default and with escalation alone: only the investigation agent proposes.
+        let normal = allowed_of(&ClaudeCliDriver::new("/tmp/mcp.json"));
+        assert!(!normal.split(' ').any(|t| t == PROPOSE_DECISION_TOOL));
+        let dev = allowed_of(&ClaudeCliDriver::new("/tmp/mcp.json").with_escalation(true));
+        assert!(!dev.split(' ').any(|t| t == PROPOSE_DECISION_TOOL));
+
+        // Offered wherever ask_clarification is offered (the investigation agent).
+        let inv = allowed_of(&ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true));
+        assert!(inv.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL));
+        assert!(inv.split(' ').any(|t| t == PROPOSE_DECISION_TOOL));
+
+        // It is a recording tool, not a write tool: the gate and denylist are unchanged.
+        assert_ne!(PROPOSE_DECISION_TOOL, GATED_WRITE_TOOL);
+        assert_eq!(PROPOSE_DECISION_TOOL, "mcp__camerata__propose_decision");
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(!inv.split(' ').any(|t| t == tool));
+        }
+    }
+
+    #[test]
+    fn clarification_and_decision_tools_are_denied_outright_unless_granted() {
+        // The CLI runs with --dangerously-skip-permissions, under which --allowedTools is
+        // advisory only, so a tool that is not granted must be on --disallowedTools too.
+        let disallowed_of = |d: &ClaudeCliDriver, role: &Role| {
+            let args = d.build_args(role, "task");
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for name in ["Implementer", "Reviewer"] {
+            let r = Role {
+                name: name.to_string(),
+                ..role()
+            };
+            for d in [
+                ClaudeCliDriver::new("/tmp/mcp.json"),
+                ClaudeCliDriver::new("/tmp/mcp.json").with_escalation(true),
+            ] {
+                let dis = disallowed_of(&d, &r);
+                assert!(
+                    dis.split(' ').any(|t| t == PROPOSE_DECISION_TOOL),
+                    "{name}: {dis}"
+                );
+                assert!(
+                    dis.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+                    "{name}: {dis}"
+                );
+            }
+        }
+        // Granted (the investigation agent): neither tool is denied.
+        let inv = disallowed_of(
+            &ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true),
+            &role(),
+        );
+        assert!(!inv.split(' ').any(|t| t == PROPOSE_DECISION_TOOL));
+        assert!(!inv.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL));
+        // The built-in denylist is unchanged either way.
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(inv.split(' ').any(|t| t == tool));
+        }
     }
 
     #[test]

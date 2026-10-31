@@ -100,14 +100,14 @@ fn sanitize_finding_text_covers_fix_specific_also_locations_and_rationale() {
             snippet: "clean".to_string(),
             fix_specific: Some(format!("Replace {} now.", p.text)),
             calibration_rationale: Some(format!("because {}", p.text)),
-            also_locations: vec![MergedLocation {
-                repo: "acme/app".to_string(),
-                path: ".env".to_string(),
-                line: 1,
-                rule_id: "R-1".to_string(),
-                snippet: p.text.clone(),
-                consequence: false,
-            }],
+            also_locations: vec![MergedLocation::site(
+                "acme/app".to_string(),
+                ".env".to_string(),
+                1,
+                "R-1".to_string(),
+                p.text.clone(),
+                false,
+            )],
             kind: Some(FindingKind::Defect),
             ..Finding::default()
         };

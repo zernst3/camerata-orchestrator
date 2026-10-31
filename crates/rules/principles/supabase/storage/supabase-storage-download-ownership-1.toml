@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1"
-version = 1
+version = 3
 title = "A handler that signs or downloads a client-supplied object path must verify the caller is entitled to that specific object first"
 domain = "supabase:storage"
 layer = "platform"
@@ -17,11 +17,11 @@ qualifies = "Whether a download/signed-URL handler validates the caller's entitl
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/639.html"
-title = "CWE-639: Authorization Bypass Through User-Controlled Key — the object path IS the user-controlled key in this shape"
+title = "CWE-639: Authorization Bypass Through User-Controlled Key: the object path IS the user-controlled key in this shape"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Does every handler that signs or downloads a client-supplied storage object path verify the caller is entitled to that exact object before doing so?"
@@ -53,10 +53,10 @@ which is the actual dominant failure mode in practice.
 id = "require-ownership-check-before-signing"
 label = "Every handler signing or downloading a client-supplied object path first checks the caller owns that object"
 directive = """
-Wherever `createSignedUrl` or `download` is called with a path that came from the request — a route
-parameter, a query string, a body field — the handler first confirms the requesting user is
+Wherever `createSignedUrl` or `download` is called with a path that came from the request (a route
+parameter, a query string, a body field) the handler first confirms the requesting user is
 entitled to that EXACT object. In practice that is a lookup keyed on both the object identifier and
-the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path), or an explicit
+the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path) or an explicit
 `storage.objects` owner check. Signing a URL is functionally granting read access, so the check
 happens before the storage call, not after it.
 
@@ -64,13 +64,13 @@ Two reasons the surrounding policy is not enough on its own. A handler that buil
 client with a service_role key bypasses RLS entirely, so no policy is evaluated on that call at
 all and the handler's own logic is the complete access control. And even on the anon or
 authenticated key, a policy scoped to a bucket or folder still permits signing any object inside
-that scope — the handler is the only place that knows which single object this particular request
+that scope: the handler is the only place that knows which single object this particular request
 was supposed to reach.
 """
 remediation = """
 In `<file>`, before calling createSignedUrl/download with the client-supplied object path, add an explicit lookup
-that confirms the requesting user owns (or is a member of the resource that owns) the EXACT object being requested
-— e.g. a query scoped to `WHERE object_path = $1 AND owner_id = $2`, not just `WHERE object_path = $1`. If the
+that confirms the requesting user owns (or is a member of the resource that owns) the EXACT object being requested:
+e.g. a query scoped to `WHERE object_path = $1 AND owner_id = $2`, not just `WHERE object_path = $1`. If the
 handler constructs a service_role-backed storage client, treat this check as non-negotiable, since no RLS backstop
 exists on that path at all. Verify by confirming a request that substitutes another user's valid object id/path is
 now rejected rather than returning that user's file.
@@ -83,4 +83,4 @@ id = "trust-the-storage-objects-rls-policy-alone"
 violates = true
 label = "Download and signed-URL handlers pass the client's object path straight through, relying on the storage.objects policy"
 directive = "Handlers pass the client-supplied object path directly into `createSignedUrl`/`download` with no entitlement check of their own, treating the `storage.objects` RLS policy as sufficient authorization for whatever path arrives."
-why = "Rejected: a handler that constructs its storage client with a service_role key bypasses RLS entirely, so there is no policy evaluation happening on that call at all — this is the dominant real-world shape of this bug, and policy-only coverage misses it completely. Even with the anon/authenticated client, a policy scoped to a folder or bucket rather than an exact object still permits signing a URL for any object within that scope, which is broader than what a specific feature intends; the handler is the only place that knows which single object this particular request is supposed to be allowed to touch."
+why = "Rejected: a handler that constructs its storage client with a service_role key bypasses RLS entirely, so there is no policy evaluation happening on that call at all: this is the dominant real-world shape of this bug, and policy-only coverage misses it completely. Even with the anon/authenticated client, a policy scoped to a folder or bucket rather than an exact object still permits signing a URL for any object within that scope, which is broader than what a specific feature intends; the handler is the only place that knows which single object this particular request is supposed to be allowed to touch."

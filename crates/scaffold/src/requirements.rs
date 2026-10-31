@@ -26,7 +26,7 @@ pub enum AppTarget {
 
 /// Whether a scaffolded app is reachable by anyone who has the URL, or hidden
 /// behind a minimal shared-passcode lock by default (FOLD D — default-private
-/// skeleton lock, `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s
+/// skeleton lock, the product-owner vibe-mode design notes'
 /// usability backlog: "default-private deploy (single-user lock unless opted
 /// public)").
 ///

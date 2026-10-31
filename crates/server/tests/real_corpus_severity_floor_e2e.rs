@@ -3,7 +3,7 @@
 //! > **W5-Q2 DECIDED — a single named severity is a FLOOR, not a ceiling.**
 //! > Zach: *"Floor, it's the minimum rating."*
 //! >
-//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the audit findings tracker
 //!
 //! # Why this file exists separately from `report_export.rs`'s own `req_w8_*` tests
 //!
@@ -79,11 +79,17 @@ fn defect(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
 
 fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 2,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -119,6 +125,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
             audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-10-11T00:00:00Z".to_string(),
             finished_at: "2026-10-11T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -214,6 +221,38 @@ async fn req_w8_an_authored_floor_raises_a_real_rule() {
         exported_severity(RULE, "low", Some(&corpus)),
         "high",
         "{RULE} authors \"Flag as high severity\"; no report may export below high for it"
+    );
+}
+
+/// A checker-emitted `info` is an OBSERVATION ("confirm in the dashboard"), not a live defect, so
+/// the corpus floor never raises it (decision logged 2026-10-28). The real case is
+/// `SUPABASE-RLS-POLICY-DISABLED-1`'s platform-owned row: severity `info`, rule floor `critical`.
+/// Before the exemption the export (and `camerata-check`) read it as `critical`. The `low` control
+/// proves the rule's floor still raises a real, lower-rated defect.
+#[tokio::test]
+async fn an_info_observation_is_never_raised_by_the_floor_but_a_low_defect_still_is() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    const RULE: &str = "SUPABASE-RLS-POLICY-DISABLED-1";
+    assert_eq!(
+        corpus
+            .iter()
+            .find(|r| r.id.0 == RULE)
+            .and_then(|r| r.min_severity.clone())
+            .as_deref(),
+        Some("critical"),
+        "{RULE} must declare its critical floor, or this test is vacuous"
+    );
+    assert_eq!(
+        exported_severity(RULE, "info", Some(&corpus)),
+        "info",
+        "an info observation must not be floored to critical"
+    );
+    assert_eq!(
+        exported_severity(RULE, "low", Some(&corpus)),
+        "critical",
+        "the floor still raises a below-floor defect"
     );
 }
 

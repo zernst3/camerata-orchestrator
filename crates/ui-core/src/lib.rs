@@ -4,7 +4,7 @@
 //! any rendering framework (RUST-HEADLESS-CORE-1). The Dioxus adapter crate (`camerata-ui`) depends on
 //! it and renders its state; everything here is unit-testable with no VirtualDom.
 //!
-//! Extraction from `camerata-ui` is incremental (see `docs/plans/2026-07-01_ui-core-extraction.md`);
+//! Extraction from `camerata-ui` is incremental (see the UI-core extraction notes);
 //! modules are added here as each surface's logic moves over.
 
 pub mod adopt;
@@ -18,6 +18,8 @@ pub mod models;
 pub mod order_preset;
 pub mod palette;
 pub mod pane_context;
+pub mod patterns;
+pub mod product_export;
 pub mod progress;
 pub mod provider_safety;
 pub mod readiness;
@@ -26,12 +28,15 @@ pub mod review_timer;
 pub mod rules;
 pub mod run;
 pub mod save_queue;
+pub mod saved_inspections;
 pub mod scan;
 pub mod schedule;
 pub mod source;
 pub mod stack;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod transcript;
 pub mod triage;
 pub mod viewer;
 pub mod viewer_find;
+pub mod walkthrough;

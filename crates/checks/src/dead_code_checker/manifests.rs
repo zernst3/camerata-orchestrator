@@ -15,21 +15,21 @@ use super::roots::{is_inside, RootSet};
 
 /// One parsed `package.json`.
 #[derive(Debug)]
-pub(super) struct Package {
+pub(crate) struct Package {
     /// Directory of the manifest (`""` for the repository root).
-    pub(super) dir: String,
+    pub(crate) dir: String,
     pub(super) path: String,
     json: Map<String, Value>,
 }
 
 /// Every parseable `package.json` in the scan, deepest first.
 #[derive(Debug, Default)]
-pub(super) struct Packages {
+pub(crate) struct Packages {
     list: Vec<Package>,
 }
 
 impl Packages {
-    pub(super) fn load(files: &[(String, String)]) -> Self {
+    pub(crate) fn load(files: &[(String, String)]) -> Self {
         let mut list: Vec<Package> = files
             .iter()
             .filter(|(p, _)| p == "package.json" || p.ends_with("/package.json"))
@@ -54,8 +54,25 @@ impl Packages {
     }
 
     /// The package whose folder is the nearest ancestor of `path`.
-    pub(super) fn nearest(&self, path: &str) -> Option<&Package> {
+    pub(crate) fn nearest(&self, path: &str) -> Option<&Package> {
         self.list.iter().find(|p| is_inside(path, &p.dir))
+    }
+
+    /// Whether a bare module specifier names a package from outside the repository: a Node
+    /// built-in, or a dependency some manifest declares that is not itself one of the
+    /// repository's own packages (a workspace package is internal however it is imported).
+    pub(crate) fn is_external_specifier(&self, specifier: &str) -> bool {
+        if specifier.starts_with("node:") || NODE_BUILTINS.contains(&specifier) {
+            return true;
+        }
+        let Some(name) = package_name(specifier) else {
+            return false;
+        };
+        let internal = self
+            .list
+            .iter()
+            .any(|p| p.json.get("name").and_then(Value::as_str) == Some(name));
+        !internal && self.list.iter().any(|p| p.depends_on(|k| k == name))
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &Package> {
@@ -98,6 +115,15 @@ impl ManifestDirs {
 }
 
 impl Package {
+    /// Whether the manifest names an entry point other code loads the package through
+    /// (`main`, `module`, `browser`, `types`, `typings`, `bin` or `exports`): a published or
+    /// shared package whose importers may live outside the repository.
+    pub(crate) fn declares_entry_points(&self) -> bool {
+        ENTRY_FIELDS
+            .iter()
+            .any(|field| self.json.contains_key(*field))
+    }
+
     fn is_private(&self) -> bool {
         self.json.get("private") == Some(&Value::Bool(true))
     }
@@ -119,6 +145,55 @@ impl Package {
     }
 }
 
+/// Node's built-in modules, importable without the `node:` prefix.
+const NODE_BUILTINS: &[&str] = &[
+    "assert",
+    "buffer",
+    "child_process",
+    "crypto",
+    "dns",
+    "events",
+    "fs",
+    "fs/promises",
+    "http",
+    "https",
+    "module",
+    "net",
+    "os",
+    "path",
+    "process",
+    "querystring",
+    "readline",
+    "stream",
+    "timers",
+    "tls",
+    "url",
+    "util",
+    "vm",
+    "worker_threads",
+    "zlib",
+];
+
+/// The package a bare specifier names (`@scope/pkg/sub` is `@scope/pkg`, `pkg/sub` is `pkg`), or
+/// `None` for a relative, absolute or aliased (`@/`, `~/`, `#`) specifier.
+fn package_name(specifier: &str) -> Option<&str> {
+    if specifier.starts_with(['.', '/', '~', '#']) || specifier.starts_with("@/") {
+        return None;
+    }
+    let mut cut = specifier.match_indices('/');
+    let end = if specifier.starts_with('@') {
+        cut.nth(1)
+    } else {
+        cut.next()
+    };
+    Some(end.map_or(specifier, |(at, _)| &specifier[..at]))
+}
+
+/// The manifest fields that name a package's entry points.
+const ENTRY_FIELDS: &[&str] = &[
+    "main", "module", "browser", "types", "typings", "bin", "exports",
+];
+
 /// Every string a manifest uses as a file path: `main`, `module`, `browser`, `types`,
 /// `typings`, `bin` (a string or a map of paths) and every string leaf of `exports`.
 fn entry_values(json: &Map<String, Value>) -> Vec<String> {
@@ -131,10 +206,8 @@ fn entry_values(json: &Map<String, Value>) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    for field in [
-        "main", "module", "browser", "types", "typings", "bin", "exports",
-    ] {
-        if let Some(value) = json.get(field) {
+    for field in ENTRY_FIELDS {
+        if let Some(value) = json.get(*field) {
             leaves(value, &mut out);
         }
     }

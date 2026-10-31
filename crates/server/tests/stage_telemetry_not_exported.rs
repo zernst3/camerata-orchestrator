@@ -14,11 +14,17 @@ use camerata_server::xlsx_export::build_findings_export;
 
 fn report(ledger: ScanLedger) -> ScanReport {
     ScanReport {
+        run_id: None,
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: Vec::new(),
@@ -124,4 +130,52 @@ fn a_ledger_written_before_telemetry_existed_still_loads() {
     value.as_object_mut().unwrap().remove("stage_telemetry");
     let back: ScanLedger = serde_json::from_value(value).expect("a legacy ledger deserializes");
     assert!(back.stage_telemetry().is_none());
+}
+
+/// The efficiency set and the spend-cap record (dollar figures, NOT RUN lists) ride on the same
+/// operator ledger as the telemetry, so they obey the same rule: the client export is unchanged.
+#[test]
+fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_export() {
+    let mut capped = ScanLedger::new();
+    let mut efficiency = camerata_server::efficiency::EfficiencyConfig::default();
+    efficiency.set("warm_schedule", false).unwrap();
+    capped.record_efficiency(efficiency);
+    capped.record_cost_cap(camerata_server::cost_cap::CostCapRecord {
+        repos_not_finished: Vec::new(),
+        cost_unknown: false,
+        cap_usd: 7.77,
+        spent_usd: 8.88,
+        not_run_passes: vec![camerata_server::cost_cap::NotRunPass {
+            files: Vec::new(),
+            repo: "acme/portal".to_string(),
+            group: "pass[all]".to_string(),
+            chunk: 1,
+            n_chunks: 1,
+            rule_batch: 2,
+            n_rule_batches: 2,
+            rule_ids: vec!["ARCH-X-1".to_string()],
+            class: camerata_server::cost_cap::FailureClass::SpendLimit,
+        }],
+        not_run_stages: Vec::new(),
+        notes: vec!["batch NOT submitted".to_string()],
+    });
+    assert!(capped.is_cost_capped());
+
+    let (report_with, findings_with) = exported(report(capped));
+    let (report_without, findings_without) = exported(report(ScanLedger::new()));
+    assert_eq!(report_with, report_without, "report.json changed");
+    assert_eq!(findings_with, findings_without, "findings.json changed");
+    for term in [
+        "7.77",
+        "8.88",
+        "cost_cap",
+        "max_cost",
+        "efficiency",
+        "warm_schedule",
+    ] {
+        assert!(
+            !report_with.contains(term) && !findings_with.contains(term),
+            "`{term}` leaked into the client export"
+        );
+    }
 }

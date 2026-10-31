@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-REQUEST-VALIDATION-1"
-version = 1
+version = 2
 title = "Request input is validated through marshmallow or pydantic schemas before reaching business logic"
 domain = "python:flask"
 layer = "framework"
@@ -39,4 +39,4 @@ why = "Every field is user-controlled; missing fields become None or raise KeyEr
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/api/#flask.Request.json"
-title = "Flask docs — Request.json (raw untrusted client data)"
+title = "Flask docs: Request.json (raw untrusted client data)"

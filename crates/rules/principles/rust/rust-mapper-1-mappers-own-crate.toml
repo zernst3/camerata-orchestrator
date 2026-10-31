@@ -1,6 +1,6 @@
 id = "RUST-MAPPER-1"
-version = 1
-title = "Where domain↔entity mappers live: a dedicated mapper crate, the entity crate, or the domain crate"
+version = 3
+title = "Where domain↔entity mappers live: a dedicated mapper crate, the entity crate or the domain crate"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/dataMapper.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Data Mapper"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Data Mapper"
 relevance = "Authority note (author-facing): medium authority — grounds a translation layer between domain and persistence in general; PoEAA does not itself mandate that layer live in its own crate"
 
 [decision]

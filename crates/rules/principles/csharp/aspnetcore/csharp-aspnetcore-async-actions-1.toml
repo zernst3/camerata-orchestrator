@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-ASYNC-ACTIONS-1"
-version = 1
+version = 3
 title = "All I/O-bound controller actions and endpoint handlers are async; no sync-over-async blocking"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -18,7 +18,7 @@ why = "ASP.NET Core is built on a thread-pool model. Each concurrent request con
 [[option]]
 id = "async-task-actions"
 label = "All I/O-bound actions are async Task<IActionResult> or async Task<T>; await at every I/O call"
-directive = "Every controller action or Minimal API endpoint handler that performs I/O (database access, HTTP calls, file I/O) is declared async Task<IActionResult> (MVC) or async Task<T> (Minimal API). All awaitable calls inside the handler are awaited. ConfigureAwait(false) is used on library-internal async calls to avoid unnecessary context capture. .Result, .Wait(), and GetAwaiter().GetResult() on Tasks are forbidden inside action methods and endpoint handlers. CPU-bound work that does not involve I/O may use synchronous implementations; I/O-bound work may not."
+directive = "Every controller action or Minimal API endpoint handler that performs I/O (database access, HTTP calls, file I/O) is declared async Task<IActionResult> (MVC) or async Task<T> (Minimal API). All awaitable calls inside the handler are awaited. ConfigureAwait(false) is used on library-internal async calls to avoid unnecessary context capture. .Result, .Wait() and GetAwaiter().GetResult() on Tasks are forbidden inside action methods and endpoint handlers. CPU-bound work that does not involve I/O may use synchronous implementations; I/O-bound work may not."
 remediation = """
 Change the action or endpoint handler to an async action returning IActionResult (or an async Task-returning handler for Minimal API) and await every I/O call inside it instead of blocking on .Result or .Wait(). Move any fire-and-forget work off async void and onto a tracked background mechanism such as a hosted service queue. Verify by confirming the handler's signature is async and a load test no longer shows thread-pool starvation under concurrent requests.
 """
@@ -42,12 +42,12 @@ why = "Avoids async complexity at the cost of blocking threads for every I/O cal
 id = "async-void-handlers"
 violates = true
 label = "Fire-and-forget work is dispatched via async void methods"
-directive = "Fire-and-forget operations reachable from an action (background notifications, best-effort side effects) are implemented as async void methods invoked without await, instead of async Task dispatched through a tracked background-work mechanism (a hosted service queue, Task.Run with logging, or a library like TaskTracker)."
+directive = "Fire-and-forget operations reachable from an action (background notifications, best-effort side effects) are implemented as async void methods invoked without await, instead of async Task dispatched through a tracked background-work mechanism (a hosted service queue, Task.Run with logging or a library like TaskTracker)."
 why = "async void removes the caller's ability to await completion or observe exceptions: an exception thrown inside an async void method is raised on the SynchronizationContext that was active when the async void method started, which in ASP.NET Core has no meaningful handler and can crash the process instead of being caught by the caller. Prefer async Task with an explicitly tracked fire-and-forget mechanism."
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices?view=aspnetcore-10.0"
-title = "ASP.NET Core Best Practices — Avoid blocking calls | Microsoft Learn"
+title = "ASP.NET Core Best Practices: Avoid blocking calls | Microsoft Learn"
 
 [[sources]]
 url = "https://www.nuget.org/packages/AsyncFixer"

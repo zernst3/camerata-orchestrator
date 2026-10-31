@@ -136,9 +136,9 @@ async fn scan_reports_the_unreferenced_file_and_lets_reference_text_keep_files_a
         report.findings
     );
     assert_eq!(
-        report.files_scanned, 5,
-        "package.json, app.ts, wired.ts, orphan_widget.ts, useThing.ts: reference text is not \
-         counted as scanned code"
+        report.files_scanned, 6,
+        "package.json, app.ts, wired.ts, orphan_widget.ts, useThing.ts and the Vue component \
+         (audited source since H8): other reference text is not counted as scanned code"
     );
 
     let entry = report

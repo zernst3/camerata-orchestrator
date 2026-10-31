@@ -2,14 +2,14 @@
 
 **Date:** 2026-07-02
 **Status:** Accepted (increments shipped; artifacts staged)
-**Builds on:** `2026-06-30_epic-design-page.md` (plan), `2026-06-22_uow_ai_story_authoring.md`, `2026-06-23_uow_parent_id_field.md`
+**Builds on:** the epic design page plan (private working notes), `2026-06-22_uow_ai_story_authoring.md`, `2026-06-23_uow_parent_id_field.md`
 
 ## Context
 
 The Design Canvas lets a person co-design a hierarchy of work with an AI: talk it through,
 let the model propose a tree of child nodes, review and iterate while everything is still a
 draft (nothing on the board yet), then publish the whole tree as a batch of GitHub issues.
-The plan (`2026-06-30_epic-design-page.md`) established the model: a **design** is a top node
+The plan (private working notes) established the model: a **design** is a top node
 plus the tree of work it decomposes into, built as a composition of the already-shipped
 authoring primitives (draft UoW, AI author loop, `parent_id`/sub-issue linking, the grouped
 Chorale table).

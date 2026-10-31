@@ -1,5 +1,5 @@
 id = "CSHARP-NULLABLE-REFERENCE-TYPES-1"
-version = 1
+version = 2
 title = "Nullable Reference Types are enabled in all projects; null-unsafe patterns are enforced at compile time"
 domain = "csharp"
 layer = "language"
@@ -42,9 +42,9 @@ why = "Inconsistent null safety; some code is checked, some is not. Mixing both 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/null-safety/nullable-reference-types"
-title = "Nullable reference types — C# | Microsoft Learn"
+title = "Nullable reference types: C# | Microsoft Learn"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/compiler-messages/nullable-warnings"
-title = "Nullable reference type warnings (CS8600, CS8602, CS8618, …) — C# reference | Microsoft Learn"
+title = "Nullable reference type warnings (CS8600, CS8602, CS8618, …): C# reference | Microsoft Learn"
 linter = "Roslyn (csc): CS8600/CS8602/CS8618 nullable warnings + <Nullable>enable</Nullable> + TreatWarningsAsErrors"

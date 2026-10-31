@@ -47,6 +47,9 @@ use std::time::Duration;
 use crate::onboard::{CoverageNote, Finding};
 use crate::tool_provisioning;
 
+mod manifests;
+pub use manifests::{scrub_local_paths, unread_files_sentence};
+
 /// When this environment variable is set (to any non-empty value), `run_dep_audit`
 /// and `run_dep_audit_with_tooling` return immediately with an empty findings list
 /// and no coverage note — skipping ALL provisioning and network activity.
@@ -74,6 +77,43 @@ pub const DEP_AUDIT_RULE_ID: &str = "DEP-AUDIT-1";
 
 /// The tool name carried on every dep-audit finding and coverage note.
 const TOOL_NAME: &str = "osv-scanner";
+
+/// The phrase in the coverage note osv-scanner's "no lockfiles" outcome produces. That outcome is
+/// a completed scan with nothing to report, unlike every other note this module emits (the scan
+/// did not run); [`note_means_scanned`] tells the two apart.
+const NO_LOCKFILES: &str = "found no lockfiles";
+
+/// The phrase that opens the coverage note listing manifests osv-scanner could not audit because
+/// no lockfile sits beside or above them (M12).
+pub const MANIFESTS_UNAUDITED: &str = "Dependency manifests not audited";
+
+/// The phrase that opens the coverage sentence quoting osv-scanner's own stderr about files it
+/// could not read (M12).
+pub const UNREAD_FILES: &str = "Dependency files not read";
+
+/// The `Finding::captures` key every dependency row carries: the advisory id (for example
+/// `GHSA-...` or `RUSTSEC-...`). Two advisories on one package version share a snippet, path
+/// and line, so the finding key needs this to tell them apart (M9).
+pub const ADVISORY_CAPTURE: &str = "advisory";
+
+/// True when a dep-audit coverage note still means osv-scanner ran (it found no lockfiles, or it
+/// ran and listed manifests it could not audit); false for every "did not run" outcome
+/// (provisioning, spawn, timeout, parse).
+pub fn note_means_scanned(note: &CoverageNote) -> bool {
+    note.message.contains(NO_LOCKFILES)
+        || note.message.contains(MANIFESTS_UNAUDITED)
+        || note.message.contains(UNREAD_FILES)
+}
+
+/// True when a dep-audit coverage note leaves nothing unchecked, so "no known vulnerable
+/// dependencies" is a fair thing to print: osv-scanner ran and found no lockfiles to check, and
+/// there were no manifests left unaudited either. A note that says the audit did not run, or that
+/// manifests were left out, is not clean (M11).
+pub fn note_proves_clean(note: &CoverageNote) -> bool {
+    note.message.contains(NO_LOCKFILES)
+        && !note.message.contains(MANIFESTS_UNAUDITED)
+        && !note.message.contains(UNREAD_FILES)
+}
 
 // ─── JSON parser (pure, unit-tested) ─────────────────────────────────────────
 
@@ -142,6 +182,19 @@ fn semver_sort_key(v: &str) -> (u64, u64, u64, String) {
         parts.next().unwrap_or(0),
         v.to_string(),
     )
+}
+
+/// The CVE ids an OSV advisory is known by: its own id when it is a CVE, plus every `CVE-`
+/// alias, upper-cased, de-duplicated, in first-seen order.
+fn advisory_cve_ids(advisory_id: &str, aliases: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in std::iter::once(advisory_id).chain(aliases.iter().copied()) {
+        let id = id.trim().to_ascii_uppercase();
+        if id.starts_with("CVE-") && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Result<Vec<Finding>> {
@@ -216,10 +269,13 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                 // Advisory title / summary — used in the detail field.
                 let title = vuln.get("summary").and_then(|s| s.as_str()).unwrap_or("");
 
-                // Severity: prefer database_specific.severity (a plain word like
-                // "CRITICAL"), fall back to the CVSS score bucket, then default to
-                // "medium".
-                let severity = extract_severity(vuln);
+                // Severity: a published word, else a scored CVSS vector, else the group's
+                // max severity, else unknown (medium as a placeholder, held for review and
+                // said so in the detail; see `read_severity`).
+                let OsvSeverity {
+                    label: severity,
+                    known: severity_known,
+                } = read_severity(vuln, pkg_entry);
 
                 let coord = format!("{pkg_name}@{pkg_version}");
                 let aliases_str = if aliases.is_empty() {
@@ -233,14 +289,38 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                 let fixed_version = osv_fixed_version(vuln);
 
                 let fixed_clause = match &fixed_version {
-                    Some(v) => format!(" — fixed in {v}"),
-                    None => " — no patched version available yet".to_string(),
+                    Some(v) => format!(", fixed in {v}"),
+                    None => ", no patched version available yet".to_string(),
                 };
-                let detail = if title.is_empty() {
+                let mut detail = if title.is_empty() {
                     format!("{advisory_id}{aliases_str} affects {coord}{fixed_clause}")
                 } else {
                     format!("{advisory_id}{aliases_str}: {title} (affects {coord}){fixed_clause}")
                 };
+                if !severity_known {
+                    detail.push_str(
+                        ". Severity unknown, held for review: the advisory source published no \
+                         usable rating, so medium is shown as a placeholder",
+                    );
+                }
+
+                // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
+                // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
+                // (ExternalDependency). A structured capture key, not prose in `detail`.
+                let mut captures = std::collections::BTreeMap::new();
+                if let Some(v) = &fixed_version {
+                    captures.insert("osv_fixed_version".to_string(), v.clone());
+                }
+                // The advisory's CVE ids (its own id when it is a CVE, plus every CVE alias), so
+                // `vuln_intel` can match a GHSA/RUSTSEC advisory against KEV and EPSS by CVE.
+                captures.insert(ADVISORY_CAPTURE.to_string(), advisory_id.clone());
+                let cve_ids = advisory_cve_ids(&advisory_id, &aliases);
+                if !cve_ids.is_empty() {
+                    captures.insert(
+                        crate::vuln_intel::CVE_IDS_CAPTURE.to_string(),
+                        cve_ids.join(","),
+                    );
+                }
 
                 let mut finding = Finding {
                     could_be_intentional: false,
@@ -258,21 +338,12 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                     preview: false,
                     preview_tool: None,
                     in_test: false,
-                    needs_review: false,
-                    confidence: None,
+                    needs_review: !severity_known,
+                    confidence: (!severity_known).then(|| "needs-review".to_string()),
                     effort: None,
                     category: None,
                     located: true,
-                    // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
-                    // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
-                    // (ExternalDependency). A structured capture key, not prose in `detail`.
-                    captures: match &fixed_version {
-                        Some(v) => std::collections::BTreeMap::from([(
-                            "osv_fixed_version".to_string(),
-                            v.clone(),
-                        )]),
-                        None => Default::default(),
-                    },
+                    captures,
                     // Not a multi-option semantic rule finding — never evaluated under an
                     // alternative option.
                     evaluated_option_id: None,
@@ -314,49 +385,275 @@ pub fn map_severity(word: &str) -> &'static str {
     }
 }
 
-fn extract_severity(vuln: &serde_json::Value) -> String {
+/// The result of reading an advisory's severity: the label, and whether the advisory source
+/// actually published one. `known == false` means no usable rating was found, so the label is
+/// only the "do not bury it" placeholder and the row is held for review.
+struct OsvSeverity {
+    label: String,
+    known: bool,
+}
+
+/// The word form of a severity, when it is one the vocabulary knows. Unlike [`map_severity`] an
+/// unrecognised word is `None`, not a silent medium.
+fn severity_word(word: &str) -> Option<&'static str> {
+    match word.trim().to_ascii_uppercase().as_str() {
+        "CRITICAL" => Some("critical"),
+        "HIGH" => Some("high"),
+        "MEDIUM" | "MODERATE" => Some("medium"),
+        "LOW" => Some("low"),
+        _ => None,
+    }
+}
+
+/// Read the severity of one advisory. Order:
+/// 1. `database_specific.severity`, when it is a word the vocabulary knows.
+/// 2. Each `severity[]` entry: a plain numeric score, a CVSS v3 vector (scored locally) or a
+///    CVSS v2 vector (scored locally). A v4 vector is not scored here (its scoring needs a large
+///    lookup table); it falls through to the next step.
+/// 3. The `max_severity` of the `groups[]` entry that lists this advisory (osv-scanner scores v4
+///    itself and reports the result there).
+/// 4. Otherwise unknown: `medium` as a placeholder, flagged `known: false` so the caller holds
+///    the row for review and says so instead of rating it medium silently.
+fn read_severity(vuln: &serde_json::Value, pkg_entry: &serde_json::Value) -> OsvSeverity {
+    let known = |label: &str| OsvSeverity {
+        label: label.to_string(),
+        known: true,
+    };
+
     // 1. database_specific.severity (word form).
-    if let Some(sev) = vuln
+    if let Some(word) = vuln
         .get("database_specific")
         .and_then(|d| d.get("severity"))
         .and_then(|s| s.as_str())
+        .and_then(severity_word)
     {
-        return map_severity(sev).to_string();
+        return known(word);
     }
 
-    // 2. CVSS_V3 score — parse the base score from the vector string.
-    if let Some(sevs) = vuln.get("severity").and_then(|s| s.as_array()) {
-        for entry in sevs {
-            let stype = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if stype == "CVSS_V3" {
-                if let Some(score_str) = entry.get("score").and_then(|s| s.as_str()) {
-                    // CVSS vector string example:
-                    //   "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-                    // The base score is NOT embedded in the vector string directly;
-                    // osv-scanner may omit the numeric score.  Some OSV entries
-                    // carry the score as a plain float in `score` instead of the
-                    // vector string — handle both.
-                    if let Ok(f) = score_str.parse::<f64>() {
-                        return cvss_score_to_severity(f).to_string();
-                    }
-                    // If it's a vector string we can't easily extract the numeric
-                    // base score without a full CVSS library, so fall through.
-                }
-            }
-            // Some entries use a plain numeric score under "score".
+    // 2. The severity array.
+    if let Some(entries) = vuln.get("severity").and_then(|s| s.as_array()) {
+        for entry in entries {
+            let kind = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            // A plain number under `score`, whatever the type.
             if let Some(n) = entry.get("score").and_then(|s| s.as_f64()) {
-                return cvss_score_to_severity(n).to_string();
+                return known(cvss_score_to_severity(n));
+            }
+            let Some(score) = entry.get("score").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            if let Ok(n) = score.trim().parse::<f64>() {
+                return known(cvss_score_to_severity(n));
+            }
+            let scored = match kind {
+                "CVSS_V3" => cvss_v3_base_score(score),
+                "CVSS_V2" => cvss_v2_base_score(score),
+                _ => None,
+            };
+            if let Some(n) = scored {
+                return known(cvss_score_to_severity(n));
             }
         }
     }
 
-    // 3. Default.
-    "medium".to_string()
+    // 3. The group that lists this advisory.
+    if let Some(label) = group_max_severity(vuln, pkg_entry) {
+        return known(label);
+    }
+
+    OsvSeverity {
+        label: "medium".to_string(),
+        known: false,
+    }
+}
+
+/// `groups[].max_severity` for the group that lists `vuln` (by its id or an alias), as a label.
+/// osv-scanner writes the highest CVSS base score of the group as a string such as `"7.5"`.
+fn group_max_severity(
+    vuln: &serde_json::Value,
+    pkg_entry: &serde_json::Value,
+) -> Option<&'static str> {
+    let id = vuln.get("id").and_then(|i| i.as_str()).unwrap_or("");
+    let aliases: Vec<&str> = vuln
+        .get("aliases")
+        .and_then(|a| a.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let lists = |group: &serde_json::Value, key: &str| -> bool {
+        group
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|g| g == id || aliases.contains(&g))
+            })
+    };
+    for group in pkg_entry.get("groups").and_then(|g| g.as_array())? {
+        if !(lists(group, "ids") || lists(group, "aliases")) {
+            continue;
+        }
+        let max = group.get("max_severity")?;
+        if let Some(n) = max.as_f64() {
+            return Some(cvss_score_to_severity(n));
+        }
+        let text = max.as_str()?.trim();
+        if let Ok(n) = text.parse::<f64>() {
+            return Some(cvss_score_to_severity(n));
+        }
+        return severity_word(text);
+    }
+    None
+}
+
+/// CVSS 3.1 "roundup": the smallest number with one decimal place that is at least `x`, with the
+/// specification's guard against floating-point noise.
+fn cvss_roundup(x: f64) -> f64 {
+    let int_input = (x * 100_000.0).round() as i64;
+    if int_input % 10_000 == 0 {
+        int_input as f64 / 100_000.0
+    } else {
+        ((int_input / 10_000) as f64 + 1.0) / 10.0
+    }
+}
+
+/// The base score of a CVSS v3.0 or v3.1 vector (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`),
+/// computed from the metrics. `None` for anything else (a v4 vector, a vector missing a base
+/// metric, or an unknown metric value), so the caller never guesses.
+pub(crate) fn cvss_v3_base_score(vector: &str) -> Option<f64> {
+    let mut parts = vector.trim().split('/');
+    match parts.next()? {
+        "CVSS:3.0" | "CVSS:3.1" => {}
+        _ => return None,
+    }
+    let (mut av, mut ac, mut pr, mut ui, mut scope, mut c, mut i, mut a) =
+        (None, None, None, None, None, None, None, None);
+    for part in parts {
+        let (key, value) = part.split_once(':')?;
+        match key {
+            "AV" => av = Some(value),
+            "AC" => ac = Some(value),
+            "PR" => pr = Some(value),
+            "UI" => ui = Some(value),
+            "S" => scope = Some(value),
+            "C" => c = Some(value),
+            "I" => i = Some(value),
+            "A" => a = Some(value),
+            _ => {}
+        }
+    }
+    let changed = match scope? {
+        "U" => false,
+        "C" => true,
+        _ => return None,
+    };
+    let av = match av? {
+        "N" => 0.85,
+        "A" => 0.62,
+        "L" => 0.55,
+        "P" => 0.2,
+        _ => return None,
+    };
+    let ac = match ac? {
+        "L" => 0.77,
+        "H" => 0.44,
+        _ => return None,
+    };
+    let pr = match (pr?, changed) {
+        ("N", _) => 0.85,
+        ("L", false) => 0.62,
+        ("L", true) => 0.68,
+        ("H", false) => 0.27,
+        ("H", true) => 0.5,
+        _ => return None,
+    };
+    let ui = match ui? {
+        "N" => 0.85,
+        "R" => 0.62,
+        _ => return None,
+    };
+    let cia = |v: Option<&str>| -> Option<f64> {
+        match v? {
+            "H" => Some(0.56),
+            "L" => Some(0.22),
+            "N" => Some(0.0),
+            _ => None,
+        }
+    };
+    let (c, i, a) = (cia(c)?, cia(i)?, cia(a)?);
+    let iss = 1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a);
+    let impact = if changed {
+        7.52 * (iss - 0.029) - 3.25 * (iss - 0.02).powi(15)
+    } else {
+        6.42 * iss
+    };
+    if impact <= 0.0 {
+        return Some(0.0);
+    }
+    let exploitability = 8.22 * av * ac * pr * ui;
+    let raw = if changed {
+        1.08 * (impact + exploitability)
+    } else {
+        impact + exploitability
+    };
+    Some(cvss_roundup(raw.min(10.0)))
+}
+
+/// The base score of a CVSS v2 vector (`AV:N/AC:L/Au:N/C:P/I:P/A:P`). `None` when a base metric is
+/// missing or unrecognised.
+pub(crate) fn cvss_v2_base_score(vector: &str) -> Option<f64> {
+    let (mut av, mut ac, mut au, mut c, mut i, mut a) = (None, None, None, None, None, None);
+    for part in vector.trim().split('/') {
+        let (key, value) = part.split_once(':')?;
+        match key {
+            "AV" => av = Some(value),
+            "AC" => ac = Some(value),
+            "Au" => au = Some(value),
+            "C" => c = Some(value),
+            "I" => i = Some(value),
+            "A" => a = Some(value),
+            _ => {}
+        }
+    }
+    let av = match av? {
+        "L" => 0.395,
+        "A" => 0.646,
+        "N" => 1.0,
+        _ => return None,
+    };
+    let ac = match ac? {
+        "H" => 0.35,
+        "M" => 0.61,
+        "L" => 0.71,
+        _ => return None,
+    };
+    let au = match au? {
+        "M" => 0.45,
+        "S" => 0.56,
+        "N" => 0.704,
+        _ => return None,
+    };
+    let cia = |v: Option<&str>| -> Option<f64> {
+        match v? {
+            "N" => Some(0.0),
+            "P" => Some(0.275),
+            "C" => Some(0.660),
+            _ => None,
+        }
+    };
+    let (c, i, a) = (cia(c)?, cia(i)?, cia(a)?);
+    let impact = 10.41 * (1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a));
+    let exploitability = 20.0 * av * ac * au;
+    let f = if impact == 0.0 { 0.0 } else { 1.176 };
+    let score = ((0.6 * impact) + (0.4 * exploitability) - 1.5) * f;
+    Some((score * 10.0).round() / 10.0)
 }
 
 /// Map a CVSS base score (0.0-10.0) to Camerata's four-level severity vocabulary.
-fn cvss_score_to_severity(score: f64) -> &'static str {
-    if score >= 9.0 {
+pub(crate) fn cvss_score_to_severity(score: f64) -> &'static str {
+    if score <= 0.0 {
+        // CVSS rates "no impact" 0.0; that is none, not low.
+        "info"
+    } else if score >= 9.0 {
         "critical"
     } else if score >= 7.0 {
         "high"
@@ -378,6 +675,20 @@ async fn run_dep_audit_with_tooling(
     repo_dir: &Path,
     tooling_dir: &Path,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
+    let (findings, mut note) = run_dep_audit_core(repo, repo_dir, tooling_dir).await;
+    // The note says which repo it is about, so a scan over several repos keeps one repo's
+    // dependency audit failure apart from another's.
+    if let Some(n) = note.as_mut() {
+        n.repo.get_or_insert_with(|| repo.to_string());
+    }
+    (findings, note)
+}
+
+async fn run_dep_audit_core(
+    repo: &str,
+    repo_dir: &Path,
+    tooling_dir: &Path,
+) -> (Vec<Finding>, Option<CoverageNote>) {
     // Fast-exit when the disable env var is set.  This is exclusively for test
     // isolation — see the `DISABLE_ENV_VAR` constant doc for the rationale.
     if std::env::var(DISABLE_ENV_VAR)
@@ -393,8 +704,13 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
-                    message: format!("dependency audit (osv-scanner) did not run: {e}"),
+                    message: scrub_local_paths(
+                        &format!("dependency audit (osv-scanner) did not run: {e}"),
+                        repo_dir,
+                    ),
                 }),
             );
         }
@@ -427,10 +743,15 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
-                    message: format!(
-                        "dependency audit (osv-scanner) did not run: \
-                         could not spawn process: {e}"
+                    message: scrub_local_paths(
+                        &format!(
+                            "dependency audit (osv-scanner) did not run: \
+                             could not spawn process: {e}"
+                        ),
+                        repo_dir,
                     ),
                 }),
             );
@@ -439,6 +760,8 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
                               subprocess timed out after 120 s"
@@ -470,23 +793,35 @@ async fn run_dep_audit_with_tooling(
             || stderr.to_ascii_lowercase().contains("no lockfiles")
             || stderr.to_ascii_lowercase().contains("no packages")
         {
-            format!(
-                "dependency audit (osv-scanner) found no lockfiles in {repo} — \
+            let base = format!(
+                "dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}; \
                  no dependency exposure detected (or no supported lockfile present)"
-            )
+            );
+            // M12: no lockfile anywhere does not mean no dependencies. Name the manifests
+            // that declare packages nobody checked.
+            match unaudited_manifest_sentence(repo_dir).await {
+                Some(gap) => format!("{base}. {gap}"),
+                None => base,
+            }
         } else if !exit_ok {
-            format!(
-                "dependency audit (osv-scanner) did not run: \
-                 process exited with code {code}: {stderr}"
+            scrub_local_paths(
+                &format!(
+                    "dependency audit (osv-scanner) did not run: \
+                     process exited with code {code}: {stderr}"
+                ),
+                repo_dir,
             )
         } else {
-            // Exit OK but empty stdout — treat as no lockfiles.
-            format!("dependency audit (osv-scanner) found no lockfiles in {repo}")
+            // Exit OK but empty stdout: osv-scanner printed nothing, which a completed scan
+            // never does (it prints at least an empty result). That is not "no lockfiles".
+            empty_output_message()
         };
 
         return (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: note_msg,
             }),
@@ -495,20 +830,60 @@ async fn run_dep_audit_with_tooling(
 
     // Parse the JSON output.
     match parse_osv_json(repo, repo_dir, &stdout) {
-        Ok(findings) => (findings, None),
+        Ok(findings) => {
+            // M12: a successful run used to say nothing about what it left out: manifests no
+            // lockfile covers, and files osv-scanner reported on stderr that it could not read.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let message = manifests::success_gap_message(
+                unaudited_manifest_sentence(repo_dir).await,
+                &stderr,
+                repo_dir,
+            );
+            let note = message.map(|message| CoverageNote {
+                tool_failed: false,
+                repo: None,
+                tool: TOOL_NAME.to_string(),
+                message,
+            });
+            (findings, note)
+        }
         Err(e) => (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: TOOL_NAME.to_string(),
-                message: format!("dependency audit (osv-scanner) could not parse output: {e}"),
+                message: scrub_local_paths(
+                    &format!("dependency audit (osv-scanner) could not parse output: {e}"),
+                    repo_dir,
+                ),
             }),
         ),
     }
 }
 
+/// The coverage message for a clean exit with nothing on stdout. A scan that completed always
+/// prints a result, so this is a run that did not happen, never "no lockfiles".
+fn empty_output_message() -> String {
+    "dependency audit (osv-scanner) did not run: it exited normally but produced no output"
+        .to_string()
+}
+
+/// The sentence naming the dependency manifests under `repo_dir` that no lockfile covers, or
+/// `None` when every manifest is covered (or the walk could not run).
+async fn unaudited_manifest_sentence(repo_dir: &Path) -> Option<String> {
+    let dir = repo_dir.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || manifests::unaudited_manifests(&dir))
+        .await
+        .ok()?;
+    manifests::manifests_sentence(&found)
+}
+
 /// Run osv-scanner on `repo_dir` and return `(findings, coverage_note)`.
 ///
-/// On success: returns a possibly-empty `Vec<Finding>` and `None` for the note.
+/// On success: returns a possibly-empty `Vec<Finding>` and `None` for the note, unless the run
+/// left something unchecked (manifests no lockfile covers, files osv-scanner could not read), in
+/// which case the note says so (M12).
 /// On any failure (provisioning, subprocess, parse): returns `Vec::new()` and
 /// `Some(CoverageNote)` describing why dep-audit did not run.  The scan continues
 /// either way.
@@ -529,6 +904,8 @@ pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
+                    repo: Some(repo.to_string()),
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
                               could not resolve Camerata data dir for tool provisioning"
@@ -561,6 +938,170 @@ mod tests {
         assert_eq!(map_severity(""), "medium");
     }
 
+    // ── M10: severity from a CVSS vector, a group's max severity, or an honest unknown ──────
+
+    /// One OSV vuln with the given `severity` array (JSON text), optional `database_specific`
+    /// and optional `groups` entry on its package, parsed through the real entry point.
+    fn parse_one(severity_json: &str, database_specific: &str, groups: &str) -> Finding {
+        let json = format!(
+            r#"{{"results":[{{"source":{{"path":"/w/package-lock.json","type":"lockfile"}},
+              "packages":[{{"package":{{"name":"lodash","version":"4.17.0","ecosystem":"npm"}},
+              "vulnerabilities":[{{"id":"GHSA-aaaa-bbbb-cccc","summary":"x"{database_specific},
+              "severity":{severity_json}}}]{groups}}}]}}]}}"#
+        );
+        let mut found = parse_osv_json("acme/api", Path::new("/w"), &json).unwrap();
+        assert_eq!(found.len(), 1);
+        found.remove(0)
+    }
+
+    #[test]
+    fn a_cvss_v3_vector_is_scored_not_ignored() {
+        let critical =
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]"#;
+        let f = parse_one(critical, "", "");
+        assert_eq!(f.severity, "critical", "9.8 is critical");
+        assert!(!f.needs_review);
+
+        let medium =
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"}]"#;
+        assert_eq!(
+            parse_one(medium, "", "").severity,
+            "medium",
+            "6.1 is medium"
+        );
+
+        let six_five =
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"}]"#;
+        assert_eq!(
+            parse_one(six_five, "", "").severity,
+            "medium",
+            "6.5 is medium"
+        );
+
+        let seven_five =
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"}]"#;
+        assert_eq!(
+            parse_one(seven_five, "", "").severity,
+            "high",
+            "7.5 is high"
+        );
+
+        let low = r#"[{"type":"CVSS_V3","score":"CVSS:3.0/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N"}]"#;
+        assert_eq!(parse_one(low, "", "").severity, "low", "1.8 is low");
+
+        let scope_changed =
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}]"#;
+        assert_eq!(
+            parse_one(scope_changed, "", "").severity,
+            "critical",
+            "9.9 is critical"
+        );
+    }
+
+    #[test]
+    fn the_v3_calculator_matches_published_scores() {
+        let score = |v: &str| cvss_v3_base_score(v).unwrap();
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8);
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), 6.1);
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"), 9.9);
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"), 0.0);
+        assert_eq!(cvss_v3_base_score("CVSS:4.0/AV:N/AC:L"), None);
+        assert_eq!(cvss_v3_base_score("not a vector"), None);
+        assert_eq!(
+            cvss_v3_base_score("CVSS:3.1/AV:N/AC:L"),
+            None,
+            "missing metrics"
+        );
+    }
+
+    #[test]
+    fn a_cvss_v2_vector_is_scored_too() {
+        assert_eq!(cvss_v2_base_score("AV:N/AC:L/Au:N/C:P/I:P/A:P"), Some(7.5));
+        let v2 = r#"[{"type":"CVSS_V2","score":"AV:N/AC:L/Au:N/C:P/I:P/A:P"}]"#;
+        assert_eq!(parse_one(v2, "", "").severity, "high");
+    }
+
+    #[test]
+    fn a_groups_max_severity_is_used_when_the_vuln_carries_no_usable_score() {
+        let v4 = r#"[{"type":"CVSS_V4","score":"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}]"#;
+        let groups = r#","groups":[{"ids":["GHSA-aaaa-bbbb-cccc"],"max_severity":"9.1"}]"#;
+        let f = parse_one(v4, "", groups);
+        assert_eq!(f.severity, "critical");
+        assert!(!f.needs_review);
+        // A group for some other advisory does not apply.
+        let other = r#","groups":[{"ids":["GHSA-zzzz"],"max_severity":"9.1"}]"#;
+        assert!(parse_one(v4, "", other).needs_review);
+    }
+
+    #[test]
+    fn an_advisory_with_no_usable_severity_is_held_for_review_and_says_so() {
+        let f = parse_one("[]", "", "");
+        assert_eq!(f.severity, "medium", "never buried below medium");
+        assert!(f.needs_review);
+        assert_eq!(f.confidence.as_deref(), Some("needs-review"));
+        assert!(
+            f.detail.contains("Severity unknown, held for review"),
+            "{}",
+            f.detail
+        );
+        // An unrecognised word is the same case, not a silent medium.
+        let g = parse_one("[]", r#","database_specific":{"severity":"UNRATED"}"#, "");
+        assert!(g.needs_review);
+    }
+
+    #[test]
+    fn a_published_word_still_wins_and_needs_no_review() {
+        let f = parse_one(
+            r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]"#,
+            r#","database_specific":{"severity":"LOW"}"#,
+            "",
+        );
+        assert_eq!(f.severity, "low");
+        assert!(!f.needs_review);
+        assert!(!f.detail.contains("held for review"));
+    }
+
+    #[test]
+    fn a_zero_score_is_info_not_low() {
+        assert_eq!(cvss_score_to_severity(0.0), "info");
+        let none = r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"}]"#;
+        let f = parse_one(none, "", "");
+        assert_eq!(f.severity, "info");
+        assert!(!f.needs_review);
+        assert_eq!(cvss_score_to_severity(0.1), "low");
+    }
+
+    #[test]
+    fn the_dependency_detail_has_no_em_dash() {
+        let found = parse_osv_json("acme/api", &fixture_root(), osv_fixture()).unwrap();
+        assert!(!found[0].detail.contains('\u{2014}'), "{}", found[0].detail);
+        let no_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"a","version":"1","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"}}]}]}]}"#;
+        let f = &parse_osv_json("acme/api", Path::new("/w"), no_fix).unwrap()[0];
+        assert!(!f.detail.contains('\u{2014}'), "{}", f.detail);
+        assert!(
+            f.detail.contains(", no patched version available yet"),
+            "{}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn a_clean_exit_with_no_output_is_not_a_finding_of_no_lockfiles() {
+        let message = empty_output_message();
+        assert!(message.contains("did not run"), "{message}");
+        assert!(!message.contains(NO_LOCKFILES), "{message}");
+        let note = CoverageNote {
+            tool_failed: false,
+            repo: None,
+            tool: TOOL_NAME.to_string(),
+            message,
+        };
+        assert!(!note_means_scanned(&note));
+        assert!(!note_proves_clean(&note));
+    }
+
     #[test]
     fn cvss_score_buckets() {
         assert_eq!(cvss_score_to_severity(10.0), "critical");
@@ -570,7 +1111,7 @@ mod tests {
         assert_eq!(cvss_score_to_severity(6.9), "medium");
         assert_eq!(cvss_score_to_severity(4.0), "medium");
         assert_eq!(cvss_score_to_severity(3.9), "low");
-        assert_eq!(cvss_score_to_severity(0.0), "low");
+        assert_eq!(cvss_score_to_severity(0.0), "info");
     }
 
     // ── parse_osv_json — realistic fixture ───────────────────────────────────
@@ -784,6 +1325,11 @@ mod tests {
         // when it is present.
         if let Some(ref n) = note {
             assert_eq!(n.tool, "osv-scanner", "coverage note must name the tool");
+            assert_eq!(
+                n.repo.as_deref(),
+                Some("acme/test"),
+                "and the repo it is about"
+            );
             assert!(!n.message.is_empty(), "coverage note must have a message");
         }
         // Findings from a nonexistent repo dir are always empty.
@@ -851,6 +1397,8 @@ mod tests {
         let (dep_findings, dep_note): (Vec<Finding>, Option<CoverageNote>) = (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: "dependency audit (osv-scanner) timed out after 60 s for acme/api"
                     .to_string(),

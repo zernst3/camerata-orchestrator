@@ -1,27 +1,32 @@
 id = "SUPABASE-RLS-ENABLED-1"
-version = 1
+version = 5
 title = "Every table in an API-exposed schema has Row Level Security enabled in its replayed end-state"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 default = true
 verification = "grounded"
 qualifies = "Enforced by a migration-timeline replay pass: a mini schema-state interpreter folds CREATE TABLE / ALTER ... ENABLE|DISABLE ROW LEVEL SECURITY / DROP TABLE / ALTER ... RENAME across the ordered supabase/migrations/<timestamp>_*.sql timeline (or an authoritative supabase/schemas/*.sql declarative snapshot, when present) to compute the FINAL RLS state per table, per schema. Conformance holds when every table reachable from an API-exposed schema (public by default, plus any schema named in SUPABASE-EXPOSURE-SCHEMAS-1's config parse) has RLS enabled in that replayed end-state. A table in a non-exposed schema with no RLS is a demoted defense-in-depth note, not a critical finding. Because this is a repo-only signal, every finding's detail carries the table name, the migration file + line where the state was last established, and the honest caveat that 'no evidence of RLS in the migration history' is not the same as 'RLS is disabled in production' — dashboard-applied changes never land in a migration."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
-title = "Supabase docs — Row Level Security guide (ENABLE ROW LEVEL SECURITY, policy mechanics)"
+title = "Supabase docs: Row Level Security guide (ENABLE ROW LEVEL SECURITY, policy mechanics)"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0013_rls_disabled_in_public"
-title = "Supabase Database Linter — 0013_rls_disabled_in_public (\"Table publicly accessible\")"
+title = "Supabase Database Linter: 0013_rls_disabled_in_public (\"Table publicly accessible\")"
 linter = "splinter: rls_disabled_in_public"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Does every table reachable from an API-exposed schema have Row Level Security enabled?"
@@ -59,9 +64,9 @@ step, never assert live state from the repo alone.
 id = "enforce-rls-enabled-replayed-end-state"
 label = "Every table in an API-exposed schema has Row Level Security enabled"
 directive = """
-Every table reachable through an API-exposed schema — `public` by default, plus any schema named in
-`[api] schemas` — ends the migration history with
-`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in force, and carries at least one policy scoping
+Every table reachable through an API-exposed schema (`public` by default, plus any schema named in
+`[api] schemas`) ends the migration history with
+`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in force and carries at least one policy scoping
 who may read and write it. RLS alone with zero policies denies everyone, which is safe but is
 usually not what the feature wanted.
 
@@ -69,15 +74,15 @@ This matters more here than in an ordinary Postgres deployment: an exposed table
 through PostgREST using the anon key, which ships inside the frontend bundle by design. There is no
 application firewall in front of PostgREST, so RLS is the only thing standing between an anonymous
 internet request and the table's rows. Whether RLS is on is a fact about the ORDERED migration
-history, not about any one file — a later migration can enable what an earlier one left off, or
-disable what an earlier one turned on — so the state that counts is the one the last relevant
-statement leaves behind, or the declarative `supabase/schemas/*.sql` snapshot where the project
+history, not about any one file (a later migration can enable what an earlier one left off, or
+disable what an earlier one turned on) so the state that counts is the one the last relevant
+statement leaves behind or the declarative `supabase/schemas/*.sql` snapshot where the project
 keeps one.
 """
 remediation = """
 Add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration (or update your
 declarative schema snapshot), then add at least one `CREATE POLICY` scoping exactly who can
-read and write it — RLS with zero policies still denies everyone by default, which is safer
+read and write it: RLS with zero policies still denies everyone by default, which is safer
 but usually not what the feature needs. Verify by checking the Supabase dashboard's
 Authentication > Policies page shows `<table>` as RLS-enabled with the policy you intended, and
 by confirming an anon-key request without the right credentials is rejected.

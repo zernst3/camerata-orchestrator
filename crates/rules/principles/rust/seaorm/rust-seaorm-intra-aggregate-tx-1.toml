@@ -1,6 +1,6 @@
 id = "RUST-SEAORM-INTRA-AGGREGATE-TX-1"
-version = 1
-title = "Where intra-aggregate atomicity lives: inside the repository method, on a uniform unit-of-work parameter, or not provided"
+version = 3
+title = "Where intra-aggregate atomicity lives: inside the repository method, on a uniform unit-of-work parameter or not provided"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
@@ -49,4 +49,4 @@ why = "Keeps repositories entirely free of transaction concerns, with no transac
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/advanced-query/transaction/"
-title = "SeaORM docs: Transaction — closure-based and explicit begin()/commit() transaction APIs"
+title = "SeaORM docs: Transaction: closure-based and explicit begin()/commit() transaction APIs"

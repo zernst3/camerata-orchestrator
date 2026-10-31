@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1"
-version = 1
+version = 4
 title = "Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -10,14 +10,14 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution?"
+question = "How is the order of the ASP.NET Core middleware pipeline determined?"
 default = "canonical-middleware-order"
 why = "ASP.NET Core middleware executes in registration order, and order is not a style preference: it is a correctness constraint. UseAuthentication must appear before UseAuthorization because authorization decisions require an authenticated identity — reversing them means authorization runs with no principal and every policy check either fails open or throws. Both must appear after UseRouting (or after the combined UseEndpoints in older patterns) because authorization is policy-matched per-endpoint, and the routing middleware is what resolves which endpoint's metadata (policy name, role requirements) the authorization middleware reads. Exception handling middleware (UseExceptionHandler / UseDeveloperExceptionPage) must appear first so it can catch exceptions from every layer beneath it, including auth; placed anywhere else it misses whatever is above it. Static files, CORS, HTTPS redirection, and HSTS each have their own placement requirements relative to auth and routing. The canonical order is not arbitrary: it is the order where each middleware has the context it needs. Deviation from it is invisible at startup and surfaces as security holes (auth bypassed), broken CORS preflight handling, or unexpected 500s on pages the developer thought were working."
 
 [[option]]
 id = "canonical-middleware-order"
 label = "Canonical middleware order: exception handler → HSTS → HTTPS redirect → static files → routing → CORS → auth/n → endpoints"
-directive = "Middleware is registered in this order: UseExceptionHandler (or UseDeveloperExceptionPage in development) first, then UseHsts, UseHttpsRedirection, UseStaticFiles, UseRouting, UseCors, UseAuthentication, UseAuthorization, and finally MapControllers / MapEndpoints (or the equivalent endpoint registration). No middleware that depends on an authenticated identity (authorization, business logic) is registered before UseAuthentication. No authorization middleware is registered before UseRouting. Any custom middleware that inspects the authenticated user is placed after UseAuthentication."
+directive = "Middleware is registered in this order: UseExceptionHandler (or UseDeveloperExceptionPage in development) first, then UseHsts, UseHttpsRedirection, UseStaticFiles, UseRouting, UseCors, UseAuthentication, UseAuthorization and finally MapControllers / MapEndpoints (or the equivalent endpoint registration). No middleware that depends on an authenticated identity (authorization, business logic) is registered before UseAuthentication. No authorization middleware is registered before UseRouting. Any custom middleware that inspects the authenticated user is placed after UseAuthentication."
 remediation = """
 Reorder the middleware pipeline in Program.cs to the canonical sequence: exception handler, HSTS, HTTPS redirection, static files, routing, CORS, authentication, authorization, then endpoint mapping. Pay particular attention to authentication and authorization following routing and preceding endpoint execution. Verify by confirming a request to a protected endpoint is rejected before reaching the handler, and that routing-dependent middleware runs after UseRouting.
 """
@@ -28,12 +28,12 @@ id = "ad-hoc-middleware-order"
 violates = true
 label = "Middleware is ordered by developer discretion at the time of addition"
 directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
-why = "Pipeline correctness becomes accidental: when the order happens to be right nothing fails, and one middleware registered in the wrong place produces an authorization check that runs after the endpoint has already handled the request, or a CORS preflight that never gets a response. Neither failure appears at startup. They surface in production under specific request patterns, and the symptom gives no indication that ordering is the cause."
+why = "Pipeline correctness becomes accidental: when the order happens to be right nothing fails, and one middleware registered in the wrong place produces an authorization check that runs after the endpoint has already handled the request or a CORS preflight that never gets a response. Neither failure appears at startup. They surface in production under specific request patterns, and the symptom gives no indication that ordering is the cause."
 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/?view=aspnetcore-10.0"
-title = "ASP.NET Core Middleware — canonical middleware order | Microsoft Learn"
+title = "ASP.NET Core Middleware: canonical middleware order | Microsoft Learn"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/diagnostics/asp0001?view=aspnetcore-10.0"

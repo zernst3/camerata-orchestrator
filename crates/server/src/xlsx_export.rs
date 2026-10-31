@@ -139,8 +139,8 @@ pub struct FindingRow {
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
     /// `resolve_citation(...).kind`, per the design doc's Provenance column.
     provenance: String,
-    /// C3-6: the RAW citation kind (`"grounded"` | `"preview"` | `"advisory"`) behind
-    /// `provenance`'s display label above — never serialized (the label is the wire value for
+    /// C3-6: the RAW citation kind (`"grounded"` | `"related"` | `"preview"` | `"advisory"`)
+    /// behind `provenance`'s display label above — never serialized (the label is the wire value for
     /// `findings.json`); kept only so the row sort below can call the SAME
     /// `report_export::provenance_tier_rank` the within-bucket matrix ordering uses, rather
     /// than re-deriving a rank from the formatted label string.
@@ -183,6 +183,11 @@ pub struct FindingRow {
     /// Serialized into `findings.json` and rendered in the workbook's "Also found at"
     /// column, so every absorbed site is observable in the detail artifacts.
     also_locations: Vec<crate::onboard::MergedLocation>,
+    /// The row's own place from the RAW finding (the `snippet` above is capped for the
+    /// workbook, which would tell a line-0 row apart from its own absorbed member wrongly).
+    /// Not exported.
+    #[serde(skip)]
+    place: crate::onboard::SitePlace,
     /// Pass-1 W7 (C5): the total number of distinct evidence sites this row represents —
     /// its own `path:line` plus every absorbed `also_locations` entry. `1` for an un-merged
     /// row. The single number that makes "one row, N sites" impossible to misread as "one
@@ -197,6 +202,24 @@ pub struct FindingRow {
     /// that produced the hearth 0/12 result.
     #[serde(flatten)]
     kind: camerata_api_types::audit::KindOnWire,
+    /// M2/M8: what moved this row's severity and why, as finished sentences (for example
+    /// "Severity lowered from high to info: no file or line was identified for this
+    /// finding."). Empty when nothing moved it. Always present, so every row carries the same
+    /// keys.
+    severity_adjustments: String,
+    /// H11: the commit of the earlier inspection this row was carried forward from, when this
+    /// run re-audited only the changed files. Empty when the row was found this run.
+    carried_from: String,
+    /// True when the project has more than one repo, so every site this row prints names its
+    /// repo (`src/index.ts:12` is a different place in each service). Not serialized: the
+    /// row's own `repo` field already says which service it is.
+    #[serde(skip)]
+    multi_repo: bool,
+    /// For a leaked credential that another repo of the project also flags under the same name:
+    /// a finished note naming those repos. Display only: the rows stay separate and each is
+    /// counted. Absent for every other row.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    same_credential_note: String,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -226,6 +249,18 @@ struct CoverageRow {
     citation_kind: String,
     citation_label: String,
     findings_count: usize,
+    /// For a project of several repos: what the rule found in each service, so "clean" is never
+    /// said of the project when it holds for only some of the services. Empty for one repo.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    by_repo: Vec<CoverageRepoCell>,
+}
+
+/// One service's result for a rule on the Coverage sheet: the ledger's cell state for it,
+/// finished as the same label the patterns section prints.
+#[derive(Serialize)]
+struct CoverageRepoCell {
+    repo: String,
+    result: String,
 }
 
 /// One row of the Coverage sheet's "Rules applied" appendix (P7 — evidence-based alternative
@@ -235,6 +270,10 @@ struct CoverageRow {
 /// [`build_rules_applied_rows`].
 #[derive(Serialize)]
 struct RulesAppliedRow {
+    /// The service this pick was made for, set only when the project has several repos: each
+    /// service is assessed on its own and its pick is not another's.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     rule_id: String,
     /// The human label of the chosen option (resolved against the corpus when available,
     /// else the bare option id) — or an explicit "Not applicable" note when the rule's
@@ -254,9 +293,16 @@ fn build_rules_applied_rows(
     report: &ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<RulesAppliedRow> {
-    let mut rows: Vec<RulesAppliedRow> = report
-        .recommendations
-        .values()
+    // One pick per rule and service when the project has several repos; the by-rule map keeps
+    // only the last service's pick and would state it for all of them.
+    let multi = report.repos.len() > 1 && !report.recommendations_by_repo.is_empty();
+    let picks: Vec<&crate::ai_audit::RuleRecommendation> = if multi {
+        report.recommendations_by_repo.iter().collect()
+    } else {
+        report.recommendations.values().collect()
+    };
+    let mut rows: Vec<RulesAppliedRow> = picks
+        .into_iter()
         .map(|rec| {
             let chosen = if !rec.applicable {
                 "Not applicable — no evidence this concern applies here".to_string()
@@ -272,6 +318,11 @@ fn build_rules_applied_rows(
                     .unwrap_or_else(|| rec.recommended_option_id.clone())
             };
             RulesAppliedRow {
+                repo: if multi {
+                    rec.repo.clone()
+                } else {
+                    String::new()
+                },
                 rule_id: rec.rule_id.clone(),
                 chosen,
                 evidence: rec.evidence.clone().unwrap_or_default(),
@@ -279,7 +330,7 @@ fn build_rules_applied_rows(
             }
         })
         .collect();
-    rows.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+    rows.sort_by(|a, b| (&a.rule_id, &a.repo).cmp(&(&b.rule_id, &b.repo)));
     rows
 }
 
@@ -316,6 +367,13 @@ fn partition_rows(
     let report = &sanitize_report_findings(report);
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
+    // The repos that flag a credential under the same name, for the display-only note on each
+    // such row. Nothing to link in a project of one repo.
+    let credentials = if report.repos.len() > 1 {
+        crate::onboard::credential_cross_ref::CredentialIndex::new(&report.findings)
+    } else {
+        crate::onboard::credential_cross_ref::CredentialIndex::default()
+    };
 
     for f in &report.findings {
         if f.rule_id == DEP_AUDIT_RULE_ID {
@@ -396,7 +454,10 @@ fn partition_rows(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule);
+        // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
+        // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
+        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
+            .map(|s| crate::report_export::fix_text::plain(&s));
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -468,13 +529,25 @@ fn partition_rows(
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
-            fix_specific: f.fix_specific.clone(),
+            fix_specific: f
+                .fix_specific
+                .as_deref()
+                .map(crate::report_export::fix_text::plain)
+                .filter(|s| !s.is_empty()),
             fix,
             is_fp,
             fp_reason,
             also_locations: f.also_locations.clone(),
-            site_count: 1 + f.also_locations.len(),
+            place: f.place(),
+            site_count: f.distinct_site_count(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
+            severity_adjustments: crate::severity_bounds::severity_adjustment_lines(f, corpus)
+                .join(" "),
+            carried_from: crate::report_export::carried_from(f).unwrap_or_default(),
+            multi_repo: report.repos.len() > 1,
+            same_credential_note: crate::onboard::credential_cross_ref::note(
+                &credentials.also_flagged_in(f),
+            ),
         });
     }
 
@@ -649,7 +722,12 @@ enum KindSheet {
 /// The ONE kind→sheet decision, so no sheet writer re-derives it and two of them can never
 /// disagree (which would either duplicate a row or lose it entirely).
 fn kind_sheet(row: &FindingRow) -> KindSheet {
-    match &row.kind.0 {
+    kind_sheet_for(row.kind.0.as_ref())
+}
+
+/// [`kind_sheet`] over the kind alone.
+fn kind_sheet_for(kind: Option<&FindingKind>) -> KindSheet {
+    match kind {
         // An absent kind is NOT a synonym for `Defect` on the wire (A5.6), but for ROUTING it
         // must land with the accusing rows: the honest failure mode for an unmapped emission
         // path is "visible in the wrong tab", never "quietly filed as an observation".
@@ -678,16 +756,46 @@ fn rule_title(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String
 fn site_locations(row: &FindingRow) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + row.also_locations.len());
     if !row.path.is_empty() {
-        out.push(format!("{}:{}", row.path, row.line));
+        out.push(site_label(row.multi_repo, &row.repo, &row.path, row.line));
     }
-    for l in &row.also_locations {
-        if l.consequence {
-            out.push(format!("{}:{} (also affected)", l.path, l.line));
+    // Only members at a DIFFERENT place are sites; the rest are "also flagged" notes.
+    for l in
+        crate::report_export::split_absorbed(row.place.clone(), &row.also_locations).other_sites
+    {
+        // An absorbed site names its own repo, which can differ from the row's.
+        let repo = if l.repo.is_empty() {
+            &row.repo
         } else {
-            out.push(format!("{}:{}", l.path, l.line));
+            &l.repo
+        };
+        let label = site_label(row.multi_repo, repo, &l.path, l.line);
+        if l.consequence {
+            out.push(format!("{label} (also affected)"));
+        } else {
+            out.push(label);
         }
     }
     out
+}
+
+/// One site as a cell prints it: `path:line`, and `repo/path:line` when the project has several
+/// repos, because the same path is a different place in each of them.
+fn site_label(multi_repo: bool, repo: &str, path: &str, line: usize) -> String {
+    if multi_repo && !repo.is_empty() {
+        format!("{repo}/{path}:{line}")
+    } else {
+        format!("{path}:{line}")
+    }
+}
+
+/// The "Also flagged here as <headline> (<severity>)" notes of a row: members absorbed at a
+/// place already named, which are not other sites.
+fn flagged_here_notes(row: &FindingRow) -> Vec<String> {
+    crate::report_export::split_absorbed(row.place.clone(), &row.also_locations)
+        .same_place
+        .into_iter()
+        .map(|(l, at_own)| crate::report_export::flagged_sentence(l, at_own, None))
+        .collect()
 }
 
 /// One row of the `Deviations` sheet — ONE row per RULE, not per site.
@@ -700,6 +808,10 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
 /// URI-versioned endpoints" — is three adjacent columns, with no prose to parse.
 #[derive(Serialize)]
 struct DeviationGroupRow {
+    /// The service the group belongs to, set only when the project has several repos: each
+    /// service is assessed on its own, so its deviations are counted against its own convention.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     category: String,
     rule_title: String,
     rule_id: String,
@@ -728,16 +840,26 @@ fn build_deviation_groups(
     rows: &[&FindingRow],
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<DeviationGroupRow> {
-    let mut by_rule: BTreeMap<String, Vec<&FindingRow>> = BTreeMap::new();
+    // One group per rule and, in a project of several repos, per service: the counts in the
+    // payload are per assessed service, and one service's convention is not another's.
+    let mut by_rule: BTreeMap<(String, String), Vec<&FindingRow>> = BTreeMap::new();
     for row in rows {
         if matches!(row.kind.0, Some(FindingKind::Deviation(_))) {
-            by_rule.entry(row.rule_id.clone()).or_default().push(row);
+            let repo = if row.multi_repo {
+                row.repo.clone()
+            } else {
+                String::new()
+            };
+            by_rule
+                .entry((row.rule_id.clone(), repo))
+                .or_default()
+                .push(row);
         }
     }
 
     let mut out: Vec<DeviationGroupRow> = by_rule
         .into_iter()
-        .map(|(rule_id, group)| {
+        .map(|((rule_id, repo), group)| {
             let mut declared_numerator = 0usize;
             let mut assessed_sites: Option<usize> = None;
             let mut convention_label = String::new();
@@ -758,6 +880,7 @@ fn build_deviation_groups(
             let worst_severity = worst_severity_label(&group);
             let recommended_fix = group.iter().find_map(|r| r.fix.clone()).unwrap_or_default();
             DeviationGroupRow {
+                repo,
                 category: group[0].category.clone(),
                 rule_title: rule_title(&rule_id, corpus),
                 rule_id,
@@ -776,15 +899,39 @@ fn build_deviation_groups(
             severity_rank(&a.worst_severity.to_ascii_lowercase()),
             std::cmp::Reverse(a.deviating_sites),
             &a.rule_id,
+            &a.repo,
         )
             .cmp(&(
                 severity_rank(&b.worst_severity.to_ascii_lowercase()),
                 std::cmp::Reverse(b.deviating_sites),
                 &b.rule_id,
+                &b.repo,
             ))
     });
     out
 }
+
+/// The header of the column that names the convention followed. Each service of a multi-repo
+/// project has its own convention, so the header does not say "your codebase".
+fn convention_header(multi_repo: bool) -> &'static str {
+    if multi_repo {
+        "Convention this service follows"
+    } else {
+        "Convention your codebase follows"
+    }
+}
+
+/// The Conventions sheet's Status cell for a convention the codebase follows, and for a rule
+/// with no convention adopted. The sheet prints no kind tag (`convention_observed` is our
+/// taxonomy, not the client's vocabulary), so these two plain-language cells are the only kind
+/// marker on its rows. The writer and the release gate's count reconciliation both read them
+/// from here, so the gate counts exactly the cells written.
+pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently — no exceptions found";
+pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
+
+/// The Coverage sheet's section title above its "could not complete" rows (one per
+/// `not_assessed` finding). Shared with the release gate for the same reason as the statuses.
+pub(crate) const NOT_ASSESSED_SECTION_TITLE: &str = "Checks we could not complete this scan";
 
 /// One row of the `Conventions` sheet — the derived decision set (A5.5). A shipped
 /// deliverable: the audit derives the client's conventions and this is the sheet those
@@ -796,6 +943,10 @@ struct ConventionRow {
     /// block first, because that is this sheet's headline job.
     #[serde(skip)]
     rank: u8,
+    /// The service this convention is about, set only when the project has several repos: a
+    /// convention one service follows is not stated for another.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     category: String,
     rule_title: String,
     rule_id: String,
@@ -827,13 +978,13 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    "Followed consistently — no exceptions found".to_string(),
+                    CONVENTION_STATUS_FOLLOWED.to_string(),
                     c.convention_label.clone(),
                     String::new(),
                 ),
                 Some(FindingKind::NoConvention(n)) => (
                     1u8,
-                    "No single convention adopted".to_string(),
+                    CONVENTION_STATUS_NONE_ADOPTED.to_string(),
                     String::new(),
                     n.observed_options
                         .iter()
@@ -849,6 +1000,11 @@ fn build_convention_rows(
             };
             Some(ConventionRow {
                 rank,
+                repo: if row.multi_repo {
+                    row.repo.clone()
+                } else {
+                    String::new()
+                },
                 category: row.category.clone(),
                 rule_title: rule_title(&row.rule_id, corpus),
                 rule_id: row.rule_id.clone(),
@@ -861,17 +1017,19 @@ fn build_convention_rows(
                 also_found_at: site_locations(row)
                     .into_iter()
                     .skip(1)
+                    .chain(flagged_here_notes(row))
                     .collect::<Vec<_>>()
                     .join("\n"),
             })
         })
         .collect();
     out.sort_by(|a, b| {
-        (a.rank, &a.category, &a.rule_title, &a.rule_id).cmp(&(
+        (a.rank, &a.category, &a.rule_title, &a.rule_id, &a.repo).cmp(&(
             b.rank,
             &b.category,
             &b.rule_title,
             &b.rule_id,
+            &b.repo,
         ))
     });
     out
@@ -897,7 +1055,10 @@ struct NotAssessedRow {
 /// The client-facing sentence for each structured non-assessment reason. Never the wire tag:
 /// `pass_failed` names an internal pipeline stage, which is exactly the vocabulary that must
 /// not reach a client's cell.
-fn not_assessed_reason_label(reason: NotAssessedReason) -> &'static str {
+fn not_assessed_reason_label(reason: NotAssessedReason, multi_repo: bool) -> &'static str {
+    if multi_repo && reason == NotAssessedReason::NoFilesMatched {
+        return "No files in this service were in scope for it";
+    }
     match reason {
         NotAssessedReason::PassFailed => "This check did not complete during the inspection",
         NotAssessedReason::NoFilesMatched => "No files in this codebase were in scope for it",
@@ -916,7 +1077,7 @@ fn build_not_assessed_rows(
             Some(FindingKind::NotAssessed(na)) => Some(NotAssessedRow {
                 rule_title: rule_title(&row.rule_id, corpus),
                 rule_id: row.rule_id.clone(),
-                why: not_assessed_reason_label(na.reason).to_string(),
+                why: not_assessed_reason_label(na.reason, row.multi_repo).to_string(),
                 headline: row.headline.clone(),
                 detail: row.detail.clone(),
             }),
@@ -978,6 +1139,20 @@ fn build_coverage_rows(
                     .filter(|f| f.also_matches.iter().any(|m| m == rid))
                     .count();
             }
+            let by_repo = if report.repos.len() > 1 && report.ledger.rules().next().is_some() {
+                report
+                    .repos
+                    .iter()
+                    .map(|repo| CoverageRepoCell {
+                        repo: repo.clone(),
+                        result: crate::report_export::pattern_cell_label(
+                            &crate::onboard::patterns_matrix::cell_for(report, rid, repo),
+                        ),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             CoverageRow {
                 rule_id: rid.clone(),
                 title,
@@ -985,6 +1160,7 @@ fn build_coverage_rows(
                 citation_kind: citation.kind,
                 citation_label: citation.label,
                 findings_count,
+                by_repo,
             }
         })
         .collect()
@@ -1058,7 +1234,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 26] = [
+const HEADERS: [&str; 28] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1094,16 +1270,23 @@ const HEADERS: [&str; 26] = [
     // columns that make a merged row say "3 sites" instead of silently reading as one.
     "Sites",
     "Also found at",
+    // M2/M8: why the severity above is not the one the finding was first rated at.
+    "Severity adjustments",
+    // H11: the earlier inspection a carried-forward row came from.
+    "Carried from",
 ];
 
-const WIDTHS: [f64; 26] = [
+const WIDTHS: [f64; 28] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0,
 ];
+
+/// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
+const FP_REASON_COL: u16 = HEADERS.len() as u16;
 
 /// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
 /// Recommended-Fix columns at the end, and W7's "Also found at" site list).
-const WRAP_COLS: [u16; 8] = [1, 8, 15, 16, 20, 21, 22, 25];
+const WRAP_COLS: [u16; 9] = [1, 8, 15, 16, 20, 21, 22, 25, 26];
 const SNIPPET_COL: u16 = 19;
 const NEEDS_REVIEW_COL: u16 = 12;
 
@@ -1186,19 +1369,23 @@ fn write_finding_row(
     // raw rule ids here: this cell is client-facing, and each absorbed site's own rule
     // identity already travels in findings.json's `also_locations` entries.
     ws.write_number_with_format(r, 24, row.site_count as f64, &fmts.cell(bg, false, false))?;
-    let also_found_at = row
-        .also_locations
-        .iter()
-        .map(|l| {
-            if l.consequence {
-                format!("{}:{} (also affected)", l.path, l.line)
-            } else {
-                format!("{}:{}", l.path, l.line)
-            }
-        })
+    // Only members at a different place are listed as sites; those at a place already named
+    // read "Also flagged here as <headline> (<severity>)".
+    let also_found_at = site_locations(row)
+        .into_iter()
+        .skip(usize::from(!row.path.is_empty()))
+        .chain(flagged_here_notes(row))
+        .chain(Some(row.same_credential_note.clone()).filter(|n| !n.is_empty()))
         .collect::<Vec<_>>()
         .join("\n");
     ws.write_string_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
+    ws.write_string_with_format(
+        r,
+        26,
+        &row.severity_adjustments,
+        &fmts.cell(bg, true, false),
+    )?;
+    ws.write_string_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1224,7 +1411,7 @@ fn write_findings_sheet(
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, 26, "FP Reason", &fmts.header)?;
+        ws.write_string_with_format(0, FP_REASON_COL, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -1232,7 +1419,7 @@ fn write_findings_sheet(
         ws.set_column_width(c as u16, *w)?;
     }
     if fp_reason_col {
-        ws.set_column_width(26, 40.0)?;
+        ws.set_column_width(FP_REASON_COL, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -1247,12 +1434,21 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(r, 26, &row.fp_reason, &fmts.cell(bg, true, false))?;
+            ws.write_string_with_format(
+                r,
+                FP_REASON_COL,
+                &row.fp_reason,
+                &fmts.cell(bg, true, false),
+            )?;
         }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col { 26 } else { 25 };
+    let last_col: u16 = if fp_reason_col {
+        FP_REASON_COL
+    } else {
+        FP_REASON_COL - 1
+    };
     ws.autofilter(0, 0, last_row, last_col)?;
     ws.set_freeze_panes(1, 0)?;
 
@@ -1365,10 +1561,12 @@ fn write_deviations_sheet(
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#E0B400"));
 
-    let headers = [
+    // A project of several repos is several independent services, each with its own convention.
+    let multi = groups.iter().any(|g| !g.repo.is_empty());
+    let mut headers = vec![
         "Area",
         "What was checked",
-        "Convention your codebase follows",
+        convention_header(multi),
         "Sites deviating",
         "Sites assessed",
         "Highest severity",
@@ -1376,14 +1574,16 @@ fn write_deviations_sheet(
         "Recommended fix",
         "Rule ID",
     ];
+    let mut widths = vec![16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0];
+    if multi {
+        headers.push("Service");
+        widths.push(30.0);
+    }
     for (c, h) in headers.iter().enumerate() {
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
-    for (c, w) in [16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0]
-        .iter()
-        .enumerate()
-    {
+    for (c, w) in widths.iter().enumerate() {
         ws.set_column_width(c as u16, *w)?;
     }
 
@@ -1424,9 +1624,12 @@ fn write_deviations_sheet(
         ws.write_string_with_format(r, 6, g.locations.join("\n"), &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
+        if multi {
+            ws.write_string_with_format(r, 9, &g.repo, &fmts.cell(bg, false, false))?;
+        }
     }
 
-    ws.autofilter(0, 0, groups.len() as u32, 8)?;
+    ws.autofilter(0, 0, groups.len() as u32, if multi { 9 } else { 8 })?;
     ws.set_freeze_panes(1, 0)?;
     Ok(())
 }
@@ -1448,11 +1651,12 @@ fn write_conventions_sheet(
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#27AE60"));
 
-    let headers = [
+    let multi = rows.iter().any(|r| !r.repo.is_empty());
+    let mut headers = vec![
         "Area",
         "What was checked",
         "Status",
-        "Convention your codebase follows",
+        convention_header(multi),
         "Patterns in use",
         "What we observed",
         "Detail",
@@ -1460,14 +1664,16 @@ fn write_conventions_sheet(
         "Also found at",
         "Rule ID",
     ];
+    let mut widths = vec![16.0, 46.0, 36.0, 40.0, 34.0, 50.0, 60.0, 8.0, 36.0, 28.0];
+    if multi {
+        headers.push("Service");
+        widths.push(30.0);
+    }
     for (c, h) in headers.iter().enumerate() {
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
-    for (c, w) in [16.0, 46.0, 36.0, 40.0, 34.0, 50.0, 60.0, 8.0, 36.0, 28.0]
-        .iter()
-        .enumerate()
-    {
+    for (c, w) in widths.iter().enumerate() {
         ws.set_column_width(c as u16, *w)?;
     }
 
@@ -1495,11 +1701,93 @@ fn write_conventions_sheet(
         ws.write_number_with_format(r, 7, row.sites as f64, &fmts.cell(bg, false, false))?;
         ws.write_string_with_format(r, 8, &row.also_found_at, &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 9, &row.rule_id, &fmts.cell(bg, false, false))?;
+        if multi {
+            ws.write_string_with_format(r, 10, &row.repo, &fmts.cell(bg, false, false))?;
+        }
     }
 
-    ws.autofilter(0, 0, rows.len() as u32, 9)?;
+    ws.autofilter(0, 0, rows.len() as u32, if multi { 10 } else { 9 })?;
     ws.set_freeze_panes(1, 0)?;
     Ok(())
+}
+
+/// The name of the sheet that holds the patterns across services.
+pub const PATTERNS_SHEET: &str = "Patterns across services";
+
+/// The `Patterns across services` sheet: one row per rule the services differ on, one column
+/// per service. A cell reads "Violated n", "Clean", "Not applicable" or "Not reviewed" and, for
+/// the last two, the reason. It is an observation: no severity column, no tab colour for risk,
+/// and it is not in any count on the Index.
+fn write_patterns_sheet(
+    wb: &mut Workbook,
+    name: &str,
+    patterns: &crate::report_export::PatternsAcrossServicesJson,
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    let ws = wb.add_worksheet();
+    ws.set_name(name)?;
+    let _ = ws.set_tab_color(Color::from("#6B7280"));
+
+    ws.write_string_with_format(0, 0, "Patterns across services", &fmts.section_title)?;
+    ws.write_string(1, 0, &patterns.note)?;
+    const HEADER_ROW: u32 = 3;
+    ws.write_string_with_format(HEADER_ROW, 0, "What was checked", &fmts.header)?;
+    for (i, repo) in patterns.repos.iter().enumerate() {
+        ws.write_string_with_format(HEADER_ROW, (i + 1) as u16, repo, &fmts.header)?;
+    }
+    let rule_col = (patterns.repos.len() + 1) as u16;
+    ws.write_string_with_format(HEADER_ROW, rule_col, "Rule ID", &fmts.header)?;
+    ws.set_row_height(HEADER_ROW, 28)?;
+    ws.set_column_width(0, 56.0)?;
+    for i in 0..patterns.repos.len() {
+        ws.set_column_width((i + 1) as u16, 34.0)?;
+    }
+    ws.set_column_width(rule_col, 28.0)?;
+
+    if patterns.rows.is_empty() {
+        ws.write_string(
+            HEADER_ROW + 1,
+            0,
+            "No rule was found violated in one service and clean in another.",
+        )?;
+        ws.set_freeze_panes(HEADER_ROW + 1, 1)?;
+        return Ok(());
+    }
+    for (i, row) in patterns.rows.iter().enumerate() {
+        let r = HEADER_ROW + 1 + i as u32;
+        let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
+        ws.write_string_with_format(r, 0, &row.statement, &fmts.cell(bg, true, false))?;
+        for (c, repo) in patterns.repos.iter().enumerate() {
+            let label = row
+                .cells
+                .iter()
+                .find(|cell| &cell.repo == repo)
+                .map(|cell| sheet_cell_label(&cell.state))
+                .unwrap_or_default();
+            ws.write_string_with_format(r, (c + 1) as u16, &label, &fmts.cell(bg, true, false))?;
+        }
+        ws.write_string_with_format(r, rule_col, &row.rule_id, &fmts.cell(bg, false, false))?;
+    }
+    ws.autofilter(
+        HEADER_ROW,
+        0,
+        HEADER_ROW + patterns.rows.len() as u32,
+        rule_col,
+    )?;
+    ws.set_freeze_panes(HEADER_ROW + 1, 1)?;
+    Ok(())
+}
+
+/// A grid cell of the patterns sheet: "Violated 3", "Clean", "Not applicable (reason)" or "Not
+/// reviewed (reason)".
+fn sheet_cell_label(state: &crate::scan_ledger::CellState) -> String {
+    use crate::scan_ledger::CellState;
+    match state {
+        CellState::Violated { sites } => format!("Violated {sites}"),
+        CellState::Clean => "Clean".to_string(),
+        CellState::NotApplicable { reason } => format!("Not applicable ({reason})"),
+        CellState::NotReviewed { reason } => format!("Not reviewed ({reason})"),
+    }
 }
 
 /// One concise, client-facing line summarising what this inspection actually checked (G3:
@@ -1507,7 +1795,16 @@ fn write_conventions_sheet(
 /// written for a client, never an internal diagnostic dump"). The per-rule table below it is
 /// the audit trail — the xlsx is the detail surface, where a missing row is a fault — but a
 /// client should not have to count 400 rows to learn what happened.
-fn coverage_summary_line(coverage_rows: &[CoverageRow], not_assessed: usize) -> String {
+fn coverage_summary_line(
+    coverage_rows: &[CoverageRow],
+    not_assessed: usize,
+    multi_repo: bool,
+) -> String {
+    let subject = if multi_repo {
+        "these services"
+    } else {
+        "this codebase"
+    };
     let total = coverage_rows.len();
     let with_findings = coverage_rows
         .iter()
@@ -1522,15 +1819,15 @@ fn coverage_summary_line(coverage_rows: &[CoverageRow], not_assessed: usize) -> 
     let mut line = if total == 0 {
         "No rules were recorded as checked for this inspection.".to_string()
     } else if with_findings == 0 {
-        format!("We checked {total} {rules} against this codebase; every one came back clean.")
+        format!("We checked {total} {rules} against {subject}; every one came back clean.")
     } else if clean == 0 {
         format!(
-            "We checked {total} {rules} against this codebase, and every one found something \
+            "We checked {total} {rules} against {subject}, and every one found something \
              to look at."
         )
     } else {
         format!(
-            "We checked {total} {rules} against this codebase. {with_findings} found something \
+            "We checked {total} {rules} against {subject}. {with_findings} found something \
              to look at; the other {clean} {} checked and found clean.",
             if clean == 1 { "was" } else { "were" }
         )
@@ -1555,6 +1852,8 @@ fn write_coverage_sheet(
     tool_coverage_notes: &[String],
     rules_not_run: &[(String, String)],
     not_assessed: &[NotAssessedRow],
+    gaps: &crate::report_export::CoverageGapsJson,
+    multi_repo: bool,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let ws = wb.add_worksheet();
@@ -1566,7 +1865,7 @@ fn write_coverage_sheet(
     ws.write_string(
         1,
         0,
-        coverage_summary_line(coverage_rows, not_assessed.len()),
+        coverage_summary_line(coverage_rows, not_assessed.len(), multi_repo),
     )?;
     const HEADER_ROW: u32 = 3;
 
@@ -1591,7 +1890,7 @@ fn write_coverage_sheet(
         // A "Result" cell in words, not a bare integer: a client reading "0" has to guess
         // whether the rule was clean or never ran, and those are different statements — the
         // never-ran case is disclosed in its own section below, by name.
-        let (result, result_fmt) = if row.findings_count == 0 {
+        let (mut result, mut result_fmt) = if row.findings_count == 0 {
             (
                 "Clean — nothing found".to_string(),
                 fmts.cell(Some("#ECFDF5"), false, false),
@@ -1606,6 +1905,27 @@ fn write_coverage_sheet(
                 fmts.cell(None, false, false),
             )
         };
+        // A project of several repos: the result says which services it holds for. A rule that
+        // is clean in one service and not applicable, or not reviewed, in another is not clean
+        // for the project.
+        if !row.by_repo.is_empty() {
+            let everywhere = row.by_repo.iter().all(|c| c.result == "Clean");
+            if row.findings_count == 0 && !everywhere {
+                let unreviewed = row
+                    .by_repo
+                    .iter()
+                    .any(|c| c.result.starts_with("Not reviewed"));
+                result = if unreviewed {
+                    "Not reviewed in every service".to_string()
+                } else {
+                    "Clean where it applies".to_string()
+                };
+            }
+            result_fmt = fmts.cell(None, true, false);
+            for cell in &row.by_repo {
+                result.push_str(&format!("\n{}: {}", cell.repo, cell.result));
+            }
+        }
         ws.write_string_with_format(r, 0, &row.category, &fmts.cell(None, false, false))?;
         ws.write_string_with_format(r, 1, &row.title, &fmts.cell(None, true, false))?;
         ws.write_string_with_format(r, 2, &result, &result_fmt)?;
@@ -1660,7 +1980,11 @@ fn write_coverage_sheet(
             &fmts.section_title,
         )?;
         next_r += 1;
-        let ra_headers = ["Rule ID", "Chosen alternative", "Evidence", "Applicable"];
+        let ra_multi = rules_applied.iter().any(|r| !r.repo.is_empty());
+        let mut ra_headers = vec!["Rule ID", "Chosen alternative", "Evidence", "Applicable"];
+        if ra_multi {
+            ra_headers.push("Service");
+        }
         for (c, h) in ra_headers.iter().enumerate() {
             ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
@@ -1676,11 +2000,14 @@ fn write_coverage_sheet(
                 if row.applicable { "Yes" } else { "No" },
                 &fmts.cell(None, false, false),
             )?;
+            if ra_multi {
+                ws.write_string_with_format(next_r, 4, &row.repo, &fmts.cell(None, false, false))?;
+            }
             next_r += 1;
         }
         let ra_last_row = next_r.saturating_sub(1);
         if ra_last_row > ra_header_row {
-            ws.autofilter(ra_header_row, 0, ra_last_row, 3)?;
+            ws.autofilter(ra_header_row, 0, ra_last_row, if ra_multi { 4 } else { 3 })?;
         }
         next_r += 1;
     }
@@ -1705,12 +2032,7 @@ fn write_coverage_sheet(
     // EXPORTED ROW (it reaches findings.json), so this section renders each row's own
     // headline verbatim — that is what keeps artifact parity true after the kind partition.
     if !not_assessed.is_empty() {
-        ws.write_string_with_format(
-            next_r,
-            0,
-            "Checks we could not complete this scan",
-            &fmts.section_title,
-        )?;
+        ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
         for (c, h) in [
             "What was checked",
@@ -1751,6 +2073,96 @@ fn write_coverage_sheet(
             ws.write_string_with_format(next_r, 0, rid, &fmts.cell(None, false, false))?;
             ws.write_string_with_format(next_r, 1, reason, &fmts.cell(None, true, false))?;
             next_r += 1;
+        }
+        next_r += 1;
+    }
+
+    // H4: what the scan did not review, by pass and by path — the same
+    // `report_export::coverage_gaps` the PDF and findings.json carry. Every skipped file is
+    // listed here in full (the PDF shows the first ones and points here).
+    if !gaps.is_empty() {
+        ws.write_string_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
+        next_r += 1;
+        for line in gaps.failed_ai_passes.iter().chain(&gaps.dependency_gaps) {
+            ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
+            next_r += 1;
+        }
+        // H10: rules checked against only the files in their language or declared scope.
+        if let Some(note) = &gaps.scope_limited_note {
+            ws.write_string_with_format(next_r, 0, note, &fmts.cell(None, true, false))?;
+            next_r += 1;
+            for (c, h) in [
+                "Rule ID",
+                "Files checked",
+                "Files handed to the audit",
+                "Counted over",
+                "Scope",
+            ]
+            .iter()
+            .enumerate()
+            {
+                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            }
+            next_r += 1;
+            for rule in &gaps.scope_limited_rules {
+                ws.write_string_with_format(
+                    next_r,
+                    0,
+                    &rule.rule_id,
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_number(next_r, 1, rule.files_checked as f64)?;
+                ws.write_number(next_r, 2, rule.files_total as f64)?;
+                ws.write_string_with_format(
+                    next_r,
+                    3,
+                    if rule.changed_files_only {
+                        "files changed since the earlier inspection"
+                    } else {
+                        "all files"
+                    },
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    4,
+                    &rule.scope,
+                    &fmts.cell(None, false, false),
+                )?;
+                next_r += 1;
+            }
+            next_r += 1;
+        }
+        if !gaps.skipped_files.is_empty() || gaps.skipped_beyond_cap_total > 0 {
+            for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
+                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            }
+            next_r += 1;
+            for skipped in &gaps.skipped_files {
+                ws.write_string_with_format(
+                    next_r,
+                    0,
+                    &skipped.repo,
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    1,
+                    &skipped.path,
+                    &fmts.cell(None, true, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    2,
+                    &skipped.reason,
+                    &fmts.cell(None, false, false),
+                )?;
+                next_r += 1;
+            }
+            // The list is bounded per reason; the files past the bound are counted, not named.
+            if let Some(note) = &gaps.skipped_beyond_cap_note {
+                ws.write_string_with_format(next_r, 1, note, &fmts.cell(None, true, false))?;
+            }
         }
     }
 
@@ -1795,8 +2207,9 @@ fn write_index_sheet(
         ws.write_string(r, 0, &opts.project_title)?;
         r += 1;
     }
-    if !opts.client_name.is_empty() {
-        ws.write_string(r, 0, format!("Prepared for {}", opts.client_name))?;
+    let client = crate::report_export::clean_client_name(&opts.client_name);
+    if !client.is_empty() {
+        ws.write_string(r, 0, format!("Prepared for {client}"))?;
         r += 1;
     }
     if !opts.prepared_by.is_empty() {
@@ -1864,6 +2277,13 @@ fn write_index_sheet(
     r += 1;
     ws.write_string(r, 0, "Code volume (characters)")?;
     ws.write_number(r, 1, report.code_chars as f64)?;
+    if report.repos.len() > 1 {
+        for v in &report.volume_by_repo {
+            r += 1;
+            ws.write_string(r, 0, format!("Code volume: {}", v.repo))?;
+            ws.write_string(r, 1, format!("{} lines in {} files", v.lines, v.files))?;
+        }
+    }
     r += 2;
 
     // ── Counts matrix: category x severity ─────────────────────────────────
@@ -1935,22 +2355,18 @@ fn write_index_sheet(
             None => unclassified += 1,
         }
     }
-    for (label, count, where_to_look) in [
-        ("Defects", defects, "All Findings"),
+    for (tag, count, where_to_look) in [
+        ("defect", defects, "All Findings"),
         (
-            "Deviations from your own conventions",
+            "deviation",
             deviations,
             "Deviations (one row per convention), All Findings (one row per site)",
         ),
-        (
-            "Conventions followed consistently",
-            conventions_followed,
-            "Conventions",
-        ),
-        ("No convention adopted", no_convention, "Conventions"),
-        ("Not assessed this scan", not_assessed, "Coverage"),
+        ("convention_observed", conventions_followed, "Conventions"),
+        ("no_convention", no_convention, "Conventions"),
+        ("not_assessed", not_assessed, "Coverage"),
     ] {
-        ws.write_string(r, 0, label)?;
+        ws.write_string(r, 0, statement_type_label(tag))?;
         ws.write_number(r, 1, count as f64)?;
         ws.write_string(r, 2, where_to_look)?;
         r += 1;
@@ -1959,7 +2375,12 @@ fn write_index_sheet(
     // producer assigned no kind is an unmapped emission path, and A5.6's backfill rule is
     // that such a row is surfaced as a gap rather than silently counted as a defect.
     if unclassified > 0 {
-        ws.write_string_with_format(r, 0, "Unclassified", &fmts.bold)?;
+        ws.write_string_with_format(
+            r,
+            0,
+            statement_type_label(camerata_api_types::audit::UNSPECIFIED_KIND_TAG),
+            &fmts.bold,
+        )?;
         ws.write_number_with_format(r, 1, unclassified as f64, &fmts.bold)?;
         ws.write_string(r, 2, "All Findings")?;
         r += 1;
@@ -2057,9 +2478,11 @@ fn write_index_sheet(
     ws.write_string_with_format(r, 0, "Provenance vocabulary", &fmts.bold)?;
     r += 1;
     for line in [
-        "Deterministic — corpus-grounded, cites an authoritative external source",
-        "Preview: {tool} — scan-time deterministic tool pass, not yet wired into the gate",
-        "AI-advisory — model-inferred, no corpus citation",
+        "Deterministic: corpus-grounded, cites an authoritative external source",
+        "Preview: {tool}: scan-time deterministic tool pass, not yet wired into the gate",
+        "AI-advisory: model-inferred; may cite a related standard",
+        "Related standard (in the Citation column): a published standard matched to a model \
+         finding by keyword, not a rule Camerata checked",
     ] {
         ws.write_string(r, 0, line)?;
         r += 1;
@@ -2087,13 +2510,48 @@ fn write_index_sheet(
     for sheet in sheet_plan {
         let link = format!("internal:'{}'!A1", sheet.sheet_name);
         ws.write_url_with_text(r, 0, link.as_str(), &sheet.display_name)?;
-        ws.write_number(r, 1, sheet.count as f64)?;
+        // The patterns sheet holds observations, not findings: nothing under this column.
+        if sheet.display_name != PATTERNS_SHEET {
+            ws.write_number(r, 1, sheet.count as f64)?;
+        }
         ws.write_string(r, 2, &sheet.worst_severity)?;
         r += 1;
     }
 
     Ok(())
 }
+
+/// The Index sheet's "Statement types" label for each kind's wire tag (`FindingKind::tag`, or
+/// `UNSPECIFIED_KIND_TAG` for a row with no kind). The one table the Index writer and the
+/// release gate's count reconciliation both read, so the gate finds exactly the line written.
+pub(crate) const STATEMENT_TYPES: [(&str, &str); 6] = [
+    ("defect", "Defects"),
+    ("deviation", "Deviations from your own conventions"),
+    ("convention_observed", "Conventions followed consistently"),
+    ("no_convention", "No convention adopted"),
+    ("not_assessed", "Not assessed this scan"),
+    (
+        camerata_api_types::audit::UNSPECIFIED_KIND_TAG,
+        "Unclassified",
+    ),
+];
+
+/// [`STATEMENT_TYPES`]' label for `tag`; the tag itself for one not in the table.
+pub(crate) fn statement_type_label(tag: &str) -> &str {
+    STATEMENT_TYPES
+        .iter()
+        .find(|(t, _)| *t == tag)
+        .map_or(tag, |(_, label)| label)
+}
+
+/// The kinds the "All Findings" sheet lists one row per site (`kind_sheet` routes the rest to
+/// the Conventions and Coverage sheets, grouped), so the gate compares that sheet with the JSON
+/// rows of these kinds only.
+pub(crate) const ALL_FINDINGS_SHEET_KINDS: [&str; 3] = [
+    "defect",
+    "deviation",
+    camerata_api_types::audit::UNSPECIFIED_KIND_TAG,
+];
 
 // ── Public entry point ──────────────────────────────────────────────────────────────
 
@@ -2223,6 +2681,20 @@ pub fn build_workbook(
         worst_severity: String::new(),
     });
 
+    // Only for a project of several repos; a one-repo workbook has no such sheet.
+    let patterns_json = crate::report_export::patterns_across_services_json(report, corpus);
+    let patterns_name = patterns_json.as_ref().map(|_| {
+        let name = sanitize_sheet_name(PATTERNS_SHEET, &mut used_names);
+        sheet_plan.push(SheetSummary {
+            display_name: PATTERNS_SHEET.to_string(),
+            sheet_name: name.clone(),
+            count: patterns_json.as_ref().map_or(0, |p| p.rows.len()),
+            // An observation has no severity.
+            worst_severity: String::new(),
+        });
+        name
+    });
+
     let dep_coverage_notes: Vec<String> = report
         .coverage_notes
         .iter()
@@ -2319,12 +2791,44 @@ pub fn build_workbook(
         &tool_coverage_notes,
         &rules_not_run,
         &not_assessed_rows,
+        &crate::report_export::coverage_gaps::coverage_gaps(report),
+        report.repos.len() > 1,
         &fmts,
     )
     .context("writing the Coverage sheet")?;
+    // Patterns across services: after the Coverage sheet, so every existing sheet keeps its
+    // position. Only for a project of several repos.
+    if let (Some(name), Some(patterns)) = (patterns_name.as_deref(), patterns_json.as_ref()) {
+        write_patterns_sheet(&mut wb, name, patterns, &fmts)
+            .context("writing the Patterns across services sheet")?;
+    }
+    // H4: the optional triage log, last so every existing sheet keeps its position. Off by
+    // default; see `triage_log`.
+    if triage_log::wanted(opts) {
+        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
+            .context("writing the Triage Log sheet")?;
+    }
+
+    // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
+    // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
+    // with the page number right. Applied after every sheet exists, so a sheet added later
+    // cannot be missed. The release gate reads the footers back and checks them.
+    let marking = crate::report_export::confidentiality_marking(&report.provenance, opts);
+    let footer = sheet_footer(&marking.line);
+    for ws in wb.worksheets_mut() {
+        ws.set_footer(&footer);
+    }
 
     wb.save_to_buffer()
         .context("serializing the xlsx workbook to bytes")
+}
+
+/// The sheet footer for a confidentiality line: the line on the left (`&L`), "Page N of M" on
+/// the right. `&` is Excel's footer control character, so a literal one in the line (a client
+/// called "Smith & Jones") is doubled.
+pub(crate) fn sheet_footer(line: &str) -> String {
+    format!("&L{}&RPage &P of &N", line.replace('&', "&&"))
 }
 
 // ── `findings.json` (product export, machine-readable sibling of the workbook) ────────
@@ -2357,6 +2861,14 @@ pub struct FindingsExport {
     pub provenance: crate::report_export::CoverJson,
     pub summary: crate::report_export::ExecutiveSummaryJson,
     pub findings: Vec<FindingRow>,
+    /// H4: what the scan did not review (failed AI passes, files skipped for size or past the
+    /// file cap), by path. Reused verbatim from `report_json.coverage_gaps`, like `provenance`.
+    pub coverage: crate::report_export::CoverageGapsJson,
+    /// Where the services of a multi-repo project differ on a rule, reused verbatim from
+    /// `report_json.patterns_across_services`. An observation: it is never inside `findings`,
+    /// carries no severity and is in no count. The key is absent for a one-repo project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patterns_across_services: Option<crate::report_export::PatternsAcrossServicesJson>,
 }
 
 /// Build the `findings.json` payload — the JSON sibling of [`build_workbook`]. Takes the
@@ -2379,6 +2891,8 @@ pub fn build_findings_export(
         provenance: report_json.cover.clone(),
         summary: report_json.executive_summary.clone(),
         findings,
+        coverage: report_json.coverage_gaps.clone(),
+        patterns_across_services: report_json.patterns_across_services.clone(),
     }
 }
 
@@ -2528,7 +3042,8 @@ pub fn build_csv_exports(
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let json = build_json_exports(report, dispositions, corpus, opts)?;
-    json.into_iter()
+    let mut csv: Vec<(String, Vec<u8>)> = json
+        .into_iter()
         .map(|(path, bytes)| {
             // json/foo.json -> csv/foo.csv
             let name = path
@@ -2538,14 +3053,31 @@ pub fn build_csv_exports(
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
         })
-        .collect()
+        .collect::<anyhow::Result<_>>()?;
+    // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
+    // not one of the eight `DATASETS`; the release gate admits it as an optional member).
+    if triage_log::wanted(opts) {
+        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        csv.push((
+            triage_log::TRIAGE_LOG_CSV.to_string(),
+            triage_log::triage_log_csv(&log)?,
+        ));
+    }
+    Ok(csv)
 }
+
+pub mod triage_log;
+
+#[cfg(test)]
+mod triage_log_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::onboard::{AuditedRef, Finding, ScanProvenance};
     use std::io::Read;
+
+    mod related_citation;
 
     fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
@@ -2560,13 +3092,19 @@ mod tests {
         }
     }
 
-    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+    pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: Vec::new(),
@@ -2599,6 +3137,7 @@ mod tests {
                 audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
                 camerata_version: "0.0.0-test".to_string(),
                 osv_scanner_version: Some("1.9.0".to_string()),
+                vulnerability_data: None,
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
                 model_sessions: Vec::new(),
@@ -2810,7 +3349,12 @@ mod tests {
         // data-structure change this test adapts to; tracker test-discipline exception (a)).
         // Pass-1 W7 (C5): 24 -> 26 — the Sites + "Also found at" columns append after Kind
         // (same exception (a): absorbed merge sites must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 26);
+        // False-negative audit (M2/M8, H11): 26 -> 28 — "Severity adjustments" and "Carried
+        // from" append after "Also found at" (same exception (a): a lowered severity and a
+        // carried-forward row must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 28);
+        assert_eq!(HEADERS[26], "Severity adjustments");
+        assert_eq!(HEADERS[27], "Carried from");
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.
@@ -3038,6 +3582,7 @@ mod tests {
         report.recommendations.insert(
             "MULTI-RULE-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "MULTI-RULE-1".to_string(),
                 recommended_option_id: "opt-b".to_string(),
                 recommendation_reasoning: "the repo already does it the B way".to_string(),
@@ -3051,6 +3596,7 @@ mod tests {
         report.recommendations.insert(
             "MULTI-RULE-2".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "MULTI-RULE-2".to_string(),
                 recommended_option_id: String::new(),
                 recommendation_reasoning: "no evidence of this anywhere in the codebase"
@@ -3428,7 +3974,7 @@ mod tests {
         let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
         assert_eq!(
             rows[0].fix_specific.as_deref(),
-            Some("Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does.")
+            Some("Use safeInternalPath from lib/redirect.ts, as app/auth/signin/route.ts does.")
         );
     }
 
@@ -3458,9 +4004,10 @@ mod tests {
         f.fix_specific = Some("Enable RLS directly on `profiles`.".to_string());
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        // Plain-text artifacts carry the fix without the markdown backticks.
         assert_eq!(
             rows[0].fix_specific.as_deref(),
-            Some("Enable RLS directly on `profiles`.")
+            Some("Enable RLS directly on profiles.")
         );
         assert!(rows[0]
             .fix
@@ -3468,9 +4015,111 @@ mod tests {
             .is_some_and(|s| s.contains("profiles")));
     }
 
+    /// Fix text reaches the plain-text artifacts (workbook cells, `findings.json`, CSV) as ONE
+    /// paragraph per authored paragraph and without markdown backticks: the rule TOML's hard
+    /// line wraps are joined and `code` spans lose their backticks.
+    #[tokio::test]
+    async fn fix_text_is_joined_and_backtick_free_in_workbook_json_and_csv() {
+        let (corpus, errors) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut f = finding(
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "apps/web/.env.production",
+            3,
+            "critical",
+        );
+        f.fix_specific = Some(
+            "Move the key out of `apps/web/.env.production`\nand rename `VITE_KEY`,\nthen rotate it.\n\nRedeploy."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec![]);
+        let sealed = report.clone().seal();
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let generic = rows[0].fix.as_deref().expect("authored remediation");
+        let specific = rows[0].fix_specific.as_deref().expect("specific fix");
+        assert_eq!(
+            specific,
+            "Move the key out of apps/web/.env.production and rename VITE_KEY, then rotate it.\n\nRedeploy."
+        );
+        assert!(
+            !generic.contains('`') && !generic.contains('\n'),
+            "{generic:?}"
+        );
+        assert!(generic.contains("NEXT_PUBLIC_"), "{generic:?}");
+
+        // The workbook cells (V = fix_specific, W = Recommended Fix on the All Findings sheet).
+        let xlsx = build_workbook(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        for cell in ["V2", "W2"] {
+            let text = cell_text(&xlsx, "xl/worksheets/sheet2.xml", cell);
+            assert!(!text.contains('`'), "{cell}: {text:?}");
+        }
+        assert_eq!(
+            cell_text(&xlsx, "xl/worksheets/sheet2.xml", "W2"),
+            generic.to_string()
+        );
+
+        // The CSV (derived from the same rows).
+        let exports =
+            build_csv_exports(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        let all = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/all-findings.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(all.as_slice());
+        let headers = rdr.headers().unwrap().clone();
+        let rec = rdr.records().next().expect("one data row").unwrap();
+        for col in ["fix", "fix_specific"] {
+            let i = headers.iter().position(|h| h == col).expect(col);
+            assert!(!rec[i].contains('`'), "{col}: {:?}", &rec[i]);
+        }
+    }
+
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
 
     // ── Pass-1 W3 (A5.6/A5.2): the kind must survive to findings.json, losslessly ────────
+
+    /// 22d: the release gate compares the All Findings sheet with the JSON rows of
+    /// `ALL_FINDINGS_SHEET_KINDS` only, so that list must be exactly the kinds `kind_sheet`
+    /// routes to the sheet; and every kind has a Statement types label.
+    #[test]
+    fn the_gates_sheet_kind_list_matches_the_sheet_routing_and_every_kind_has_a_label() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+            NotAssessedReason,
+        };
+        let kinds: Vec<Option<FindingKind>> = vec![
+            None,
+            Some(FindingKind::Defect),
+            Some(FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: String::new(),
+            })),
+            Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: String::new(),
+                convention_label: String::new(),
+            })),
+            Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+            })),
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::PassFailed,
+                reason_detail: String::new(),
+            })),
+        ];
+        for kind in &kinds {
+            let tag = FindingKind::tag_or_unspecified(kind.as_ref());
+            assert_eq!(
+                ALL_FINDINGS_SHEET_KINDS.contains(&tag),
+                kind_sheet_for(kind.as_ref()) == KindSheet::Findings,
+                "{tag}"
+            );
+            assert_ne!(statement_type_label(tag), tag, "{tag} has no Index label");
+        }
+    }
 
     fn kinded(mut f: Finding, kind: camerata_api_types::audit::FindingKind) -> Finding {
         f.kind = Some(kind);
@@ -3793,7 +4442,11 @@ mod tests {
             expected.is_some(),
             "fixture rule must have authored remediation"
         );
-        assert_eq!(findings_export.findings[0].fix, expected);
+        // Same authored text, in the plain-text form (no markdown backticks) the workbook uses.
+        assert_eq!(
+            findings_export.findings[0].fix,
+            expected.map(|s| crate::report_export::fix_text::plain(&s))
+        );
     }
 
     #[test]
@@ -3852,7 +4505,7 @@ mod tests {
         );
         assert_eq!(
             findings_export.findings[0].fix_specific.as_deref(),
-            Some("Use `safeInternalPath` from lib/redirect.ts.")
+            Some("Use safeInternalPath from lib/redirect.ts.")
         );
         let serialized = serde_json::to_string(&findings_export.findings[0]).unwrap();
         let fix_specific_idx = serialized
@@ -4438,19 +5091,15 @@ mod tests {
     /// cross-artifact test below can exercise a REAL PDF compile where possible without
     /// failing in an environment that never installed the binary.
     fn typst_available() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        camerata_test_env::typst_on_path()
     }
 
     /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3
     /// fallback (`classify_ai_finding`) into a known defect class, must carry the IDENTICAL
-    /// grounded citation, a human-readable title (never the bare invented rule id), and its
-    /// real semantic category (never a mangled rule-id-token key) across `findings.json`, the
-    /// xlsx workbook, and the PDF's curated-findings data — and the category scorecard must
-    /// count it as a checked rule. This is the general class behind the "AI-tier critical is
+    /// citation (the class's sources, labelled as a related standard since H5), a
+    /// human-readable title (never the bare invented rule id), and its real semantic category
+    /// (never a mangled rule-id-token key) across `findings.json`, the xlsx workbook, and the
+    /// PDF's curated-findings data — and the category scorecard must count it as a checked rule. This is the general class behind the "AI-tier critical is
     /// uncited in json/xlsx while the PDF prints a different rule's citation under a mangled
     /// category with 0 rules checked" bug.
     #[tokio::test]
@@ -4506,9 +5155,22 @@ mod tests {
             "the AI-tier finding must survive the P3 citation gate into the curated set"
         );
         let group = &json.curated_findings[0];
+        // H5: the class's sources, labelled as a related standard (a keyword match is not a
+        // rule check) — see `report_export::RELATED_STANDARD_LABEL_PREFIX`.
         assert_eq!(
-            group.citation.label, grounding_citation.label,
-            "the group header's citation must be the P3 class's grounded citation, not advisory"
+            group.citation.label,
+            format!(
+                "{}{}",
+                crate::report_export::RELATED_STANDARD_LABEL_PREFIX,
+                grounding_citation.label
+            ),
+            "the group header's citation must be the P3 class's sources as a related standard, \
+             not advisory"
+        );
+        assert_eq!(group.citation.kind, "related");
+        assert_eq!(
+            group.citation.sources.len(),
+            grounding_citation.sources.len()
         );
         assert_ne!(
             group.title, "AI-RLS-GAP-CUSTOM-7",
@@ -4973,22 +5635,22 @@ mod tests {
     fn req_c5_absorbed_sites_are_observable_in_findings_json() {
         let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         f.also_locations = vec![
-            crate::onboard::MergedLocation {
-                repo: "owner/repo".to_string(),
-                path: "src/orders.rs".to_string(),
-                line: 24,
-                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-                snippet: "let q = format!(\"SELECT ... {}\", id);".to_string(),
-                consequence: false,
-            },
-            crate::onboard::MergedLocation {
-                repo: "owner/repo".to_string(),
-                path: "src/orders.rs".to_string(),
-                line: 41,
-                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-                snippet: "let q = \"DELETE ...\".to_string() + &id;".to_string(),
-                consequence: true,
-            },
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/orders.rs".to_string(),
+                24,
+                "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                "let q = format!(\"SELECT ... {}\", id);".to_string(),
+                false,
+            ),
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/orders.rs".to_string(),
+                41,
+                "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                "let q = \"DELETE ...\".to_string() + &id;".to_string(),
+                true,
+            ),
         ];
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let json = crate::report_export::build_report_json(
@@ -5049,14 +5711,14 @@ mod tests {
     fn req_c6_a_rule_merged_away_as_a_member_never_renders_clean_on_the_coverage_sheet() {
         let mut primary = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         primary.also_matches = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
-        primary.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "owner/repo".to_string(),
-            path: "src/orders.rs".to_string(),
-            line: 12,
-            rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
-            snippet: "let key = \"sk_live_...\";".to_string(),
-            consequence: false,
-        }];
+        primary.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            "src/orders.rs".to_string(),
+            12,
+            "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+            "let key = \"sk_live_...\";".to_string(),
+            false,
+        )];
         let report = report_with(
             vec![primary],
             vec!["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
@@ -5115,10 +5777,13 @@ mod tests {
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
         let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: "eslint".to_string(),
             message: "Could not preview 12 rule(s) with eslint: spawn ENOENT.".to_string(),
         }];
         report.ledger.record_rule(
+            "",
             "JS-SOME-NEVER-RUN-RULE-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             false,
@@ -5145,6 +5810,66 @@ mod tests {
             shared.contains("Rules not run this scan")
                 && shared.contains("JS-SOME-NEVER-RUN-RULE-1"),
             "a ledger-excluded rule must be named on the Coverage sheet"
+        );
+    }
+
+    /// A member absorbed at the row's own line is the same place: the workbook counts one site
+    /// and prints the "Also flagged here" note (with the member's headline and severity).
+    #[test]
+    fn a_same_line_member_is_a_note_not_another_site_in_the_workbook() {
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "medium");
+        f.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo",
+            "src/orders.rs",
+            10,
+            "AI-INVENTED-1",
+            "x",
+            false,
+        )
+        .with_rating("critical", "Any user can read any invoice")];
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.seal();
+        let json =
+            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["site_count"], 1, "{row}");
+        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("Also flagged here as Any user can read any invoice (critical)"),
+            "the note is in the workbook"
+        );
+    }
+
+    /// A line-0 row with a snippet longer than the workbook cap and an absorbed member quoting
+    /// the same raw snippet are the same place; the workbook cap must not tell them apart.
+    #[test]
+    fn a_long_snippet_row_and_its_same_place_member_are_one_site_in_the_workbook() {
+        let long = "x".repeat(WORKBOOK_SNIPPET_MAX_CHARS + 500);
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 0, "medium");
+        f.snippet = long.clone();
+        f.also_locations = vec![crate::onboard::MergedLocation::site(
+            f.repo.clone(),
+            "src/orders.rs",
+            0,
+            "AI-INVENTED-1",
+            long,
+            false,
+        )
+        .with_rating("critical", "Second view of the same place")];
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.seal();
+        let json =
+            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["site_count"], 1, "{row}");
+        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("Also flagged here as Second view of the same place (critical)"),
+            "the same-place member is a note, not a second site"
         );
     }
 
@@ -5722,16 +6447,17 @@ mod tests {
             citation_kind: "grounded".to_string(),
             citation_label: "l".to_string(),
             findings_count,
+            by_repo: Vec::new(),
         };
 
         // Nothing checked at all: never a sentence with a 0 in it pretending to be a result.
         assert_eq!(
-            coverage_summary_line(&[], 0),
+            coverage_summary_line(&[], 0, false),
             "No rules were recorded as checked for this inspection."
         );
 
         // The healthy case: no "0 found something to look at".
-        let all_clean = coverage_summary_line(&[row(0), row(0), row(0)], 0);
+        let all_clean = coverage_summary_line(&[row(0), row(0), row(0)], 0, false);
         assert_eq!(
             all_clean,
             "We checked 3 rules against this codebase; every one came back clean."
@@ -5742,7 +6468,7 @@ mod tests {
         );
 
         // Everything fired: no "the other 0 were checked and found clean".
-        let none_clean = coverage_summary_line(&[row(2), row(1)], 0);
+        let none_clean = coverage_summary_line(&[row(2), row(1)], 0, false);
         assert_eq!(
             none_clean,
             "We checked 2 rules against this codebase, and every one found something to look at."
@@ -5751,13 +6477,13 @@ mod tests {
         // Singulars agree, and the not-assessed clause is appended rather than replacing the
         // summary — a rule that could not be evaluated is extra honesty, not a substitute for
         // saying what WAS checked.
-        let one = coverage_summary_line(&[row(1)], 1);
+        let one = coverage_summary_line(&[row(1)], 1, false);
         assert!(
             one.starts_with("We checked 1 rule against this codebase")
                 && one.contains("A further 1 could not be evaluated this scan and is named below"),
             "{one:?}"
         );
-        let mixed = coverage_summary_line(&[row(1), row(0), row(0)], 2);
+        let mixed = coverage_summary_line(&[row(1), row(0), row(0)], 2, false);
         assert_eq!(
             mixed,
             "We checked 3 rules against this codebase. 1 found something to look at; the other \
@@ -5780,13 +6506,15 @@ mod tests {
     #[test]
     fn req_pass3_absorbed_merge_sites_stay_visible_on_the_new_sheets() {
         use camerata_api_types::audit::{ConventionObservedKind, DeviationKind, FindingKind};
-        let loc = |line: usize, consequence: bool| crate::onboard::MergedLocation {
-            repo: "owner/repo".to_string(),
-            path: "src/api/users.rs".to_string(),
-            line,
-            rule_id: "ARCH-API-VERSIONING-1".to_string(),
-            snippet: "router.get(\"/users\", …)".to_string(),
-            consequence,
+        let loc = |line: usize, consequence: bool| {
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/api/users.rs".to_string(),
+                line,
+                "ARCH-API-VERSIONING-1".to_string(),
+                "router.get(\"/users\", …)".to_string(),
+                consequence,
+            )
         };
         let mut dev = kinded(
             finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
@@ -5806,14 +6534,14 @@ mod tests {
                 convention_label: "Cursor pagination".to_string(),
             }),
         );
-        conv.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "owner/repo".to_string(),
-            path: "src/api/search.rs".to_string(),
-            line: 22,
-            rule_id: "ARCH-PAGINATION-1".to_string(),
-            snippet: "cursor".to_string(),
-            consequence: false,
-        }];
+        conv.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            "src/api/search.rs".to_string(),
+            22,
+            "ARCH-PAGINATION-1".to_string(),
+            "cursor".to_string(),
+            false,
+        )];
 
         let report = report_with(vec![dev, conv], vec![]);
         let bytes =

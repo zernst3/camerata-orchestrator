@@ -1,5 +1,5 @@
 id = "PROC-AUTO-MERGE-1"
-version = 1
+version = 3
 title = "Auto-merge tight, bot-authored PRs"
 domain = "ci-cd"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "decision"
 inspectable = false
 default = false
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.github.com/en/code-security/tutorials/secure-your-dependencies/automate-dependabot-with-actions"
+title = "GitHub Docs: Automating Dependabot with GitHub Actions (enable auto-merge only for a chosen class of bot pull requests, such as patch updates)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — referenced in brownfield onboarding context (auto-merge tight bot PRs)"
+title = "Project policy: bot pull requests that are single-purpose, follow conventions and touch no sensitive area may merge on green CI"
 
 [decision]
 question = "Which bot-authored PRs may self-merge?"
@@ -20,9 +24,9 @@ why = "Tight bot PRs don't need human judgment; conventions + CI cover the safet
 [[option]]
 id = "tight-single-purpose-convention-following-non-hard-guard-prs-on-green-ci"
 label = "tight, single-purpose, convention-following, non-hard-guard PRs on green CI"
-directive = "PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard areas, add no new conventions, and pass CI + automated review → auto-merge (tagged). Frees human review for judgment-heavy PRs."
+directive = "PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard areas, add no new conventions and pass CI + automated review → auto-merge (tagged). Frees human review for judgment-heavy PRs."
 remediation = """
-Configure auto-merge to apply only to PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard area, introduce no new convention, and have passed CI plus automated review, and tag those PRs explicitly so the exception is auditable. Route every other bot-authored PR to human review instead of merging it automatically. Verify by confirming a PR that touches a hard-guard area or introduces a new pattern does not auto-merge, even with green CI.
+Configure auto-merge to apply only to PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard area, introduce no new convention and have passed CI plus automated review, and tag those PRs explicitly so the exception is auditable. Route every other bot-authored PR to human review instead of merging it automatically. Verify by confirming a PR that touches a hard-guard area or introduces a new pattern does not auto-merge, even with green CI.
 """
 why = "Tight bot PRs do not need human judgment; conventions and CI already cover their safety surface, and routing them through manual review consumes reviewer attention on changes whose correctness is already guaranteed."
 
@@ -38,5 +42,5 @@ why = "Requiring human review on everything is safer but loses the throughput be
 [[option]]
 id = "auto-merge-any-bot-pr-on-green-ci-unconditionally"
 label = "auto-merge any bot-authored PR once CI passes, regardless of scope or hard-guard areas"
-directive = "Any bot-authored pull request auto-merges as soon as CI passes, with no distinction by scope, size, whether it touches a hard-guard area, or whether it introduces a new convention."
+directive = "Any bot-authored pull request auto-merges as soon as CI passes, with no distinction by scope, size, whether it touches a hard-guard area or whether it introduces a new convention."
 why = "Maximizes throughput and requires no per-PR scope judgment, but widens the blast radius: a single bad routine can ship a damaging change before anyone notices, because CI passing is not the same guarantee as 'this change is tight, single-purpose, and touches nothing sensitive.' The hard-guard areas exist precisely because the cost of a wrong autonomous call there is high, and green CI alone does not certify that a change stays out of them."

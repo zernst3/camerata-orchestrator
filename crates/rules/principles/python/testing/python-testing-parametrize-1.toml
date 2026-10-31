@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-PARAMETRIZE-1"
-version = 1
+version = 2
 title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-paste test functions"
 domain = "python:testing"
 layer = "language"
@@ -32,14 +32,14 @@ why = "Duplicates logic that will diverge; scales poorly; adding a case requires
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/how-to/parametrize.html"
-title = "pytest — How to parametrize fixtures and test functions"
+title = "pytest: How to parametrize fixtures and test functions"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/pytest-parametrize-names-wrong-type/"
-title = "Ruff PT006 — pytest-parametrize-names-wrong-type"
+title = "Ruff PT006: pytest-parametrize-names-wrong-type"
 linter = "Ruff: PT006"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/pytest-parametrize-values-wrong-type/"
-title = "Ruff PT007 — pytest-parametrize-values-wrong-type"
+title = "Ruff PT007: pytest-parametrize-values-wrong-type"
 linter = "Ruff: PT007"

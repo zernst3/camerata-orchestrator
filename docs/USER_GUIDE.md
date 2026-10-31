@@ -182,6 +182,55 @@ Repository Workspace · Settings · Docs**.
 
 ---
 
+## 2a. Guided inspection (the walkthrough)
+
+A short guided mode for the Inspection, from an empty app to an exported package. A small popup
+points at the real control on screen (with an arrow, and the control lightly highlighted), says in a
+sentence or two what it does, and shows "Step N of 12" with **Back**, **Next** and **Exit**. It
+never clicks, types or decides anything for you.
+
+**Turning it on**
+- The **Guided inspection** switch on the **Onboard repos** screen, where an inspection starts. On
+  means the walkthrough runs alongside the real flow; off hides it. The switch is remembered for
+  you on this computer (it is an app setting, not part of any project, so a project export never
+  carries it).
+- On a first launch with no projects, the Projects home offers it once: "Want a guided first
+  inspection?" **No thanks** is remembered and the offer is not made again; the switch stays
+  available.
+- **Start walkthrough** in the **Help** menu, or the same line in the command palette (Ctrl+K or
+  Cmd+K), starts it again from step 1 at any time.
+
+**How it behaves**
+- Most steps move on by themselves when you do the thing (open a project, press the audit button).
+  If you start it with the thing already done (from inside an open project, step 1 is already
+  satisfied), it skips that step. **Next** skips ahead, and is how the steps that only explain are
+  passed. **Back** goes back.
+- If the control is not on screen (you are on another page, or the inspection has not run yet), the
+  popup says how to get there instead of pointing at nothing.
+- **Esc** exits, as does **Exit** (and **Done** on the last step); exiting also turns the switch off.
+  Esc is left alone while a reason prompt, the code viewer, the stacked view, the palette or a dialog
+  is open, or while you are typing in a field.
+- It gets out of the way: while a reason prompt, the code viewer, the stacked view, the command
+  palette or any dialog is open, the popup is hidden, and it comes back when they close. Starting
+  the walkthrough is refused (with a note saying why) while any of those is open. Only the
+  palette's own **Start walkthrough** line can start it with the palette open (it closes the
+  palette itself); the Help menu cannot.
+- Keyboard and screen readers: starting it moves the keyboard into the popup, each step is
+  announced, and closing it puts the keyboard back on the control it was pointing at (on a bar or
+  a block, the block itself, never on a button inside it, so a stray Enter cannot decide a
+  finding). For the run and export steps it leaves the keyboard on the area around the button, not
+  the button, so a stray Enter cannot start a paid run or an export. The popup only listens for clicks and Esc while it is running, so a key pressed
+  between walkthroughs does nothing to the next one.
+
+**What it covers (twelve steps).** Create or open a project; add the client repository; the client
+name; the model backend and where the key is saved; the stack rules; the spend limit, with the line
+count and cost estimate just below it; running the inspection; failed or skipped passes; the review
+queue and its four decisions; the speed tools (stacked review, the code viewer, the palette); review
+time; exporting the package. This first version covers the Inspection only. Where a step's own
+control does not exist, it points at the nearest control that does.
+
+---
+
 ## 3. Onboarding a repo (the main flow)
 
 Open **Onboard repos**. The flow: **detect stack → pick rules → scan the repo for violations (audit)
@@ -345,6 +394,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      to be set to **API** with an Anthropic API key configured; results arrive asynchronously
      (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
      exchange for cost.
+
+   **Release note: Batch is now the default on the API backend.** When you do not pick a mode, a scan
+   on the API backend runs as a Message Batch (half price); on the CLI (subscription) backend it still
+   runs in real time and says so once. Choose Parallel or Sequential, or pass `--realtime`, to force
+   real time. A scan started as a plain foreground request (no background job) always runs in real
+   time and says so in its notes, because a batch can run for hours and a foreground request has
+   nowhere to record the batch id; start it as a background job to use batches. If the results of an
+   accepted batch cannot be retrieved, the affected passes are reported as failed with the batch id,
+   and the batch is never submitted a second time. The `batch_default=off` efficiency switch restores
+   the previous behavior (real time unless Batch is chosen). **A scan mode Camerata does not
+   recognize is now an error** (naming the valid choices) instead of silently running the default
+   mode; check any script or saved setting that passes a mode other than `parallel`, `sequential`,
+   `batch` or `auto`.
 
    **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
    statement the row is making. This replaced a binary model in which a row was a violation or it was
@@ -633,7 +695,8 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    previous finding, **Open in the code viewer** (`O`), **Review this group stacked** (`B`, offered
    only on a deviation or defect row), the pane's **Full detail** and Rule Hub buttons, **Undo**
    (offered only while the five-second undo is live), the four **Order** cuts (the cut you are in
-   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button. A
+   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button, and
+   **Start walkthrough** (the Help menu's item; see §2a). A
    decision line has the same rules as its key: Confirm and Tech debt apply at once with the
    five-second undo, while Ignore and False positive open the reason prompt and write nothing
    until you commit a reason. A line whose control is not on screen is not listed, and a line is checked again at the
@@ -786,7 +849,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** - the full corpus (**437 rules across 22 domains** as of 2026-10-27: Rust,
+- **All rules** - the full corpus (**443 rules across 22 domains** as of 2026-10-27: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -818,8 +881,8 @@ silence, and silence used to be indistinguishable from "we checked and it was cl
 meant a client report could open its healthy list with a rule about how *Camerata* runs its
 agents, presented as a verified property of *their* codebase.
 
-Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
-437 corpus rules are emit-only.** For you, that means:
+Those rules now carry a flag (`inspectable = false`) that separates the two roles. **28 of the
+443 corpus rules are emit-only.** For you, that means:
 
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
@@ -830,6 +893,11 @@ Those rules now carry a flag (`inspectable = false`) that separates the two role
   legitimately differ, and the second is the honest one. On a TypeScript repo the checked
   count dropped from 167 to 145 when this landed; nothing stopped working, the report stopped
   over-claiming.
+- Two of the 28, the runtime end-of-life rule and the known-vulnerable runtime rule, are the one
+  exception to "never appear in a finding". They are not scanned by the AI pass either, but their
+  findings come from a dedicated check of the versions a repository declares (see "Runtime and
+  framework end of life, and runtime vulnerabilities" below). They still never appear in "what's healthy": a runtime with
+  nothing wrong produces no finding and no claim.
 
 The flag is set by the rule's author in the corpus, not per project. It is not a switch in the
 Rules view.
@@ -1334,10 +1402,34 @@ After the dev agent finishes each iteration and Layer-2 checks run, the L3 revie
 
 1. Runs `git diff HEAD` in the agent's worktree.
 2. Sends the **story + selected rules + diff** to the configured model.
-3. Returns a PASS or BOUNCE verdict.
+3. Returns a ranked list of findings and a PASS or BOUNCE verdict.
 
-A BOUNCE feeds the bounce reasons back to the dev agent on the next iteration — same
+The reviewer is adversarial: it looks for the way the change fails. Every finding is ranked HIGH,
+MEDIUM or LOW and carries a concrete failure scenario, the rule or acceptance criterion it breaks
+and the place in the diff. A HIGH or MEDIUM finding is a BOUNCE. A reply the reviewer did not write
+in the agreed format is never read as a PASS: it bounces with one MEDIUM finding.
+
+A BOUNCE feeds the findings back to the dev agent on the next iteration, with the same
 bounce-and-revise mechanism as Layer-2. A PASS is recorded as a `layer-3` gate event in the run log.
+
+Every finding is recorded on the unit of work, so none is dropped silently. A finding a later pass no
+longer reports is marked fixed. The rest stay open and are listed under **Reviewer findings** in the
+Development panel. An open HIGH or MEDIUM finding blocks sign-off until you fix it or choose
+**Accept with reason** and say why it is acceptable as is. The acceptance is also written as a
+decision on the unit. LOW findings never block sign-off.
+
+### Reviewer settings
+
+Three more controls sit under the enable toggle. Each defaults to the earlier behaviour:
+
+- **On reviewer error**: advisory (the run continues when the reviewer cannot run) or fail closed (the
+  run stops, so no run passes without a review).
+- **Fix rounds after a bounce**: 0 (the default), 1 or 2 extra implementer passes beyond the
+  project's iteration limit. With the default single pass, a bounce ends the run.
+- **Reviewer model tier**: balanced (the default) or strongest, used when no model is pinned above.
+
+Each review is one model call with the whole diff as input, once per pass. Fix rounds add implementer
+passes. Strongest costs more per call than balanced.
 
 If the diff is empty (nothing changed), the L3 review is skipped (logged: "Layer-3 skipped: no diff
 to review").
@@ -1693,8 +1785,20 @@ client-facing deliverable: a ZIP holding a PDF, an Excel workbook, `findings.jso
 from the command line with no server and no UI at all:
 
 ```
-cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip> --client "<CLIENT NAME>"
 ```
+
+**Confidentiality marking.** Every PDF page footer and every workbook sheet footer reads
+"Confidential, prepared for <client> on <date>", and the first page of the PDF carries a short
+handling note (who the report is for, and not to forward it outside that company without consent).
+The client name is part of the inspection setup: the **Client name** field above the cost estimate
+on the scan screen, saved with the project as you leave the field. An export with no client name is
+refused with a message saying where to enter it. On the command line, `--client` is required and is
+checked before anything is read or spent. A project export file leaves the client name blank, so a
+client's name does not travel in a backup, and a project imported from an export starts with no client
+name, so a report is never marked for the wrong client. The name is at most 100 characters, and shorter
+when it holds many "&" signs, because the workbook footer has room for 255 characters and writes each
+"&" twice; a name that does not fit is refused with a message saying so.
 
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
 Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the
@@ -1702,9 +1806,59 @@ Anthropic API, is the default and uses the Anthropic key you saved in the app (S
 anywhere the run fails and tells you to add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
 internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
 for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
-arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
-the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
-ledger rather than the concise summary.
+arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model` / `--fix-model` / `--clone-judge-model` (the only
+way to choose a model on the command line; with none given, the built-in default, Sonnet 5.5, runs), `--full` to ignore
+the incremental-scan cache and rescan every file, `--verbose` to print the per-rule coverage
+ledger rather than the concise summary, `--max-cost-usd` to cap the spend, and `--efficiency` to
+switch a saving off (both below).
+
+#### What a scan will cost, and how to cap it
+
+Before the first model call, `camerata inspect` prints a pre-flight ESTIMATE: about how many dollars,
+over how many model calls, and the basis it is built on (characters of code, number of rules, the
+models, the mode and backend). It is an estimate, not a quote. On the API backend it also prints the
+exact input size of one scan pass, counted by the API for free. A repeat run on an unchanged tree
+reuses the previous findings and costs less than the estimate.
+
+To put a ceiling on a run, add `--max-cost-usd 25`. The run stops BETWEEN passes once its actual
+spend reaches the limit; it never cuts a pass off halfway. The limit is checked before each scan pass,
+each calibration or fix batch and each deep-tier call starts, and once the limit has stopped anything no
+later stage starts. Calls already started finish, so a run can end about one pass over the limit (a pass
+can include one retry of a reply that was cut off). When the limit stops a run:
+
+- the final report says so, and lists the passes that were NOT RUN (also shown under FAILED PASSES);
+- the export is still written but is marked incomplete: its report lists the passes that did not run,
+  `manifest.json` says `"cost_cap_reached": true` and `README.txt` says so in one line. No dollar
+  figure is put in the export;
+- the command exits with status 4, so a script cannot mistake it for a complete inspection.
+
+A limit needs every model the run uses to have a known price. If the scan, calibration, fix, deep-tier
+or clone-judge model has none (a model outside the built-in price list), the run refuses to start,
+before any model call, and names the model, because the cost of its calls could not be counted against
+the limit. Without a limit such a model runs as before.
+
+With `--batch` the limit is checked BEFORE the batch is submitted (a submitted batch cannot be
+cancelled cheaply); if the estimate would pass the limit, nothing is submitted and every pass is
+reported as not run. The desktop app has the same control as "Spend limit (USD)" in the scan settings.
+When any pass or stage did not run, for any reason (the limit, or a failure), the app's results screen
+shows an "Incomplete" banner listing them, a short reminder beside the export button, and the progress
+line counts them as NOT RUN rather than done. A rule that was checked on only part of the code is
+listed as such and never counted as clean.
+
+Every saving the product applies is on by default and can be switched off for one run, to find out
+whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
+`CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`,
+`fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default`, `applies_to_routing` and
+`candidates_prefilter` (what each does is in TECHNICAL.md). `applies_to_routing` sends a rule that
+declares where it applies (for example, only SQL files) just those files; `candidates_prefilter`
+sends some SQL rules only the statements they can be about (for example, only function
+definitions) instead of whole files. Switch either off if a run seems to have missed something a
+rule should have caught. A misspelled name is an error. Every run prints which measures were on. With
+`terse_output` on, the scan writes one-sentence explanations and a separate step
+writes the full explanation for each finding that survives the merge; a finding whose full
+explanation could not be written stays in the report with `[detail incomplete]` after its short
+one, and the report lists the step as incomplete.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
 machine-readable output). It uses no model and no network, reads the repo through the inspection's
@@ -1738,6 +1892,38 @@ a row sits where its own columns mean something:
 | **False Positives** | Everything you dispositioned as a false positive, kept rather than deleted. |
 | **Coverage** | What was checked and with what result, which tools could not run, which rules did not run this scan, and the "not assessed" rows in their own "checks we could not complete" section. |
 
+**Known exploited and exploit probability on dependency findings.** Each vulnerable dependency is
+checked against two public feeds: the CISA Known Exploited Vulnerabilities (KEV) catalog and the
+FIRST.org EPSS exploit-probability scores. Matching is by CVE, including a CVE that a GitHub or
+RustSec advisory lists as an alias. A dependency on the KEV catalog is labelled "Known exploited" and
+raised to critical severity; a dependency with an EPSS score shows its probability of exploitation
+in the next 30 days and its percentile. The export's `README.txt` and `manifest.json` state how
+current each source was ("Vulnerability data (CISA KEV) as of 2026-10-27", likewise for EPSS and
+OSV). When a feed cannot be reached, the scan still completes, a cached copy up to 7 days old is
+used and named as cached, and with no usable copy the line says plainly that the feed was not
+checked, and no finding is labelled from it.
+
+**Runtime and framework end of life, and runtime vulnerabilities.** The dependency audit looks at the
+packages in your lockfiles. A second check looks at the runtime and the major frameworks they run on.
+It reads the versions your repository declares (a Docker base image, a version file such as `.nvmrc`,
+a manifest field, a lockfile entry) and compares them with two public sources: endoflife.date for
+end-of-life dates and the National Vulnerability Database for known vulnerabilities in the runtime
+itself. A release line past its end of life is a high finding, worded like "Node.js 16 has received
+no security fixes since 2023-09-11". One that ends within 90 days is a low advisory. A runtime with a
+known vulnerability is rated by its highest CVSS score, and raised to critical when CISA lists the
+vulnerability as known exploited. A version that is a range or a moving tag (`>=18`, `node:latest`)
+is never guessed: the Coverage section lists it as not checked, and a runtime declared without a
+patch version is checked for end of life but not for vulnerabilities. In a Dockerfile only the image
+the final stage is built on counts, because an earlier build stage never ships; a final image that is
+itself a build argument (`FROM ${BASE}`) cannot be named, so it is listed as not checked. A framework counts
+only when your project file beside the lockfile lists it as a direct, non-dev dependency (in a
+workspace project, the `package.json` of a listed workspace package counts); one that
+is only pulled in by something else, only used in development or only an optional or peer
+dependency is listed as not checked. If either source cannot be
+reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
+data unavailable in this scan", and the report makes no claim about what was not checked. What a
+repository declares is not proof of what runs in production.
+
 The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
 reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty
 properties are worth knowing because they were both once wrong: a rule that found something and then
@@ -1767,6 +1953,65 @@ rather than defaulted, so a typo can never quietly relax the gate.
 The gate deliberately does not complain that a Python rule did not run against a Rust repo: a rule
 that does not run because it is irrelevant to the stack is correct behaviour. What it will not
 tolerate is a skip it cannot classify, which it treats as a defect rather than a pass.
+
+### When a run does not finish: saved runs and resume
+
+Every inspection is saved while it runs, part by part. If the AI service goes down, a part fails, or
+the run is interrupted (a crash, a closed laptop), you do not start over. You run only what remains.
+
+`camerata inspect` prints a line such as `run: 20261029T101500Z-ab12cd (camerata inspect --resume
+20261029T101500Z-ab12cd runs only what remains)`. To finish that run later:
+
+```
+camerata inspect --resume 20261029T101500Z-ab12cd
+camerata inspect --resume latest          # the newest run that still has work left
+```
+
+A resume first prints what remains and what it should cost (only the remaining work, as an upper
+estimate), then sends only the model calls that were not stored as good, and builds the report and
+the export from everything. You may give `--export` and `--max-cost-usd` again; the spend limit
+then applies to the resume alone. Everything else is the saved run's.
+
+A resume refuses, in plain words, when its stored answers would no longer fit: the repository is at
+another commit; a file was edited or added; the models or the rules differ; or this is another
+version of Camerata. It also refuses while another process works on the same run. A run that is
+already complete says so and does nothing.
+
+A client export is written only when every part is complete. While a part has failed or has not
+run, the export is refused (nothing is written) and the run stays resumable. `--internal` still
+writes an export, marked INTERNAL INCOMPLETE.
+
+In the app, the scan screen shows a failure panel when parts failed. **Run what remains** shows
+the same plan and estimate first; **Start: run only these parts** resumes the run, and the
+background animation runs until it ends.
+
+**If the app closes in the middle of a scan.** A scan you start in the app is saved as it runs, the
+same way. If the app crashes, you close it, or the laptop dies before the scan finishes, nothing is
+lost: the next time you open the app (or open the project) the scan screen says **This inspection
+was interrupted** (or **This inspection did not finish**, when it ended with a part left) and offers
+**Run what remains**. It shows the same plan and estimate first. Only the work that was not stored
+is sent again, so the cost is minutes and the findings are the ones an uninterrupted scan gives.
+When several saved inspections are unfinished, the newest is offered and the others are listed
+below it. An inspection that is running right now is listed as running and is never offered.
+
+A run is resumed in the place that started it. A run started from the app is resumed in the app;
+`camerata inspect --resume` refuses it and says so, and `--resume latest` skips it. A run started
+with `camerata inspect` is resumed with `camerata inspect --resume`; the app lists it with that
+command and has no button for it.
+
+| Exit code | What it means |
+|---|---|
+| 0 | The run is complete, or you resumed a run that was already complete. |
+| 1 | The run could not start or a resume was refused; the message says why. |
+| 3 | The release gate refused the export. Nothing was written. |
+| 4 | The spend limit stopped the run. Raise the limit and resume. |
+| 5 | The AI service could not be reached (three failed calls in a row, or a login or billing failure). Resume when it is back. |
+| 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. |
+
+Saved runs live in the Camerata state folder under `runs/`, one folder per run, readable only by
+you: they hold model answers derived from the code. Camerata keeps the newest five runs of each
+project. A run that is not complete is deleted only when a newer complete run exists for the same
+commits.
 
 ---
 
@@ -2015,6 +2260,33 @@ After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking th
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
 
+### `camerata-check` severities and which findings fail the build
+
+`camerata-check` reports each finding at the same severity your Camerata report shows. It runs
+the checker's severity through the rule corpus's severity bounds (a rule's minimum severity, its
+maximum severity, the deviation ceiling, and the rule that a finding with no location is
+informational), using the same implementation the inspection and its exports use. For example,
+ARCH-DEAD-CODE-1 is capped at `low` by the corpus, so the CI gate reports it at `low`.
+
+Which deterministic findings fail the build:
+
+| Severity after the bounds | Default run | `--strict` |
+|---|---|---|
+| `critical`, `high`, `medium` | fails the build (exit 1) | fails the build |
+| `low`, `info` | advisory: reported, exit 0 | fails the build |
+
+The bar is one constant (`FAIL_AT_SEVERITY = "medium"` in `crates/camerata-check/src/lib.rs`).
+The reasoning: a low-severity consistency finding is worth seeing on every pull request, but it
+should not block a merge. Needs-review findings never fail a default run, whatever their
+severity. The human output tags an advisory finding `deterministic, advisory`; the JSON output
+carries `blocking_count`, the number of findings that failed the build.
+
+The corpus is read from the bundled rules, or from the directory in `CAMERATA_CORPUS_PATH`. If
+it cannot be loaded, the gate still runs and still applies the bounds that need no rule, but a
+finding keeps the checker's own severity, the JSON says `"corpus_bounds_applied": false`, and the
+human output says so. When you vendor a built binary into a CI image, also copy the corpus
+(`crates/rules/principles`) and set `CAMERATA_CORPUS_PATH`.
+
 ### `camerata-check --strict` and Firebase rules kept in the console
 
 `camerata-check --strict` fails when a Firebase project's security rules live only in the
@@ -2206,11 +2478,19 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-All steps default to `claude-sonnet-5` when a project is created. A change to one project never
+All steps default to `claude-sonnet-5-5` (Sonnet 5.5) when a project is created. A change to one project never
 touches another project's step models.
 
 For steps where you also pick a model per run (audit, calibration, research chat), your per-run
 choice wins over the project default for that run only.
+
+**Where a model comes from.** Models are chosen per project in the app (the settings above), and on
+the command line only by flags (`--model`, `--calibration-model`, `--fix-model`, `--clone-judge-model`). When nothing is
+chosen, the built-in default is Sonnet 5.5 (`claude-sonnet-5-5`), the cheap fix and clone-judge
+stages default to Haiku 5.5 and the fleet's strongest band defaults to Opus 5.5 (`claude-opus-5-5`). Camerata never reads a model from the environment or from a `.env`
+file, so a stray line in a local file cannot change which model a run uses or what it costs. A
+project saved before a model setting existed opens with these built-in defaults. In the app the
+duplicate-code checker (the clone judge) runs on the project's fast model band.
 
 #### L3 AI code review
 
@@ -2259,8 +2539,7 @@ RELATIONSHIP rules that a flat label cannot.
 New projects start seeded with the common ladder (Initiative, then Epic, then Feature, then Story or
 Defect; Story then Task or Bug); edit it freely. This is the first shipped piece of a larger Design
 page: the schema itself is live today; the AI-assisted decomposition of an epic into drafted child
-stories, and publishing that tree to your tracker, are planned (see
-`docs/plans/2026-06-30_epic-design-page.md`).
+stories, and publishing that tree to your tracker, are planned.
 
 ---
 

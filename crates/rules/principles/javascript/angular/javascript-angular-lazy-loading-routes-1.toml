@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-LAZY-LOADING-ROUTES-1"
-version = 1
+version = 4
 title = "Feature routes are lazy-loaded to reduce the initial bundle"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,17 +11,17 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/routing/define-routes"
-title = "Angular — Define routes (loadComponent / loadChildren for lazy-loaded routes)"
+title = "Angular: Define routes (loadComponent / loadChildren for lazy-loaded routes)"
 
 [decision]
-question = "What position does the project take on: Feature routes are lazy-loaded to reduce the initial bundle?"
+question = "How are Angular feature routes loaded into the application bundle?"
 default = "feature-routes-are-lazy-loaded-to-reduce-the-initial-bundle"
 why = "Lazy loading defers the bundling and loading of a feature module or route until the user navigates to that route. The initial application bundle includes only the code needed to render the landing page and navigation; when the user clicks to a lazy-loaded feature, the browser downloads and evaluates that feature's code. This dramatically reduces the initial bundle size and improves time-to-interactive. The alternative—bundling all routes into the main bundle—ensures every user pays the cost of every feature, even features they never use. Lazy loading is especially valuable in large applications with many features, and it is practical in any application with more than a single route. The pattern in Angular is to use loadComponent (for standalone components) or loadChildren (for feature modules) in the route configuration, paired with dynamic imports (import('path/to/feature.ts')). The rule is: all routes beyond the main/root route should be lazy-loaded; the root route and authentication routes are eagerly loaded, but feature routes defer their load until navigation."
 
 [[option]]
 id = "feature-routes-are-lazy-loaded-to-reduce-the-initial-bundle"
 label = "Feature routes are lazy-loaded to reduce the initial bundle"
-directive = "All routes beyond the root and authentication routes use loadComponent or loadChildren with dynamic imports to defer bundling until navigation. The routing configuration uses import('path/to/component/or/module.ts') in a loadComponent or loadChildren property, and Angular automatically chunks that code into a separate bundle. The main bundle includes only the root layout, navigation, and critical routes. Feature modules and routes are split into separate chunks that load on demand."
+directive = "All routes beyond the root and authentication routes use loadComponent or loadChildren with dynamic imports to defer bundling until navigation. The routing configuration uses import('path/to/component/or/module.ts') in a loadComponent or loadChildren property, and Angular automatically chunks that code into a separate bundle. The main bundle includes only the root layout, navigation and critical routes. Feature modules and routes are split into separate chunks that load on demand."
 remediation = """
 Change the route configuration for this feature to use loadComponent or loadChildren with a dynamic import() instead of a static import bundled into the main chunk. Verify by inspecting the production build's chunk output and confirming this feature's code is in a separate chunk loaded only on navigation, not in the initial bundle.
 """

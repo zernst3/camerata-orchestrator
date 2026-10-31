@@ -65,6 +65,20 @@ pub struct AiScanKey {
     /// Order-independent digest of every selected rule's id AND directive text, which is what the
     /// audit prompt actually asks.
     pub directives_fingerprint: String,
+    /// Whether the findings were produced under the `terse_output` measure (a one-sentence scan
+    /// `detail`, the full one regenerated afterwards). It changes what the model is asked and so
+    /// what it reports, which is not a pure saving like the scheduling measures, so a baseline
+    /// from the other setting is not reused: flipping the switch to find a regression must not
+    /// be answered from the other setting's cache. Absent in a key stored before the measure
+    /// existed, which reads as `false`: those findings were produced the old way.
+    #[serde(default)]
+    pub terse_output: bool,
+    /// Whether the findings were produced with `applies_to` routing on (a rule that declares
+    /// where it applies is sent only with matching files). It changes which (chunk, rule) pairs
+    /// the model is asked about, so one setting's cache must not answer the other's. Absent in a
+    /// key stored before rank 7, which reads as `false`: those findings were produced without it.
+    #[serde(default)]
+    pub applies_to_routing: bool,
 }
 
 impl AiScanKey {
@@ -87,7 +101,21 @@ impl AiScanKey {
                 "{:016x}",
                 crate::suppression::fnv1a(&parts.join("\u{1e}"))
             ),
+            terse_output: false,
+            applies_to_routing: false,
         }
+    }
+
+    /// The key of a scan running with the `terse_output` measure `on` or off.
+    pub fn with_terse_output(mut self, on: bool) -> Self {
+        self.terse_output = on;
+        self
+    }
+
+    /// The key of a scan running with `applies_to` routing `on` or off.
+    pub fn with_applies_to_routing(mut self, on: bool) -> Self {
+        self.applies_to_routing = on;
+        self
     }
 }
 
@@ -149,16 +177,35 @@ pub struct ScanManifest {
     /// evidence, so a missing cache only costs one scan's judge calls).
     #[serde(default)]
     pub clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
+    /// H11: `repo` -> the commit that scan audited (`HEAD` of the repo), for a repo with a
+    /// source identity. An incremental run reads it to say which inspection its carried findings
+    /// came from. `serde(default)` and additive, like `clone_verdicts`: a manifest written before
+    /// this existed carries no commits, and the carried rows then say "an earlier inspection".
+    #[serde(default)]
+    pub commits: BTreeMap<String, String>,
 }
 
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
 /// invalidates the incremental cache. Order-independent: ids and bindings are sorted first.
 pub fn rules_fingerprint<'a>(rules: impl Iterator<Item = (&'a str, &'a [String])>) -> String {
+    rules_fingerprint_with_content(rules.map(|(id, repos)| (id, repos, None)))
+}
+
+/// [`rules_fingerprint`] with each rule's corpus content hash (`Rule::content_hash`) folded in,
+/// so a change to a rule's own content (its scope, options, wording) changes the fingerprint and
+/// forces a full rescan, not only a change to WHICH rules are selected. `None` for a rule the
+/// corpus does not know (or no corpus), which fingerprints as before.
+pub fn rules_fingerprint_with_content<'a>(
+    rules: impl Iterator<Item = (&'a str, &'a [String], Option<String>)>,
+) -> String {
     let mut parts: Vec<String> = rules
-        .map(|(id, repos)| {
+        .map(|(id, repos, content_hash)| {
             let mut r: Vec<&str> = repos.iter().map(String::as_str).collect();
             r.sort_unstable();
-            format!("{}@{}", id, r.join(","))
+            match content_hash {
+                Some(hash) => format!("{}@{}#{}", id, r.join(","), hash),
+                None => format!("{}@{}", id, r.join(",")),
+            }
         })
         .collect();
     parts.sort_unstable();
@@ -270,6 +317,74 @@ pub fn partition(
     }
 }
 
+/// What a carried finding says when its source commit is unknown (a manifest saved before commits
+/// were recorded, or a repo with no source identity).
+pub const CARRIED_FROM_UNKNOWN: &str = "an earlier inspection";
+
+/// H11: mark each of `carried` with the commit it was last found at (`captures["carried_from"]`,
+/// read by `report_export::carried_from`). A finding that already carries the mark was carried on
+/// from an earlier incremental run and keeps its commit: the commit where its file was last
+/// actually audited, not the commit of the run that merely passed it along.
+pub fn mark_carried(carried: &mut [Finding], prior_commit: Option<&str>) {
+    let source = prior_commit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CARRIED_FROM_UNKNOWN);
+    for f in carried {
+        f.captures
+            .entry(crate::report_export::CARRIED_FROM_CAPTURE.to_string())
+            .or_insert_with(|| source.to_string());
+    }
+}
+
+/// H11: sums what an incremental scan re-audited and carried forward across its repos, then
+/// yields the one [`crate::scan_ledger::IncrementalCarry`] the ledger records.
+#[derive(Debug, Default)]
+pub struct CarryTally {
+    changed: usize,
+    carried_files: usize,
+    carried_findings: usize,
+    commits: Vec<String>,
+}
+
+impl CarryTally {
+    /// Add one repo's partition. A repo that carried no file adds nothing: it was a full scan.
+    pub fn add_repo(
+        &mut self,
+        changed: usize,
+        carried_files: usize,
+        carried_findings: usize,
+        prior_commit: Option<String>,
+    ) {
+        if carried_files == 0 {
+            return;
+        }
+        self.changed += changed;
+        self.carried_files += carried_files;
+        self.carried_findings += carried_findings;
+        if let Some(sha) = prior_commit {
+            if !self.commits.contains(&sha) {
+                self.commits.push(sha);
+            }
+        }
+    }
+
+    /// `None` when no repo carried a file (a full scan). The source commit is named only when
+    /// every carrying repo came from the same one; with several, the cover says "an earlier
+    /// inspection" rather than naming one commit for rows that came from different repos.
+    pub fn finish(self) -> Option<crate::scan_ledger::IncrementalCarry> {
+        (self.carried_files > 0).then(|| crate::scan_ledger::IncrementalCarry {
+            changed: self.changed,
+            carried_files: self.carried_files,
+            carried_findings: self.carried_findings,
+            prior_sha: match self.commits.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            },
+        })
+    }
+}
+
 /// Accumulates a fresh manifest across a multi-repo scan, then finalizes it for persistence.
 ///
 /// For each repo the caller records (a) the current fingerprints of EVERY file that was in the
@@ -284,6 +399,7 @@ pub struct ManifestBuilder {
     ai_covered: bool,
     ai_key: AiScanKey,
     clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
+    commits: BTreeMap<String, String>,
 }
 
 impl ManifestBuilder {
@@ -329,8 +445,26 @@ impl ManifestBuilder {
     /// apply to it after this scan. `ai_findings` must already be the post-merge AI set for the
     /// repo (fresh ∪ carried); deterministic-floor findings should NOT be passed here.
     pub fn record_repo(&mut self, repo: &str, files: &[(String, String)], ai_findings: &[Finding]) {
+        self.record_repo_except(repo, files, ai_findings, &std::collections::HashSet::new());
+    }
+
+    /// [`Self::record_repo`] leaving out the files in `unreviewed`: files the AI pass did not
+    /// review (the spend limit stopped it first, or the review failed). A file with no
+    /// fingerprint is new to the next scan, which audits it; a recorded one would be carried on
+    /// as unchanged and clean. A repo with every file unreviewed is still recorded, with no
+    /// files, so the manifest knows the repo was met.
+    pub fn record_repo_except(
+        &mut self,
+        repo: &str,
+        files: &[(String, String)],
+        ai_findings: &[Finding],
+        unreviewed: &std::collections::HashSet<String>,
+    ) {
         let entry = self.files.entry(repo.to_string()).or_default();
         for (path, content) in files {
+            if unreviewed.contains(path) {
+                continue;
+            }
             entry.insert(path.clone(), content_fingerprint(content));
         }
         self.findings.extend(
@@ -339,6 +473,15 @@ impl ManifestBuilder {
                 .filter(|f| f.repo.eq_ignore_ascii_case(repo))
                 .cloned(),
         );
+    }
+
+    /// Record the commit `repo` was audited at (see [`ScanManifest::commits`]). Skipped for a
+    /// blank sha, so a repo without a source identity simply has none.
+    pub fn record_commit(&mut self, repo: &str, sha: &str) {
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            self.commits.insert(repo.to_string(), sha.to_string());
+        }
     }
 
     /// Finalize into a persistable manifest stamped with the current schema version.
@@ -351,6 +494,7 @@ impl ManifestBuilder {
             ai_covered: self.ai_covered,
             ai_key: self.ai_key,
             clone_verdicts: self.clone_verdicts,
+            commits: self.commits,
         }
     }
 }
@@ -486,6 +630,9 @@ impl ScanCacheStore {
         };
         let removed = repo_slice_stats(manifest, repo);
         manifest.files.retain(|k, _| !k.eq_ignore_ascii_case(repo));
+        manifest
+            .commits
+            .retain(|k, _| !k.eq_ignore_ascii_case(repo));
         manifest
             .findings
             .retain(|f| !f.repo.eq_ignore_ascii_case(repo));
@@ -716,6 +863,23 @@ mod tests {
         let mut b = ManifestBuilder::new();
         b.record_repo("me/api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
         assert_eq!(b.finish().findings.len(), 1);
+    }
+
+    #[test]
+    fn rules_fingerprint_changes_when_a_rules_content_hash_changes() {
+        let repos: &[String] = &[];
+        let with = |hash: Option<&str>| {
+            rules_fingerprint_with_content(
+                [("ARCH-1", repos, hash.map(str::to_string))].into_iter(),
+            )
+        };
+        assert_ne!(with(Some("sha256:a")), with(Some("sha256:b")));
+        assert_ne!(with(Some("sha256:a")), with(None));
+        assert_eq!(
+            with(None),
+            rules_fingerprint([("ARCH-1", repos)].into_iter()),
+            "a rule with no known content fingerprints as before"
+        );
     }
 
     #[test]
@@ -1086,6 +1250,7 @@ mod tests {
             ai_covered: true,
             ai_key: AiScanKey::default(),
             clone_verdicts: Default::default(),
+            commits: Default::default(),
         };
 
         let p = partition(Some(&stale), "me/api", &files);
@@ -1188,5 +1353,56 @@ mod tests {
             got.findings[0].rule_id, "R2",
             "re-put must store the new manifest, not the cleared one"
         );
+    }
+
+    // ── H11: carried findings and the incremental record ─────────────────────────────────
+
+    #[test]
+    fn mark_carried_names_the_commit_and_keeps_an_earlier_mark() {
+        let mut fresh = Finding::default();
+        let mut older = Finding::default();
+        older
+            .captures
+            .insert("carried_from".to_string(), "aaa1111".to_string());
+        let mut both = vec![fresh.clone(), older];
+        mark_carried(&mut both, Some("bbb2222"));
+        assert_eq!(both[0].captures["carried_from"], "bbb2222");
+        assert_eq!(both[1].captures["carried_from"], "aaa1111");
+        let mut unknown = vec![std::mem::take(&mut fresh)];
+        mark_carried(&mut unknown, None);
+        assert_eq!(unknown[0].captures["carried_from"], CARRIED_FROM_UNKNOWN);
+    }
+
+    #[test]
+    fn the_carry_tally_sums_repos_and_names_one_commit_only_when_it_is_one() {
+        let mut one = CarryTally::default();
+        one.add_repo(2, 8, 3, Some("abc".to_string()));
+        one.add_repo(5, 0, 0, Some("zzz".to_string())); // a full scan: adds nothing
+        let carry = one.finish().expect("a repo carried files");
+        assert_eq!(
+            (carry.changed, carry.carried_files, carry.carried_findings),
+            (2, 8, 3)
+        );
+        assert_eq!(carry.prior_sha.as_deref(), Some("abc"));
+
+        let mut two = CarryTally::default();
+        two.add_repo(1, 4, 1, Some("abc".to_string()));
+        two.add_repo(1, 4, 1, Some("def".to_string()));
+        assert_eq!(two.finish().unwrap().prior_sha, None);
+
+        assert!(CarryTally::default().finish().is_none(), "a full scan");
+    }
+
+    #[test]
+    fn a_manifest_records_commits_and_a_repo_removal_drops_its_commit() {
+        let mut b = ManifestBuilder::new();
+        b.record_commit("me/api", " abc123 ");
+        b.record_commit("me/web", "   ");
+        let m = b.finish();
+        assert_eq!(m.commits.get("me/api").map(String::as_str), Some("abc123"));
+        assert!(!m.commits.contains_key("me/web"));
+        // A manifest saved before commits existed still loads.
+        let old: ScanManifest = serde_json::from_str(r#"{"version":3}"#).unwrap();
+        assert!(old.commits.is_empty());
     }
 }

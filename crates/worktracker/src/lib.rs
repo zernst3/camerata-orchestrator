@@ -482,11 +482,18 @@ impl SyncPolicy {
 
 // ── WorkItemProvider trait ────────────────────────────────────────────────────
 
+/// One [`WorkItemProvider::poll`] result: the new events since the cursor, plus the next
+/// cursor.
+type PollPage = (Vec<InboundWorkItemEvent>, String);
+
 /// The seam between core orchestration and any work-tracker backend. Core holds
 /// a `dyn WorkItemProvider` and never imports provider-specific code. Each adapter
 /// (native, jira, azure-devops, github) implements this trait and handles its own
 /// auth, webhook signature verification, field mapping, and rate-limit handling.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait WorkItemProvider: Send + Sync {
     /// The provider kind this adapter implements.
     fn kind(&self) -> Provider;
@@ -494,18 +501,34 @@ pub trait WorkItemProvider: Send + Sync {
     /// Intake: pull an external work item in and normalize it as a
     /// `CanonicalStory`. The adapter maps provider-specific fields to the
     /// canonical vocabulary.
-    async fn ingest_story(&self, reference: &ExternalRef) -> anyhow::Result<CanonicalStory>;
+    fn ingest_story<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        reference: &'life1 ExternalRef,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<CanonicalStory>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// Outbound: post a status transition plus the minimum-credible provenance
     /// payload (governed PR links, gate results, sign-off) as a single editable
     /// status comment on the work item. Providers use their own comment-update
     /// API (GitHub `updateComment`, Jira `PUT .../comment/{id}`, ADO Comments
     /// API) so only one comment is ever present per story.
-    async fn push_status(
-        &self,
-        reference: &ExternalRef,
-        report: &FeatureStatusReport,
-    ) -> anyhow::Result<()>;
+    fn push_status<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        reference: &'life1 ExternalRef,
+        report: &'life2 FeatureStatusReport,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 
     /// CLARIFY-BRIDGE outbound (V1 slice, doc 0.5): post the PRODUCT clarifying
     /// questions as a comment on the work item, mentioning the Product Owner.
@@ -516,11 +539,18 @@ pub trait WorkItemProvider: Send + Sync {
     /// Privilege boundary: the PO can answer and eventually sign off via the
     /// tracker, but can never trigger execution. The Architect reviews the
     /// ingested answer locally, approves tradeoffs, and runs the agents.
-    async fn post_clarifying_questions(
-        &self,
-        reference: &ExternalRef,
-        questions: &[String],
-    ) -> anyhow::Result<String>;
+    fn post_clarifying_questions<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        reference: &'life1 ExternalRef,
+        questions: &'life2 [String],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 
     /// Inbound reconciliation poll (webhook is a later opt-in upgrade for users
     /// with a public ingress). Returns new events since `cursor` plus the next
@@ -532,10 +562,16 @@ pub trait WorkItemProvider: Send + Sync {
     /// explicit opt-in tunnel (ngrok / cloudflared). The poll runs on a slow
     /// cadence (a few minutes) and serves as both the primary path and the safety
     /// net for any webhook-capable deployment.
-    async fn poll(
-        &self,
-        cursor: Option<&str>,
-    ) -> anyhow::Result<(Vec<InboundWorkItemEvent>, String)>;
+    fn poll<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        cursor: Option<&'life1 str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<PollPage>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ── NativeProvider ────────────────────────────────────────────────────────────
@@ -719,14 +755,49 @@ impl WorkItemProvider for NativeProvider {
 /// the provider owns per-item tracker I/O. In-memory now; a SQLite-backed impl
 /// behind this same trait is the cloud-hosting step (mirrors
 /// `camerata_persistence::ArtifactStore`).
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait StoryStore: Send + Sync {
     /// All stories on the spine, in insertion order.
-    async fn list(&self) -> anyhow::Result<Vec<CanonicalStory>>;
+    fn list<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<Vec<CanonicalStory>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
     /// One story by its canonical id, or `None` if absent.
-    async fn get(&self, id: &str) -> anyhow::Result<Option<CanonicalStory>>;
+    fn get<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        id: &'life1 str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<Option<CanonicalStory>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
     /// Insert a new story or replace an existing one with the same id.
-    async fn upsert(&self, story: CanonicalStory) -> anyhow::Result<()>;
+    fn upsert<'life0, 'async_trait>(
+        &'life0 self,
+        story: CanonicalStory,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// In-memory [`StoryStore`] for local/desktop runs and tests. The cloud build

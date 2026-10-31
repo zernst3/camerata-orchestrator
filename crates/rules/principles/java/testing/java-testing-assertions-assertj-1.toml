@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-ASSERTIONS-ASSERTJ-1"
-version = 1
+version = 3
 title = "Assertions use AssertJ's assertThat() fluent API; JUnit's assertEquals/assertTrue/assertNull are not used in new test code"
 domain = "java:testing"
 layer = "language"
@@ -17,17 +17,17 @@ why = "AssertJ's assertThat() fluent API produces failure messages that include 
 
 [[sources]]
 url = "https://assertj.github.io/doc/"
-title = "AssertJ — Fluent testing assertions for Java: 'provides a rich set of assertions and truly helpful error messages, improves test code readability'"
+title = "AssertJ: Fluent testing assertions for Java: 'provides a rich set of assertions and truly helpful error messages, improves test code readability'"
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"
-title = "PMD Best Practices — UnitTestShouldIncludeAssert: unit tests should include at least one assertion (assertThat satisfies this)"
+title = "PMD Best Practices: UnitTestShouldIncludeAssert: unit tests should include at least one assertion (assertThat satisfies this)"
 linter = "PMD: UnitTestShouldIncludeAssert"
 
 [[option]]
 id = "assertj-fluent"
 label = "AssertJ assertThat() fluent assertions"
-directive = "All assertions use AssertJ: import static org.assertj.core.api.Assertions.assertThat; (or BDDAssertions.then for BDD style). Never use org.junit.jupiter.api.Assertions.assertEquals, assertTrue, assertFalse, assertNull, or assertNotNull in new test code. For exception assertions, use assertThatThrownBy(() -> ...).isInstanceOf(X.class).hasMessageContaining('...'). For soft assertions (check all conditions before reporting), use SoftAssertions.assertSoftly(softly -> { ... })."
+directive = "All assertions use AssertJ: import static org.assertj.core.api.Assertions.assertThat; (or BDDAssertions.then for BDD style). Never use org.junit.jupiter.api.Assertions.assertEquals, assertTrue, assertFalse, assertNull or assertNotNull in new test code. For exception assertions, use assertThatThrownBy(() -> ...).isInstanceOf(X.class).hasMessageContaining('...'). For soft assertions (check all conditions before reporting), use SoftAssertions.assertSoftly(softly -> { ... })."
 remediation = """
 Replace the JUnit or Hamcrest assertion call with AssertJ's fluent assertThat() API in this test method. Verify by confirming the test file's imports no longer include org.junit.jupiter.api.Assertions or org.hamcrest, and the assertion still fails with a clear message when the expected value doesn't match.
 """

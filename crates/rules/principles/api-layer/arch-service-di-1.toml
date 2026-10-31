@@ -1,5 +1,5 @@
 id = "ARCH-SERVICE-DI-1"
-version = 1
+version = 4
 title = "Services depend on repository abstractions injected at the composition root"
 domain = "api-layer"
 layer = "universal"
@@ -15,11 +15,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/injection.html"
-title = "Martin Fowler — Inversion of Control Containers and the Dependency Injection pattern"
+title = "Martin Fowler: Inversion of Control Containers and the Dependency Injection pattern"
 
 [[sources]]
 url = "https://www.manning.com/books/dependency-injection-principles-practices-patterns"
-title = "Seemann & van Deursen — Dependency Injection Principles, Practices, and Patterns (Composition Root)"
+title = "Seemann & van Deursen: Dependency Injection Principles, Practices and Patterns (Composition Root)"
 
 [decision]
 question = "How do services obtain the repositories they use?"
@@ -29,7 +29,7 @@ why = "A service that constructs its own concrete repository binds itself to a s
 [[option]]
 id = "inject-abstractions"
 label = "inject repository abstractions at the composition root"
-directive = "Services depend on repository abstractions (interfaces or traits), never on concrete persistence implementations. The concrete implementations are constructed once at the application's composition root and passed into services as dependencies. A service never instantiates its own repository, opens its own connection, or reads its own datastore configuration; it receives an already-constructed abstraction that satisfies the capability it declares."
+directive = "Services depend on repository abstractions (interfaces or traits), never on concrete persistence implementations. The concrete implementations are constructed once at the application's composition root and passed into services as dependencies. A service never instantiates its own repository, opens its own connection or reads its own datastore configuration; it receives an already-constructed abstraction that satisfies the capability it declares."
 remediation = """
 Change the service to receive its repository dependency as an injected abstraction (interface or trait) through its constructor, rather than instantiating a concrete repository or reading a datastore configuration itself. Wire the concrete implementation at the application's composition root instead. Verify by confirming the service's constructor takes the repository abstraction as a parameter and contains no direct construction of a concrete repository or connection.
 """
@@ -40,11 +40,11 @@ id = "construct-concretes-inline"
 violates = true
 label = "services construct their own concrete repositories"
 directive = "Each service constructs the concrete repository it needs directly, including acquiring whatever connection or client that repository requires."
-why = "Simpler with no wiring layer, but binds every service to a specific persistence implementation and makes unit testing without the real datastore impossible."
+why = "Every service is bound to a specific persistence implementation, and unit testing without the real datastore becomes impossible. Skipping the wiring layer is simpler only at first."
 
 [[option]]
 id = "global-service-locator"
 violates = true
 label = "a global service locator resolves dependencies"
 directive = "Services resolve their repositories from a global singleton or service-locator registry at call time rather than receiving them as constructor dependencies."
-why = "Removes constructor boilerplate but hides each service's real dependencies and reintroduces the test-isolation problem through global state."
+why = "Each service's real dependencies are hidden, and the test-isolation problem returns through global state. The locator removes constructor boilerplate at that cost."

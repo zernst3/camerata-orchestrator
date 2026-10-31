@@ -1,5 +1,5 @@
 id = "UI-REACT-HOOKS-LINT-1"
-version = 2
+version = 3
 title = "A React project's own lint configuration enables the React Hooks rules, so a misused hook or an incomplete dependency array fails the lint step"
 domain = "javascript:react"
 layer = "framework"
@@ -60,4 +60,4 @@ id = "hooks-lint-rules-are-not-enabled"
 violates = true
 label = "The project's own lint configuration does not enable the React Hooks rules"
 directive = "Leave the React Hooks lint rules out of the project's lint configuration, so that a misused hook or an incomplete dependency array is not reported by any automatic check."
-why = "With neither hooks rule enabled, a hook called inside a condition or a loop, or an effect, callback or memo that reads a value it leaves out of its dependency array, passes review and the build. It fails only when the app runs: as a crash when the number of hooks changes between renders, or as stale data when an effect keeps using an old copy of a value. Neither shows in a short manual test, and the first report of either is usually a user. Every hook added from here on is unchecked."
+why = "With neither hooks rule enabled, a hook called inside a condition or a loop or an effect, callback or memo that reads a value it leaves out of its dependency array, passes review and the build. It fails only when the app runs: as a crash when the number of hooks changes between renders, or as stale data when an effect keeps using an old copy of a value. Neither shows in a short manual test, and the first report of either is usually a user. Every hook added from here on is unchecked."

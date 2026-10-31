@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
-version = 1
+version = 6
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
@@ -15,6 +15,16 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the DEFINER clause, the parameter filter, the identity check (and any helper function it calls) and the GRANT EXECUTE are all routine statements); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: this is IDOR inside the database — a broadly-granted SECURITY DEFINER
 # read whose filtering id comes from the caller, with the RLS that would have constrained it
 # bypassed by the DEFINER privileges. Any caller matching the grant substitutes another tenant's
@@ -35,7 +45,7 @@ title = "CWE-863: Incorrect Authorization"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker"
-title = "Supabase docs — Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
+title = "Supabase docs: Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
 
 [decision]
 question = "Must a SECURITY DEFINER function that returns rows filtered only by a caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, check that parameter against the caller's own identity before returning rows?"
@@ -75,16 +85,16 @@ directive = """
 A SECURITY DEFINER function runs with its creator's privileges, so the Row Level Security that would
 normally decide which rows a caller may see never runs. When such a function is granted EXECUTE to
 `anon`, `public` or `authenticated`, and selects rows by matching a column against one of its own
-parameters, the function body is the only place entitlement can be established — and it establishes
+parameters, the function body is the only place entitlement can be established, and it establishes
 it, before returning anything. A session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against the owner or tenant
-column, a call to a role/ownership-check function, or a caller-supplied shared secret compared
+column, a call to a role/ownership-check function or a caller-supplied shared secret compared
 against a stored value all satisfy this; any of the three makes the supplied id's relationship to
 the caller provable. Where the function is only ever meant to return the caller's OWN rows, the
 better shape is to derive the id from `auth.uid()` and not accept it as a parameter at all.
 
 Without that check, any caller matching the grant substitutes another tenant's id and reads their
-rows — IDOR, with the bypass happening inside the database rather than in a web handler. A UI that
+rows: IDOR, with the bypass happening inside the database rather than in a web handler. A UI that
 declines to render the button is not a substitute: the PostgREST RPC endpoint reaches the function
 directly regardless of what the interface shows.
 """
@@ -92,11 +102,11 @@ remediation = """
 For `<function-name>`, add a server-side identity check as the FIRST statement in the function
 body, before returning any rows: compare `auth.uid()` (or `current_user`/`session_user`, or a
 custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
-owner/tenant column for the id supplied, and `raise exception` on mismatch — or call a role-check
+owner/tenant column for the id supplied and `raise exception` on mismatch, or call a role-check
 helper (e.g. `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the
 function is only ever meant to return the CALLER's own data, consider deriving the id from
 `auth.uid()` directly instead of accepting it as a parameter, removing the substitution risk
-entirely. A UI-only disable/hide of the triggering control is never sufficient — the function is
+entirely. A UI-only disable/hide of the triggering control is never sufficient: the function is
 still reachable directly via the PostgREST RPC endpoint regardless of what the UI renders. Verify
 by confirming a direct RPC call supplying an id the caller does not own is rejected before any row
 is returned.
@@ -108,5 +118,5 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 id = "definer-read-trusts-caller-supplied-id"
 violates = true
 label = "A broadly-granted SECURITY DEFINER read filters rows by a caller-supplied id with no check tying it to the caller"
-directive = "A SECURITY DEFINER function that returns rows filtered by one of its own caller-supplied parameters, granted to anon/public/authenticated, performs no check tying that parameter to the caller's own identity, role, or a validated secret."
+directive = "A SECURITY DEFINER function that returns rows filtered by one of its own caller-supplied parameters, granted to anon/public/authenticated, performs no check tying that parameter to the caller's own identity, role or a validated secret."
 why = "Rejected: SECURITY DEFINER bypasses the caller's RLS, so the function body is the only place the ownership check can live. Without it, the broad grant lets any caller substitute any id and read another tenant's rows."

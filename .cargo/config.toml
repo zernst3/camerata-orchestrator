@@ -1,0 +1,6 @@
+# On macOS, `cargo run` (and test executables) go through scripts/cargo-runner.sh, which signs the
+# camerata binaries with the local "Camerata Dev" certificate before launching them (see
+# scripts/sign-dev.sh: a stable signature keeps the Keychain's "Always Allow"). It is a no-op
+# without the certificate, off macOS and on CI.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/cargo-runner.sh"

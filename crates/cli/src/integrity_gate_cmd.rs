@@ -132,9 +132,9 @@ mod tests {
     fn req_i2_cmd_a_healthy_ledger_exits_zero() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut l = ScanLedger::new();
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
-        l.record_rule("TAINT-1", RuleTier::ExternalTool, true, None, 5, 0);
-        l.record_rule("AI-1", RuleTier::Semantic, true, None, 5, 0);
+        l.record_rule("", "SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
+        l.record_rule("", "TAINT-1", RuleTier::ExternalTool, true, None, 5, 0);
+        l.record_rule("", "AI-1", RuleTier::Semantic, true, None, 5, 0);
         l.record_input(healthy_input());
         let path = write_ledger(tmp.path(), &l);
 
@@ -153,8 +153,8 @@ mod tests {
     fn req_i2_cmd_a_dark_tier_exits_one_and_is_still_a_successful_gate_run() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut l = ScanLedger::new();
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
-        l.record_rule("AI-1", RuleTier::Semantic, true, None, 5, 0);
+        l.record_rule("", "SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
+        l.record_rule("", "AI-1", RuleTier::Semantic, true, None, 5, 0);
         // The external-tool tier never ran: the 41-rule dark-taint-layer shape.
         let path = write_ledger(tmp.path(), &l);
 
@@ -214,7 +214,7 @@ mod tests {
     fn req_i2_cmd_the_graded_profile_is_strictly_stronger_than_the_smoke_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut l = ScanLedger::new();
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
+        l.record_rule("", "SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
         l.record_input(healthy_input());
         let path = write_ledger(tmp.path(), &l);
 

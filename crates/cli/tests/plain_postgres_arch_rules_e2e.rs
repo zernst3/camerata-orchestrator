@@ -78,12 +78,7 @@ fn plain_postgres_files() -> Vec<(&'static str, &'static str)> {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// STEP 1 — arming, at the real selection seam: `scan_repos` (stack detection +
@@ -128,7 +123,13 @@ async fn plain_postgres_repo_selects_both_rules_via_the_real_curated_selection()
 /// corpus-documented" label an armed-but-uncited deterministic finding would carry) — this is
 /// exactly what the C3-3 real-path arming bug silently broke.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_end() {
+    // Test isolation: with the dependency audit disabled no osv-scanner run happens, so neither
+    // the CISA KEV nor the FIRST EPSS feed is fetched and nothing is written to the real user
+    // data dir's vuln-intel cache. (`vuln_intel::enrich_dependency_findings` honours the same
+    // variable.)
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
     let repo_dir = tempfile::tempdir().expect("create temp dir for the fixture repo");
     stage_git_repo(repo_dir.path(), &plain_postgres_files());
     let export_dir = tempfile::tempdir().expect("create temp dir for the export zip");
@@ -136,16 +137,27 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path,
         // `Api` + `has_api_key: false` resolves to `Blocked` — the real compliance gate, not a
         // test-only bypass (mirrors `inspect_e2e.rs`). The deterministic floor AND the
         // architectural engine both still run; only the AI review is skipped.
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
+        fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
+        max_cost_usd: None,
+        efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
+        client_engagement: false,
+        run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)

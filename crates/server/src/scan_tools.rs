@@ -72,6 +72,111 @@ impl ScanTool {
             ScanTool::Semgrep => "semgrep",
         }
     }
+
+    /// True when running this tool executes code the scanned repository controls, so a client
+    /// engagement skips it unless the operator opted in ([`crate::client_lock`]).
+    ///
+    /// - `cargo clippy` COMPILES the crate: that runs the repository's `build.rs` scripts and
+    ///   procedural macros, and honours its `.cargo/config.toml` (a `rustc-wrapper` there is a
+    ///   command of the repository's choosing). True.
+    /// - `ruff` and `semgrep` read the source as data, with Camerata's own rule selection and
+    ///   bundled rules. False.
+    /// - `eslint` runs with an explicit `--config` pointing at Camerata's bundled flat config
+    ///   ([`eslint_args`]), which turns off eslint's lookup of the repository's own
+    ///   `eslint.config.*` (JavaScript that would otherwise be imported), and resolves plugins
+    ///   and parsers from Camerata's provisioned workspace. False.
+    pub fn executes_repo_code(self) -> bool {
+        matches!(self, ScanTool::Clippy)
+    }
+}
+
+/// The [`CoverageNote::tool`] of the note that tells the report a step executed the client's own
+/// code with the operator's opt-in. Deliberately not a tool name: a note keyed by the tool's own
+/// name reads as that tool having failed (see `reconcile_external_tool_ledger`).
+pub const CLIENT_TOOLING_NOTE_TOOL: &str = "client-tooling";
+
+/// The phrase every client-tooling skip note carries, so the report can tell a step withheld on
+/// purpose from a tool that failed ([`is_client_tooling_skip`]).
+const CLIENT_TOOLING_SKIPPED: &str =
+    "this inspection does not execute repository code without an explicit opt-in";
+
+/// The client-facing text of a client-tooling skip note for `command`.
+pub(crate) fn client_tooling_skipped_message(command: &str, rules: usize) -> String {
+    format!(
+        "{command} was not run: it compiles the code, which runs this repository's own build \
+         scripts and procedural macros, and {CLIENT_TOOLING_SKIPPED}. The {rules} selected \
+         rule(s) it previews were not checked by it in this inspection."
+    )
+}
+
+/// True when `note` records a step skipped by the client-tooling lock (not a tool failure).
+pub fn is_client_tooling_skip(note: &CoverageNote) -> bool {
+    note.message.contains(CLIENT_TOOLING_SKIPPED)
+}
+
+/// Why a tool did not produce a result when it was never actually run: withheld by policy, not
+/// installed or not provisionable, or handed no rule to evaluate. A run error that is NOT this
+/// type (a crash, a non-zero exit with no result document, output nobody can read) means the
+/// tool was invoked and failed. See [`tool_invoked_and_failed`].
+#[derive(Debug)]
+struct ToolNotRun(String);
+
+impl std::fmt::Display for ToolNotRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ToolNotRun {}
+
+fn tool_not_run(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ToolNotRun(message.into()))
+}
+
+/// True when `error` came from a tool that was INVOKED and then failed, as opposed to one that
+/// was not run (see [`ToolNotRun`]). A program that cannot be started because it is not on the
+/// machine (`NotFound`) was never run, so it is the absence case.
+pub(crate) fn tool_invoked_and_failed(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<ToolNotRun>().is_some() {
+        return false;
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_none_or(|io| io.kind() != std::io::ErrorKind::NotFound)
+}
+
+/// The coverage note for `tool` skipped in a client engagement with no opt-in.
+fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
+    CoverageNote {
+        tool_failed: false,
+        repo: None,
+        tool: tool.name().to_string(),
+        message: client_tooling_skipped_message(tool_command(tool), rules),
+    }
+}
+
+/// The coverage note for `tool` run in a client engagement because the operator opted in.
+fn client_tooling_ran_note(tool: ScanTool) -> CoverageNote {
+    CoverageNote {
+        tool_failed: false,
+        repo: None,
+        tool: CLIENT_TOOLING_NOTE_TOOL.to_string(),
+        message: format!(
+            "{} ran with the operator's opt-in to run this repository's own tooling: compiling \
+             the code executed the repository's build scripts and procedural macros.",
+            tool_command(tool)
+        ),
+    }
+}
+
+/// The command a reader recognises for `tool`.
+fn tool_command(tool: ScanTool) -> &'static str {
+    match tool {
+        ScanTool::Clippy => "cargo clippy",
+        ScanTool::Ruff => "ruff",
+        ScanTool::Eslint => "eslint",
+        ScanTool::Semgrep => "semgrep",
+    }
 }
 
 /// Derive the scan tool a rule's findings would come from, by inspecting its
@@ -620,7 +725,7 @@ fn norm_severity(s: &str) -> String {
 /// When semgrep is invoked with an absolute `--config` path (as Camerata does when
 /// scanning an external repository), it prefixes every rule id with the config path,
 /// dotted. For example, scanning `/repos/myrepo` with
-/// `--config /Users/alice/camerata/tooling/semgrep-rules` produces:
+/// `--config /Users/auditor/camerata/tooling/semgrep-rules` produces:
 ///
 /// ```text
 /// Users.alice.camerata.tooling.semgrep-rules.camerata.security.sql-string-concat-rust
@@ -1038,7 +1143,7 @@ fn preview_finding(
 /// External linters are invoked with absolute paths and report absolute paths back. Nothing
 /// rewrote them, so every ESLint-preview row shipped the auditor's own filesystem layout to
 /// the client. Measured on the 2026-10-18 hearth export: **32 of 237 rows** carried a path
-/// like `/Users/<auditor>/Documents/Repos/Camerata tests/hearth/app/admin/page.tsx`, in the
+/// like `/Users/auditor/Documents/Repos/client fixtures/hearth/app/admin/page.tsx`, in the
 /// PDF and the workbook both. Every one of them was `Preview: eslint`; no other tier leaked.
 ///
 /// Two things are wrong with that beyond untidiness. It tells the client the auditor's
@@ -1186,9 +1291,14 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
 /// directory is the client's checkout. The client never opted in, and it is one more copy of
 /// their tree's fingerprints on disk after "delete source" (the same class of defect as the old
 /// in-repo scan cache; docs/design/2026-10-24_delete-and-refetch-client-source.md, D1).
+///
+/// `--isolated`: ruff otherwise reads the client's own `pyproject.toml` / `ruff.toml`, which can
+/// change what the preview checks and which files it skips. Camerata's rule selection is the only
+/// configuration it should see.
 fn ruff_args(select: &str) -> Vec<String> {
     [
         "check",
+        "--isolated",
         "--no-cache",
         "--output-format",
         "json",
@@ -1378,6 +1488,7 @@ pub const DISABLE_SEMGREP_ENV_VAR: &str = "CAMERATA_DISABLE_SEMGREP";
 /// even invoked this scan" (ran = false + disclosure) — a distinction a `CoverageNote`
 /// alone cannot make, since a tool nothing routed to emits no note at all (see
 /// [`tool_for_rule`]'s doc comment for the exact wiring gap this closes).
+#[allow(clippy::too_many_arguments)] // one scan pass's inputs, read in the order the pass uses them
 pub async fn run_scan_tools<'r>(
     repo: &str,
     dir: &Path,
@@ -1385,7 +1496,15 @@ pub async fn run_scan_tools<'r>(
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     present_languages: Option<&HashSet<String>>,
     progress: Option<(&crate::jobs::JobStore, &str)>,
+    // Whether a tool that executes the repository's code may run (see
+    // [`ScanTool::executes_repo_code`]). A skipped tool still counts as attempted and is
+    // disclosed with a note keyed by its own name, so the ledger records it as not run.
+    tooling: crate::client_lock::ClientTooling,
+    // True when the scan covers more than one repo. The job's tool progress is then keyed by
+    // repo and tool, so one repo's result for a tool is never written over another's.
+    multi_repo: bool,
 ) -> (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>) {
+    let progress_key = |tool: &str| crate::jobs::progress_tool_key(repo, tool, multi_repo);
     let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let attempted: HashSet<&'static str> = by_tool.keys().map(|t| t.name()).collect();
     let mut findings = Vec::new();
@@ -1395,10 +1514,10 @@ pub async fn run_scan_tools<'r>(
     // from the start (the UI shows the full set of tools queued, not one-at-a-time growth).
     if let Some((jstore, jid)) = progress {
         for tool in by_tool.keys() {
-            jstore.det_register_tool(jid, tool.name());
+            jstore.det_register_tool(jid, &progress_key(tool.name()));
         }
         if !ungrouped.is_empty() {
-            jstore.det_register_tool(jid, "unrouted");
+            jstore.det_register_tool(jid, &progress_key("unrouted"));
         }
     }
 
@@ -1406,11 +1525,13 @@ pub async fn run_scan_tools<'r>(
     // preview gap is visible rather than a silent clean.
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {
-            jstore.det_tool_running(jid, "unrouted");
+            jstore.det_tool_running(jid, &progress_key("unrouted"));
         }
     }
     for sr in &ungrouped {
         coverage_notes.push(CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: "unrouted".to_string(),
             message: format!(
                 "Could not preview {} — no scan-runnable tool wired for its linter source; \
@@ -1421,7 +1542,7 @@ pub async fn run_scan_tools<'r>(
     }
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {
-            jstore.det_tool_done(jid, "unrouted", ungrouped.len());
+            jstore.det_tool_done(jid, &progress_key("unrouted"), ungrouped.len());
         }
     }
 
@@ -1436,8 +1557,18 @@ pub async fn run_scan_tools<'r>(
     });
 
     for (tool, rules) in by_tool {
+        if tool.executes_repo_code() && !tooling.allowed() {
+            coverage_notes.push(client_tooling_skipped_note(tool, rules.len()));
+            if let Some((jstore, jid)) = progress {
+                jstore.det_tool_done(jid, &progress_key(tool.name()), 0);
+            }
+            continue;
+        }
+        if tool.executes_repo_code() && tooling.client_engagement {
+            coverage_notes.push(client_tooling_ran_note(tool));
+        }
         if let Some((jstore, jid)) = progress {
-            jstore.det_tool_running(jid, tool.name());
+            jstore.det_tool_running(jid, &progress_key(tool.name()));
         }
         let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone())
             .await
@@ -1454,6 +1585,8 @@ pub async fn run_scan_tools<'r>(
             }
             Err(e) => {
                 coverage_notes.push(CoverageNote {
+                    tool_failed: tool_invoked_and_failed(&e),
+                    repo: None,
                     tool: tool.name().to_string(),
                     message: format!(
                         "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
@@ -1465,7 +1598,15 @@ pub async fn run_scan_tools<'r>(
             }
         };
         if let Some((jstore, jid)) = progress {
-            jstore.det_tool_done(jid, tool.name(), produced);
+            jstore.det_tool_done(jid, &progress_key(tool.name()), produced);
+        }
+    }
+
+    // Every note names the repo it is about, so the ledger can tell a tool that failed on this
+    // repo from the same tool running on another.
+    for note in &mut coverage_notes {
+        if note.repo.is_none() {
+            note.repo = Some(repo.to_string());
         }
     }
 
@@ -1538,18 +1679,20 @@ async fn run_one_tool<'r>(
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
             {
-                anyhow::bail!("semgrep disabled via {DISABLE_SEMGREP_ENV_VAR} (test isolation)");
+                return Err(tool_not_run(format!(
+                    "semgrep disabled via {DISABLE_SEMGREP_ENV_VAR} (test isolation)"
+                )));
             }
             // Semgrep selects by config PACK, not individual ids.  Camerata
             // auto-provisions semgrep into a stable venv so the user never
             // needs to install it manually.  The preview runs against the
             // bundled offline ruleset (no network call to the semgrep registry).
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+                tool_not_run("could not resolve Camerata data dir for tool provisioning")
             })?;
             let semgrep_bin = tool_provisioning::ensure_semgrep(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("semgrep provisioning: {e}"))?;
+                .map_err(|e| tool_not_run(format!("semgrep provisioning: {e}")))?;
             let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
@@ -1569,7 +1712,9 @@ async fn run_one_tool<'r>(
         }
         ScanTool::Ruff => {
             if selectors.is_empty() {
-                anyhow::bail!("no ruff rule codes derived from the selection");
+                return Err(tool_not_run(
+                    "no ruff rule codes derived from the selection",
+                ));
             }
             let select = selectors.join(",");
             let args = ruff_args(&select);
@@ -1621,7 +1766,9 @@ async fn run_one_tool<'r>(
         }
         ScanTool::Eslint => {
             if selectors.is_empty() {
-                anyhow::bail!("no eslint rule ids derived from the selection");
+                return Err(tool_not_run(
+                    "no eslint rule ids derived from the selection",
+                ));
             }
             // Camerata auto-provisions eslint into a stable node_modules
             // workspace so the user never needs to install it manually. We use
@@ -1636,16 +1783,16 @@ async fn run_one_tool<'r>(
             // resolve and aborted every run with an empty stdout. See
             // [`parse_eslint_json`]'s doc comment for the full C11 post-mortem.
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+                tool_not_run("could not resolve Camerata data dir for tool provisioning")
             })?;
             tool_provisioning::ensure_eslint(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("eslint provisioning: {e}"))?;
+                .map_err(|e| tool_not_run(format!("eslint provisioning: {e}")))?;
             // Resolve the `eslint` symlink ONCE to the concrete generation directory and run
             // from those paths, so a re-provision swapping the link mid-run cannot affect us.
             let run_paths = tool_provisioning::eslint_run_paths(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("eslint workspace: {e}"))?;
+                .map_err(|e| tool_not_run(format!("eslint workspace: {e}")))?;
             let workspace = run_paths.workspace;
             let bin_str = run_paths.bin.to_string_lossy().into_owned();
             let config_str = run_paths.config.to_string_lossy().into_owned();
@@ -1657,6 +1804,8 @@ async fn run_one_tool<'r>(
             let mut gaps: Vec<CoverageNote> = unresolvable
                 .iter()
                 .map(|(sel, pkg)| CoverageNote {
+                    tool_failed: false,
+                    repo: None,
                     tool: ScanTool::Eslint.name().to_string(),
                     message: format!(
                         "Could not preview the eslint rule `{sel}`: its plugin package \
@@ -1667,11 +1816,11 @@ async fn run_one_tool<'r>(
                 })
                 .collect();
             if runnable.is_empty() {
-                anyhow::bail!(
+                return Err(tool_not_run(format!(
                     "none of the {} selected eslint rule(s) could be resolved: every one needs \
                      a plugin package that is not installed in Camerata's eslint workspace",
                     selectors.len(),
-                );
+                )));
             }
 
             let args = eslint_args(&config_str, &runnable);
@@ -1685,6 +1834,8 @@ async fn run_one_tool<'r>(
                     // valid JSON, no findings. Never leave it undisclosed.
                     if shape.read_nothing() {
                         gaps.push(CoverageNote {
+                            tool_failed: false,
+                            repo: None,
                             tool: ScanTool::Eslint.name().to_string(),
                             message: format!(
                                 "eslint could not PARSE any of the {} file(s) it read, so none \
@@ -1743,6 +1894,10 @@ mod tests {
     fn ruff_args_pass_no_cache() {
         let args = ruff_args("E501,F401");
         assert!(args.iter().any(|a| a == "--no-cache"), "{args:?}");
+        // `--isolated`: ruff reads no configuration file from the client's repository
+        // (`pyproject.toml`, `ruff.toml`), so the repository cannot change what the preview
+        // checks, where it writes or which files it skips.
+        assert!(args.iter().any(|a| a == "--isolated"), "{args:?}");
         // The rest of the command is unchanged.
         assert_eq!(args[0], "check");
         assert!(args.windows(2).any(|w| w == ["--select", "E501,F401"]));
@@ -1762,7 +1917,8 @@ mod tests {
     }
 
     /// The behavioural proof for D1, when ruff is installed: a real run leaves no cache folder
-    /// in the scanned directory.
+    /// in the scanned directory. VACUOUS where `ruff` is not on PATH: it returns early and passes
+    /// without checking anything, so only `ruff_args_pass_no_cache` pins the flags there.
     #[tokio::test]
     async fn ruff_run_leaves_no_cache_directory_in_the_scanned_repo() {
         let Ok(probe) = tokio::process::Command::new("ruff")
@@ -1812,6 +1968,8 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
+            candidates: None,
             verification: Verification::Grounded,
             sources: linters
                 .iter()
@@ -2137,6 +2295,8 @@ mod tests {
             &lookup,
             None,
             None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
 
@@ -2158,6 +2318,138 @@ mod tests {
         );
     }
 
+    // ── H2: the client-tooling lock ──────────────────────────────────────────
+
+    /// A crate whose `build.rs` writes `marker` when it is compiled: the observable proof of
+    /// whether `cargo clippy` executed the repository's own code.
+    fn crate_that_marks_when_built(dir: &Path, marker: &Path) {
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"marker\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("build.rs"),
+            format!(
+                // No `unwrap`: this build script is linted too, and under `RUSTFLAGS=-D warnings`
+                // an `unwrap_used` warning would stop it compiling and so stop it running.
+                "fn main() {{ let _ = std::fs::write({:?}, \"built\"); }}\n",
+                marker.display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn f() -> u8 { 1 }\n").unwrap();
+    }
+
+    #[test]
+    fn only_clippy_executes_the_repository_code() {
+        assert!(ScanTool::Clippy.executes_repo_code());
+        for tool in [ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+            assert!(!tool.executes_repo_code(), "{tool:?}");
+        }
+    }
+
+    /// A client engagement without an opt-in never builds the client's crate: no build script
+    /// runs, and the skip is disclosed as a clippy coverage note naming why.
+    #[tokio::test]
+    async fn a_client_engagement_skips_clippy_without_running_the_build_script() {
+        let rules = vec![rule_with(
+            "RUST-NO-UNWRAP-1",
+            EnforcementKind::Mechanical,
+            false,
+            &["clippy: unwrap_used"],
+        )];
+        let lookup = lookup_over(&rules);
+        let repo = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("built");
+        crate_that_marks_when_built(repo.path(), &marker);
+
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            repo.path(),
+            &[selected("RUST-NO-UNWRAP-1")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::new(true, false),
+            false,
+        )
+        .await;
+
+        assert!(!marker.exists(), "the client's build script must not run");
+        assert!(!repo.path().join("target").exists(), "nothing was compiled");
+        assert!(findings.is_empty());
+        assert!(attempted.contains("clippy"), "{attempted:?}");
+        let note = notes
+            .iter()
+            .find(|n| n.tool == "clippy")
+            .expect("the skip is disclosed");
+        assert!(note.message.contains("was not run"), "{}", note.message);
+        // Every note names the repo it is about.
+        assert!(
+            notes.iter().all(|n| n.repo.as_deref() == Some("me/api")),
+            "{notes:?}"
+        );
+        assert!(note.message.contains("build scripts"), "{}", note.message);
+        assert!(
+            !note.message.contains('\u{2014}'),
+            "no em dash: {}",
+            note.message
+        );
+    }
+
+    /// With the operator's opt-in, clippy runs (the build script executes) and the report is
+    /// told that the repository's own code was executed. VACUOUS where `cargo clippy` is not
+    /// installed: it prints SKIPPED and passes without checking anything.
+    #[tokio::test]
+    async fn an_opted_in_client_engagement_runs_clippy_and_says_so() {
+        let cargo_clippy = std::process::Command::new("cargo")
+            .args(["clippy", "--version"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !cargo_clippy {
+            eprintln!("SKIPPED: cargo clippy is not installed");
+            return;
+        }
+        let rules = vec![rule_with(
+            "RUST-NO-UNWRAP-1",
+            EnforcementKind::Mechanical,
+            false,
+            &["clippy: unwrap_used"],
+        )];
+        let lookup = lookup_over(&rules);
+        let repo = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("built");
+        crate_that_marks_when_built(repo.path(), &marker);
+
+        let (_findings, notes, _attempted) = run_scan_tools(
+            "me/api",
+            repo.path(),
+            &[selected("RUST-NO-UNWRAP-1")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::new(true, true),
+            false,
+        )
+        .await;
+
+        assert!(marker.exists(), "opted in: clippy built the crate");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.tool == CLIENT_TOOLING_NOTE_TOOL && n.message.contains("opt-in")),
+            "{notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|n| n.tool == "clippy"),
+            "an opted-in run is not a clippy failure: {notes:?}"
+        );
+    }
+
     // ── SARIF + per-tool JSON parsing ────────────────────────────────────────
 
     // ── normalize_semgrep_rule_id ─────────────────────────────────────────────
@@ -2165,7 +2457,7 @@ mod tests {
     #[test]
     fn normalize_strips_absolute_path_prefix() {
         // Real example from scanning an external repo with an absolute --config path.
-        let raw = "Users.zacharyernst.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust";
+        let raw = "Users.auditor.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust";
         assert_eq!(
             normalize_semgrep_rule_id(raw),
             "camerata.security.sql-string-concat-rust"
@@ -2706,8 +2998,17 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes, attempted) =
-            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
         assert!(
             findings.is_empty(),
             "missing tool must yield no finding rows"
@@ -2760,6 +3061,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_tool_that_could_not_start_was_not_run_but_a_crash_was_a_failure() {
+        // Not run: withheld, not provisionable, no rule, or not on the machine.
+        assert!(!tool_invoked_and_failed(&tool_not_run("semgrep disabled")));
+        assert!(!tool_invoked_and_failed(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::NotFound)
+        )));
+        // Invoked and failed: unreadable output, no output, or any other process error.
+        assert!(tool_invoked_and_failed(&tool_output_error(
+            ScanTool::Semgrep,
+            "",
+            "boom",
+            None
+        )));
+        assert!(tool_invoked_and_failed(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_is_not_on_the_machine_leaves_a_note_that_is_not_a_failure() {
+        let rules = vec![rule_with(
+            "PY-A",
+            EnforcementKind::Mechanical,
+            false,
+            &["Ruff: S608"],
+        )];
+        let lookup = lookup_over(&rules);
+        let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let (_, notes, _) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
+        assert!(!notes.is_empty());
+        assert!(notes.iter().all(|n| !n.tool_failed), "{notes:?}");
+    }
+
     #[tokio::test]
     async fn missing_tool_emits_coverage_note_not_finding() {
         let rules = vec![rule_with(
@@ -2770,8 +3115,17 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes, attempted) =
-            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
         assert!(
             findings.is_empty(),
             "a missing tool must yield NO finding row"
@@ -3053,6 +3407,58 @@ mod tests {
         std::path::PathBuf::from(path)
     }
 
+    /// The symlink fix, against a REAL symlinked root (not a synthetic path): a tool reports the
+    /// canonical path while the caller passes the symlinked root (macOS `/var` vs
+    /// `/private/var`), or the other way round. Both must be kept, the path-shape exclusions must
+    /// still apply after resolution, and a symlink inside the repo that points OUT of it must not
+    /// smuggle an outside file in.
+    #[cfg(unix)]
+    #[test]
+    fn scope_compares_canonical_forms_under_a_real_symlinked_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::create_dir_all(real.join("target/debug")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(real.join("target/debug/b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(outside.join("c.rs"), "fn c() {}\n").unwrap();
+        let link = tmp.path().join("linked-repo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(&outside, real.join("escape")).unwrap();
+        let real_c = real.canonicalize().unwrap();
+
+        // Symlinked root, canonical finding path: the case that used to drop a whole tool tier.
+        let canonical_file = real_c.join("src/a.rs");
+        assert!(is_in_repo_scope(&link, &canonical_file.to_string_lossy()));
+        // Canonical root, finding reported through the symlink.
+        assert!(is_in_repo_scope(
+            &real_c,
+            &link.join("src/a.rs").to_string_lossy()
+        ));
+        // A repo-relative path under a symlinked root.
+        assert!(is_in_repo_scope(&link, "src/a.rs"));
+        // The exclusions still apply to the resolved path.
+        assert!(!is_in_repo_scope(
+            &link,
+            &real_c.join("target/debug/b.rs").to_string_lossy()
+        ));
+        // A link inside the repo that resolves outside it is outside the repo.
+        assert!(!is_in_repo_scope(
+            &link,
+            &link.join("escape/c.rs").to_string_lossy()
+        ));
+        assert!(!is_in_repo_scope(
+            &link,
+            &outside
+                .canonicalize()
+                .unwrap()
+                .join("c.rs")
+                .to_string_lossy()
+        ));
+    }
+
     /// Rust stdlib paths emitted by clippy (absolute, outside any repo) are dropped.
     #[test]
     fn scope_excludes_rustc_stdlib_path() {
@@ -3129,11 +3535,11 @@ mod tests {
             "(scan preview)"
         );
         // Nested deeply, and a repo whose own path contains a space (the real fixture did).
-        let spaced = repo("/Users/auditor/Camerata tests/hearth");
+        let spaced = repo("/Users/auditor/client fixtures/hearth");
         assert_eq!(
             repo_relative_path(
                 &spaced,
-                "/Users/auditor/Camerata tests/hearth/app/listings/[id]/page.tsx"
+                "/Users/auditor/client fixtures/hearth/app/listings/[id]/page.tsx"
             ),
             "app/listings/[id]/page.tsx"
         );
@@ -3158,7 +3564,7 @@ mod tests {
         ] {
             let out = repo_relative_path(&root, raw);
             assert!(
-                !out.contains("/Users/") && !out.contains("auditor"),
+                !out.contains("/Users") && !out.contains("auditor"),
                 "`{out}` still discloses the auditor's filesystem"
             );
             assert!(
@@ -3341,7 +3747,7 @@ mod tests {
 
     // ── req_c11: the eslint preview failed WHOLESALE, at zero coverage and nonzero cost ──
     //
-    // `docs/plans/2026-10-09_audit-findings-tracker.md`, C11 / Fable priority #4:
+    // the audit findings tracker, C11 / Fable priority #4:
     //
     //   > The ESLint preview pass FAILED WHOLESALE on these runs: `Could not preview 10
     //   > rule(s) with eslint: EOF while parsing a value at line 1 column 0`.
@@ -4062,8 +4468,17 @@ export function Thing({ id }) {
         let lookup = lookup_over(&rules);
         let selection = vec![selected("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")];
 
-        let (findings, notes, attempted) =
-            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/web",
+            dir.path(),
+            &selection,
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
 
         assert!(
             attempted.contains("eslint"),
@@ -4255,8 +4670,17 @@ export function Thing({ id }) {
             .map(selected)
             .collect();
         let lookup = |id: &str| corpus.get_by_id(id);
-        let (findings, notes, attempted) =
-            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/web",
+            dir.path(),
+            &selection,
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
         assert!(attempted.contains("eslint"), "notes={notes:?}");
         assert!(
             notes.iter().all(|n| !n.message.contains(HOOKS_LINT_RULE)),
@@ -4423,5 +4847,32 @@ export function Thing({ id }) {
                  is the coverage C11 cost us entirely. findings={findings:?}"
             );
         }
+    }
+
+    /// Two repos running the same tool get a progress row each, keyed by repo and tool, so the
+    /// second repo's count never overwrites the first's.
+    #[test]
+    fn tool_progress_is_keyed_by_repo_when_there_is_more_than_one() {
+        let jobs = crate::jobs::JobStore::new();
+        let id = jobs.create("audit", None);
+        for (repo, found) in [("acme/one", 3usize), ("acme/two", 0)] {
+            let key = crate::jobs::progress_tool_key(repo, "eslint", true);
+            jobs.det_tool_running(&id, &key);
+            jobs.det_tool_done(&id, &key, found);
+        }
+        let progress = jobs.det_progress(&id).unwrap();
+        let rows: Vec<(&str, usize)> = progress
+            .tools
+            .iter()
+            .map(|t| (t.tool.as_str(), t.findings))
+            .collect();
+        assert_eq!(rows, vec![("acme/one:eslint", 3), ("acme/two:eslint", 0)]);
+        assert_eq!(progress.total, 2);
+        assert_eq!(progress.done, 2);
+        // One repo keeps the tool's own name.
+        assert_eq!(
+            crate::jobs::progress_tool_key("acme/one", "eslint", false),
+            "eslint"
+        );
     }
 }

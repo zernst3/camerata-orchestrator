@@ -11,7 +11,7 @@
 //! The rule's value is "`X` is written as a bare literal in N files". The whole difficulty is
 //! deciding, deterministically, which `X` are *domain* values and which are the protocol, the
 //! framework, the styling or the test data. Owner ruling, 2026-10-21 (recorded in
-//! `docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE): only four shapes qualify, and widening
+//! `docs/decisions/2026-10-28_consistency_rules_scope.md`): only four shapes qualify, and widening
 //! happens one shape at a time, each with its own safe twins.
 //!
 //! - **S1** a separated lowercase token (`orders-high`, `user:signup`, `uploads/avatars`),

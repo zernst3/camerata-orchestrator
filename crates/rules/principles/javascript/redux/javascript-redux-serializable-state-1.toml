@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-SERIALIZABLE-STATE-1"
-version = 1
+version = 4
 title = "Only plain serializable values live in the store and in actions"
 domain = "javascript:redux"
 layer = "library"
@@ -12,28 +12,28 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#do-not-put-non-serializable-values-in-state-or-actions"
-title = "Redux Style Guide — Do Not Put Non-Serializable Values in State or Actions (Priority A: Essential)"
+title = "Redux Style Guide: Do Not Put Non-Serializable Values in State or Actions (Priority A: Essential)"
 
 [[sources]]
 url = "https://redux-toolkit.js.org/api/serializabilityMiddleware"
-title = "Redux Toolkit — Serializability Middleware"
+title = "Redux Toolkit: Serializability Middleware"
 
 [decision]
-question = "What position does the project take on: Only plain serializable values live in the store and in actions?"
+question = "What kinds of values are held in the Redux store and carried in dispatched actions?"
 default = "only-plain-serializable-values-live-in-the-store"
 why = "Several core Redux capabilities depend on state and actions being plain serializable data: persisting and rehydrating the store, replaying actions, time-travel debugging, and the devtools' ability to show and diff state all serialize the values and assume they survive a round trip. Putting a non-serializable value into the store (a Promise, a function, a class instance, a Date, a Map or Set, DOM nodes) breaks those features quietly: persistence drops or corrupts the value, devtools cannot render it, and replay produces a different state than the original run. The same applies to action payloads, which flow through the same machinery. Storing a Date or a class instance because it is convenient at the call site trades these whole-store capabilities for local convenience; the fix is to keep the serializable projection in the store (an ISO string, a plain object, an id) and reconstruct the rich value at the edge where it is used. Genuinely non-serializable concerns (a Promise mid-flight, an AbortController) belong in middleware or component state, not the store."
 
 [[option]]
 id = "only-plain-serializable-values-live-in-the-store"
 label = "Only plain serializable values live in the store and in actions"
-directive = "The state tree and all action payloads contain only plain serializable values: primitives, plain objects, and arrays. Promises, functions, class instances, Dates, Maps, Sets, and other non-serializable values are not stored; their serializable projection is stored instead (an ISO string for a time, a plain object or id for an entity) and the rich value is reconstructed at the point of use. Non-serializable runtime concerns live in middleware or component state, not the store."
+directive = "The state tree and all action payloads contain only plain serializable values: primitives, plain objects and arrays. Promises, functions, class instances, Dates, Maps, Sets and other non-serializable values are not stored; their serializable projection is stored instead (an ISO string for a time, a plain object or id for an entity) and the rich value is reconstructed at the point of use. Non-serializable runtime concerns live in middleware or component state, not the store."
 remediation = """
-Replace the non-serializable value (a Date, class instance, Map, Set, or Promise) stored in state or an action payload with its plain serializable projection (an ISO string for a date, a plain object or array for a class instance or Map). Verify by confirming the state tree can be JSON-serialized and deserialized without losing information, and the Redux Toolkit serializability middleware check passes.
+Replace the non-serializable value (a Date, class instance, Map, Set or Promise) stored in state or an action payload with its plain serializable projection (an ISO string for a date, a plain object or array for a class instance or Map). Verify by confirming the state tree can be JSON-serialized and deserialized without losing information, and the Redux Toolkit serializability middleware check passes.
 """
 why = "Persistence, action replay, time-travel debugging, and the devtools all serialize state and assume it survives a round trip, so a Promise, class instance, or Date in the store breaks those features quietly."
 
 [[option]]
 id = "non-serializable-values-such-as-dates-class-inst"
 label = "Store non-serializable values in state"
-directive = "non-serializable values such as Dates, class instances, Maps, or Promises are stored directly in the state tree or action payloads when convenient, rather than keeping only plain serializable projections in the store"
+directive = "non-serializable values such as Dates, class instances, Maps or Promises are stored directly in the state tree or action payloads when convenient, rather than keeping only plain serializable projections in the store"
 why = "Storing non-serializable values such as Dates, class instances, Maps, or Promises directly in the state tree trades local convenience for the loss of whole-store capabilities: persistence drops or corrupts the value, devtools cannot render it, and action replay produces a different state than the original run. The breakage is silent in development and only surfaces when persisting, replaying, or inspecting state in the devtools."

@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-1"
-version = 1
+version = 4
 title = "Use the DeriveEntityModel macro path"
 domain = "rust:seaorm"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Use the DeriveEntityModel macro path?"
+question = "How are SeaORM entities declared?"
 default = "use-the-deriveentitymodel-macro-path"
 why = "Matches code-generator output, is the most googleable shape, and avoids verbose boilerplate that offers no benefit unless you are deliberately deviating. Hand-rolled Entity, Column, and PrimaryKey impls are verbose and offer no upside unless an entity needs a specific customization of the macro expansion, which is rare. A project-specific entity macro that wraps DeriveEntityModel with extra defaults looks ergonomic at first but in practice drifts from generator output and has to be re-validated against every SeaORM upgrade, so the upgrade cost outpaces the local ergonomics gain. Relying on the SeaORM CLI generator for every entity and checking generated files in unmodified works until an entity needs a hand-tuned variant; once that happens, the project has two divergent shapes and reviewers must learn which entities are generator-clean and which have been hand-edited."
 
@@ -19,15 +19,15 @@ id = "use-the-deriveentitymodel-macro-path"
 label = "Use the DeriveEntityModel macro path"
 directive = "Entities are defined with the DeriveEntityModel macro, not hand-rolled Entity/Column/PrimaryKey impls."
 remediation = """
-Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column, or PrimaryKey.
+Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column or PrimaryKey.
 """
 why = "Matches code-generator output, is the most googleable shape, and avoids verbose boilerplate that offers no benefit unless you are deliberately deviating."
 
 [[option]]
 id = "entities-are-defined-with-hand-rolled-entity-col"
 violates = true
-label = "Hand-rolled Entity, Column, and PrimaryKey impls"
-directive = "entities are defined with hand-rolled Entity, Column, and PrimaryKey impls rather than the DeriveEntityModel macro"
+label = "Hand-rolled Entity, Column and PrimaryKey impls"
+directive = "entities are defined with hand-rolled Entity, Column and PrimaryKey impls rather than the DeriveEntityModel macro"
 why = "Verbose and offers no upside over the macro path unless an entity needs specific customization of the macro expansion, which is rare: the boilerplate must be written and maintained by hand across every entity, and reviewer attention is spent on mechanical repetition rather than on actual entity semantics."
 
 [[option]]
@@ -45,8 +45,8 @@ why = "Works until an entity needs a hand-tuned variant; once that happens, the 
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — the 'almighty' macro generating Entity, Column, PrimaryKey"
+title = "sea_orm::DeriveEntityModel: the 'almighty' macro generating Entity, Column, PrimaryKey"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — DeriveEntityModel usage and column attributes"
+title = "SeaORM docs: Entity Format: DeriveEntityModel usage and column attributes"

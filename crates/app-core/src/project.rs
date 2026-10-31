@@ -30,7 +30,8 @@ use camerata_fleet::tier::TierMap;
 /// resolving unchanged.
 pub use camerata_api_types::project::{
     default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, ProjectBackend,
-    StallThresholds, StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
+    ReviewOnError, ReviewTier, StallThresholds, StepModels, DEFAULT_MODEL,
+    DEFAULT_ROUTINE_STALL_SECS,
 };
 
 /// The NON-FLEET AI steps whose model is configured per-project on [`StepModels`].
@@ -49,6 +50,9 @@ pub enum StepKind {
     /// The calibration pass (severity recalibration + confidence tagging) that runs after
     /// the audit. UI-picked: an explicit request model overrides.
     Calibration,
+    /// The fix stage (one codebase-specific fix per finding, after calibration). UNSET by
+    /// default (an empty model id): unset, the `fix_on_haiku` efficiency measure picks the model.
+    Fix,
     /// The research / side-by-side chat completion. UI-picked: an explicit request model
     /// overrides.
     ResearchChat,
@@ -212,7 +216,7 @@ pub struct ProjectRuleset {
 
 /// One work-item TYPE in a project's hierarchy schema (e.g. `"Epic"`, `"Story"`, or a custom
 /// `"Spike"`). GitHub has no native "Epic"; a type is just a freetext name that the GitHub adapter
-/// maps to a `type:<name>` label. See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// maps to a `type:<name>` label. See the epic design page notes §3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkType {
     /// The type name (e.g. `"Feature"`). Freetext; custom types use any non-empty string.
@@ -240,7 +244,7 @@ pub struct TypeRelation {
 /// parent→child nesting rules between them. Saved on the [`Project`] and portable (travels with
 /// export). It is effectively Camerata's own, per-project, relationship-aware alternative to GitHub
 /// Issue Types (per-project not org-locked, freetext + custom types, and it encodes hierarchy
-/// RELATIONS that Issue Types do not). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// RELATIONS that Issue Types do not). See the epic design page notes §3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HierarchySchema {
     /// The work-item types available in this project (built-in palette + custom).
@@ -342,8 +346,8 @@ pub struct Project {
     ///
     /// Serde default fills in [`TierMap::default()`] for projects persisted before this
     /// field existed, so no migration is required. The default Claude tier map is:
-    /// `fast=claude-haiku-4-5-20251001`, `balanced=claude-sonnet-5`,
-    /// `strongest=claude-opus-5`.
+    /// `fast=claude-haiku-5-5`, `balanced=claude-sonnet-5-5`,
+    /// `strongest=claude-opus-5-5`.
     #[serde(default)]
     pub tier_map: TierMap,
     /// VCS-action gate configuration: per-rule enabled flags and tunables for the
@@ -422,7 +426,7 @@ pub struct Project {
     /// portable (travels with the project export). Serde default seeds [`default_hierarchy_schema`]
     /// (the common Scrum ladder) for projects persisted before this field existed — no migration
     /// required; an explicitly-saved empty schema stays empty. See
-    /// `docs/plans/2026-06-30_epic-design-page.md`.
+    /// the epic design page notes.
     #[serde(default = "default_hierarchy_schema")]
     pub hierarchy_schema: HierarchySchema,
     /// The backend this project's AI calls use — the source of truth for EVERY project-scoped
@@ -450,6 +454,35 @@ pub struct Project {
     /// `legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli` for the migration test.
     #[serde(default)]
     pub backend: ProjectBackend,
+    /// Who the inspection is FOR: the client company named in every export's confidentiality
+    /// line ("Confidential, prepared for <client> on <date>") on every PDF page and every
+    /// workbook sheet (2026-10-24 decision). Part of the inspection setup saved with the
+    /// project, so every export fills it in without retyping; a blank name blocks the export.
+    /// Serde default = empty for projects persisted before this field existed (no migration).
+    #[serde(default)]
+    pub client_name: String,
+    /// This project is a CLIENT ENGAGEMENT (`camerata_server::client_lock`): its AI work runs
+    /// only on the Anthropic API with Anthropic models (the `Cli` backend and OpenRouter models
+    /// are refused before any file is read or any model is called), and steps that execute the
+    /// client's own code are skipped unless [`Self::client_tooling_opt_in`] is set.
+    ///
+    /// ON for every new and imported project, and for a project persisted before this field
+    /// existed (the serde default): a refusal is loud and fixed in one click (Settings, Client
+    /// engagement), while client code silently sent through the personal subscription is not
+    /// recoverable at all. The operator turns it off for their own development.
+    #[serde(default = "default_client_engagement")]
+    pub client_engagement: bool,
+    /// The operator's explicit opt-in to run the client's own tooling for this engagement (the
+    /// `cargo clippy` scan preview, which builds the code; the governed dev loop's build and
+    /// tests). Off by default; recorded in the scan ledger and stated in the report. Ignored
+    /// when [`Self::client_engagement`] is off (nothing is withheld then).
+    #[serde(default)]
+    pub client_tooling_opt_in: bool,
+}
+
+/// The serde default for [`Project::client_engagement`]: on. See that field's doc comment.
+pub fn default_client_engagement() -> bool {
+    true
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -711,6 +744,7 @@ impl Project {
         match step {
             StepKind::Audit => &self.step_models.audit,
             StepKind::Calibration => &self.step_models.calibration,
+            StepKind::Fix => &self.step_models.fix,
             StepKind::ResearchChat => &self.step_models.research_chat,
             StepKind::StoryAuthoring => &self.step_models.story_authoring,
             StepKind::Decomposition => &self.step_models.decomposition,
@@ -727,6 +761,7 @@ impl Project {
         match step {
             StepKind::Audit => self.step_models.audit = model,
             StepKind::Calibration => self.step_models.calibration = model,
+            StepKind::Fix => self.step_models.fix = model,
             StepKind::ResearchChat => self.step_models.research_chat = model,
             StepKind::StoryAuthoring => self.step_models.story_authoring = model,
             StepKind::Decomposition => self.step_models.decomposition = model,
@@ -776,21 +811,32 @@ impl Project {
 
     /// The effective model id for the L3 reviewer on this project.
     ///
-    /// Returns `self.l3_review.model` when it is non-empty; falls back to
-    /// `self.tier_map.balanced` so a project that opts in but doesn't pin a specific
-    /// model uses its configured balanced tier.
+    /// Returns `self.l3_review.model` when it is non-empty (an explicit pin always wins);
+    /// otherwise the tier the project chose for the reviewer: `Strongest` gives the
+    /// strongest tier model, `Balanced` (the default) gives `self.tier_map.balanced`.
     pub fn l3_model(&self) -> &str {
         if !self.l3_review.model.trim().is_empty() {
             &self.l3_review.model
         } else {
-            self.tier_map.balanced_primary()
+            match self.l3_review.tier {
+                ReviewTier::Strongest => &self.tier_map.strongest,
+                ReviewTier::Balanced => self.tier_map.balanced_primary(),
+            }
         }
     }
 
     /// Replace the L3 review configuration for this project in place.
+    ///
+    /// Only a change to the model assignment (`enabled` or `model`) deviates the project off its
+    /// model-profile preset. The reviewer policy (`on_error`, `fix_rounds`, `tier`) is not part of
+    /// any preset, so changing only it leaves the profile alone.
     pub fn set_l3_review(&mut self, config: L3ReviewConfig) {
+        let assignment_changed =
+            self.l3_review.enabled != config.enabled || self.l3_review.model != config.model;
         self.l3_review = config;
-        self.mark_profile_custom();
+        if assignment_changed {
+            self.mark_profile_custom();
+        }
     }
 }
 
@@ -954,6 +1000,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -994,6 +1043,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections,
                 cross_repo: vec![],
@@ -1089,6 +1141,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1149,7 +1204,28 @@ mod tests {
         p.set_l3_review(L3ReviewConfig {
             enabled: true,
             model: "pinned-l3".into(),
+            ..Default::default()
         });
+        assert_eq!(p.model_profile, ModelProfile::Custom);
+    }
+
+    /// The reviewer policy (fail closed, fix rounds, tier) is not a model assignment, so
+    /// changing only it must not deviate the project off its model-profile preset.
+    #[test]
+    fn changing_only_a_reviewer_policy_field_does_not_mark_the_profile_custom() {
+        let mut p = proj_on_balanced();
+        let before = p.model_profile;
+        assert_ne!(before, ModelProfile::Custom);
+        let mut next = p.l3_review.clone();
+        next.on_error = ReviewOnError::FailClosed;
+        next.fix_rounds = 2;
+        next.tier = ReviewTier::Strongest;
+        p.set_l3_review(next);
+        assert_eq!(p.model_profile, before);
+        // But the on/off toggle or a pinned model still does.
+        let mut toggled = p.l3_review.clone();
+        toggled.enabled = !toggled.enabled;
+        p.set_l3_review(toggled);
         assert_eq!(p.model_profile, ModelProfile::Custom);
     }
 
@@ -1173,6 +1249,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1215,6 +1294,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1250,6 +1332,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1272,6 +1357,32 @@ mod tests {
         }"#;
         let p: Project = serde_json::from_str(json).unwrap();
         assert_eq!(p.max_iterations, 1);
+    }
+
+    #[test]
+    fn a_legacy_project_is_a_client_engagement_with_no_tooling_opt_in() {
+        // A project persisted before the client lock existed fails closed: it is treated as a
+        // client engagement until the operator turns that off, and never runs client tooling.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert!(p.client_engagement);
+        assert!(!p.client_tooling_opt_in);
+
+        let json_off = r#"{
+            "id": "proj-2",
+            "name": "Internal",
+            "client_engagement": false,
+            "client_tooling_opt_in": true
+        }"#;
+        let p: Project = serde_json::from_str(json_off).unwrap();
+        assert!(!p.client_engagement);
+        assert!(p.client_tooling_opt_in);
     }
 
     #[test]
@@ -1391,6 +1502,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1458,6 +1572,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1547,6 +1664,9 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

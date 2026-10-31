@@ -1,8 +1,8 @@
 # Delete and re-fetch client source: the build-ready design (2026-10-24)
 
-Binding decisions: `docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE, the 2026-10-22 entries "Delete
+Binding decisions: the private decision log, the 2026-10-22 entries "Delete
 client source after delivery" and its re-fetch revision. Forward-compatibility note:
-`docs/plans/2026-10-22_post-v1-roadmap.md`, "Keep V1 forward-compatible". Downstream consumer:
+the post-V1 roadmap notes (private working notes), "Keep V1 forward-compatible". Downstream consumer:
 `_workspace/brownfield-audits/WORK_ORDER_REVIEW_SPEED.md` (the code viewer, built AFTER this).
 
 Branch: `feat/audit-report-export`. This document is the spec Sonnet builds from and Fable
@@ -244,15 +244,15 @@ Counting is a plain recursive walk over the checkout (including `.git/`), so "fi
 Camerata source deletion record
 Repository        acme/app  (origin https://github.com/acme/app.git)
 Inspected commit  3f2a9c14e0b7... (inspection insp-..., finished 2026-10-24 15:02 UTC)
-Removed from      /Users/zach/Camerata/acme/app   on   MacBook-Pro.local
+Removed from      /Users/auditor/Camerata/acme/app   on   MacBook-Pro.local
 Requested         2026-10-24 17:40:12 UTC     Completed  2026-10-24 17:40:19 UTC
 Removed
-  checkout            /Users/zach/Camerata/acme/app                        2,314 files   148.2 MB
-  worktree            /Users/zach/Camerata/acme/app/.camerata-worktrees/..    412 files    31.0 MB
+  checkout            /Users/auditor/Camerata/acme/app                        2,314 files   148.2 MB
+  worktree            /Users/auditor/Camerata/acme/app/.camerata-worktrees/..    412 files    31.0 MB
   scan cache entry    scan-cache.json#proj-3/acme/app                           -          0.9 MB
   CLI scan cache      ~/Library/Caches/camerata/app-3f2a9c14.cache.json         1           0.4 MB
   CLI ledger          ~/Library/Caches/camerata/app-3f2a9c14.ledger.json        1          12.1 KB
-  model session file  ~/.claude/projects/-Users-zach-Camerata/9d1c....jsonl     1           2.3 MB
+  model session file  ~/.claude/projects/-Users-auditor-Camerata/9d1c....jsonl  1           2.3 MB
 Total                                                                      2,729 files   182.9 MB
 Kept                code excerpts inside the inspection findings (part of the delivered report)
 Method              Ordinary file removal on a FileVault-encrypted APFS volume. Not a forensic
@@ -465,7 +465,7 @@ inside `<checkout>/.git/worktrees/`), and the record is written last.
 | P3 | Server incremental-scan cache | `<dirs::data_dir()>/camerata/scan-cache.json` (`lib.rs:924`), the project's `ScanManifest` (`scan_cache.rs:53`): `files[repo]` and every `findings[i]` with `repo == <repo>` | `ScanCacheStore` | new `ScanCacheStore::remove_repo(project_id, repo)` (lock held through save, like `put`, `scan_cache.rs:335`); the whole project entry is dropped when `files` becomes empty |
 | P4 | CLI scan cache | `~/Library/Caches/camerata/<name>-<fnv32>.cache.json` where the key is `repo_state_key(canonical checkout path)` (`inspect_cmd.rs:286-310`, `manifest_cache_path` `:245`); Linux: `$XDG_CACHE_HOME/camerata/` (`camerata_state_dir` `:273`) | the key function, moved to `camerata_server::scan_cache::state_dir` so the server and the CLI share ONE implementation (the CLI re-exports it) | `remove_file` |
 | P5 | CLI integrity ledger | `~/Library/Caches/camerata/<same key>.ledger.json` (`ledger_path` `:408`). Counts only, no code (`scan_ledger.rs`), purged because the owner listed the CLI cache dir and it is keyed to the client path | same | `remove_file` |
-| P6 | Claude Code session files (Cli backend only) | `~/.claude/projects/<cwd with every "/" and "." replaced by "-">/<session_id>.jsonl` (verified on this machine: 23 such directories exist, e.g. `-Users-zacharyernst-Documents-Repos-camerata-orchestrator`). Camerata spawns `claude -p <prompt>` (`llm.rs:1310-1331`) with the prompt, which contains client source, as an argument; Claude Code persists every print-mode session. cwd is the Camerata process cwd for single-shot calls and the repo dir for repo-read calls (`harden_completion`, `llm.rs:152-178`) | `InspectionEntry.model_sessions` (section 5.1) | glob `~/.claude/projects/*/<session_id>.jsonl` and `~/.claude/projects/*/<session_id>/` (sidecar dir, if present) for each recorded id; `remove_file` / `remove_dir_all` |
+| P6 | Claude Code session files (Cli backend only) | `~/.claude/projects/<cwd with every "/" and "." replaced by "-">/<session_id>.jsonl` (verified on this machine: 23 such directories exist, e.g. `-Users-auditor-Documents-Repos-camerata-orchestrator`). Camerata spawns `claude -p <prompt>` (`llm.rs:1310-1331`) with the prompt, which contains client source, as an argument; Claude Code persists every print-mode session. cwd is the Camerata process cwd for single-shot calls and the repo dir for repo-read calls (`harden_completion`, `llm.rs:152-178`) | `InspectionEntry.model_sessions` (section 5.1) | glob `~/.claude/projects/*/<session_id>.jsonl` and `~/.claude/projects/*/<session_id>/` (sidecar dir, if present) for each recorded id; `remove_file` / `remove_dir_all` |
 | P7 | In-memory copies | `TranscriptStore` (`transcript.rs:37`) entries for the project's scan job ids; `JobStore` (`jobs.rs:121`) finished jobs for the project; NOT `last_scan` (findings are kept) | `AppState` | `transcripts.clear(job_id)`, `jobs.remove_finished(project_id)`; listed in the record as `InMemory` with `files: 0` |
 
 Locations checked and found NOT to hold client code (stated in the design so the completeness
@@ -636,7 +636,7 @@ are disabled with "Checking GitHub...".
   remote head: "Latest from `main` (`3f2a9c1`, the inspected commit)".
 - Radio B: "The inspected commit `3f2a9c1`, 24 Oct 2026" (date from the inspection entry).
   Hint: "For reproducing or disputing a finding. The clone still has full history."
-- Destination line: "Into /Users/zach/Camerata/acme/app".
+- Destination line: "Into /Users/auditor/Camerata/acme/app".
 - Errors from `/source/remote` replace the radios with the message and a "Retry" button; "Add a
   token" links to Credentials for `no_token`.
 - Button "Re-fetch" (primary); busy "Cloning..." (a full clone can take minutes; the dialog

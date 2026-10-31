@@ -299,11 +299,17 @@ async fn regenerate_sample_report() {
     assert_eq!(audited_rule_ids.len(), 22);
 
     let report = ScanReport {
+        run_id: None,
+ repos_not_inspected: Vec::new(),
+ recommendations_by_repo: Vec::new(),
+ patterns_across_services: Default::default(),
+ volume_by_repo: Default::default(),
         repos: vec![PORTAL.to_string(), EDGE.to_string()],
         stacks: Vec::new(),
         files_scanned: 214,
         test_file_count: 0,
         files_excluded: 1188,
+        excluded_noise_lines: Some(96_400),
         code_chars: 486_203,
         code_lines: 18_700,
         code_lines_by_language: vec![
@@ -331,11 +337,13 @@ async fn regenerate_sample_report() {
         actual_usage: None,
         deep: None,
         coverage_notes: vec![
-            CoverageNote {
+            CoverageNote { tool_failed: false,
+ repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Dependency scan covers the npm ecosystem via package-lock.json. No manifest was found for other ecosystems.".to_string(),
             },
-            CoverageNote {
+            CoverageNote { tool_failed: false,
+ repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Advisory data reflects the scan timestamp; re-run before remediation sign-off.".to_string(),
             },
@@ -367,6 +375,7 @@ async fn regenerate_sample_report() {
             audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
             camerata_version: "0.4.0".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -565,10 +574,5 @@ fn fn_by_rule(findings: &[Finding], rule_id: &str) -> Finding {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }

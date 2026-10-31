@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-DESCRIBE-NAMING-1"
-version = 1
+version = 3
 title = "describe uses the class constant; nested describe uses #method or .method; context starts with when/with/without"
 domain = "ruby:testing"
 layer = "language"
@@ -18,7 +18,7 @@ why = "RSpec generates human-readable failure messages by concatenating the desc
 [[option]]
 id = "class-and-method-naming"
 label = "describe ClassName; nested describe '#method'/.method; context 'when ...'; it 'returns ...'"
-directive = "Top-level describe takes the class constant (never a string like 'User'): describe User do. Nested describe blocks that zoom in on a method use '#method_name' for instance methods or '.method_name' for class methods: describe '#authenticate' do. Context blocks explain the precondition and start with 'when', 'with', or 'without': context 'when the password is correct' do. The it block description states the outcome in present tense without leading 'should' or 'will': it 'returns a signed JWT' do. Use is_expected.to rather than expect(subject).to in one-liner examples. Keep it descriptions under 40 characters; if longer, extract a context."
+directive = "Top-level describe takes the class constant (never a string like 'User'): describe User do. Nested describe blocks that zoom in on a method use '#method_name' for instance methods or '.method_name' for class methods: describe '#authenticate' do. Context blocks explain the precondition and start with 'when', 'with' or 'without': context 'when the password is correct' do. The it block description states the outcome in present tense without leading 'should' or 'will': it 'returns a signed JWT' do. Use is_expected.to rather than expect(subject).to in one-liner examples. Keep it descriptions under 40 characters; if longer, extract a context."
 remediation = """
 Rename the top-level describe to the class constant (describe User, not describe 'User'), nested describes for methods to '#method_name' (instance) or '.method_name' (class), and context blocks to start with when/with/without. Verify by confirming the spec file's describe/context blocks follow this naming and the RSpec/Rubocop naming cop passes.
 """
@@ -34,23 +34,23 @@ why = "Freeform describe strings produce failure output that names neither the m
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs (community guideline, not an official RSpec/Rails standard) — Testing Guidelines (describe naming, context wording, it descriptions)"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard): Testing Guidelines (describe naming, context wording, it descriptions)"
 
 [[sources]]
 url = "https://rspec.rubystyle.guide/"
-title = "RSpec Style Guide — Method naming with # and . prefixes"
+title = "RSpec Style Guide: Method naming with # and . prefixes"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/DescribeClass"
-title = "rubocop-rspec — RSpec/DescribeClass cop"
+title = "rubocop-rspec: RSpec/DescribeClass cop"
 linter = "rubocop-rspec: RSpec/DescribeClass"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/ContextWording"
-title = "rubocop-rspec — RSpec/ContextWording cop"
+title = "rubocop-rspec: RSpec/ContextWording cop"
 linter = "rubocop-rspec: RSpec/ContextWording"
 
 [[sources]]
 url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
-title = "RuboCop RSpec — full cop reference"
+title = "RuboCop RSpec: full cop reference"
 linter = "rubocop-rspec: RSpec/ExampleWording"

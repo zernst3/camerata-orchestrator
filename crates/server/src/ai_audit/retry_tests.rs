@@ -47,7 +47,7 @@ impl LlmPort for ScriptedLlm {
         }
         let (text, truncated) = self.script[n.min(self.script.len() - 1)].clone();
         Ok(LlmResponse {
-            text,
+            text: super::reply_schemas::check::address_by_id(&req.prompt, &text),
             model: "stub".to_string(),
             backend: "api".to_string(),
             cost_usd: Some(0.25),
@@ -85,11 +85,13 @@ async fn pass(
         None,
         "prompt".to_string(),
         Vec::new(),
+        &crate::prompt_frame::FrameNonce::generate(),
         "o/r",
         &std::collections::HashSet::new(),
         None,
         "s",
         Some(meter),
+        1,
     )
     .await
 }
@@ -259,6 +261,7 @@ async fn rejected_fix_attempts_are_counted_as_wasted_tokens() {
     assert_eq!(out[0].fix_specific, None);
     assert_eq!(failed.len(), 1);
     let fix = meter.stage_telemetry(1_000).stages[0].usage.clone();
+    // The rounds and the solo retry; a rejected fix is not sent again at the end of the run.
     let attempts = (MAX_FIX_REGENERATIONS + 2) as u64;
     assert_eq!(fix.calls, attempts);
     assert_eq!(fix.wasted_calls, attempts, "every attempt was thrown away");
@@ -327,21 +330,27 @@ async fn a_truncated_pass_retries_once_with_a_higher_cap_and_keeps_the_complete_
 async fn a_pass_truncated_twice_is_retried_once_only() {
     let llm = ScriptedLlm::new(&[(CUT_OFF, true)]);
     let meter = UsageMeter::default();
-    let _ = pass(&llm, &meter).await.expect("the pass completes");
+    // Still cut off after the one retry: a failed pass (H1) that keeps the complete findings.
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("a reply still cut off after the retry is a failed pass, not a clean one");
+    assert!(err.downcast_ref::<PartialPassReply>().is_some(), "{err}");
     assert_eq!(llm.calls(), 2, "never a third attempt");
 }
 
 #[tokio::test]
-async fn a_malformed_but_complete_pass_is_not_blindly_retried() {
+async fn a_malformed_but_complete_pass_is_retried_a_bounded_number_of_times_then_fails() {
     let llm = ScriptedLlm::new(&[("I could not produce JSON for this chunk.", false)]);
     let meter = UsageMeter::default();
-    let (findings, _, _) = pass(&llm, &meter).await.expect("the pass completes");
-    assert_eq!(llm.calls(), 1, "no truncation, no retry");
-    assert!(findings.is_empty());
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("a reply that never becomes JSON is a failed pass, not zero findings");
+    assert!(err.to_string().contains("not valid JSON"), "{err}");
+    assert_eq!(llm.calls(), 1 + MALFORMED_REPLY_RETRIES, "bounded retries");
     // The spend bought nothing, and the table says so.
     let scan = meter.stage_telemetry(1_000).stages[0].usage.clone();
-    assert_eq!(scan.calls, 1);
-    assert_eq!(scan.wasted_calls, 1);
+    assert_eq!(scan.calls, 1 + MALFORMED_REPLY_RETRIES as u64);
+    assert_eq!(scan.wasted_calls, 1 + MALFORMED_REPLY_RETRIES as u64);
 }
 
 #[tokio::test]
@@ -356,12 +365,18 @@ async fn a_clean_pass_is_one_call_and_nothing_is_wasted() {
 
 #[tokio::test]
 async fn a_failed_retry_never_makes_the_pass_worse_than_before() {
-    // The first call is cut off, the retry hits a transport error: the pass still returns Ok with
-    // what the first response parsed to (as it always did), not an Err that loses the chunk.
+    // The first call is cut off, the retry hits a transport error: the pass keeps what the first
+    // response held (its complete findings) and is reported as cut off (H1), so the chunk is
+    // neither lost nor read as clean.
     let mut llm = ScriptedLlm::new(&[(CUT_OFF, true)]);
     llm.fail_after = Some(1);
     let meter = UsageMeter::default();
-    let out = pass(&llm, &meter).await;
-    assert!(out.is_ok(), "{out:?}");
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("cut off, so a failed pass");
+    let partial = err
+        .downcast::<PartialPassReply>()
+        .expect("the failure carries what was recovered");
+    assert!(!partial.findings.is_empty(), "{partial:?}");
     assert_eq!(llm.calls(), 2);
 }

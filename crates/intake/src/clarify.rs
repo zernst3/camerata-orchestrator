@@ -61,12 +61,22 @@ pub enum ClarifyError {
 /// This is the seam that makes the clarify loop testable without a network or
 /// interactive stdin: tests inject [`StubAnswerSource`]; a real CLI
 /// implementation reads from stdin.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait AnswerSource: Send + Sync {
     /// Supply answers to `questions`. The returned `Vec` should be the same
     /// length as `questions`; shorter vecs are padded with empty strings when
     /// the driver folds them into the form.
-    async fn answer(&self, questions: &[String]) -> Vec<String>;
+    fn answer<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        questions: &'life1 [String],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── stub answer source ───────────────────────────────────────────────────────
@@ -425,7 +435,7 @@ mod tests {
         async fn evaluate(&self, _form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
             let remaining = self
                 .clarify_count
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
                     |v| if v > 0 { Some(v - 1) } else { None },

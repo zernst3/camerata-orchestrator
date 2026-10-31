@@ -1,5 +1,5 @@
 id = "ARCH-NAMING-ONE-CONCEPT-1"
-version = 2
+version = 5
 title = "A helper that does one thing exists once under one name that says what it does, and two modules do not each carry their own copy of it under different names"
 domain = "universal"
 layer = "universal"
@@ -12,26 +12,32 @@ inspectable = true
 # top severity.
 max_severity = "low"
 default = true
-# `policy`, not `grounded`: the convention that one concept has one name is deliberate project
-# policy, and no external authority states the cross-module, reviewed form specified here.
+# `grounded`: CWE-1041 states the principle, that several functions holding the same code are a
+# weakness because a fix to one copy can miss the others. The cross-module, reviewed form
+# specified here, keyed on the names, is this project's own.
 # Related controls (not citations, and deliberately not in `[[sources]]`): ESLint's `no-dupe-*`
 # rules and similar duplicate-declaration checks are intra-file and compare names, not bodies;
 # token clone detectors such as jscpd report repeated code without asking whether the names say
-# the same thing. None of them states this rule. Only the owner sets `verified`.
-verification = "policy"
+# the same thing.
+# Only the owner sets `verified`.
+verification = "grounded"
 qualifies = "A deterministic search followed by a reviewed assessment of the listed code, so the result is a judgment on top of a mechanical search and not a purely mechanical check. The search looks for a stretch of at least 60 tokens shared by two or more files of the same language family, with variable names, property names, literal values and operator spellings set aside, in which every copy is at least 90% of one whole top-level function. The functions must be declared under names that carry different concepts: each name is split into words (on underscores, hyphens and capital letters), a leading verb such as get, fetch, format, build or to and a trailing word such as helper or util are set aside, and two names differ only when the remaining words differ, so getUser and fetchUser count as one name and formatPrice and formatMoney count as two. Default exports and anonymous functions carry no declared name and are not counted. A function that calls another copy through an import is a wrapper and not a copy, and is not reported. When two files share two or more such functions, the finding is one module-level finding that lists every overlapping pair, so a duplicated utility module is reported once with the functions that overlap and not with a guess at purpose from folder names. Each candidate is then assessed on the listed code alone: do the differently named functions implement the same concept (one helper that should have one name), as opposed to two concepts that happen to share a body or an adapter that renames at a boundary? Only a candidate assessed as the same concept is reported, and one the assessment is unsure about is not. The bodies are also compared token for token (the name of a called function is compared; a renamed variable is not), and the finding says whether they currently agree and names where they differ. A function that renders JSX in a package the UI shared-primitive rule reads is left to that rule when it is selected, so one pair of components is not reported twice. Misleading names (a function whose name says something it does not do) are not detected, and neither are two helpers for one concept whose bodies differ in structure. Not reported: names that differ only by verb, test code, generated code, vendored code, minified code, migrations and seeds, translation catalogs and data tables, repetition inside a single file, and functions shorter than 60 tokens. Candidates beyond the 160 most significant in one scan are counted and disclosed but not assessed. When the assessment cannot run (no model available), candidates are reported as not assessed, never as clean. A scan that finds no candidate reports nothing and does not claim that no helper has two names."
 
 [[sources]]
+url = "https://cwe.mitre.org/data/definitions/1041.html"
+title = "MITRE CWE-1041: Use of Redundant Code (several functions that contain the same code are a maintenance weakness, since a fix to one copy can miss the others)"
+
+[[sources]]
 url = "docs/design/2026-10-21_w29-detector-implementation.md"
-title = "Design: the W29 detector layer, ARCH-NAMING-ONE-CONCEPT-1: the algorithm and its traps"
+title = "Design notes: how the check finds the same helper kept under different names, and the cases it must not report"
 
 [[sources]]
 url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
-title = "Corpus work order: consistency rules, section 5: one concept has one name"
+title = "Project policy: one concept has one name"
 
 [[sources]]
-url = "docs/OVERNIGHT_DECISIONS.md"
-title = "Decisions log, DECISIONS MADE, 2026-10-21: the clone detector and the three rules built on it are in V1 scope"
+url = "docs/decisions/2026-10-28_consistency_rules_scope.md"
+title = "Decision record: the repeated-code detector and the three rules built on it ship in the first release"
 
 [decision]
 question = "How does the project name a helper that several modules need?"

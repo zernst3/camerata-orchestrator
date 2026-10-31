@@ -65,13 +65,28 @@ impl MaintenanceScan {
 /// CVE feeds). [`StubScanner`] is the deterministic offline default: it always
 /// returns the same believable set of findings so the rest of the system can be
 /// developed and tested without network access.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait MaintenanceScanner: Send + Sync {
     /// Scan the given app and return all findings as of `now`.
     ///
     /// `now` is caller-supplied so tests can pass a fixed timestamp and the
     /// pure logic never calls the wall clock.
-    async fn scan(&self, app_id: &str, now: DateTime<Utc>) -> anyhow::Result<MaintenanceScan>;
+    fn scan<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        app_id: &'life1 str,
+        now: DateTime<Utc>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<MaintenanceScan>> + Send + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── stub scanner ────────────────────────────────────────────────────────────

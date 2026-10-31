@@ -1,5 +1,5 @@
 //! `camerata inspect` — Step 0 of the refinement loop (see
-//! `~/Documents/Repos/_workspace/brownfield-audits/CAMERATA_LOOP_HANDOFF.md`): a HEADLESS
+//! `<workspace>/brownfield-audits/CAMERATA_LOOP_HANDOFF.md`): a HEADLESS
 //! brownfield inspection that runs the exact pipeline the cockpit's "Run audit" + "product
 //! export" buttons drive, with no UI and no running BFF, so it can be scripted from a shell
 //! (CI, batch scans, and the refinement loop that needs to grade a scan without a browser).
@@ -38,6 +38,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub(crate) mod preflight;
+
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, BackendResolution, ProjectBackend};
 use camerata_server::onboard::{ProposedRule, SelectedRule};
@@ -56,11 +58,20 @@ use camerata_server::usage_ledger::UsageLedger;
 
 /// Parsed + validated arguments for `camerata inspect`. Kept separate from clap's `Command`
 /// enum variant so the pipeline ([`run_inspect`]) and its tests never depend on clap at all.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InspectArgs {
     /// The repo's local working tree to inspect. Must exist and be a directory
     /// ([`validate_args`] checks eagerly).
     pub repo: PathBuf,
+    /// Further repos of the SAME project (`--repo` given more than once). They are inspected
+    /// together with [`Self::repo`]: one scan, one report, one cache, one ledger.
+    pub also_repos: Vec<PathBuf>,
+    /// `--repo-name OWNER/REPO`, one per repo in the order the repos were given (the first
+    /// names [`Self::repo`]). Empty is allowed only for a single repo, which is then named for
+    /// its folder as it always was. Each name goes through
+    /// [`camerata_api_types::uow::validate_repo_name`] and must be unique: the name tags every
+    /// finding and keys the incremental cache, so two repos sharing one would merge.
+    pub repo_names: Vec<String>,
     /// Where to write the product-export ZIP (PDF + xlsx + findings.json + README.txt). Its
     /// parent directory must already exist.
     pub export: PathBuf,
@@ -69,16 +80,27 @@ pub struct InspectArgs {
     /// project's `backend` field. The `camerata inspect` flag defaults to `Api` (a client inspection
     /// runs on the Anthropic API); `Cli` is an explicit choice for internal benchmark runs.
     pub backend: ProjectBackend,
-    /// Use the Anthropic Message Batches path (`ScanMode::Batch`): ~50% cheaper, latency is
-    /// not returned until the whole batch completes. Requires `backend: Api` plus a
-    /// configured key — [`validate_args`] rejects the combination eagerly otherwise.
+    /// `--batch`: FORCE the Anthropic Message Batches path (`ScanMode::Batch`): ~50% cheaper,
+    /// latency is not returned until the whole batch completes. Requires `backend: Api` plus a
+    /// configured key ([`validate_args`] rejects the combination eagerly otherwise). With
+    /// neither this nor [`Self::realtime`] set the run's default applies
+    /// ([`camerata_server::ai_audit::resolve_scan_mode`]): batch on the API backend unless
+    /// `batch_default` is off.
     pub batch: bool,
+    /// `--realtime`: FORCE real-time (parallel) calls. Exclusive with [`Self::batch`].
+    pub realtime: bool,
     /// Explicit model override for the audit pass. `None`/blank falls back to
     /// [`camerata_server::llm::DEFAULT_MODEL`] — the same floor `step_model` uses for the
     /// project-less edge.
     pub model: Option<String>,
     /// Explicit model override for the calibration pass. Same fallback as `model`.
     pub calibration_model: Option<String>,
+    /// `--fix-model`: the fix stage's explicit model. `None`/blank = not set, and the fix stage
+    /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
+    pub fix_model: Option<String>,
+    /// `--clone-judge-model`: the duplicate-code checker's model. `None`/blank = the built-in
+    /// fast default (Haiku 5.5, `camerata_server::onboard::clone_advisory::resolve_clone_judge_model`).
+    pub clone_judge_model: Option<String>,
     /// Ignore the on-disk incremental-scan cache (see [`manifest_cache_path`]) and force a
     /// full re-scan of every file.
     pub full: bool,
@@ -87,6 +109,153 @@ pub struct InspectArgs {
     /// line per rule. Default output stays at the concise stage/family/not-run/failed-passes
     /// summary.
     pub verbose: bool,
+    /// `--max-cost-usd`: stop between passes once actual spend reaches this many dollars. See
+    /// [`camerata_server::cost_cap`].
+    pub max_cost_usd: Option<f64>,
+    /// `--efficiency name=on|off` entries (applied over `CAMERATA_EFFICIENCY`). See
+    /// [`camerata_server::efficiency`].
+    pub efficiency: Vec<String>,
+    /// `--client`: who the inspection is for, printed in the export's confidentiality line on
+    /// every page and sheet (the headless stand-in for a project's inspection-setup field).
+    /// Required and checked by [`validate_args`] before anything is read or spent, so a run
+    /// can never pay for an inspection whose export would then be refused.
+    pub client: String,
+    /// The run is a client engagement ([`camerata_server::client_lock`]): ON unless the operator
+    /// passed `--internal` (the maintainer's own development). A client engagement refuses the
+    /// `cli` backend and any non-Anthropic model before any file is read ([`validate_args`]),
+    /// and skips every step that executes the client's own code unless `run_client_tooling`.
+    pub client_engagement: bool,
+    /// `--run-client-tooling`: the operator's explicit opt-in to run steps that execute the
+    /// client's own code (today the `cargo clippy` scan preview, which builds the crate) in a
+    /// client engagement. Recorded in the ledger and stated in the report either way.
+    pub run_client_tooling: bool,
+    /// `--consensus`: run the AI audit three times and keep what two runs agree on (see
+    /// [`camerata_server::consensus`]). Off by default.
+    pub consensus: bool,
+}
+
+impl InspectArgs {
+    /// Every repo folder of the run, in the order given.
+    pub fn repo_dirs(&self) -> Vec<PathBuf> {
+        std::iter::once(self.repo.clone())
+            .chain(self.also_repos.iter().cloned())
+            .collect()
+    }
+
+    /// The `(name, folder)` sources the scan reads, validated: every folder exists, the names
+    /// are valid `OWNER/REPO` coordinates and unique, and no folder is given twice.
+    ///
+    /// One repo with no `--repo-name` keeps the old behaviour (named for its folder). Several
+    /// repos each need a `--repo-name`: a folder name is not a repository name, and two clients'
+    /// repos are routinely both called `api`.
+    pub fn resolve_sources(&self) -> Result<Vec<(String, PathBuf)>, String> {
+        let dirs = self.repo_dirs();
+        for dir in &dirs {
+            if !dir.is_dir() {
+                return Err(format!(
+                    "--repo {} does not exist or is not a directory",
+                    dir.display()
+                ));
+            }
+        }
+        if !self.repo_names.is_empty() && self.repo_names.len() != dirs.len() {
+            return Err(format!(
+                "--repo-name was given {} time(s) for {} --repo; give one name per repo, in the \
+                 same order as the repos",
+                self.repo_names.len(),
+                dirs.len()
+            ));
+        }
+        if dirs.len() > 1 && self.repo_names.is_empty() {
+            return Err(format!(
+                "{} repos were given with --repo, so each needs a --repo-name OWNER/REPO (a folder \
+                 name is not a repository name, and two repos can share one)",
+                dirs.len()
+            ));
+        }
+        let mut sources: Vec<(String, PathBuf)> = Vec::with_capacity(dirs.len());
+        for (i, dir) in dirs.iter().enumerate() {
+            let name = match self.repo_names.get(i) {
+                Some(name) => {
+                    camerata_api_types::uow::validate_repo_name(name)
+                        .map_err(|e| format!("--repo-name: {e}"))?;
+                    name.clone()
+                }
+                // A single unnamed repo: the folder's own name, as before.
+                None => dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("repo")
+                    .to_string(),
+            };
+            if let Some((_, other)) = sources.iter().find(|(n, _)| *n == name) {
+                return Err(format!(
+                    "--repo-name {name} is used for both {} and {}; each repo needs its own name",
+                    other.display(),
+                    dir.display()
+                ));
+            }
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if let Some((other, _)) = sources
+                .iter()
+                .find(|(_, d)| d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical)
+            {
+                return Err(format!(
+                    "{} was given more than once (as {other} and as {name})",
+                    dir.display()
+                ));
+            }
+            sources.push((name, dir.clone()));
+        }
+        Ok(sources)
+    }
+
+    /// Where this run's incremental-scan cache and integrity ledger live: the single repo's own
+    /// pair (so every key already on disk stays valid), or ONE pair for the whole set of repos.
+    pub fn state_paths(&self) -> (PathBuf, PathBuf) {
+        let dirs = self.repo_dirs();
+        if dirs.len() == 1 {
+            (manifest_cache_path(&dirs[0]), ledger_path(&dirs[0]))
+        } else {
+            (
+                camerata_server::scan_cache::state_dir::project_manifest_cache_path(&dirs),
+                camerata_server::scan_cache::state_dir::project_ledger_path(&dirs),
+            )
+        }
+    }
+
+    /// The client-tooling decision this run carries into the preview pass, the ledger and the
+    /// report.
+    pub fn client_tooling(&self) -> camerata_server::client_lock::ClientTooling {
+        camerata_server::client_lock::ClientTooling::new(
+            self.client_engagement,
+            self.run_client_tooling,
+        )
+    }
+
+    /// The run's controls: the environment's efficiency switches, then the flags over them, and
+    /// the validated cap. `Err` on an unknown measure, a malformed entry or a bad cap, before
+    /// anything is read or spent.
+    pub fn run_controls(&self) -> Result<camerata_server::cost_cap::RunControls, String> {
+        let mut efficiency = camerata_server::efficiency::EfficiencyConfig::from_env()?;
+        for entry in &self.efficiency {
+            efficiency
+                .apply_entry(entry)
+                .map_err(|e| format!("--efficiency: {e}"))?;
+        }
+        let max_cost_usd = self
+            .max_cost_usd
+            .map(camerata_server::cost_cap::RunControls::validate_cap)
+            .transpose()?;
+        Ok(camerata_server::cost_cap::RunControls {
+            efficiency,
+            max_cost_usd,
+            estimate_hint_usd: None,
+            fix_model: self.fix_model.clone(),
+            clone_judge_model: self.clone_judge_model.clone(),
+            consensus: self.consensus,
+        })
+    }
 }
 
 /// What [`run_inspect`] reports back to its caller. `main.rs`'s handler prints this; tests
@@ -96,6 +265,7 @@ pub struct InspectOutcome {
     pub export_path: PathBuf,
     pub export_zip_bytes: usize,
     pub backend: ProjectBackend,
+    /// Whether the scan ran as a Message Batch (the resolved mode, forced or default).
     pub batch: bool,
     /// Real token usage + cost for this run's AI passes (audit + calibration), when the AI
     /// review actually ran. `None` on an AI-off / compliance-blocked (floor-only) run — see
@@ -123,11 +293,94 @@ pub struct InspectOutcome {
     /// ledger at [`ledger_path`]). Printed as a table at the end of the run; deliberately NOT
     /// part of the export. `None` when no model call ran.
     pub stage_telemetry: Option<camerata_server::stage_telemetry::StageTelemetry>,
+    /// The pre-flight estimate that was printed before the first model call (`None` when no
+    /// model call was going to be made).
+    pub preflight: Option<String>,
+    /// Which token-efficiency measures were on for this run.
+    pub efficiency: camerata_server::efficiency::EfficiencyConfig,
+    /// What the spend limit did, when one was set. Operator-only: it carries dollar figures.
+    pub cost_cap: Option<camerata_server::cost_cap::CostCapRecord>,
+    /// What an outage stop left undone, when the run stopped because the model provider could not
+    /// be reached. Operator-only.
+    pub outage: Option<camerata_server::run_health::OutageRecord>,
+    /// Why the run did not complete ([`camerata_server::onboard::ScanReport::incomplete_reasons`]);
+    /// empty for a complete run. Non-empty only on an `--internal` run, because a client run
+    /// that is incomplete writes no export and returns [`InspectError::IncompleteRun`] instead.
+    pub incomplete_reasons: Vec<String>,
+    /// One structured line per failed part, for stderr (see
+    /// [`camerata_server::failure_report`]). The full report is at the path the ledger summary
+    /// names.
+    pub failure_lines: Vec<String>,
+    /// The saved run this inspection is (`camerata inspect --resume <id>` runs what remains).
+    /// `None` when the run could not be saved.
+    pub run_id: Option<String>,
+    /// What the saved run wants the operator to know that is not a failure
+    /// (`RunRecord::notes`: a model call made with no prompt seed in scope, say). Printed in the
+    /// summary; empty when the run could not be saved or has nothing to say.
+    pub run_notes: Vec<String>,
+}
+
+impl InspectOutcome {
+    /// True when the run stopped because the model provider could not be reached, so the
+    /// inspection is incomplete and can be run again later.
+    pub fn outage_stopped(&self) -> bool {
+        self.outage.is_some()
+    }
+
+    /// The process exit code this outcome calls for: [`EXIT_OUTAGE_STOPPED`] when an outage
+    /// stopped the run, [`EXIT_COST_CAPPED`] when the spend limit did, else 0.
+    pub fn exit_code(&self) -> i32 {
+        if self.outage_stopped() {
+            EXIT_OUTAGE_STOPPED
+        } else if self.cost_capped() {
+            EXIT_COST_CAPPED
+        } else if !self.incomplete_reasons.is_empty() {
+            EXIT_INCOMPLETE_RUN
+        } else {
+            0
+        }
+    }
+
+    /// True when the spend limit stopped part of the run, so the export is incomplete.
+    pub fn cost_capped(&self) -> bool {
+        self.cost_cap
+            .as_ref()
+            .is_some_and(camerata_server::cost_cap::CostCapRecord::stopped_the_run)
+    }
 }
 
 /// The exit code `camerata inspect` uses when the release gate refuses the export (the
 /// integrity gate's is 2). The zip is never written.
 pub const EXIT_RELEASE_BLOCKED: i32 = 3;
+
+/// The exit code when the spend limit (`--max-cost-usd`) stopped the run. A client export is
+/// refused and nothing is written; an `--internal` export is written, marked incomplete.
+pub const EXIT_COST_CAPPED: i32 = 4;
+
+/// The exit code when the run stopped because the model provider could not be reached (three
+/// transport failures in a row after retries, or one auth or billing failure). Every part that
+/// was never sent is on the ledger as not run with class `outage_stop`, and the run can be
+/// triggered again when the provider is back. A client export is refused for such a run; an
+/// `--internal` export is written, marked INTERNAL INCOMPLETE. Distinct from 3 (release gate
+/// refused) and 4 (spend limit).
+pub const EXIT_OUTAGE_STOPPED: i32 = 5;
+
+/// The exit code when a CLIENT export was refused, or an internal one was marked, because the
+/// run did not complete for a reason other than the two above (a part failed after its retries
+/// and its second try). Nothing was written for a client. Distinct from 3, 4 and 5.
+pub const EXIT_INCOMPLETE_RUN: i32 = 6;
+
+/// The exit code for an incomplete run: the outage code when an outage stopped it, the spend-limit
+/// code when the limit did, else the plain incomplete code.
+fn incomplete_exit_code(outage: bool, cost_capped: bool) -> i32 {
+    if outage {
+        EXIT_OUTAGE_STOPPED
+    } else if cost_capped {
+        EXIT_COST_CAPPED
+    } else {
+        EXIT_INCOMPLETE_RUN
+    }
+}
 
 /// Why an inspection produced no export.
 #[derive(Debug)]
@@ -137,6 +390,30 @@ pub enum InspectError {
     /// The release gate refused the export: a secret value (or an inconsistency) was found in
     /// the package it just built. Nothing was written.
     ReleaseBlocked(camerata_server::release_gate::GateFailure),
+    /// A client export was refused because the run did not complete (raised by the package
+    /// assembly; the pipeline wraps it as [`InspectError::IncompleteRun`] with the run's report).
+    Incomplete(camerata_server::report_export::RunIncomplete),
+    /// The same refusal, with what the run did and did not do. No zip was written.
+    IncompleteRun(Box<IncompleteRun>),
+    /// `--resume` was given a run that is already complete: nothing to do, and it says so.
+    AlreadyComplete(String),
+}
+
+/// A client export refused because the run did not complete, with the run's own account.
+#[derive(Debug)]
+pub struct IncompleteRun {
+    /// The refusal and its reasons.
+    pub refusal: camerata_server::report_export::RunIncomplete,
+    /// The ledger summary (including FAILED PASSES), as for a run that exported.
+    pub ledger_summary: String,
+    /// Where the operator ledger was written.
+    pub ledger_path: PathBuf,
+    /// One structured line per failure, for stderr.
+    pub failure_lines: Vec<String>,
+    /// The saved run, so the operator can resume it.
+    pub run_id: Option<String>,
+    /// The saved run's notes (see [`InspectOutcome::run_notes`]), for stderr.
+    pub run_notes: Vec<String>,
 }
 
 impl InspectError {
@@ -145,6 +422,13 @@ impl InspectError {
         match self {
             InspectError::Failed(_) => 1,
             InspectError::ReleaseBlocked(_) => EXIT_RELEASE_BLOCKED,
+            InspectError::Incomplete(refusal) => {
+                incomplete_exit_code(refusal.outage, refusal.cost_capped)
+            }
+            InspectError::IncompleteRun(run) => {
+                incomplete_exit_code(run.refusal.outage, run.refusal.cost_capped)
+            }
+            InspectError::AlreadyComplete(_) => 0,
         }
     }
 }
@@ -154,6 +438,15 @@ impl std::fmt::Display for InspectError {
         match self {
             InspectError::Failed(message) => write!(f, "{message}"),
             InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+            InspectError::Incomplete(refusal) => write!(f, "{refusal}"),
+            InspectError::IncompleteRun(run) => write!(
+                f,
+                "{}\n\n{}\nintegrity ledger: {}",
+                run.refusal,
+                run.ledger_summary,
+                run.ledger_path.display()
+            ),
+            InspectError::AlreadyComplete(message) => write!(f, "{message}"),
         }
     }
 }
@@ -176,12 +469,15 @@ impl From<String> for InspectError {
 /// production caller, and it passes the presence the shared resolver finds (the key saved in
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
-    if !args.repo.is_dir() {
-        return Err(format!(
-            "--repo {} does not exist or is not a directory",
-            args.repo.display()
-        ));
-    }
+    args.run_controls()?;
+    require_client_lock(args)?;
+    let probe = ReportOptions {
+        client_name: args.client.clone(),
+        ..ReportOptions::default()
+    };
+    camerata_server::report_export::require_client_name(&probe)
+        .map_err(|e| format!("--client: {e}"))?;
+    args.resolve_sources()?;
     let export_dir: &Path = match args.export.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -191,6 +487,9 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
             "--export directory {} does not exist",
             export_dir.display()
         ));
+    }
+    if args.batch && args.realtime {
+        return Err("--batch and --realtime cannot both be given (pick one mode)".to_string());
     }
     if args.batch && !matches!(args.backend, ProjectBackend::Api) {
         return Err(
@@ -208,6 +507,27 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
         );
     }
     Ok(())
+}
+
+/// The client-engagement lock ([`camerata_server::client_lock::refusal`]) for this run: the
+/// backend and every model the scan may use (each resolved exactly as the scan resolves it,
+/// environment overrides included). Pure apart from those environment reads; runs before any
+/// file is read.
+pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
+    let models = camerata_server::client_lock::models_a_scan_may_use(
+        args.model.as_deref(),
+        args.calibration_model.as_deref(),
+        false,
+        args.fix_model.as_deref(),
+        args.clone_judge_model.as_deref(),
+    );
+    match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
+        None => Ok(()),
+        Some(why) => Err(format!(
+            "{why} Run it with `--backend api` and Anthropic models (`--model claude-...`), or \
+             pass `--internal` if this is your own development and not client work."
+        )),
+    }
 }
 
 /// The rule ids/directives a FRESH onboarding scan pre-checks with no human override — i.e.
@@ -298,14 +618,13 @@ fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename:
 /// on the spot: a version 1 manifest holds findings stored before construction-time secret
 /// redaction, so it can hold a raw secret value, and "ignored" is not the same as "gone"
 /// (docs/design/2026-10-23_secret-redaction-and-release-gate.md, path E2).
-fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
-    let path = manifest_cache_path(repo);
-    let bytes = std::fs::read(&path).ok()?;
+fn load_prior_manifest(path: &Path) -> Option<ScanManifest> {
+    let bytes = std::fs::read(path).ok()?;
     let manifest: ScanManifest = serde_json::from_slice(&bytes).ok()?;
     if manifest.is_current() {
         return Some(manifest);
     }
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => eprintln!(
             "camerata inspect: removed the incremental-scan cache at {} (written by an older              version; the next run does a full scan)",
             path.display()
@@ -320,18 +639,18 @@ fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
 
 /// Best-effort save. Failing to persist the cache never fails the inspection itself — it just
 /// means the NEXT run does a full scan instead of an incremental one.
-fn save_manifest(repo: &Path, manifest: &ScanManifest) {
+fn save_manifest(path: &Path, manifest: &ScanManifest) {
     let Ok(bytes) = serde_json::to_vec_pretty(manifest) else {
         return;
     };
     // Best-effort: a failure here surfaces as the write error below, which is already
     // non-fatal (the next run does a full scan instead).
     let _ = std::fs::create_dir_all(camerata_state_dir());
-    if let Err(e) = std::fs::write(manifest_cache_path(repo), bytes) {
+    if let Err(e) = std::fs::write(path, bytes) {
         eprintln!(
             "camerata inspect: could not persist the incremental-scan cache at {}: {e} (the \
              next run will do a full scan instead)",
-            manifest_cache_path(repo).display()
+            path.display()
         );
     }
 }
@@ -352,7 +671,7 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
 /// inspection — but unlike the scan cache (whose absence costs one full re-scan) the absence
 /// of this file makes `camerata integrity-gate` exit `2` (gate unavailable) rather than `0`,
 /// so a silent write failure can never read as a passing gate.
-fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
+fn save_ledger(path: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     let Ok(bytes) = serde_json::to_vec_pretty(ledger) else {
         return;
     };
@@ -366,11 +685,11 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
         );
         return;
     }
-    if let Err(e) = std::fs::write(ledger_path(repo), bytes) {
+    if let Err(e) = std::fs::write(path, bytes) {
         eprintln!(
             "camerata inspect: could not persist the pipeline-integrity ledger at {}: {e} \
              (`camerata integrity-gate` will report itself unavailable rather than passing)",
-            ledger_path(repo).display()
+            path.display()
         );
     }
 }
@@ -390,8 +709,9 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
 pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    client: &str,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus, None).await?;
+    let released = release_product_export(report, corpus, None, client, false).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -401,12 +721,18 @@ async fn release_product_export(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     model: Option<camerata_server::ModelRecord>,
+    client: &str,
+    internal: bool,
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
     options.model = model;
+    options.client_name = client.to_string();
+    // `--internal` is the operator's own review: only then may an export come from a run that
+    // did not complete, and it is marked INTERNAL INCOMPLETE.
+    options.internal = internal;
 
     let package = camerata_server::release_gate::build_product_package(
         report,
@@ -415,17 +741,27 @@ async fn release_product_export(
         &options,
     )
     .await
-    .map_err(
-        |e| match e.downcast::<camerata_server::release_gate::ReleaseError>() {
+    .map_err(|e| {
+        // A client export of a run that did not complete is refused before anything is built.
+        let e = match e.downcast::<camerata_server::report_export::RunIncomplete>() {
+            Ok(incomplete) => return InspectError::Incomplete(incomplete),
+            Err(e) => e,
+        };
+        match e.downcast::<camerata_server::release_gate::ReleaseError>() {
             // The assembly checks the PDF's data before it compiles it.
             Ok(camerata_server::release_gate::ReleaseError::Blocked(failure)) => {
                 InspectError::ReleaseBlocked(failure)
             }
             Ok(other) => InspectError::Failed(other.to_string()),
             Err(e) => InspectError::Failed(e.to_string()),
-        },
-    )?;
-    camerata_server::release_gate::release(package).map_err(|e| match e {
+        }
+    })?;
+    let released = if internal {
+        camerata_server::release_gate::release_internal(package)
+    } else {
+        camerata_server::release_gate::release(package)
+    };
+    released.map_err(|e| match e {
         camerata_server::release_gate::ReleaseError::Blocked(failure) => {
             InspectError::ReleaseBlocked(failure)
         }
@@ -498,17 +834,59 @@ async fn run_inspect_pipeline(
     has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
 ) -> Result<InspectOutcome, InspectError> {
-    validate_args(&args, has_api_key)?;
+    run_inspect_pipeline_with(
+        args,
+        has_api_key,
+        creds,
+        Seams {
+            resume: None,
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
 
-    // A headless run has no `owner/repo` spec — the scanned directory's own name stands in
-    // for it (tags every finding/provenance entry, same role `spec` plays in `resolve_local_sources`).
-    let repo_spec = args
-        .repo
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo")
-        .to_string();
-    let sources = vec![(repo_spec, args.repo.clone())];
+/// The test seams of the pipeline. Production passes no model (the real `Llm` is built from the
+/// credential store) and prints the pre-flight estimate to stdout the moment it is ready.
+pub struct Seams<'a> {
+    /// A scripted model to run the audit over instead of the real `Llm` (no network).
+    pub llm: Option<&'a dyn camerata_server::llm::LlmPort>,
+    /// Receives the pre-flight estimate text BEFORE the first model call is made.
+    pub preflight_sink: &'a (dyn Fn(&str) + Sync),
+    /// The id of a saved run to resume instead of starting a new one (see [`resume_inspect`]).
+    pub resume: Option<String>,
+}
+
+/// [`run_inspect_pipeline`] with its seams explicit.
+pub async fn run_inspect_pipeline_with(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    validate_args(&args, has_api_key)?;
+    let mut controls = args.run_controls()?;
+
+    // The `(name, folder)` sources: one per `--repo`, named by `--repo-name` (a lone repo with
+    // no name keeps its folder's name). The name tags every finding and provenance entry, the
+    // role `spec` plays in `resolve_local_sources`. Several repos are ONE project: one scan,
+    // one report, one cache and one ledger.
+    let sources = args.resolve_sources()?;
+    let (manifest_path, ledger_file) = args.state_paths();
+    // A multi-repo run's one cache and one ledger cover several folders; record which, so that
+    // deleting any one of them can find and remove the files (see `project_files_covering`).
+    // Written before anything is spent: a cache that deletion could not find must not exist.
+    if args.repo_dirs().len() > 1 {
+        camerata_server::scan_cache::state_dir::write_project_repos(&args.repo_dirs()).map_err(
+            |e| {
+                InspectError::Failed(format!(
+                    "could not record which folders this run covers in {}: {e}",
+                    camerata_state_dir().display()
+                ))
+            },
+        )?;
+    }
 
     // ── Phase 1: stack detection + rule proposal ────────────────────────────────────────
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
@@ -531,11 +909,26 @@ async fn run_inspect_pipeline(
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
     let backend_resolution = resolve_backend(args.backend, has_api_key);
-    let mode = if args.batch {
-        ScanMode::parse(Some("batch"))
+    // The mode: forced by `--batch` / `--realtime`, else the run's default (rank 2: a Message
+    // Batch on the API backend). The CLI backend cannot batch; that is said once, here, before
+    // any model call.
+    let requested = if args.batch {
+        Some(ScanMode::Batch)
+    } else if args.realtime {
+        Some(ScanMode::Parallel)
     } else {
-        ScanMode::Parallel
+        None
     };
+    let mode_choice = camerata_server::ai_audit::resolve_scan_mode(
+        requested,
+        &backend_resolution,
+        controls.efficiency,
+    );
+    if let Some(notice) = &mode_choice.notice {
+        (seams.preflight_sink)(&format!("camerata inspect: {notice}\n"));
+    }
+    let mode = mode_choice.mode;
+    let batch = mode == ScanMode::Batch;
     let model = args.model.as_deref().filter(|m| !m.trim().is_empty());
     let calibration_model = args
         .calibration_model
@@ -547,17 +940,138 @@ async fn run_inspect_pipeline(
     // before the scan so this run's file collection never sees them, independently of
     // `files::is_engine_artifact` — belt and braces on the defect that put 174,236 characters
     // of Camerata's own output into an audit prompt.
-    clean_legacy_repo_file::<ScanManifest>(&args.repo, ".camerata-scan-cache.json");
-    clean_legacy_repo_file::<camerata_server::scan_ledger::ScanLedger>(
-        &args.repo,
-        ".camerata-scan-ledger.json",
-    );
+    for dir in args.repo_dirs() {
+        clean_legacy_repo_file::<ScanManifest>(&dir, ".camerata-scan-cache.json");
+        clean_legacy_repo_file::<camerata_server::scan_ledger::ScanLedger>(
+            &dir,
+            ".camerata-scan-ledger.json",
+        );
+    }
 
-    let incremental_prior = if args.full {
-        None
+    // ── The run store: a new run, or the saved run being resumed ───────────────────────────
+    let audit_model_resolved = camerata_server::ai_audit::resolve_audit_model(model);
+    let ai_scan_key = camerata_server::scan_cache::AiScanKey::new(
+        &audit_model_resolved,
+        calibration_model,
+        &selected,
+    );
+    // The resolved ids (what each stage calls), so a resume notices a changed default.
+    let models_record = camerata_server::run_store::ModelsRecord::from_picks(
+        model,
+        calibration_model,
+        &controls,
+        &format!("{:?}", args.backend).to_ascii_lowercase(),
+        &format!("{mode:?}").to_ascii_lowercase(),
+    );
+    let project_key = if args.repo_dirs().len() == 1 {
+        camerata_server::scan_cache::state_dir::repo_state_key(&args.repo)
     } else {
-        load_prior_manifest(&args.repo)
+        camerata_server::scan_cache::state_dir::project_state_key(&args.repo_dirs())
     };
+    let resumed: Option<(Arc<camerata_server::run_store::RunStore>, String)> = match &seams.resume {
+        Some(run_id) => Some(open_for_resume(
+            run_id,
+            &sources,
+            &ai_scan_key,
+            &models_record,
+        )?),
+        None => None,
+    };
+    let incremental_prior = match &resumed {
+        // The baseline the run started from, not the one an attempt since may have replaced.
+        Some((store, _)) => store.load_prior_manifest(),
+        None if args.full => None,
+        None => load_prior_manifest(&manifest_path),
+    };
+
+    // A spend limit needs every model priced; refuse before the estimate, before any model call.
+    if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let models = camerata_server::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        );
+        if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
+            return Err(InspectError::Failed(why));
+        }
+    }
+
+    // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
+    // Skipped when no model call will be made (the compliance gate blocked the AI review).
+    let mut preflight_text: Option<String> = None;
+    if let Some((_, estimate_text)) = &resumed {
+        // A resume prices only what remains.
+        (seams.preflight_sink)(estimate_text);
+        preflight_text = Some(estimate_text.clone());
+    } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
+        let facts =
+            camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
+                .await;
+        // A repo that cannot be read is a repo the inspection would silently leave out. Refuse
+        // before any model call, naming it, rather than price (and later run) a smaller job.
+        if let Some(bad) = facts.iter().find(|f| f.read_error.is_some()) {
+            return Err(InspectError::Failed(format!(
+                "could not read {}: {}",
+                bad.repo,
+                bad.read_error.as_deref().unwrap_or("unknown error")
+            )));
+        }
+        // The exact size of one pass: API backend only, and never for a scripted model.
+        let exact = if seams.llm.is_none() && matches!(backend_resolution, BackendResolution::Api) {
+            let llm = camerata_server::onboard::build_llm(
+                creds,
+                camerata_server::llm::Backend::Api,
+                None,
+            );
+            camerata_server::preflight::exact_sample_tokens(
+                &llm,
+                &facts,
+                mode,
+                model,
+                controls.efficiency,
+            )
+            .await
+        } else {
+            None
+        };
+        let audit_model = camerata_server::ai_audit::resolve_audit_model(model);
+        // The models the run calls beyond the scan, resolved the way the stages resolve them: the
+        // fix stage, and the clone judge when a clone rule is selected. Both are in the figure.
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let judge_selected = camerata_server::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        )
+        .iter()
+        .any(|(roles, _)| roles.contains("the clone judge"));
+        let pf = preflight::build(&preflight::PreflightInputs {
+            backend: args.backend,
+            batch,
+            fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
+                controls.fix_model_for(model, calibration_model),
+            )),
+            clone_judge_model: judge_selected.then(|| controls.clone_judge_model_for()),
+            calibration_model: calibration_model
+                .map(str::to_string)
+                .unwrap_or_else(|| audit_model.clone()),
+            model: audit_model,
+            repos: &facts,
+            incremental: incremental_prior.is_some(),
+            cap_usd: controls.max_cost_usd,
+            exact,
+            terse_output: controls.efficiency.terse_output,
+            consensus: controls.consensus,
+        });
+        (seams.preflight_sink)(&pf.text);
+        controls.estimate_hint_usd = pf.estimate_usd;
+        preflight_text = Some(pf.text);
+    }
 
     // ── Phase 3: the two-tier scan (deterministic floor + AI review), calibration, and
     // per-rule alternative recommendation (when the corpus resolves a rule's alternatives —
@@ -565,30 +1079,111 @@ async fn run_inspect_pipeline(
     // exact function `onboard_audit`'s HTTP handler calls. `chosen_options` stays empty: no
     // project-level override exists headlessly, so the model recommends fully automatically —
     // the curation-default state. ──
-    let (mut report, manifest) = camerata_server::onboard::audit_repos(
-        creds,
-        &sources,
-        &selected,
-        Vec::new(),
-        model,
-        calibration_model,
-        mode,
-        false, // thorough — not exposed on Step 0's flag surface; matches AuditReq's default
-        None,  // feedback — no live transcript sink headlessly
-        None,  // job — no job store headlessly (this call blocks until done, like `onboard_audit`)
-        incremental_prior.as_ref(),
-        false, // deep — the opt-in compliance tier; not exposed on Step 0's flag surface
-        true,  // soc2_enabled — irrelevant with `deep` off
-        true,  // run_ai_review
-        true,  // run_deterministic
-        Some(ledger.clone()),
-        backend_resolution,
-        corpus.as_ref(),
-        &HashMap::new(),
-    )
-    .await;
+    // The run is saved from here on: every model reply is stored as it returns, so an
+    // interruption or a failed part costs only that part (see `camerata_server::run_store`).
+    let store: Option<Arc<camerata_server::run_store::RunStore>> = match resumed {
+        Some((store, _)) => Some(store),
+        None => {
+            match camerata_server::run_store::RunStore::create(camerata_server::run_store::NewRun {
+                project_key: project_key.clone(),
+                repos: sources.clone(),
+                models: models_record.clone(),
+                ai_scan_key: ai_scan_key.clone(),
+                args: serde_json::to_value(&args).unwrap_or(serde_json::Value::Null),
+                estimate_usd: controls.estimate_hint_usd,
+                include_alternatives: corpus.is_some(),
+                origin: camerata_server::run_store::RunOrigin::Cli,
+                project_id: None,
+            }) {
+                Ok(store) => {
+                    if let Some(prior) = &incremental_prior {
+                        store.save_prior_manifest(prior);
+                    }
+                    let _ = camerata_server::run_store::prune_runs(
+                        &project_key,
+                        camerata_server::run_store::DEFAULT_KEEP_RUNS,
+                    );
+                    Some(store)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "camerata inspect: this run cannot be saved ({e}); it will run, but it \
+                         cannot be resumed if it is interrupted or a part fails"
+                    );
+                    None
+                }
+            }
+        }
+    };
+    // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
+    // questions as the run it resumes and a stored reply still matches its prompt.
+    let token_seed = store.as_ref().map(|s| s.nonce_seed());
 
-    save_manifest(&args.repo, &manifest);
+    let (mut report, manifest) = {
+        // The model this run asks: the scripted one a test hands in, else the real client for the
+        // resolved transport (EXACTLY the resolution's Cli/Api choice, as `audit_repos_controlled`
+        // builds it; every `claude -p` it spawns is remembered so source deletion can find the
+        // session files).
+        let sessions = camerata_server::llm::SessionSink::new();
+        let llm_backend = match &backend_resolution {
+            BackendResolution::Api => camerata_server::llm::Backend::Api,
+            BackendResolution::Cli | BackendResolution::Blocked { .. } => {
+                camerata_server::llm::Backend::Cli
+            }
+        };
+        let real = match seams.llm {
+            Some(_) => None,
+            None => Some(
+                camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
+                    .with_session_sink(sessions.clone()),
+            ),
+        };
+        let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
+            (Some(llm), _) => llm,
+            (None, Some(real)) => real,
+            (None, None) => {
+                return Err(InspectError::Failed(
+                    "no model client could be built for this run".to_string(),
+                ))
+            }
+        };
+        let journaled = store
+            .as_ref()
+            .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
+        let model_seam: &dyn camerata_server::llm::LlmPort = match &journaled {
+            Some(j) => j.as_ref(),
+            None => base,
+        };
+        let (mut report, manifest) = camerata_server::prompt_frame::with_seed(
+            token_seed,
+            camerata_server::onboard::audit_repos_with_llm_controlled(
+                model_seam,
+                &sources,
+                &selected,
+                Vec::new(),
+                model,
+                calibration_model,
+                mode,
+                false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                None,  // feedback: no live transcript sink headlessly
+                None,  // job: no job store headlessly (this call blocks until done)
+                incremental_prior.as_ref(),
+                false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                true,  // soc2_enabled: irrelevant with `deep` off
+                true,  // run_ai_review
+                true,  // run_deterministic
+                backend_resolution,
+                corpus.as_ref(),
+                &HashMap::new(),
+                controls.clone(),
+            ),
+        )
+        .await;
+        if seams.llm.is_none() {
+            report.provenance.model_sessions = sessions.snapshot();
+        }
+        (report, manifest)
+    };
     report.excluded_mechanical_rules = excluded_mechanical;
     // W13: mirrors `onboard_audit`/`onboard_audit_start`'s own call site in
     // `camerata_server::lib` exactly — every corpus file that would not parse is disclosed
@@ -604,14 +1199,24 @@ async fn run_inspect_pipeline(
         &preview_rules,
         corpus.as_ref(),
         None,
+        args.client_tooling(),
     )
     .await;
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
     // `onboard_audit`'s synchronous path in `camerata_server::lib` exactly (see
     // `camerata_server::scan_ledger::record_addition_stage`'s doc comment).
+    // Runtime and framework end of life and known runtime vulnerabilities, before the dependency
+    // pass so that the KEV / EPSS enrichment below covers these rows too.
+    let runtime_rows_in = report.findings.len();
+    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources).await;
     let dep_audit_rows_in = report.findings.len();
+    let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
         let (dep_findings, dep_note) = camerata_server::dep_audit::run_dep_audit(spec, dir).await;
+        osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
+            spec,
+            dep_note.as_ref(),
+        ));
         if !dep_findings.is_empty() {
             report.findings.extend(dep_findings);
         }
@@ -619,6 +1224,15 @@ async fn run_inspect_pipeline(
             report.coverage_notes.push(note);
         }
     }
+    // KEV / EPSS enrichment and the "vulnerability data as of" stamp: the SAME single
+    // implementation `onboard_audit` calls, once per run over the rows the loop above added.
+    // ORDER: before `apply_scan_severity_bounds` below, never after (see `vuln_intel::apply`).
+    camerata_server::vuln_intel::enrich_dependency_findings(
+        &mut report,
+        runtime_rows_in,
+        &osv_runs,
+    )
+    .await;
     camerata_server::scan_ledger::record_addition_stage(
         &mut report.ledger,
         "dependency-audit-merge",
@@ -640,6 +1254,18 @@ async fn run_inspect_pipeline(
         corpus.as_ref(),
     );
 
+    // The incremental baseline becomes reusable only when the scan is complete: a run with a
+    // failed or unrun part leaves the previous baseline in place, and its own stored replies are
+    // what a resume uses.
+    if report.incomplete_reasons().is_empty() {
+        save_manifest(&manifest_path, &manifest);
+    }
+    // The scan's own tools (a build) can leave files in the checkout. Record the tree as it stands
+    // now, so a run killed from here on (during the export, say) still resumes against it.
+    if let Some(store) = &store {
+        store.record_tree_end();
+    }
+
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
     // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs
     // `reconcile_external_tool_ledger` and is the LAST thing that corrects the ledger's
@@ -653,43 +1279,224 @@ async fn run_inspect_pipeline(
     // W6 / I2: persist the ledger at the SAME point the summary is computed — fully
     // reconciled, before sealing — so `camerata integrity-gate` evaluates exactly the facts
     // this run's summary describes, never a different snapshot. See `ledger_path`.
-    save_ledger(&args.repo, &report.ledger);
+    // The engagement this run was made under, with the models that actually ran.
+    let model_record = camerata_server::ModelRecord::anthropic(args.backend)
+        .with_client_engagement(args.client_engagement)
+        .with_models_from(&report.provenance);
+    report
+        .ledger
+        .record_engagement(camerata_server::client_lock::EngagementRecord::new(
+            &model_record,
+            args.client_tooling(),
+        ));
+    save_ledger(&ledger_file, &report.ledger);
+    // The operator's failure report, next to the ledger (never in the export): every failed part
+    // with every attempt's status, provider error, request id and waits.
+    let failure_report = camerata_server::failure_report::build(&report);
+    let failure_report_path =
+        match camerata_server::failure_report::write(&ledger_file, &failure_report) {
+            Ok(paths) => paths.map(|(json, _md)| json),
+            Err(e) => {
+                eprintln!("camerata inspect: could not write the failure report: {e}");
+                None
+            }
+        };
+    let failure_lines = failure_report.stderr_lines();
+    let ledger_summary = match &failure_report_path {
+        Some(path) => format!("{ledger_summary}\nfailure report: {}", path.display()),
+        None => ledger_summary,
+    };
+
+    let run_id = store.as_ref().map(|s| s.run_id());
+    let ledger_summary = match &run_id {
+        Some(id) => format!(
+            "{ledger_summary}\nrun: {id} (camerata inspect --resume {id} runs only what remains)"
+        ),
+        None => ledger_summary,
+    };
 
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
     // every exporter the rest of this function calls now takes `&SealedReport`, never
     // `&ScanReport` (see `ScanReport::seal`'s doc comment for the compile-time guarantee this
     // establishes).
+    report.run_id.clone_from(&run_id);
     let report = report.seal();
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(
+    let released = match release_product_export(
         &report,
         corpus.as_ref(),
-        Some(camerata_server::ModelRecord::anthropic(args.backend)),
+        Some(model_record),
+        &args.client,
+        !args.client_engagement,
     )
-    .await?;
+    .await
+    {
+        Ok(released) => released,
+        Err(e) => {
+            let run_notes = finish_run(store.as_ref(), &report, false);
+            return Err(match e {
+                // The refusal still tells the operator what the run did and did not do.
+                InspectError::Incomplete(refusal) => {
+                    InspectError::IncompleteRun(Box::new(IncompleteRun {
+                        refusal,
+                        ledger_summary: ledger_summary.clone(),
+                        ledger_path: ledger_file.clone(),
+                        failure_lines: failure_lines.clone(),
+                        run_id: run_id.clone(),
+                        run_notes,
+                    }))
+                }
+                other => other,
+            });
+        }
+    };
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
         released.report.checks.len()
     );
-    std::fs::write(&args.export, &zip_bytes)
-        .map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
+    let written = std::fs::write(&args.export, &zip_bytes);
+    let run_notes = finish_run(store.as_ref(), &report, written.is_ok());
+    written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
 
     Ok(InspectOutcome {
         export_path: args.export,
         export_zip_bytes: zip_bytes.len(),
         backend: args.backend,
-        batch: args.batch,
+        batch,
         actual_usage: report.actual_usage.clone(),
         findings_count: report.findings.len(),
         ledger_summary,
-        ledger_path: ledger_path(&args.repo),
+        ledger_path: ledger_file,
         release_gate,
         stage_telemetry: report.ledger.stage_telemetry().cloned(),
+        preflight: preflight_text,
+        efficiency: controls.efficiency,
+        cost_cap: report.ledger.cost_cap().cloned(),
+        outage: report.ledger.outage().cloned(),
+        incomplete_reasons: report.incomplete_reasons(),
+        failure_lines,
+        run_id,
+        run_notes,
     })
+}
+
+/// Open the saved run `run_id` to resume it (the one implementation lives in
+/// [`camerata_server::run_store::open_for_resume`]; the cockpit's button uses it too).
+fn open_for_resume(
+    run_id: &str,
+    sources: &[(String, PathBuf)],
+    ai_scan_key: &camerata_server::scan_cache::AiScanKey,
+    models: &camerata_server::run_store::ModelsRecord,
+) -> Result<(Arc<camerata_server::run_store::RunStore>, String), InspectError> {
+    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models).map_err(|e| {
+        match e {
+            camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
+                InspectError::AlreadyComplete(m)
+            }
+            other => InspectError::Failed(other.to_string()),
+        }
+    })
+}
+
+/// The end of an attempt: tell the store which parts failed and whether the run is complete.
+fn finish_run(
+    store: Option<&Arc<camerata_server::run_store::RunStore>>,
+    report: &camerata_server::onboard::ScanReport,
+    export_written: bool,
+) -> Vec<String> {
+    let Some(store) = store else {
+        return Vec::new();
+    };
+    camerata_server::run_store::finish_run(store, report, export_written);
+    store.record().notes
+}
+
+/// Production entry point for `camerata inspect --resume`: the key and the credential store are
+/// the real ones, as for [`run_inspect`].
+pub async fn run_resume(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+) -> Result<InspectOutcome, InspectError> {
+    let store = &camerata_server::credentials::KeyringCredentialStore;
+    let has_api_key = api_key_present(store);
+    resume_inspect(
+        run,
+        repos,
+        export,
+        max_cost_usd,
+        has_api_key,
+        store,
+        Seams {
+            resume: None,
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
+
+/// Resume the saved run `run` (an id, or `latest`): run only the parts that are not done and
+/// export once everything is. `args_override` carries what a resume may change: where the export
+/// goes and the spend limit for the work that remains.
+pub async fn resume_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    use camerata_server::run_store as rs;
+    let project_key = match repos {
+        [] => None,
+        [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),
+        many => Some(camerata_server::scan_cache::state_dir::project_state_key(
+            many,
+        )),
+    };
+    let run_id = rs::resolve_run(run, project_key.as_deref(), rs::RunOrigin::Cli)
+        .map_err(|e| InspectError::Failed(e.to_string()))?;
+    let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    // A run the cockpit started saved the cockpit's scan request, not these flags, and it needs
+    // the project's settings to be read back: the cockpit is the place to resume it.
+    if record.origin == rs::RunOrigin::Cockpit {
+        return Err(InspectError::Failed(format!(
+            "run {run_id} was started from the cockpit, so it is resumed there: open the \
+             project's scan screen and choose Run what remains. `camerata inspect --resume` \
+             resumes runs started from the command line"
+        )));
+    }
+    let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
+        InspectError::Failed(format!(
+            "run {run_id} did not save the arguments it was started with ({e}); start a new run"
+        ))
+    })?;
+    if let Some(export) = export {
+        args.export = export;
+    }
+    if max_cost_usd.is_some() {
+        args.max_cost_usd = max_cost_usd;
+    }
+    if seams.llm.is_none() {
+        require_api_key_for_client_inspection(args.backend, has_api_key)?;
+    }
+    run_inspect_pipeline_with(
+        args,
+        has_api_key,
+        creds,
+        Seams {
+            resume: Some(run_id),
+            ..seams
+        },
+    )
+    .await
 }
 
 /// Render the scan's pipeline-integrity ledger (`crate::scan_ledger::ScanLedger`) into a
@@ -757,7 +1564,8 @@ pub fn render_ledger_summary(
 
     writeln!(out, "\n== DETECTION FAMILIES ==").ok();
     for tier in RuleTier::all() {
-        let rules: Vec<&RuleLedgerEntry> = ledger.rules().filter(|r| r.tier == tier).collect();
+        let rules: Vec<&RuleLedgerEntry> =
+            ledger.rules_merged().filter(|r| r.tier == tier).collect();
         let ran = rules.iter().filter(|r| r.ran).count();
         let skipped = rules.len() - ran;
         let findings: usize = rules.iter().map(|r| r.findings_emitted).sum();
@@ -848,13 +1656,20 @@ pub fn render_ledger_summary(
     }
 
     if verbose {
+        // One line per (rule, repo): a rule that ran on one repo and not on another is two
+        // lines, each naming its repo.
         let mut rules: Vec<&RuleLedgerEntry> = ledger.rules().collect();
-        rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+        rules.sort_by(|a, b| (&a.rule_id, &a.repo).cmp(&(&b.rule_id, &b.repo)));
         writeln!(out, "\n== PER-RULE DETAIL ({}) ==", rules.len()).ok();
         for r in rules {
+            let repo = if r.repo.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", r.repo)
+            };
             writeln!(
                 out,
-                "  {:<40} ran={:<5} files_evaluated={:<6} findings={}",
+                "  {:<40} ran={:<5} files_evaluated={:<6} findings={}{repo}",
                 r.rule_id, r.ran, r.files_evaluated, r.findings_emitted,
             )
             .ok();
@@ -883,8 +1698,8 @@ pub fn require_api_key_for_client_inspection(
         return Err(InspectError::Failed(
             "client inspections run on the Anthropic API, but no API key is configured. Add an \
              Anthropic API key in the app (Settings, Chat backend, API) or set ANTHROPIC_API_KEY, \
-             and re-run. For an internal benchmark run only, choose the Claude Code subscription \
-             explicitly with `--backend cli`."
+             and re-run. For your own development only (never client work), choose the Claude \
+             Code subscription explicitly with `--internal --backend cli`."
                 .to_string(),
         ));
     }
@@ -932,21 +1747,92 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         .as_ref()
         .map(|t| format!("\n{}", t.render_table()))
         .unwrap_or_default();
+    let cap = outcome
+        .cost_cap
+        .as_ref()
+        .map(render_cost_cap)
+        .unwrap_or_default()
+        + &outcome
+            .outage
+            .as_ref()
+            .map(render_outage)
+            .unwrap_or_default();
+    // What the saved run wants the operator to know that is not a failure: in the summary, not in
+    // run.json alone.
+    let notes: String = outcome
+        .run_notes
+        .iter()
+        .map(|note| format!("run note: {note}\n"))
+        .collect();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         {}\nintegrity ledger: {}\n{}\n\n{}{telemetry}",
+         {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}{notes}\n{}{telemetry}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
         outcome.release_gate,
         outcome.ledger_path.display(),
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
+        outcome.efficiency.render(),
         outcome.ledger_summary,
     )
 }
 
+/// The outage block of the final report: what stopped the run and how much was never sent.
+fn render_outage(outage: &camerata_server::run_health::OutageRecord) -> String {
+    format!(
+        "RUN STOPPED: {} ({}). This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) \
+         were never sent (listed under FAILED PASSES as NOT RUN). Run it again when the provider \
+         is reachable.\n",
+        outage.trigger.detail,
+        outage.trigger.class.as_str(),
+        outage.not_run_passes.len(),
+        outage.not_run_stages.len()
+    )
+}
+
+/// The spend-limit block of the final report: what was set, what was spent, and, when the limit
+/// stopped the run, that the export is incomplete and what was not run. Operator-only (dollar
+/// figures live here, never in the export).
+fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
+    let mut out = format!(
+        "spend limit: ${:.2}, spent ${:.2}",
+        cap.cap_usd, cap.spent_usd
+    );
+    if cap.stopped_the_run() {
+        // The limit was reached, or it could not be enforced because a call's cost could not be
+        // determined: two different things, and the operator is told which (the note that
+        // follows names the model and the call).
+        let how = if cap.cost_unknown {
+            "COULD NOT BE ENFORCED (a call's cost could not be determined, so the run stopped \
+             instead of running past the limit unseen)."
+        } else {
+            "REACHED."
+        };
+        write!(
+            out,
+            " -- {how} This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT RUN \
+             (listed under FAILED PASSES). Passes already started finish, so a run can end about one pass \
+             over the limit.",
+            cap.not_run_passes.len(),
+            cap.not_run_stages.len()
+        )
+        .ok();
+    } else {
+        out.push_str(" (not reached)");
+    }
+    for note in &cap.notes {
+        write!(out, "\n  {note}").ok();
+    }
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod redaction_tests;
+
+#[cfg(test)]
+mod exit_code_tests;
 
 #[cfg(test)]
 mod tests {
@@ -956,14 +1842,225 @@ mod tests {
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {
             repo,
+            also_repos: Vec::new(),
+            repo_names: Vec::new(),
             export,
             backend: ProjectBackend::Cli,
             batch: false,
+            realtime: false,
             model: None,
             calibration_model: None,
+            fix_model: None,
+            clone_judge_model: None,
             full: false,
             verbose: false,
+            max_cost_usd: None,
+            efficiency: Vec::new(),
+            client: "Example Client Ltd".to_string(),
+            // The maintainer's own run: these tests exercise the `cli` backend's validation.
+            client_engagement: false,
+            run_client_tooling: false,
+            consensus: false,
         }
+    }
+
+    // ── run controls: --efficiency and --max-cost-usd ───────────────────────────────
+
+    #[test]
+    fn efficiency_flags_switch_exactly_the_named_measures() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        args.efficiency = vec![
+            "warm_schedule=off".to_string(),
+            "truncation_retry=off".to_string(),
+            "warm_schedule=on".to_string(),
+        ];
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.efficiency.disabled(), vec!["truncation_retry"]);
+        assert_eq!(controls.max_cost_usd, None);
+    }
+
+    #[test]
+    fn an_unknown_measure_or_a_bad_cap_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        args.efficiency = vec!["warm_shedule=off".to_string()];
+        let err = validate_args(&args, false).expect_err("a typo must not silently leave it on");
+        assert!(
+            err.contains("--efficiency") && err.contains("warm_schedule"),
+            "{err}"
+        );
+
+        args.efficiency.clear();
+        for bad in [0.0, -3.0, f64::NAN] {
+            args.max_cost_usd = Some(bad);
+            let err = validate_args(&args, false).expect_err("a non-positive cap");
+            assert!(err.contains("--max-cost-usd"), "{err}");
+        }
+        args.max_cost_usd = Some(12.5);
+        validate_args(&args, false).unwrap();
+        assert_eq!(args.run_controls().unwrap().max_cost_usd, Some(12.5));
+    }
+
+    #[test]
+    fn the_fix_model_flag_reaches_the_run_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        assert_eq!(args.run_controls().unwrap().fix_model, None);
+        args.fix_model = Some("claude-opus-5".to_string());
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.fix_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(
+            controls.fix_model_for(Some("claude-sonnet-5"), None),
+            Some("claude-opus-5"),
+            "an explicit fix model wins over the switch"
+        );
+    }
+
+    /// `--clone-judge-model` is the only way to move the duplicate-code checker on the command
+    /// line; unset, it runs on the built-in fast default (Haiku 5.5). The environment has no
+    /// say, and the client lock checks the judge's model like any other.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_clone_judge_model_flag_reaches_the_run_controls_and_the_client_lock() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.clone_judge_model, None);
+        assert_eq!(controls.clone_judge_model_for(), "claude-haiku-5-5");
+        args.clone_judge_model = Some("claude-haiku-4-5-20251001".to_string());
+        let controls = args.run_controls().unwrap();
+        assert_eq!(
+            controls.clone_judge_model_for(),
+            "claude-haiku-4-5-20251001",
+            "the older id stays selectable"
+        );
+        args.clone_judge_model = Some("other-vendor/judge".to_string());
+        args.client_engagement = true;
+        args.backend = ProjectBackend::Api;
+        let refusal = require_client_lock(&args).unwrap_err();
+        assert!(
+            refusal.contains("the clone judge") && refusal.contains("other-vendor/judge"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn the_final_report_states_the_efficiency_set_and_the_spend_limit() {
+        use camerata_server::cost_cap::{CostCapRecord, NotRunPass};
+        let mut efficiency = camerata_server::efficiency::EfficiencyConfig::default();
+        efficiency.set("result_cache", false).unwrap();
+        let mut outcome = InspectOutcome {
+            run_id: None,
+            export_path: PathBuf::from("/tmp/out.zip"),
+            export_zip_bytes: 1,
+            backend: ProjectBackend::Api,
+            batch: false,
+            actual_usage: None,
+            findings_count: 0,
+            ledger_summary: String::new(),
+            ledger_path: PathBuf::from("/tmp/l.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
+            stage_telemetry: None,
+            preflight: None,
+            efficiency,
+            cost_cap: Some(CostCapRecord {
+                repos_not_finished: Vec::new(),
+                cost_unknown: false,
+                cap_usd: 5.0,
+                spent_usd: 5.4,
+                not_run_passes: vec![NotRunPass {
+                    files: Vec::new(),
+                    repo: "r".into(),
+                    group: "pass[all]".into(),
+                    chunk: 1,
+                    n_chunks: 1,
+                    rule_batch: 2,
+                    n_rule_batches: 2,
+                    rule_ids: vec!["A-1".into()],
+                    class: camerata_server::cost_cap::FailureClass::SpendLimit,
+                }],
+                not_run_stages: Vec::new(),
+                notes: Vec::new(),
+            }),
+            outage: None,
+            incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
+            run_notes: Vec::new(),
+        };
+        let text = format_outcome_report(&outcome);
+        assert!(
+            text.contains("result_cache=off") && text.contains("warm_schedule=on"),
+            "{text}"
+        );
+        assert!(
+            text.contains("spend limit: $5.00, spent $5.40 -- REACHED"),
+            "{text}"
+        );
+        assert!(
+            text.contains("INCOMPLETE") && text.contains("NOT RUN"),
+            "{text}"
+        );
+        assert!(outcome.cost_capped());
+
+        outcome.cost_cap.as_mut().unwrap().not_run_passes.clear();
+        assert!(
+            !outcome.cost_capped(),
+            "a cap that stopped nothing is not a capped run"
+        );
+        assert!(format_outcome_report(&outcome).contains("(not reached)"));
+    }
+
+    /// A run stopped because a call's cost could not be determined did not reach its limit: the
+    /// operator's summary line says the limit could not be enforced, with the amounts, never
+    /// "REACHED" (the 2026-10-29 run had spent under a cent of $10 when it was told that).
+    #[test]
+    fn the_spend_limit_line_says_could_not_be_enforced_when_a_cost_was_unknown() {
+        use camerata_server::cost_cap::{CostCapRecord, NotRunPass};
+        let record = CostCapRecord {
+            repos_not_finished: Vec::new(),
+            cost_unknown: true,
+            cap_usd: 10.0,
+            spent_usd: 0.0095,
+            not_run_passes: vec![NotRunPass {
+                files: Vec::new(),
+                repo: "r".into(),
+                group: "pass[all]".into(),
+                chunk: 1,
+                n_chunks: 1,
+                rule_batch: 2,
+                n_rule_batches: 2,
+                rule_ids: vec!["A-1".into()],
+                class: camerata_server::cost_cap::FailureClass::SpendLimit,
+            }],
+            not_run_stages: Vec::new(),
+            notes: vec![
+                "The spend limit could not be enforced past this point: a call to \
+                         `claude-unlisted-9` reported no cost."
+                    .to_string(),
+            ],
+        };
+        let text = render_cost_cap(&record);
+        assert!(text.contains("spend limit: $10.00, spent $0.01"), "{text}");
+        assert!(text.contains("COULD NOT BE ENFORCED"), "{text}");
+        assert!(text.contains("could not be determined"), "{text}");
+        assert!(!text.contains("REACHED"), "{text}");
+        assert!(
+            text.contains("INCOMPLETE") && text.contains("NOT RUN"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`claude-unlisted-9`"),
+            "the note follows: {text}"
+        );
+        // The plain reached case is unchanged.
+        let reached = CostCapRecord {
+            cost_unknown: false,
+            spent_usd: 10.4,
+            ..record
+        };
+        assert!(render_cost_cap(&reached).contains("-- REACHED."));
     }
 
     // ── validate_args ────────────────────────────────────────────────────────────────
@@ -1005,6 +2102,156 @@ mod tests {
         assert!(validate_args(&args, false).is_ok());
     }
 
+    // ── M11: several repos, one project ───────────────────────────────────────────────
+
+    /// Two folders, each with a `src/index.ts` (the same path in both repos).
+    fn two_repos() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("api");
+        let b = root.path().join("web");
+        for dir in [&a, &b] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src/index.ts"), "export const x = 1;\n").unwrap();
+        }
+        (root, a, b)
+    }
+
+    fn multi(a: PathBuf, b: PathBuf, names: &[&str], export: PathBuf) -> InspectArgs {
+        let mut args = base_args(a, export);
+        args.also_repos = vec![b];
+        args.repo_names = names.iter().map(|n| n.to_string()).collect();
+        args
+    }
+
+    #[test]
+    fn a_lone_repo_without_a_name_is_still_named_for_its_folder() {
+        let (root, a, _) = two_repos();
+        let args = base_args(a.clone(), root.path().join("o.zip"));
+        assert_eq!(
+            args.resolve_sources().unwrap(),
+            vec![("api".to_string(), a)]
+        );
+        validate_args(&args, false).unwrap();
+    }
+
+    #[test]
+    fn several_repos_resolve_to_one_named_source_each() {
+        let (root, a, b) = two_repos();
+        let args = multi(
+            a.clone(),
+            b.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        assert_eq!(
+            args.resolve_sources().unwrap(),
+            vec![("acme/api".to_string(), a), ("acme/web".to_string(), b)]
+        );
+        validate_args(&args, false).unwrap();
+    }
+
+    #[test]
+    fn several_repos_without_names_are_refused_with_the_fix() {
+        let (root, a, b) = two_repos();
+        let args = multi(a, b, &[], root.path().join("o.zip"));
+        let err = validate_args(&args, false).expect_err("a folder name is not a repo name");
+        assert!(err.contains("--repo-name OWNER/REPO"), "{err}");
+    }
+
+    #[test]
+    fn a_name_count_that_does_not_match_the_repo_count_is_refused() {
+        let (root, a, b) = two_repos();
+        let args = multi(a, b, &["acme/api"], root.path().join("o.zip"));
+        let err = validate_args(&args, false).expect_err("one name for two repos");
+        assert!(err.contains("one name per repo"), "{err}");
+    }
+
+    /// The names go through `validate_repo_name`: a folder-style name, a name with a space and a
+    /// path-escaping name are all refused, naming the flag.
+    #[test]
+    fn repo_names_are_validated_as_owner_slash_repo() {
+        let (root, a, b) = two_repos();
+        for bad in ["api", "acme/we b", "acme/../x", "acme/web/extra", ""] {
+            let args = multi(
+                a.clone(),
+                b.clone(),
+                &["acme/api", bad],
+                root.path().join("o.zip"),
+            );
+            let err = validate_args(&args, false).expect_err(bad);
+            assert!(err.contains("--repo-name"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn two_repos_may_not_share_a_name_or_a_folder() {
+        let (root, a, b) = two_repos();
+        let same_name = multi(
+            a.clone(),
+            b,
+            &["acme/api", "acme/api"],
+            root.path().join("o.zip"),
+        );
+        let err = same_name.resolve_sources().expect_err("same name");
+        assert!(err.contains("needs its own name"), "{err}");
+        let same_dir = multi(
+            a.clone(),
+            a,
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let err = same_dir.resolve_sources().expect_err("same folder");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_second_repo_is_named() {
+        let (root, a, b) = two_repos();
+        let gone = b.join("nope");
+        let args = multi(
+            a,
+            gone.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let err = validate_args(&args, false).expect_err("missing second repo");
+        assert!(err.contains(&gone.display().to_string()), "{err}");
+    }
+
+    /// One project has ONE cache and ONE ledger, whatever order the repos were named in, and
+    /// they are not the files of either repo alone.
+    ///
+    /// Each path read resolves the state dir from process environment, which other tests in
+    /// this binary mutate, so it takes the `process_env` key like
+    /// `bookkeeping_is_never_written_into_the_scanned_repo` (it flaked once in a full run).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn several_repos_share_one_cache_and_one_ledger() {
+        let (root, a, b) = two_repos();
+        let ab = multi(
+            a.clone(),
+            b.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let ba = multi(
+            b.clone(),
+            a.clone(),
+            &["acme/web", "acme/api"],
+            root.path().join("o.zip"),
+        );
+        assert_eq!(ab.state_paths(), ba.state_paths());
+        let (cache, ledger) = ab.state_paths();
+        assert_ne!(cache, ledger);
+        let alone_a = base_args(a, root.path().join("o.zip")).state_paths();
+        let alone_b = base_args(b, root.path().join("o.zip")).state_paths();
+        assert_ne!(cache, alone_a.0);
+        assert_ne!(cache, alone_b.0);
+        // A single repo keeps the key it always had.
+        assert_eq!(alone_a.0, manifest_cache_path(&ab.repo));
+        assert_eq!(alone_a.1, ledger_path(&ab.repo));
+    }
+
     #[test]
     fn validate_args_rejects_batch_on_the_cli_backend() {
         let dir = tempfile::tempdir().unwrap();
@@ -1013,6 +2260,22 @@ mod tests {
         args.backend = ProjectBackend::Cli;
         let err = validate_args(&args, true).expect_err("batch must require the api backend");
         assert!(err.contains("--batch requires --backend api"), "{err}");
+    }
+
+    #[test]
+    fn validate_args_rejects_forcing_batch_and_realtime_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
+        args.backend = ProjectBackend::Api;
+        args.batch = true;
+        args.realtime = true;
+        let err = validate_args(&args, true).expect_err("one mode at a time");
+        assert!(err.contains("--batch and --realtime"), "{err}");
+        args.batch = false;
+        assert!(
+            validate_args(&args, true).is_ok(),
+            "--realtime alone is fine"
+        );
     }
 
     #[test]
@@ -1039,6 +2302,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
         assert!(validate_args(&args, false).is_ok());
+    }
+
+    /// Confidentiality: a blank or multi-line `--client` is refused before anything is read or
+    /// spent, so a run never pays for an inspection whose export would then be refused.
+    #[test]
+    fn validate_args_rejects_a_blank_or_multi_line_client() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "   ", "Example\nClient"] {
+            let mut args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
+            args.client = bad.to_string();
+            let err = validate_args(&args, false).expect_err("a bad --client is refused");
+            assert!(err.starts_with("--client: "), "{err}");
+        }
     }
 
     // ── the shared key resolver (the app-saved key is the key the CLI uses) ───────────
@@ -1277,7 +2553,7 @@ mod tests {
             camerata_server::scan_cache::state_dir::STATE_DIR_ENV,
             state.path(),
         );
-        let repo = PathBuf::from("/Users/someone/clients/acme-platform");
+        let repo = PathBuf::from("/Users/auditor/clients/acme-platform");
         for path in [manifest_cache_path(&repo), ledger_path(&repo)] {
             assert!(
                 !path.starts_with(&repo),
@@ -1299,8 +2575,8 @@ mod tests {
     /// well as a correctness one).
     #[test]
     fn repo_state_key_is_stable_distinct_and_filesystem_safe() {
-        let a = PathBuf::from("/Users/someone/clients/acme-platform");
-        let b = PathBuf::from("/Users/someone/clients/other-client");
+        let a = PathBuf::from("/Users/auditor/clients/acme-platform");
+        let b = PathBuf::from("/Users/auditor/clients/other-client");
 
         assert_eq!(repo_state_key(&a), repo_state_key(&a), "must be stable");
         assert_ne!(
@@ -1330,6 +2606,7 @@ mod tests {
     #[test]
     fn format_outcome_report_names_the_export_path_and_backend() {
         let outcome = InspectOutcome {
+            run_id: None,
             export_path: PathBuf::from("/tmp/out.zip"),
             export_zip_bytes: 4096,
             backend: ProjectBackend::Api,
@@ -1340,6 +2617,13 @@ mod tests {
             ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
             release_gate: "release gate: passed (6 checks)".to_string(),
             stage_telemetry: None,
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
+            outage: None,
+            incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
+            run_notes: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -1354,6 +2638,45 @@ mod tests {
             !text.contains("STAGE TELEMETRY"),
             "a scan that made no model call has no telemetry table: {text}"
         );
+    }
+
+    /// A note the saved run carries (a model call made with no prompt seed in scope, which a
+    /// resume cannot replay) is in the summary the operator reads, not in run.json alone; a run
+    /// with no notes prints no such block.
+    #[test]
+    fn format_outcome_report_prints_the_runs_notes() {
+        let mut outcome = InspectOutcome {
+            run_id: Some("run-1".to_string()),
+            export_path: PathBuf::from("/tmp/out.zip"),
+            export_zip_bytes: 1,
+            backend: ProjectBackend::Cli,
+            batch: false,
+            actual_usage: None,
+            findings_count: 0,
+            ledger_summary: String::new(),
+            ledger_path: PathBuf::from("/tmp/l.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
+            stage_telemetry: None,
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
+            outage: None,
+            incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
+            run_notes: Vec::new(),
+        };
+        let text = format_outcome_report(&outcome);
+        assert!(!text.contains("run note"), "{text}");
+        outcome.run_notes = vec![
+            "a model call was made with no prompt seed in scope".to_string(),
+            "second".to_string(),
+        ];
+        let text = format_outcome_report(&outcome);
+        assert!(
+            text.contains("run note: a model call was made with no prompt seed in scope"),
+            "{text}"
+        );
+        assert!(text.contains("run note: second"), "{text}");
     }
 
     /// Rank 1: the per-stage cost table closes the operator's output, so the next sweep can read
@@ -1377,6 +2700,7 @@ mod tests {
             },
         );
         let outcome = InspectOutcome {
+            run_id: None,
             export_path: PathBuf::from("/tmp/out.zip"),
             export_zip_bytes: 1,
             backend: ProjectBackend::Api,
@@ -1387,6 +2711,13 @@ mod tests {
             ledger_path: PathBuf::from("/tmp/state/x.ledger.json"),
             release_gate: String::new(),
             stage_telemetry: Some(meter.snapshot(8_000)),
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
+            outage: None,
+            incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
+            run_notes: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");
@@ -1403,6 +2734,7 @@ mod tests {
     fn render_ledger_summary_clean_ledger_has_no_alarms() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
@@ -1411,6 +2743,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             RuleTier::Architectural,
             true,
@@ -1419,6 +2752,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::ExternalTool,
             true,
@@ -1426,7 +2760,7 @@ mod tests {
             8,
             0,
         );
-        ledger.record_rule("AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
+        ledger.record_rule("", "AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
         ledger.record_stage("cross-family-merge", 1, 1, StageAccounting::default());
 
         let text = render_ledger_summary(&ledger, &[], false);
@@ -1455,6 +2789,7 @@ mod tests {
         // Empty bucket: a positive disclosure, no alarm.
         let mut clean = ScanLedger::new();
         clean.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::Deterministic,
             true,
@@ -1523,6 +2858,7 @@ mod tests {
     fn render_ledger_summary_flags_a_family_with_zero_rules_recorded() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
@@ -1552,6 +2888,7 @@ mod tests {
     fn render_ledger_summary_flags_a_family_whose_rules_all_failed_to_run() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::ExternalTool,
             false,
@@ -1578,6 +2915,7 @@ mod tests {
     fn render_ledger_summary_renders_not_run_reasons() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             RuleTier::Architectural,
             false,
@@ -1586,6 +2924,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             false,
@@ -1618,6 +2957,11 @@ mod tests {
             pass: "commodity taint pass".to_string(),
             reason: "SEC-NO-RAW-SQL-CONCAT-1: commodity taint pass did not run: semgrep absent"
                 .to_string(),
+            files_not_reviewed: 0,
+            class: camerata_server::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
 
         let text = render_ledger_summary(&ledger, &failed_passes, false);
@@ -1633,6 +2977,7 @@ mod tests {
     fn render_ledger_summary_default_omits_per_rule_detail() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
