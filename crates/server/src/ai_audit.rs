@@ -1524,7 +1524,11 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// the fix direction, and the prompt lists the names the text must keep; the fix reply is
 /// addressed by the same kind of opaque id instead of a batch position, and its prompt lists
 /// the names the evidence lets the fix use.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 4;
+///
+/// 5: defects D2 and D4. The detail-regeneration reply is one entry per finding keyed by its id
+/// (the schema requires every id), and the fix prompt says an omitted id is asked about once
+/// more and is never sent for a convention row.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 5;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
@@ -7094,6 +7098,111 @@ pub(crate) fn complete_array_objects<'a>(text: &'a str, key: &str) -> Vec<&'a st
         .into_iter()
         .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
         .collect()
+}
+
+/// The COMPLETE `"key": {...}` members of the object under `key` in a reply that may have been
+/// cut off mid-way, as `(member name, the member's object text)`: the keyed twin of
+/// [`complete_array_objects`], for a reply that holds one property per id. The last, unfinished
+/// member and anything after it are not guessed at. Strings and escapes are tracked, so a brace
+/// or a quote inside a string does not move a boundary. Each member's text is valid JSON.
+pub(crate) fn complete_keyed_objects<'a>(text: &'a str, key: &str) -> Vec<(String, &'a str)> {
+    let Some(obj_start) = text.find('{') else {
+        return Vec::new();
+    };
+    let json = &text[obj_start..];
+    let quoted = format!("\"{key}\"");
+    let Some(key_at) = json
+        .match_indices(quoted.as_str())
+        .map(|(i, _)| i)
+        .find(|&i| {
+            json[..i]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c == '{' || c == ',')
+        })
+    else {
+        return Vec::new();
+    };
+    let after = &json[key_at + quoted.len()..];
+    let Some(open) = after.find('{') else {
+        return Vec::new();
+    };
+    // Only whitespace and a colon may sit between the key and its object.
+    if !after[..open].chars().all(|c| c.is_whitespace() || c == ':') {
+        return Vec::new();
+    }
+    let body = &after[open + 1..];
+    let bytes = body.as_bytes();
+    let mut members: Vec<(String, &str)> = Vec::new();
+    let mut i = 0usize;
+    'members: while i < bytes.len() {
+        // Skip to the next member name (a string), or stop at the closing brace of the object.
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'"' {
+            break;
+        }
+        let name_start = i + 1;
+        let mut j = name_start;
+        let mut esc = false;
+        while j < bytes.len() {
+            if esc {
+                esc = false;
+            } else if bytes[j] == b'\\' {
+                esc = true;
+            } else if bytes[j] == b'"' {
+                break;
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        let Ok(name) = serde_json::from_str::<String>(&body[name_start - 1..=j]) else {
+            break;
+        };
+        i = j + 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'{' {
+            break;
+        }
+        let start = i;
+        let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if b == b'\\' {
+                    esc = true;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if b == b'"' {
+                in_str = true;
+            } else if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    let text = &body[start..=i];
+                    if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+                        members.push((name, text));
+                    }
+                    i += 1;
+                    continue 'members;
+                }
+            }
+            i += 1;
+        }
+        // The member never closed: the cut-off point. Nothing after it is read.
+        break;
+    }
+    members
 }
 
 /// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut

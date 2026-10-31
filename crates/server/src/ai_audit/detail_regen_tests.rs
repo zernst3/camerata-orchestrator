@@ -1114,7 +1114,10 @@ async fn the_request_does_not_ask_the_model_to_echo_the_path_or_line() {
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let system = llm.systems(Role::Regen).remove(0);
-    assert!(system.contains(r#"{"details":[{"id":"#), "{system}");
+    assert!(
+        system.contains(r#"{"details":{"<the finding's id"#),
+        "{system}"
+    );
     assert!(!system.contains(r#""path":"<"#), "{system}");
     assert!(!system.contains("its line number"), "{system}");
     let reqs: Vec<LlmRequest> = llm
@@ -1126,12 +1129,17 @@ async fn the_request_does_not_ask_the_model_to_echo_the_path_or_line() {
         .map(|(_, q)| q.clone())
         .collect();
     let schema = reqs[0].response_schema.as_ref().expect("a schema");
-    let props = schema["properties"]["details"]["items"]["properties"]
+    // One property per id, each an entry with the two fields and nothing to echo.
+    let by_id = schema["properties"]["details"]["properties"]
         .as_object()
         .unwrap();
-    assert!(props.contains_key("id") && props.contains_key("why"));
-    assert!(props.contains_key("fix_direction"));
-    assert!(!props.contains_key("path") && !props.contains_key("line"));
+    assert!(!by_id.is_empty());
+    for entry in by_id.values() {
+        let props = entry["properties"].as_object().unwrap();
+        assert!(props.contains_key("why") && props.contains_key("fix_direction"));
+        assert!(!props.contains_key("id"));
+        assert!(!props.contains_key("path") && !props.contains_key("line"));
+    }
 }
 
 #[tokio::test]
