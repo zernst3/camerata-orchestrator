@@ -2961,11 +2961,18 @@ call carries `output_path`: `schema` when the reply was produced under the schem
 `tolerant` when the request carried one the backend or model could not take. The API caches
 a prompt per schema, so the stages that send a cached digest (scan, alternatives) use one
 schema for every request of a run; calibration, detail and fix, which send no cached prefix,
-name the ids of their batch in the schema. A schema cannot make a reply cover every id (the
-API allows `minItems` of 0 or 1 only), so a finding the reply leaves out is handled as before.
+name the ids of their batch in the schema. An array cannot make a reply cover every id (the
+API allows `minItems` of 0 or 1 only), so the detail reply is an OBJECT with one required
+property per id of the batch (defect D4): a reply that answers 1 of 4 findings is a shape the
+decoder cannot produce. The size is the batch's (ten ids, ten required properties, none
+optional), inside the limits above; a test checks 25 ids too. The fix reply stays an array
+whose ids are optional, because the prompt lets the model leave out a fix it cannot ground.
 
-*Ids Camerata knows are never echoed.* The detail reply is `{"details":[{"id","detail"}]}`:
-the finding's path and line are attached by Camerata from the finding, so the reply no
+*Ids Camerata knows are never echoed.* The detail reply is
+`{"details":{"<id>":{"why","fix_direction"}}}`, keyed by the opaque id (the array form
+`{"details":[{"id",...}]}` a backend that never saw the schema may send is still read, and a
+keyed reply cut off at the output limit is salvaged member by member,
+`ai_audit::complete_keyed_objects`): the finding's path and line are attached by Camerata from the finding, so the reply no
 longer echoes them (an echo from a backend that never saw the schema is ignored, and the
 old "wrong place" rejection is gone; `DetailRejections::mismatch` stays in the ledger as a
 zero so older ledgers read). The fix stage moved from the batch position to the same kind
@@ -2973,7 +2980,7 @@ of opaque id: each fix block opens `[a1b2c3] rule ...`, the reply is
 `{"fixes":[{"id","fix"}]}`, and the schema's `id` is an enum of the batch's ids. A finding
 keeps its id across rounds (it hashes the finding's place in the run, not its place in the
 batch), and a position is no address, so a reply numbered from 0 or 1 lands on no finding.
-Prompt schema version 4.
+Prompt schema version 5 (4 for the ids, 5 for the keyed detail reply and the D2 fix prompt).
 
 *The prompt says what the check requires.* Each detail block carries a `Names to keep:`
 line (`detail_regen::names_to_keep`: every path or identifier the one-sentence statement
@@ -2983,7 +2990,7 @@ the same function, so the sentence and the check cannot differ. Each fix block e
 identifiers of the evidence the grounding check looks a name up in); anything else is
 introduced as a new name in plain words.
 
-*`why` and `fix_direction`.* The detail reply is `{"id","why","fix_direction"}`. The text
+*`why` and `fix_direction`.* Each detail entry is `{"why","fix_direction"}` under its id. The text
 that is written is the two joined with a space (a test pins that a client reads exactly
 what one `detail` field of the same words gave), the named-token check reads the joined
 text, and the exploit-precondition check reads `why` alone, so a fix direction that says
@@ -3027,6 +3034,39 @@ evidence nor anywhere in the repository. `stored_replay_tests` (ignored; set
 `CAMERATA_STORED_RUNS`) replays the stored fix replies of the two efficiency runs against a
 repository rebuilt from their scan calls' paths and quoted code, and asserts that
 `billing_accounts_user_id_fkey` and `app/api/charge/route.ts` are still flagged.
+
+*Standard names are not inventions (D3).* The grounding check refused `Number.isSafeInteger`,
+`crypto.randomUUID` and the ESLint rule `react-hooks/rules-of-hooks`, names that are in no
+repository and in every one. `fix_standard_names` holds EXACT lists, not prefixes: the standard
+members of the JavaScript, Web and Node namespaces (`Number`, `Math`, `JSON`, `Object`,
+`Promise`, `crypto`, `crypto.subtle`, `window`, `document`, `Buffer` and others, also reached
+through `globalThis.` or `window.`), the standard bare names (`URLSearchParams`, `randomUUID`),
+and the rule names of ESLint core and of the `react-hooks`, `react`, `jsx-a11y`, `import`,
+`security`, `@next/next` and `@typescript-eslint` plugins. `Number.toCents`, `crypto.makeToken`,
+`react-hooks/hook-order-checker` and `process.env.SOME_SECRET` are still refused.
+
+*The fix stage asks only about faults (D2).* A row of an informational kind
+(`FindingKind::is_informational`: convention observed, no convention, not assessed) has no
+defect to fix. The fix prompt tells the model to omit an id it cannot ground, and the stage
+counted the omission as a failure, asked again in every round and ended in a failed part, so
+those rows are now left out of `generate_fix_specifics` (no call, no failed part, `fix_specific`
+stays empty; the rule's generic remediation still shows in the `fix` column). The prompt says an
+omitted id is asked about once more in a smaller request and then gets the rule's own fix.
+
+*A junk finding never reaches an export (D1).* A scan reply once held a row with rule
+`JAVASCRIPT-TYPESRIPT-PLACEHOLDER`, title `placeholder`, code and detail `x`. Calibration and the
+detail step both said to discard it, calibration never drops a row, and it shipped. Three layers
+read one definition, `junk_finding`: (1) `parse_ai_findings` refuses a row whose rule is not
+adopted and whose code and detail are both blank or placeholder, whose title is a placeholder
+word or whose rule id has a `PLACEHOLDER` word (an adopted-rule row only when all three texts
+are blank or placeholder); the count and the places go to the operator log only. (2) After
+calibration, `drop_discarded_invented_rows` removes a model-invented (`AI-`) row whose own
+explanation says to discard it or whose headline or rule id is a placeholder, and the removal
+is a disposition of the `ai-calibration` ledger stage (`discarded_placeholder_row`), so the row
+accounting still reconciles; no adopted-rule row is ever removed by its prose. (3) The release
+gate's `finding content` check refuses a package whose `findings.json` still holds one. The rule
+id enum in the scan schema was considered and not done: a batch holds over a hundred rules, and
+a genuinely new rule needs a free name (the schema is also one cached prefix for every pass).
 
 *The alternatives digest is a cached prefix.* The stage re-sent the whole file digest (25k
 to 40k input tokens) uncached with every rule batch. Its prompt is now the repo map and the
@@ -3487,7 +3527,7 @@ thing:
   `json/all-findings.json`'s tally by `(severity, kind)`;
   `pdf_count_reconciliation_problems` (in-memory release) does the same for the PDF's rendered
   rows and its cover severity summary. A difference names the cell and both counts. The gate
-  now runs eight checks.
+  now runs nine checks (the ninth, `finding content`, is described in section 6c).
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
@@ -3870,12 +3910,14 @@ The deterministic floor and checkers still read RAW code (they must find the sec
 **The gate** (`server/src/release_gate.rs`). `build_product_package` is the one assembly of a
 product export and `release` is the ONLY function that returns zip bytes (HTTP `export_product`,
 `camerata inspect --export` and the sample generator all use it; source-grep tests pin
-`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs six checks over the
+`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs nine checks over the
 archive it built: **secrets** (every string of every file: `data.json`, `findings.json`, each
 dataset in both formats, every workbook cell and shared string, the README, the manifest, member
 names; zero-width characters stripped; never a field list), **dataset set**, **dataset parity**
 (CSV against JSON, `findings.json` against `all-findings`), **row parity** (PDF rows against
-`findings.json` rows), **manifest** hashes, **provenance** (README against manifest). The
+`findings.json` rows), **severity and kind counts**, **finding content** (D1: no model-invented
+row is a placeholder or says to discard itself), **confidentiality marking**, **manifest**
+hashes, **provenance** (README against manifest). The
 comparison logic is production code the export tests call. A refusal is a `GateFailure`: its
 `Display` is the fail-loud block (every field redacted by `Problem::new`), the HTTP route returns
 422 `{ok:false, gate:"release", message, problems}`, and `camerata inspect` exits 3 and writes
@@ -3883,6 +3925,17 @@ nothing. The PDF-only route checks `data.json` before Typst runs.
 
 `camerata release-gate <zip>` runs the same checks over a zip on disk (exit 0 clean, 3 blocked, 2
 could not run); build with `--features pdf-text` to check the PDF's rendered text too.
+
+**Merged sites and the CSV (D5).** A merged finding's absorbed sites (`also_locations`) are
+redacted where the merge builds them and again by `sanitize_finding_text` before any dataset,
+workbook or PDF field is built (snippet and headline of every site); a test runs a credential
+through a merged site into `findings.json`, every CSV and JSON dataset, the workbook and the
+PDF's data, with `terse_output` on and off. The export that was refused in the efficiency run
+held no credential: the `also_locations` CSV cell is compact JSON, and scanned as ONE string a
+rule id naming a key beside an environment variable NAME (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=`)
+read as a named secret literal. The secrets check now parses a CSV cell that holds a JSON list or
+object and walks each string and key on its own, as it does `findings.json` (same detector, same
+strictness; a real key inside the cell is still found, located by row, column and JSON path).
 
 **Known limits.** A finding's `path` and `repo` are not rewritten (a file named after a key is
 caught by the gate, not redacted). Calls that pass `repo_read_dir` give the model on-demand read
