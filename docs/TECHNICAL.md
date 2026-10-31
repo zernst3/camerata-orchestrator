@@ -3933,9 +3933,13 @@ through a merged site into `findings.json`, every CSV and JSON dataset, the work
 PDF's data, with `terse_output` on and off. The export that was refused in the efficiency run
 held no credential: the `also_locations` CSV cell is compact JSON, and scanned as ONE string a
 rule id naming a key beside an environment variable NAME (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=`)
-read as a named secret literal. The secrets check now parses a CSV cell that holds a JSON list or
-object and walks each string and key on its own, as it does `findings.json` (same detector, same
-strictness; a real key inside the cell is still found, located by row, column and JSON path).
+read as a named secret literal. The secrets check now scans a CSV cell that holds a JSON list or
+object BOTH ways and reports the union: parsed and walked string by string as it does
+`findings.json` (which also sees an unquoted `.env` line inside a snippet), and as one string
+(which also sees a value whose name sits in a neighbouring field). The one shape skipped, on the
+one-string pass only, is a named secret literal whose "value" is itself an environment variable
+name (upper case, underscores, fewer than four digits). A real key inside the cell, quoted,
+escaped, nested or split from its name across fields, is still found.
 
 **Known limits.** A finding's `path` and `repo` are not rewritten (a file named after a key is
 caught by the gate, not redacted). Calls that pass `repo_read_dir` give the model on-demand read

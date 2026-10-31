@@ -175,6 +175,49 @@ fn a_credential_inside_a_json_cell_of_a_csv_is_still_blocked() {
     assert!(!leaked(&shown, &p), "{shown}");
 }
 
+/// The parsed walk must not make the CSV check weaker than scanning the cell as one string did:
+/// a credential value whose NAME sits in a neighbouring field (the rule id names a key, the
+/// snippet is the bare value), a value hidden behind escaped quotes inside a snippet, and an
+/// unquoted `.env` line that the whole-cell scan could not see are all still blocked.
+#[test]
+fn a_credential_split_or_escaped_inside_a_json_cell_of_a_csv_is_still_blocked() {
+    let value = "Qm3vX9pL2sKd8Rt4Wn7Yz1Hb5Jc0Tf6";
+    let cells = [
+        // Split across keys: the name in `rule_id`, the bare value in `snippet`.
+        serde_json::json!([{ "rule_id": "SEC-API-KEY-1", "snippet": value }]),
+        // Escaped quotes inside the snippet.
+        serde_json::json!([{ "rule_id": "X-1", "snippet": format!("const apiKey = \"{value}\";") }]),
+        // An unquoted `.env` line: only visible when the string is scanned on its own.
+        serde_json::json!([{ "rule_id": "X-1", "snippet": format!("SERVICE_KEY={value}") }]),
+        // Nested one level deeper.
+        serde_json::json!([{ "rule_id": "X-1", "site": { "snippet": format!("token = '{value}'") } }]),
+    ];
+    for cell in cells {
+        let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+        let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+        assert!(!problems.is_empty(), "missed in {cell}");
+        let shown = format!("{problems:?}");
+        assert!(!shown.contains(value), "{shown}");
+    }
+}
+
+/// The exact cell of the efficiency run: a rule id naming a key beside an environment variable
+/// NAME (no value) is clean, and stays clean with a digit in the name.
+#[test]
+fn an_environment_variable_name_beside_a_key_rule_id_in_a_csv_cell_is_clean() {
+    for name in [
+        "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=",
+        "export NEXT_PUBLIC_S3_SECRET_ACCESS_KEY=",
+    ] {
+        let cell = serde_json::json!([{
+            "rule_id": "SUPABASE-SERVICE-ROLE-KEY-PUBLIC-1", "snippet": name, "line": 3
+        }]);
+        let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+        let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+        assert!(problems.is_empty(), "{name}: {problems:?}");
+    }
+}
+
 fn csv_quote(cell: &str) -> String {
     format!("\"{}\"", cell.replace('"', "\"\""))
 }
