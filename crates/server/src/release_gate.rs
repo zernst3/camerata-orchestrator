@@ -498,6 +498,9 @@ pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
 #[cfg(test)]
 mod patterns_tests;
 
+#[cfg(test)]
+mod merged_site_tests;
+
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;

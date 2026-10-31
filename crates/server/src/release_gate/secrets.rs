@@ -134,15 +134,40 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
         };
         for (c, cell) in record.iter().enumerate() {
             let column = headers.get(c).unwrap_or("?");
-            problems.extend(scan_text(
-                file,
-                &format!("row {}, column {column:?}", i + 1),
-                cell,
-                false,
-            ));
+            let at = format!("row {}, column {column:?}", i + 1);
+            match nested_json_cell(cell) {
+                // A nested list or object (the `also_locations` column) is JSON text. Scanned as
+                // one string, its field names and punctuation sit next to each value and turn a
+                // harmless one (an environment variable NAME beside a rule id naming a key) into
+                // a "named secret literal" that no reader sees. Walk it like `findings.json`:
+                // every string and key on its own, the same detector, the same strictness.
+                Some(value) => {
+                    for p in json_problems(file, &value) {
+                        problems.push(Problem::new(
+                            file,
+                            format!("{at}, {}", p.location),
+                            p.message,
+                            p.evidence,
+                        ));
+                    }
+                }
+                None => problems.extend(scan_text(file, &at, cell, false)),
+            }
         }
     }
     problems
+}
+
+/// The parsed value of a CSV cell holding a nested JSON list or object, as `json_array_to_csv`
+/// writes one. `None` for any other cell (including a scalar that happens to parse as JSON).
+fn nested_json_cell(cell: &str) -> Option<Value> {
+    let trimmed = cell.trim();
+    if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .filter(|v| v.is_array() || v.is_object())
 }
 
 /// A workbook: every cell (located by sheet and cell reference) and every shared string (so a
