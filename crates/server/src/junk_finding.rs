@@ -114,12 +114,12 @@ pub fn parse_gate_reason(
 }
 
 /// Whether model-written text is the model's own verdict that its row is to be thrown away:
-/// "discard this finding", "placeholder finding", or both words "placeholder" and "discard".
+/// "discard this finding" or "placeholder finding" (the phrases the detail and calibration steps
+/// wrote on the incident row). The two words apart are not a verdict: a real finding speaks of a
+/// placeholder in the code or a value the code discards, and such a row must stay.
 pub fn carries_discard_verdict(text: &str) -> bool {
     let t = text.to_lowercase();
-    t.contains("discard this finding")
-        || t.contains("placeholder finding")
-        || (t.contains("placeholder") && t.contains("discard"))
+    t.contains("discard this finding") || t.contains("placeholder finding")
 }
 
 /// Whether a model-invented row is junk after the detail and calibration steps: its own text
@@ -248,6 +248,21 @@ mod tests {
         assert!(!carries_discard_verdict(
             "Raw SQL is built from user input."
         ));
+    }
+
+    /// A real finding may use both words in its own sense: a placeholder in the code, a value
+    /// the code discards. Neither is a verdict on the row, so the row stays.
+    #[test]
+    fn a_real_finding_that_mentions_a_placeholder_and_discarding_is_not_a_verdict() {
+        for text in [
+            "The placeholder image URL is fetched without validation, and the handler discards requests whose origin is unknown.",
+            "A placeholder session token `changeme` is accepted; expired sessions are never discarded.",
+            "The upload result is discarded without inspection, so the placeholder row stays in the table.",
+        ] {
+            assert!(!carries_discard_verdict(text), "{text}");
+            assert!(!is_junk_invented_row("AI-UPLOAD-RESULT-IGNORED", "Upload result ignored", text));
+            assert!(row_problem("AI-UPLOAD-RESULT-IGNORED", "Upload result ignored", "await upload(file);", text).is_none());
+        }
     }
 
     #[test]
