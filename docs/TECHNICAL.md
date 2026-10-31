@@ -3045,6 +3045,14 @@ and the rule names of ESLint core and of the `react-hooks`, `react`, `jsx-a11y`,
 `security`, `@next/next` and `@typescript-eslint` plugins. `Number.toCents`, `crypto.makeToken`,
 `react-hooks/hook-order-checker` and `process.env.SOME_SECRET` are still refused.
 
+*Platform environment variables are standard names (D7).* hearth gave up on a finding (and so the
+whole run was incomplete, exit 6) because the model wrote `process.env.TZ` to pin a test's
+timezone: unquoted, the grounding check read it as a file name (stem `process.env`, extension
+`TZ`) found in neither the evidence nor the repository, on every round. `fix_standard_names` now
+holds a short exact list of variables the operating system or Node defines (`TZ`, `NODE_ENV`,
+`NODE_OPTIONS`, `PATH`, `HOME`, `CI`, `LANG` and a few more), accepted as `process.env.NAME` however
+they are written; an application's own variable is still a name to ground.
+
 *The fix stage asks only about faults (D2).* A row of an informational kind
 (`FindingKind::is_informational`: convention observed, no convention, not assessed) has no
 defect to fix. The fix prompt tells the model to omit an id it cannot ground, and the stage

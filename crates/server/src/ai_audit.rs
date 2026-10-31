@@ -22494,6 +22494,30 @@ mod tests {
         }
     }
 
+    /// D7: hearth's fix stage gave up on a finding because the model wrote `process.env.TZ`, in
+    /// prose, to pin the timezone of a test (the stored rejection). Unquoted, the word reads as
+    /// a file name (stem `process.env`, extension `TZ`), and `TZ` is the operating system's own
+    /// variable, not one the repository chose. A platform variable is accepted however it is
+    /// written; an application's own variable (`process.env.CHARGE_SIGNING_SECRET`) is not.
+    #[test]
+    fn find_ungrounded_identifier_accepts_platform_environment_variables() {
+        let evidence = "tests/format.test.ts line 10 calls formatDate with a fixed ISO input";
+        for fix in [
+            "Pin the timezone for this assertion by setting the test's timezone to a fixed zone \
+             before calling `formatDate` in tests/format.test.ts (for example via a test setup \
+             setting process.env.TZ to UTC), so the '2025' check does not depend on the machine.",
+            "Set `process.env.TZ` to UTC in the test setup.",
+            "Run it with `process.env.TZ = 'UTC'` before `formatDate`.",
+            "Guard on `process.env.NODE_ENV` in tests/format.test.ts.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+        assert_eq!(
+            find_ungrounded_identifier("Read `process.env.CHARGE_SIGNING_SECRET` first.", evidence),
+            Some("process.env.CHARGE_SIGNING_SECRET".to_string())
+        );
+    }
+
     /// D3: a known ESLint rule name (core, `react-hooks/`, `@typescript-eslint/`) is not invented.
     #[test]
     fn find_ungrounded_identifier_accepts_known_eslint_rule_names() {
