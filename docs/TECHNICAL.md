@@ -3381,12 +3381,19 @@ It runs the same Phases 1 to 3 as `camerata inspect` (stack detection, the
 curated rule selection, the corpus, `audit_repos` with the deterministic floor
 and the AI review) twice, applies the corpus severity bounds to each run and
 compares the two finding sets with `camerata_server::repeatability::diff_runs`:
-counts by tier (`deterministic`, `ai`, `preview`), by rule and by severity in
-each run, plus every finding one run reported and the other did not. Findings
-are matched by `finding_match_key`: repo, path and the content fingerprint
-baselines use (rule id plus whitespace-collapsed snippet), so a finding quoted
-at a neighbouring line still matches; repeats are matched one for one. The
-deterministic floor is the control: its counts never change between runs.
+counts by tier (`deterministic`, `ai`, `convention`, `preview`), by rule and by
+severity in each run, plus every finding one run reported and the other did
+not. Findings are matched by `finding_match_key`: repo, path and the content
+fingerprint baselines use (rule id plus whitespace-collapsed snippet), so a
+finding quoted at a neighbouring line still matches; repeats are matched one
+for one. Findings the fingerprint pass leaves unmatched get a second pass by
+site: the same repo, path and rule id with lines within the semantic merge
+window (5 lines). These are counted as "matched by site", separately from the
+fingerprint count, because the model quoted the same defect on a nearby line
+with a different snippet. The `convention` tier holds the convention-observed,
+no-convention and not-assessed rows: they carry no calibration confidence but
+cite model-chosen evidence, so they are not part of the control. The
+`deterministic` tier is the control: its counts never change between runs.
 
 **The client lock applies.** Like `inspect`, every run is a client engagement
 unless `--internal` is passed: the `cli` backend and non-Anthropic models are

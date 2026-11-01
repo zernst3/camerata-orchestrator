@@ -173,6 +173,7 @@ fn the_diff_serializes_every_table() {
         "first_total",
         "second_total",
         "matched",
+        "matched_by_site",
         "by_tier",
         "by_rule",
         "by_severity",
@@ -185,4 +186,52 @@ fn the_diff_serializes_every_table() {
         json["by_severity"][0]["key"], "high",
         "severity is normalised to lowercase"
     );
+}
+
+#[test]
+fn the_same_defect_quoted_two_lines_apart_matches_by_site() {
+    let first = vec![ai("SUPA-X-1", "src/a.ts", 15, "high", "const k = key;")];
+    let second = vec![ai("SUPA-X-1", "src/a.ts", 17, "high", "export const k = key")];
+    let diff = diff_runs(&first, &second);
+    assert_eq!(diff.matched, 0, "the fingerprint count is unchanged");
+    assert_eq!(diff.matched_by_site, 1);
+    assert!(diff.only_in_first.is_empty());
+    assert!(diff.only_in_second.is_empty());
+    assert!(diff.identical());
+}
+
+#[test]
+fn a_site_match_needs_the_same_rule_path_and_a_line_inside_the_window() {
+    let base = ai("SUPA-X-1", "src/a.ts", 15, "high", "one");
+    let window = crate::ai_audit::SEMANTIC_MERGE_WINDOW;
+
+    let mut edge = ai("SUPA-X-1", "src/a.ts", 15 + window, "high", "two");
+    assert_eq!(
+        diff_runs(&[base.clone()], &[edge.clone()]).matched_by_site,
+        1
+    );
+    edge.line = 15 + window + 1;
+    let beyond = diff_runs(&[base.clone()], &[edge]);
+    assert_eq!(beyond.matched_by_site, 0);
+    assert_eq!(beyond.only_in_first.len(), 1);
+    assert_eq!(beyond.only_in_second.len(), 1);
+
+    let other_rule = ai("SUPA-Y-1", "src/a.ts", 16, "high", "two");
+    assert_eq!(diff_runs(&[base.clone()], &[other_rule]).matched_by_site, 0);
+    let other_path = ai("SUPA-X-1", "src/b.ts", 16, "high", "two");
+    assert_eq!(diff_runs(&[base], &[other_path]).matched_by_site, 0);
+}
+
+#[test]
+fn each_leftover_pairs_by_site_at_most_once_and_the_closest_line_wins() {
+    let first = vec![
+        ai("SUPA-X-1", "src/a.ts", 10, "high", "a"),
+        ai("SUPA-X-1", "src/a.ts", 20, "high", "b"),
+    ];
+    let second = vec![ai("SUPA-X-1", "src/a.ts", 12, "high", "c")];
+    let diff = diff_runs(&first, &second);
+    assert_eq!(diff.matched_by_site, 1);
+    assert_eq!(diff.only_in_first.len(), 1);
+    assert_eq!(diff.only_in_first[0].line, 20);
+    assert!(diff.only_in_second.is_empty());
 }

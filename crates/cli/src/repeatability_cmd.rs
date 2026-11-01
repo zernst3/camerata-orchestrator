@@ -172,8 +172,9 @@ impl RepeatabilityOutcome {
         let d = &self.diff;
         writeln!(
             out,
-            "  matched by fingerprint: {}; only in run 1: {}; only in run 2: {}; {}",
+            "  matched by fingerprint: {}; matched by site: {}; only in run 1: {}; only in run 2: {}; {}",
             d.matched,
+            d.matched_by_site,
             d.only_in_first.len(),
             d.only_in_second.len(),
             if self.identical {

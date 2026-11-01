@@ -9299,7 +9299,7 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// between an AI finding and the native checker for the same policy, with margin, while staying
 /// inside the harness's ±2 line-grading tolerance for the surviving primary (whose line is the
 /// deterministic anchor, never the drifted sibling's).
-const SEMANTIC_MERGE_WINDOW: usize = 5;
+pub(crate) const SEMANTIC_MERGE_WINDOW: usize = 5;
 
 /// The closed semantic taxonomy (design §1a). A finding is only ever merged with another of the
 /// SAME category, so the set is deliberately coarse — one bucket per defect *family*, not per
