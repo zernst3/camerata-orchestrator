@@ -7055,31 +7055,114 @@ pub(crate) fn dedup_scan_previews(
     existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
+    dedup_scan_previews_with(existing, previews, None)
+}
+
+/// The tool rule selectors each corpus rule names in its `sources[].linter` entries, by native
+/// rule id, normalised for comparison with a preview row's tool rule id (see
+/// [`normalised_tool_rule_id`]). `linter = "@typescript-eslint: no-non-null-assertion"` on
+/// `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1` yields
+/// `@typescript-eslint/no-non-null-assertion`. Semgrep entries name a config pack, not a rule
+/// id, so they yield nothing.
+pub(crate) fn native_tool_selectors(
+    corpus: &camerata_rules::RuleSet,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for rule in corpus.iter() {
+        let selectors: Vec<String> = rule
+            .sources
+            .iter()
+            .filter_map(|s| s.linter.as_deref())
+            .filter_map(crate::scan_tools::selector_for_linter)
+            .map(|sel| normalised_tool_rule_id(&sel))
+            .collect();
+        if !selectors.is_empty() {
+            out.insert(rule.id.0.clone(), selectors);
+        }
+    }
+    out
+}
+
+/// A tool rule id in the form used to compare a preview row's id with a corpus selector:
+/// lower case, without a `clippy::` prefix.
+fn normalised_tool_rule_id(id: &str) -> String {
+    let lower = id.trim().to_ascii_lowercase();
+    lower.strip_prefix("clippy::").unwrap_or(&lower).to_string()
+}
+
+/// Whether the preview row's tool rule id IS the tool rule the native rule `native_id` is
+/// enforced by: the corpus's own `sources[].linter` mapping (`selectors`, from
+/// [`native_tool_selectors`]) or the built-in tool-id map ([`external_tool_floor_category`]).
+fn preview_is_native_rule_tool(
+    preview_rule_id: &str,
+    native_id: &str,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> bool {
+    if external_tool_floor_category(preview_rule_id) == Some(native_id) {
+        return true;
+    }
+    let wanted = normalised_tool_rule_id(preview_rule_id);
+    selectors
+        .and_then(|m| m.get(native_id))
+        .is_some_and(|sels| sels.iter().any(|s| *s == wanted))
+}
+
+/// [`dedup_scan_previews`] with the corpus's tool mapping. A preview row collapses into an
+/// existing row at the same `(repo, path, line)` when:
+///
+/// 1. both carry the SAME rule id (a deterministic row and the preview of the same rule);
+/// 2. the preview's tool rule id is the tool rule the existing native rule is enforced by
+///    (`selectors`, from the rule file's `sources[].linter`; for example the eslint rule
+///    `@typescript-eslint/no-non-null-assertion` and
+///    `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1`); or
+/// 3. both share a security category (as before).
+///
+/// Both ids stay on the merged row (the folded one in `also_matches`) and the merged row keeps
+/// the higher of the two severities: a collapse never lowers a severity and never drops a
+/// violation (the folded row's place is the canonical row's place).
+pub(crate) fn dedup_scan_previews_with(
+    existing: &mut [crate::onboard::Finding],
+    previews: Vec<crate::onboard::Finding>,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
 
     for preview in previews {
         let preview_cat = finding_security_category(&preview.rule_id);
 
-        // Try to find an existing finding that shares the same location AND category.
-        // The category must be Some (we don't collapse unrecognized categories).
-        let twin_idx = if let Some(cat) = preview_cat {
-            existing.iter().position(|f| {
-                f.repo == preview.repo
-                    && f.path == preview.path
-                    && f.line == preview.line
-                    && finding_security_category(&f.rule_id) == Some(cat)
-            })
-        } else {
-            None
-        };
+        // An existing finding at the same location that is the same rule, the native rule this
+        // tool rule enforces, or (security) the same category. The category must be Some (we
+        // don't collapse unrecognized categories).
+        let twin_idx = existing.iter().position(|f| {
+            f.repo == preview.repo
+                && f.path == preview.path
+                && f.line == preview.line
+                && (f.rule_id == preview.rule_id
+                    || preview_is_native_rule_tool(&preview.rule_id, &f.rule_id, selectors)
+                    || preview_cat
+                        .is_some_and(|cat| finding_security_category(&f.rule_id) == Some(cat)))
+        });
 
         if let Some(idx) = twin_idx {
             let existing_rank = finding_dedup_rank(&existing[idx]);
             let preview_rank = finding_dedup_rank(&preview);
+            // The merged row keeps the higher severity of the two.
+            let severity = if crate::report_export::severity_rank(&preview.severity)
+                < crate::report_export::severity_rank(&existing[idx].severity)
+            {
+                preview.severity.clone()
+            } else {
+                existing[idx].severity.clone()
+            };
 
             if preview_rank >= existing_rank {
                 // Existing row has equal or higher precedence: keep it, fold preview in.
-                existing[idx].also_matches.push(preview.rule_id.clone());
+                if preview.rule_id != existing[idx].rule_id
+                    && !existing[idx].also_matches.contains(&preview.rule_id)
+                {
+                    existing[idx].also_matches.push(preview.rule_id.clone());
+                }
+                existing[idx].severity = severity;
                 // drop the preview finding (continue to next)
             } else {
                 // Preview has higher precedence: promote it to canonical, demote existing.
@@ -7088,13 +7171,18 @@ pub(crate) fn dedup_scan_previews(
                 new_canonical
                     .also_matches
                     .append(&mut existing[idx].also_matches);
-                new_canonical.also_matches.push(old_rule_id);
+                if old_rule_id != new_canonical.rule_id
+                    && !new_canonical.also_matches.contains(&old_rule_id)
+                {
+                    new_canonical.also_matches.push(old_rule_id);
+                }
+                new_canonical.severity = severity;
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
             }
         } else {
-            // No twin at this (repo, path, line, category): net-new coverage or different
-            // category — keep it.
+            // No twin at this (repo, path, line): net-new coverage or a different defect —
+            // keep it.
             out.push(preview);
         }
     }
@@ -7163,6 +7251,9 @@ pub async fn merge_scan_preview(
     if !preview_rules.is_empty() {
         if let Some(set) = corpus {
             let lookup = |id: &str| set.get_by_id(id);
+            // The tool rule ids the corpus's native rules are enforced by, so a preview row of
+            // such a tool rule collapses into the native rule's row on the same line.
+            let selectors = native_tool_selectors(set);
             for (spec, dir) in sources {
                 // Only the rules bound to this repo (or project-level) preview against it.
                 let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
@@ -7202,7 +7293,8 @@ pub async fn merge_scan_preview(
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
                 // and the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
-                let deduped = dedup_scan_previews(&mut report.findings, previews);
+                let deduped =
+                    dedup_scan_previews_with(&mut report.findings, previews, Some(&selectors));
                 report.findings.extend(deduped);
                 report.coverage_notes.append(&mut notes);
             }
@@ -25625,6 +25717,183 @@ mod tests {
             vec!["camerata.security.hardcoded-secret"],
             "semgrep rule must be recorded in also_matches on the floor finding"
         );
+    }
+
+    fn tool_preview(
+        path: &str,
+        line: usize,
+        rule_id: &str,
+        tool: &str,
+        severity: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: "me/web".to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: severity.to_string(),
+            preview: true,
+            preview_tool: Some(tool.to_string()),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    fn native_row(
+        path: &str,
+        line: usize,
+        rule_id: &str,
+        severity: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: "me/web".to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: severity.to_string(),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// R1-2: a preview row and the deterministic row of the SAME rule id on the same line are one
+    /// row (UI-UTC-DATES-1 appeared twice, preview medium and deterministic low). Both stay
+    /// counted: the merged row keeps the higher severity and no id is lost.
+    #[test]
+    fn dedup_collapses_an_identical_rule_id_on_one_line_and_keeps_the_higher_severity() {
+        let mut existing = vec![native_row("src/a.ts", 4, "UI-UTC-DATES-1", "low")];
+        let previews = vec![
+            tool_preview("src/a.ts", 4, "UI-UTC-DATES-1", "camerata-arch", "medium"),
+            // A different line is a different place: kept.
+            tool_preview("src/a.ts", 9, "UI-UTC-DATES-1", "camerata-arch", "medium"),
+        ];
+        let out = dedup_scan_previews(&mut existing, previews);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].line, 9);
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].severity, "medium", "the higher severity wins");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "same id, nothing to add"
+        );
+
+        // The other way round: the existing row is the higher one and stays so.
+        let mut existing = vec![native_row("src/a.ts", 4, "UI-UTC-DATES-1", "high")];
+        let out = dedup_scan_previews(
+            &mut existing,
+            vec![tool_preview(
+                "src/a.ts",
+                4,
+                "UI-UTC-DATES-1",
+                "camerata-arch",
+                "low",
+            )],
+        );
+        assert!(out.is_empty());
+        assert_eq!(existing[0].severity, "high");
+    }
+
+    /// R1-2: the eslint rule that enforces a native rule collapses into the native rule's row on
+    /// the same path and line (faktura: 15 `@typescript-eslint/no-non-null-assertion` rows beside
+    /// 10 `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1` rows, 12 on the same line). Both ids
+    /// stay on the merged row.
+    #[test]
+    fn dedup_collapses_the_enforcing_eslint_rule_into_the_native_rule_row() {
+        let native = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1";
+        let tool = "@typescript-eslint/no-non-null-assertion";
+        let mut existing = vec![native_row("app/api/x.ts", 12, native, "medium")];
+        let previews = vec![
+            tool_preview("app/api/x.ts", 12, tool, "eslint", "medium"),
+            // Same tool rule on another line: net-new coverage, kept.
+            tool_preview("app/api/x.ts", 20, tool, "eslint", "medium"),
+            // An unrelated eslint rule on the native rule's line is a different defect: kept.
+            tool_preview("app/api/x.ts", 12, "no-console", "eslint", "low"),
+        ];
+        let out = dedup_scan_previews(&mut existing, previews);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(existing[0].rule_id, native);
+        assert_eq!(existing[0].also_matches, vec![tool.to_string()]);
+    }
+
+    /// R1-2: the corpus's own `sources[].linter` mapping drives the collapse for a native rule
+    /// the built-in map does not list.
+    #[test]
+    fn dedup_uses_the_rule_files_linter_mapping() {
+        let mut selectors = std::collections::HashMap::new();
+        selectors.insert(
+            "SOME-NATIVE-RULE-1".to_string(),
+            vec!["@typescript-eslint/no-unnecessary-condition".to_string()],
+        );
+        let mut existing = vec![native_row("src/a.ts", 3, "SOME-NATIVE-RULE-1", "low")];
+        let tool = "@typescript-eslint/no-unnecessary-condition";
+        let previews = vec![tool_preview("src/a.ts", 3, tool, "eslint", "medium")];
+        // Without the mapping the rows stay apart (nothing links them).
+        let kept = dedup_scan_previews(
+            &mut existing.clone(),
+            vec![tool_preview("src/a.ts", 3, tool, "eslint", "medium")],
+        );
+        assert_eq!(kept.len(), 1);
+        let out = dedup_scan_previews_with(&mut existing, previews, Some(&selectors));
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(existing[0].also_matches, vec![tool.to_string()]);
+        assert_eq!(existing[0].severity, "medium");
+    }
+
+    /// R1-2: the real corpus names the eslint rule on the native rule through its source
+    /// `linter`, and the mapping built from it links the two.
+    #[tokio::test]
+    async fn native_tool_selectors_come_from_the_corpus_sources() {
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let selectors = native_tool_selectors(&corpus);
+        assert!(selectors
+            .get("JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1")
+            .is_some_and(|s| s
+                .iter()
+                .any(|x| x == "@typescript-eslint/no-non-null-assertion")));
+        let mut existing = vec![native_row(
+            "a.ts",
+            1,
+            "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1",
+            "medium",
+        )];
+        let out = dedup_scan_previews_with(
+            &mut existing,
+            vec![tool_preview(
+                "a.ts",
+                1,
+                "@typescript-eslint/no-non-null-assertion",
+                "eslint",
+                "medium",
+            )],
+            Some(&selectors),
+        );
+        assert!(out.is_empty());
+    }
+
+    /// R1-2: a weak-hash semgrep row and a weak-token-randomness native row on one line are two
+    /// different defects (MD5/SHA-1 against a general-purpose PRNG); the corpus supports no
+    /// mapping between them, so both stay.
+    #[test]
+    fn dedup_keeps_weak_hash_and_weak_randomness_on_one_line_apart() {
+        let mut existing = vec![native_row(
+            "src/token.js",
+            5,
+            "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
+            "high",
+        )];
+        let out = dedup_scan_previews(
+            &mut existing,
+            vec![tool_preview(
+                "src/token.js",
+                5,
+                "camerata.security.weak-hash-js",
+                "semgrep",
+                "medium",
+            )],
+        );
+        assert_eq!(out.len(), 1);
     }
 
     /// (a) SQL-concat variant: floor SEC-NO-RAW-SQL-CONCAT-1 + semgrep sql-string-concat-python
