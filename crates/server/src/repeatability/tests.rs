@@ -60,6 +60,36 @@ fn the_tier_names_the_engine() {
 }
 
 #[test]
+fn convention_rows_with_no_confidence_are_not_tallied_as_deterministic() {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, FindingKind, NoConventionKind, NotAssessedKind, NotAssessedReason,
+    };
+    let kinds = [
+        FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "opt".to_string(),
+            convention_label: "Option".to_string(),
+        }),
+        FindingKind::NoConvention(NoConventionKind {
+            observed_options: Vec::new(),
+        }),
+        FindingKind::NotAssessed(NotAssessedKind {
+            reason: NotAssessedReason::ToolFailed,
+            reason_detail: "tool failed".to_string(),
+        }),
+    ];
+    for kind in kinds {
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "a", 1, "info", "x");
+        f.kind = Some(kind);
+        assert!(f.confidence.is_none());
+        assert_eq!(finding_tier(&f), "convention");
+    }
+    // A real deviation or defect with no confidence is still the floor.
+    let mut defect = finding("SEC-X-1", "a", 1, "high", "x");
+    defect.kind = Some(FindingKind::Defect);
+    assert_eq!(finding_tier(&defect), "deterministic");
+}
+
+#[test]
 fn identical_runs_report_no_difference() {
     let run = vec![
         finding("SEC-X-1", "src/a.rs", 1, "high", "a()"),
