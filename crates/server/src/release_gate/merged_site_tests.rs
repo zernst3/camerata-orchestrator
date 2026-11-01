@@ -290,3 +290,29 @@ fn a_real_key_beside_an_http_header_name_in_a_csv_cell_is_still_blocked() {
         assert!(!shown.contains(key), "{shown}");
     }
 }
+
+/// D6 review: the other security header names a merged CORS or hardening site can quote, beside a
+/// rule id that names a key, a token, a secret or a credential, are not credentials either.
+#[test]
+fn more_http_header_names_beside_a_secret_naming_rule_id_in_a_csv_cell_are_clean() {
+    for header in [
+        "X-Permitted-Cross-Domain-Policies",
+        "Upgrade-Insecure-Requests",
+        "Public-Key-Pins-Report-Only",
+    ] {
+        for rule in [
+            "SEC-HARDCODED-KEY-1",
+            "SEC-TOKEN-IN-HEADER-1",
+            "SEC-SECRET-LEAK-1",
+            "AI-WEAK-CREDENTIALS-HEADERS",
+        ] {
+            let cell = serde_json::json!([{
+                "rule_id": rule,
+                "snippet": format!("res.setHeader('{header}', value)"),
+            }]);
+            let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+            let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+            assert!(problems.is_empty(), "{header} beside {rule}: {problems:?}");
+        }
+    }
+}

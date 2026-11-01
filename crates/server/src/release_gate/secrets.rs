@@ -274,6 +274,16 @@ const HEADER_WORDS: &[&str] = &[
     "private",
     "network",
     "local",
+    "x",
+    "upgrade",
+    "insecure",
+    "requests",
+    "public",
+    "pins",
+    "permissions",
+    // `Public-Key-Pins-Report-Only`: the word is a header word only in company with the others,
+    // since every part of a value must be one of these.
+    "key",
 ];
 
 /// Whether a matched "value" is an HTTP header NAME: two or more alphabetic words joined by `-`,
