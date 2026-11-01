@@ -3009,17 +3009,44 @@ cookie" and "an attacker must be logged in" are still turned down. Calibration's
 (`mentions_exploit_precondition`, which blocks an upward move when the written text holds
 any of the phrases) is unchanged and still reads the written text.
 
-*A resume does not pay again for an answer already judged wrong.* The run store used to
-re-ask, identically, a fix or detail reply every entry of which the stage had turned down (or
-that was cut off or held no JSON), because only a good reply was replayed. The live run had
-already moved on to the changed request (the feedback line, the smaller batch), so a resume
-paid twice for the first request and then replayed the rest. For these two stages
-(`journal::replays_on_resume`, the only ones whose own rounds change the request after a reply
-they turned down) the stored reply is now replayed: the stage judges it again, turns it down
-for the same reason, and its next round is the changed request the live run stored. A give-up
-replays to the same give-up at no cost. Scan, calibration and alternatives keep their policy
-(a rejected stage is set aside whole and asked again). `calls_done` and the resume estimate
-count a replayable reply as stored.
+*A requirement the code shown makes itself is not a precondition (R1-1 a).* A reply that
+restates the policy in the code ("messages_select only requires auth.role() = 'authenticated',
+so any signed-in user can read ...") was turned down as an invented precondition on the hearth
+run. A "requires" whose object (the rest of the clause up to a comma or "so") appears
+verbatim in the code or excerpts the model was shown is now removed before the check reads the
+text (`detail_regen::without_restated_requirements`, objects shorter than six characters never
+count), and the backticked-construct exemption applies to the `why` field too (`why_scope`).
+A requirement that is not in the code shown is still an invented precondition.
+
+*A retry says why (R1-1 b).* From round two, a finding's block ends with "Your previous answer
+was turned down because: <reason>." (the reason of its latest rejection, secrets redacted), so a
+retry is never an identical prompt. Round one is unchanged.
+
+*A finding the check keeps turning down still completes (R1-1 c).* When the model ANSWERED a
+finding in every attempt with a split reply (`why`, `fix_direction`) that failed only the
+invented-precondition check, the stage ran: the scan's own statement (already the finding's
+detail) plus the reply's fix direction ships as the detail, with no `[detail incomplete]`
+marker and no failed part. The fix direction ships only if it passes the same precondition
+reading; the rejected explanation never ships. The finding is marked in two `captures` keys
+(`report_export::DETAIL_SOURCE_CAPTURE` = `scan`, `DETAIL_REJECTION_CAPTURE` = the reason; never
+read by an exporter) and the operator's failure report lists it under "Scan statements shipped as
+the detail" (`detail_fallbacks` in `failures.json`), as D8 does for fixes. Work that never ran
+stays incomplete and resumable: a last attempt that failed in transport, a spend limit or outage
+stop, an attempt turned down by another check (a dropped name), or a single-`detail` reply (no
+split to ship from).
+
+*A resume asks a wholly rejected reply again (R1-1 d).* The run store used to replay a fix or
+detail reply every entry of which the stage had turned down, on the idea that the stage's next
+round changes the request. That does not hold for the last round: the hearth resume printed "84
+model call(s) stored and not sent again; 0 to send again" and failed identically.
+`journal::replays_on_resume` now replays a `done` reply (including one only part of which was
+turned down, so the accepted entries cost nothing) and, for the fix and detail stages, an
+`unusable` one (its next round splits the batch and was stored); a `rejected` reply is asked
+again, for every stage, and `ResumeEstimate` counts it under "to send again". Together with the
+reason line of (b) the retry for a turned-down finding is a changed request. A last-round
+`unusable` reply of one finding still replays (nothing smaller to split to). Rounds two and three
+for a finding already alone in its batch are the same request when the reason repeats, so they
+share a request key and the estimate counts both stored replies.
 
 *The fix checker knows the repository.* A fix's names were grounded only in the finding's
 own evidence (its path, snippet, detail, captures and a 17-line window), so real names just
@@ -6321,7 +6348,9 @@ it, and pins that the label wording holds no word like failed, fallback, rejecte
 The operator's failure report lists every Standard fix of the run in a `standard_fixes` section of
 `failures.json` and under "Standard fixes" in `failures.md`, each with its reasons, as a quality
 signal: a reason that names a plain, real name means a checker is too strict (D7 was one). It is not
-a failure and is not printed as one.
+a failure and is not printed as one. A finding whose detail fell back to the scan's own statement
+(R1-1 c) is listed the same way in a `detail_fallbacks` section and under "Scan statements shipped
+as the detail".
 
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
 attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An

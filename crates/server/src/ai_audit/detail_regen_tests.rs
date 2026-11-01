@@ -2174,6 +2174,99 @@ fn a_requires_whose_object_is_a_backticked_construct_is_not_a_precondition() {
     );
 }
 
+/// A reply that split the explanation from the fix direction.
+fn split_entry(why: &str, direction: &str) -> Entry {
+    Entry {
+        id: "x".to_string(),
+        detail: format!("{why} {direction}"),
+        why: Some(why.to_string()),
+    }
+}
+
+const POLICY_CODE: &str = "create policy messages_select on messages for select\n  \
+                           using (auth.role() = 'authenticated');";
+const POLICY_STATEMENT: &str =
+    "The route app/api/messages/route.ts reads every row with no ownership check.";
+const POLICY_WHY: &str = "messages_select in 0004_messages.sql only requires auth.role() = \
+                          'authenticated', so any signed-in user can read every message that \
+                          app/api/messages/route.ts returns.";
+
+/// R1-1 (a): the hearth rejection. The reply restates the policy shown ("requires" followed by
+/// the policy's own condition, verbatim in the code); that is a description of the code, not a
+/// condition on exploiting it.
+#[test]
+fn a_requires_that_restates_the_policy_shown_is_not_a_precondition() {
+    let f = statement(POLICY_STATEMENT);
+    let entry = split_entry(POLICY_WHY, "Scope the policy to the row owner.");
+    assert!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]).is_ok(),
+        "{:?}",
+        accept_entry(&f, &entry, POLICY_CODE, &[])
+    );
+    // The single-`detail` shape (no split) is read the same way.
+    let plain = Entry {
+        id: "x".to_string(),
+        detail: POLICY_WHY.to_string(),
+        why: None,
+    };
+    assert!(accept_entry(&f, &plain, POLICY_CODE, &[]).is_ok());
+}
+
+/// R1-1 (a): the exemption is for what the code says. A requirement that is NOT in the code
+/// (or in the excerpts) is still an invented precondition.
+#[test]
+fn a_requirement_absent_from_the_code_is_still_a_precondition() {
+    let f = statement(POLICY_STATEMENT);
+    let why = "messages_select in 0004_messages.sql only requires a valid session cookie, so any \
+               signed-in user can read every message that app/api/messages/route.ts returns.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // A requirement that is only similar to the code, not verbatim, is not restated either.
+    let why = "messages_select in 0004_messages.sql only requires auth.role() = 'admin', so any \
+               signed-in user can read every message that app/api/messages/route.ts returns.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // A restated requirement does not hide a second, invented one in the same text.
+    let why = format!("{POLICY_WHY} Reading it also requires a valid session cookie.");
+    let entry = split_entry(&why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // A one-word "object" that happens to occur in the code proves nothing.
+    let why = "messages_select in 0004_messages.sql requires on, so any signed-in user can read \
+               every message that app/api/messages/route.ts returns.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
+/// R1-1 (a): the backticked-construct exemption now applies to the `why` field too, in a sentence
+/// that says nothing about exploiting the problem.
+#[test]
+fn a_backticked_requirement_in_the_why_field_is_not_a_precondition() {
+    let f = statement(POLICY_STATEMENT);
+    let why = "The policy requires a `to authenticated` clause and any signed-in user can read \
+               every message that app/api/messages/route.ts returns.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert!(accept_entry(&f, &entry, "let x = 1;", &[]).is_ok());
+    // ...but not in a sentence about exploiting it.
+    let why = "Exploiting app/api/messages/route.ts requires a `session` cookie.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, "let x = 1;", &[]),
+        Err(Reject::InventedPrecondition)
+    );
+}
+
 #[test]
 fn the_shared_precondition_phrase_check_is_unchanged() {
     // Calibration's raise-block reads the whole text with this function; the detail check
@@ -2394,4 +2487,236 @@ async fn a_cut_off_detail_reply_stays_counted_whole_and_is_not_counted_twice() {
         .usage;
     assert_eq!(usage.wasted_calls, 1, "{usage:?}");
     assert_eq!(usage.wasted_input_tokens, 1_000, "{usage:?}");
+}
+
+// ── R1-1: a retry says why, and a finding the checks keep turning down still completes ─────
+
+/// What a scripted split-shape reply says about each finding of a call.
+#[derive(Clone)]
+enum SplitReply {
+    /// `why` and `fix_direction` as given.
+    Entry(String, String),
+    /// The transport fails.
+    Down,
+}
+
+/// A model that answers every regeneration call with `script(call_index)` for every finding of
+/// the batch, in the split `why` / `fix_direction` shape, and records the prompts.
+struct SplitLlm {
+    script: Box<dyn Fn(usize) -> SplitReply + Send + Sync>,
+    calls: std::sync::atomic::AtomicUsize,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl SplitLlm {
+    fn new(script: impl Fn(usize) -> SplitReply + Send + Sync + 'static) -> Self {
+        Self {
+            script: Box::new(script),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for SplitLlm {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.prompts.lock().unwrap().push(req.prompt.clone());
+        let (why, direction) = match (self.script)(call) {
+            SplitReply::Down => anyhow::bail!("connection reset"),
+            SplitReply::Entry(why, direction) => (why, direction),
+        };
+        let entries: serde_json::Map<String, serde_json::Value> = asked(&req.prompt)
+            .into_iter()
+            .map(|(id, _, _)| {
+                (
+                    id,
+                    serde_json::json!({"why": why, "fix_direction": direction}),
+                )
+            })
+            .collect();
+        Ok(stub_response(
+            serde_json::json!({ "details": entries }).to_string(),
+        ))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+const INVENTED_WHY: &str = "The handler trusts REQUIRE_WEBHOOK_SIGNATURE from src/config.rs, and \
+                            exploiting it requires a valid session first.";
+const GOOD_DIRECTION: &str = "Verify the signature in the handler itself.";
+const GOOD_WHY: &str = "The handler trusts REQUIRE_WEBHOOK_SIGNATURE from src/config.rs and \
+                        refunds without a signature check.";
+
+async fn regen_one(llm: &SplitLlm) -> (Vec<Finding>, Vec<FailedPass>) {
+    regenerate_full_details(
+        llm,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await
+}
+
+/// R1-1 (b): a retry is not an identical prompt. Round one carries no reason; rounds two and
+/// three carry the reason the previous answer was turned down.
+#[tokio::test]
+async fn a_second_round_block_carries_the_prior_rejection() {
+    let llm =
+        SplitLlm::new(|_| SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string()));
+    let _ = regen_one(&llm).await;
+    let prompts = llm.prompts();
+    assert_eq!(prompts.len(), 3, "three rounds: {prompts:?}");
+    let line = "Your previous answer was turned down because: added an exploit precondition";
+    assert!(!prompts[0].contains("turned down"), "{}", prompts[0]);
+    for later in &prompts[1..] {
+        assert!(later.contains(line), "{later}");
+    }
+    assert_ne!(prompts[0], prompts[1]);
+}
+
+/// R1-1 (c): every round turned the reply down for the invented precondition and its other
+/// checks passed: the scan's own statement plus the accepted fix direction ships as the detail,
+/// with no incomplete marker and no failed part. The rejected explanation never ships.
+#[tokio::test]
+async fn a_finding_rejected_only_for_an_invented_precondition_ships_the_scan_statement() {
+    let llm =
+        SplitLlm::new(|_| SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string()));
+    let (out, failed) = regen_one(&llm).await;
+    assert!(failed.is_empty(), "the run is complete: {failed:?}");
+    let detail = &out[0].detail;
+    assert!(detail.contains(SHORT), "{detail}");
+    assert!(detail.contains(GOOD_DIRECTION), "{detail}");
+    assert!(!detail.contains(DETAIL_INCOMPLETE_MARKER), "{detail}");
+    assert!(!detail.contains("valid session"), "{detail}");
+    assert!(!detail.contains("exploiting it requires"), "{detail}");
+    // Marked for the operator report only.
+    assert_eq!(
+        out[0]
+            .captures
+            .get(crate::report_export::DETAIL_SOURCE_CAPTURE)
+            .map(String::as_str),
+        Some(crate::report_export::SCAN_DETAIL)
+    );
+    let mut scan_report = crate::onboard::ScanReport::gated(&[]);
+    scan_report.findings = out.clone();
+    let report = crate::failure_report::build(&scan_report);
+    assert!(report.entries.is_empty(), "not a failed part");
+    assert_eq!(report.detail_fallbacks.len(), 1);
+    assert!(report.detail_fallbacks[0]
+        .reasons
+        .contains("exploit precondition"));
+    assert!(report
+        .render_md()
+        .contains("Scan statements shipped as the detail (1)"));
+}
+
+/// R1-1 (c): a fix direction that makes a precondition of its own is not shipped either.
+#[tokio::test]
+async fn a_fallback_never_ships_a_fix_direction_that_makes_a_precondition() {
+    let llm = SplitLlm::new(|_| {
+        SplitReply::Entry(
+            INVENTED_WHY.to_string(),
+            "Exploiting this requires an attacker who is logged in.".to_string(),
+        )
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(out[0].detail, format!("{TITLE}{HEADLINE_SEP}{SHORT}"));
+    assert!(!out[0].detail.contains("logged in"));
+}
+
+/// R1-1 (c): work that never ran stays incomplete. A last attempt that failed in transport, or a
+/// round turned down for another reason, is not the fallback.
+#[tokio::test]
+async fn detail_work_that_never_ran_or_failed_another_check_stays_incomplete() {
+    // The last call fails in transport (the second try fails too).
+    let llm = SplitLlm::new(|call| {
+        if call < 2 {
+            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
+        } else {
+            SplitReply::Down
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(
+        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        "{}",
+        out[0].detail
+    );
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
+    assert!(!out[0]
+        .captures
+        .contains_key(crate::report_export::DETAIL_SOURCE_CAPTURE));
+
+    // One round dropped a name the statement made: that is a different check.
+    let llm = SplitLlm::new(|call| {
+        if call == 1 {
+            SplitReply::Entry(
+                "The handler is wrong.".to_string(),
+                GOOD_DIRECTION.to_string(),
+            )
+        } else {
+            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(
+        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        "{}",
+        out[0].detail
+    );
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
+
+    // A single `detail` field (no split) has no fix direction to ship apart: still incomplete.
+    let llm = RoleLlm::new("{}", Regen::InventsPrecondition);
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+}
+
+/// R1-1: a retry that answers cleanly (the reason in the prompt did its job) is written
+/// normally, with no fallback mark.
+#[tokio::test]
+async fn a_retry_that_answers_cleanly_is_written_and_not_marked() {
+    let llm = SplitLlm::new(|call| {
+        if call == 0 {
+            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
+        } else {
+            SplitReply::Entry(GOOD_WHY.to_string(), GOOD_DIRECTION.to_string())
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(out[0].detail.contains("refunds without a signature check"));
+    assert!(!out[0]
+        .captures
+        .contains_key(crate::report_export::DETAIL_SOURCE_CAPTURE));
 }

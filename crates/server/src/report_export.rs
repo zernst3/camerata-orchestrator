@@ -1308,6 +1308,29 @@ pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {
     f.captures.insert(FIX_REJECTION_CAPTURE.to_string(), why);
 }
 
+/// The `Finding::captures` key the detail stage writes, with [`SCAN_DETAIL`], on a finding whose
+/// regenerated explanation was turned down in every round for inventing an exploit precondition
+/// and which ships the scan's own statement plus the model's accepted fix direction instead
+/// (R1-1). Never read by an exporter.
+pub const DETAIL_SOURCE_CAPTURE: &str = "detail_source";
+/// The [`DETAIL_SOURCE_CAPTURE`] value of a finding that ships the scan's own statement.
+pub const SCAN_DETAIL: &str = "scan";
+/// The `Finding::captures` key holding why the checks turned the regenerated explanation down,
+/// for the operator's failure report only. Never read by an exporter.
+pub const DETAIL_REJECTION_CAPTURE: &str = "detail_rejection";
+
+/// Mark `f` as shipping the scan's own statement (and the accepted fix direction) as its detail,
+/// keeping `why` (the checks' reasons, secrets scrubbed and capped) for the operator's report.
+pub(crate) fn mark_scan_detail(f: &mut Finding, why: &str) {
+    f.captures
+        .insert(DETAIL_SOURCE_CAPTURE.to_string(), SCAN_DETAIL.to_string());
+    let why = camerata_llm::failure::scrub_message(
+        &camerata_secrets::redact_str(why),
+        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    f.captures.insert(DETAIL_REJECTION_CAPTURE.to_string(), why);
+}
+
 /// What every export prints for a fix written for this code that passed the checks.
 pub const TAILORED_FIX_LABEL: &str = "Tailored fix";
 /// What every export prints for the rule's own guidance (the fix of a row whose model-written fix

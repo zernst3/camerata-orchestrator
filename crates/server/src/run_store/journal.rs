@@ -147,11 +147,13 @@ pub enum EntryStatus {
     Done,
     /// The call failed (transport, auth, spend limit ...): asked again on a resume.
     Failed,
-    /// A reply came back but was cut off or held no JSON: asked again on a resume.
+    /// A reply came back but was cut off or held no JSON: asked again on a resume (the fix and
+    /// detail stages replay it, see [`replays_on_resume`]).
     Unusable,
-    /// A good reply every entry of which a later step rejected: asked again on a resume. The
-    /// reason is on the entry ([`CallEntry::reason`]). A reply only PART of which was rejected
-    /// stays [`EntryStatus::Done`] with the reason: what it got right is replayed.
+    /// A good reply every entry of which a later step rejected: asked again on a resume (never
+    /// replayed, whatever the stage). The reason is on the entry ([`CallEntry::reason`]). A
+    /// reply only PART of which was rejected stays [`EntryStatus::Done`] with the reason: what
+    /// it got right is replayed.
     Rejected,
 }
 
@@ -310,23 +312,27 @@ pub fn classify(req: &LlmRequest) -> (PartKind, String, Vec<String>) {
 
 /// Whether a stored entry of a call over a `kind` stage is answered from the store on a resume.
 ///
-/// A good reply always is. The fix and detail stages are the two whose own rounds change the
-/// request after a reply they turned down (the next round carries the feedback line, or a smaller
-/// batch), so for them a reply every entry of which was turned down ([`EntryStatus::Rejected`]),
-/// and one that was cut off or held no JSON ([`EntryStatus::Unusable`]), is replayed too: the stage
-/// judges it again, turns it down for the same reason and sends the next round's changed request,
-/// which the live run stored under its own key. Asking the rejected request again, identically,
-/// would pay a second time for an answer already judged wrong. Every other stage (scan,
-/// calibration, alternatives) keeps its policy: a rejected or unusable reply is asked again, for
-/// those stages set a whole stage aside ([`quarantine_rejected`]) and have no rounds of their own
-/// that change the request after a reply they turned down. A failed call has no reply to replay.
+/// A good reply ([`EntryStatus::Done`]) always is, including one only PART of which was turned
+/// down: what it got right costs nothing again, and the findings it got wrong were re-asked by
+/// the stage's next round, whose request names the reason and is stored under its own key.
+///
+/// A reply every entry of which was turned down ([`EntryStatus::Rejected`]) is NOT replayed, for
+/// any stage: a resume of a part that failed on content exists to ask again, and replaying the
+/// rejected reply makes the stage judge it again, turn it down for the same reason and have no
+/// round left (the hearth run printed "0 to send again" and failed identically). It is asked
+/// again, and it counts under "to send again" in the resume estimate.
+///
+/// The fix and detail stages keep one more case: a reply that was cut off or held no JSON
+/// ([`EntryStatus::Unusable`]) is replayed, because the stage's next round splits the batch and
+/// that smaller request was stored under its own key; asking the cut-off request again would pay
+/// twice for a reply that will be cut off again. (A last round of one finding has no smaller
+/// round to split to; that case still replays.) Every other stage (scan, calibration,
+/// alternatives) asks an unusable reply again. A failed call has no reply to replay.
 pub(crate) fn replays_on_resume(status: EntryStatus, kind: PartKind) -> bool {
     match status {
         EntryStatus::Done => true,
-        EntryStatus::Rejected | EntryStatus::Unusable => {
-            matches!(kind, PartKind::Fix | PartKind::Detail)
-        }
-        EntryStatus::Failed => false,
+        EntryStatus::Unusable => matches!(kind, PartKind::Fix | PartKind::Detail),
+        EntryStatus::Rejected | EntryStatus::Failed => false,
     }
 }
 

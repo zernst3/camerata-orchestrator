@@ -436,6 +436,7 @@ fn build_block(
     files: &[(String, String)],
     directives: &std::collections::HashMap<String, String>,
     nonce: &crate::prompt_frame::FrameNonce,
+    prior_rejection: Option<&str>,
 ) -> Block {
     let mut prompt = format!("[{id}] rule {} — severity {}\n", f.rule_id, f.severity);
     if let Some(directive) = directives.get(&f.rule_id.to_ascii_uppercase()) {
@@ -488,6 +489,15 @@ fn build_block(
         &format!("finding {id}"),
         &evidence,
     ));
+    // A retry is not the same prompt again: the finding's block says why the last answer was
+    // turned down (model-agnostic wording; the reason is Camerata's own check, secrets redacted).
+    // Round one has no prior answer, so its prompt is unchanged.
+    if let Some(reason) = prior_rejection {
+        prompt.push_str(&format!(
+            "Your previous answer was turned down because: {}.\n",
+            camerata_secrets::redact_str(reason.trim().trim_end_matches('.'))
+        ));
+    }
     prompt.push('\n');
     Block { prompt, code_shown }
 }
@@ -831,25 +841,83 @@ fn without_code_requirements(sentence: &str) -> String {
     re.replace_all(sentence, "").into_owned()
 }
 
+/// The shortest "requires" object that can count as restated from the code shown.
+const MIN_RESTATED_OBJECT_CHARS: usize = 6;
+
+/// `sentence` with every "requires <object>" removed whose object is the code's own condition,
+/// restated: the object (the rest of the clause, up to a comma or "so") appears verbatim in
+/// `code_shown`, the code and excerpts the model was given. "messages_select only requires
+/// auth.role() = 'authenticated', so any signed-in user can read ..." says what the policy in
+/// the code shown says; it is a description of the code, not a condition on exploiting it. A
+/// requirement that is not in the code shown is left in place and read as before. An object
+/// shorter than [`MIN_RESTATED_OBJECT_CHARS`] proves nothing (it occurs in any code) and never
+/// counts as restated.
+fn without_restated_requirements(sentence: &str, code_shown: &str) -> String {
+    if code_shown.is_empty() {
+        return sentence.to_string();
+    }
+    let re = regex::Regex::new(r"(?i)\brequires\s+([^,]*?)(,|\s+so\b|$)").expect("static regex");
+    re.replace_all(sentence, |caps: &regex::Captures| {
+        let object = caps[1]
+            .trim()
+            .trim_end_matches(['.', ';', ':', '!', '?'])
+            .trim();
+        let bare = object.trim_matches(['`', '\'', '"']);
+        let restated = [object, bare]
+            .iter()
+            .any(|o| o.chars().count() >= MIN_RESTATED_OBJECT_CHARS && code_shown.contains(*o));
+        if restated {
+            caps[2].to_string()
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .into_owned()
+}
+
+/// The part of one sentence the exploit-precondition check reads: a "requires" the code shown
+/// itself makes is removed ([`without_restated_requirements`]), and, in a sentence that says
+/// nothing about exploiting the problem, so is a "requires" whose object is a backticked code
+/// construct ([`without_code_requirements`]).
+fn sentence_scope(sentence: &str, code_shown: &str, about_exploitation: bool) -> String {
+    let restated = without_restated_requirements(sentence, code_shown);
+    if about_exploitation {
+        restated
+    } else {
+        without_code_requirements(&restated)
+    }
+}
+
+fn is_about_exploitation(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    EXPLOIT_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// The part of the `why` field the exploit-precondition check reads: every sentence, with the
+/// requirements the code shown makes itself removed ([`sentence_scope`]).
+pub(super) fn why_scope(why: &str, code_shown: &str) -> String {
+    sentences(why)
+        .into_iter()
+        .map(|s| sentence_scope(s, code_shown, is_about_exploitation(s)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The part of a regenerated text the exploit-precondition check reads: the explanation, not the
 /// fix direction. A sentence is left out when it opens with a fix verb ("Replace ...", "To fix
 /// this, ...") and says nothing about exploiting the problem; a "requires" whose object is a
 /// backticked code construct is not counted, in a sentence that says nothing about exploiting
-/// it either. Every other sentence is read in full, so "exploitation requires a valid session"
-/// is still a precondition wherever it stands.
-pub(super) fn precondition_scope(text: &str) -> String {
+/// it either, and a "requires" whose object the code shown makes itself is not counted anywhere
+/// ([`without_restated_requirements`]). Every other sentence is read in full, so "exploitation
+/// requires a valid session" is still a precondition wherever it stands.
+pub(super) fn precondition_scope(text: &str, code_shown: &str) -> String {
     let mut kept: Vec<String> = Vec::new();
     for sentence in sentences(text) {
-        let lower = sentence.to_ascii_lowercase();
-        let about_exploitation = EXPLOIT_WORDS.iter().any(|w| lower.contains(w));
+        let about_exploitation = is_about_exploitation(sentence);
         if !about_exploitation && is_fix_direction(sentence) {
             continue;
         }
-        if about_exploitation {
-            kept.push(sentence.to_string());
-        } else {
-            kept.push(without_code_requirements(sentence));
-        }
+        kept.push(sentence_scope(sentence, code_shown, about_exploitation));
     }
     kept.join(" ")
 }
@@ -909,8 +977,8 @@ pub(super) fn accept_entry(
     // alone: the `why` field when the reply split it from the fix direction, else (a single
     // `detail`) the sentences that are not a fix direction ([`precondition_scope`]).
     let explanation = match &entry.why {
-        Some(why) => camerata_secrets::redact_str(why).into_owned(),
-        None => precondition_scope(&text),
+        Some(why) => why_scope(&camerata_secrets::redact_str(why), code_shown),
+        None => precondition_scope(&text, code_shown),
     };
     if !is_borderline(short)
         && why_makes_exploit_precondition(&explanation)
@@ -924,6 +992,35 @@ pub(super) fn accept_entry(
         return Ok(format!("Borderline: {text}"));
     }
     Ok(text)
+}
+
+/// What the rounds learned about findings turned down for inventing an exploit precondition (the
+/// fallback of [`regenerate_full_details`]).
+#[derive(Debug, Default)]
+struct InventionLedger {
+    /// Findings whose LATEST attempt was answered with a split reply (`why` and `fix_direction`)
+    /// that failed only the invented-precondition check, with the reply's fix direction when it
+    /// passed the same check.
+    invented: std::collections::HashMap<usize, Option<String>>,
+    /// Findings an attempt turned down for any other check (a dropped name, or a reply that gave
+    /// no split to ship from): these are not eligible for the fallback.
+    other_check: std::collections::HashSet<usize>,
+}
+
+/// The reply's fix direction, when it is one the fallback may ship: non-empty, secrets redacted,
+/// and itself free of an exploit precondition by the same reading the explanation gets.
+fn checked_fix_direction(entry: &Entry, code_shown: &str) -> Option<String> {
+    let why = entry.why.as_deref()?;
+    let direction = entry.detail.strip_prefix(why)?.trim();
+    if direction.is_empty() {
+        return None;
+    }
+    let direction = camerata_secrets::redact_str(direction).into_owned();
+    let scope = precondition_scope(&direction, code_shown);
+    if why_makes_exploit_precondition(&scope) {
+        return None;
+    }
+    Some(direction)
 }
 
 /// An opaque per-finding id for one batch: not its position, so a reply numbered from 1 or
@@ -968,10 +1065,16 @@ async fn run_detail_round(
     trail: &mut super::StageTrail,
     transport_failed: &mut std::collections::HashSet<usize>,
     why: &mut std::collections::HashMap<usize, String>,
+    invention: &mut InventionLedger,
     second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     for batch in pending.chunks(batch_size.max(1)) {
+        // The latest attempt decides whether a finding was last turned down for inventing a
+        // precondition: a batch the spend limit refused, or a call that failed, is not one.
+        for idx in batch {
+            invention.invented.remove(idx);
+        }
         // SPEND CAP, between batches: a refused batch stays pending (it ends up marked
         // incomplete, never dropped) and the stage is recorded as stopped part way.
         let _permit = match admit_stage(meter, repo, STAGE_DETAIL).await {
@@ -989,7 +1092,14 @@ async fn run_detail_round(
         let mut blocks: Vec<Block> = Vec::with_capacity(batch.len());
         for &idx in batch {
             let id = opaque_id(repo, idx, &findings[idx], &ids);
-            blocks.push(build_block(&id, &findings[idx], files, directives, nonce));
+            blocks.push(build_block(
+                &id,
+                &findings[idx],
+                files,
+                directives,
+                nonce,
+                why.get(&idx).map(String::as_str),
+            ));
             ids.push(id);
         }
         let prompt = format!(
@@ -1074,8 +1184,23 @@ async fn run_detail_round(
                 }
                 Err(reject) => {
                     match &reject {
-                        Reject::DropsNamedToken(_) => rejections.drops_named_token += 1,
-                        Reject::InventedPrecondition => rejections.invented_precondition += 1,
+                        Reject::DropsNamedToken(_) => {
+                            rejections.drops_named_token += 1;
+                            invention.other_check.insert(idx);
+                        }
+                        Reject::InventedPrecondition => {
+                            rejections.invented_precondition += 1;
+                            // Only a split reply (`why` and `fix_direction`) has a fix direction
+                            // to ship apart from the rejected explanation.
+                            if entry.why.is_some() {
+                                invention.invented.insert(
+                                    idx,
+                                    checked_fix_direction(entry, &blocks[pos].code_shown),
+                                );
+                            } else {
+                                invention.other_check.insert(idx);
+                            }
+                        }
                     }
                     turned_down.push((idx, reject.reason()));
                 }
@@ -1212,6 +1337,7 @@ pub(crate) async fn regenerate_full_details(
     let mut transport_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // Why each finding's latest reply was turned down, for the failed part's record.
     let mut why: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut invention = InventionLedger::default();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -1239,6 +1365,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut trail,
                 &mut transport_failed,
                 &mut why,
+                &mut invention,
                 false,
             )
             .await;
@@ -1284,6 +1411,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut trail,
                 &mut transport_failed,
                 &mut why,
+                &mut invention,
                 true,
             )
             .await;
@@ -1303,6 +1431,39 @@ pub(crate) async fn regenerate_full_details(
         if let Some(m) = meter {
             m.record_detail_rejections(rejections);
         }
+    }
+    // RUN TO COMPLETION (R1-1): a finding the model ANSWERED in every attempt and whose reply
+    // failed only the invented-precondition check (its other checks passed) is not an incomplete
+    // part: the stage ran. It ships the scan's own statement, which is already its detail, plus
+    // the reply's fix direction when that passed the same check. Only text that passed the checks
+    // ships; the rejected explanation never does. Work that never ran (the last call failed in
+    // transport, the spend limit or an outage stopped it, an attempt was turned down for another
+    // reason) stays pending: incomplete and resumable.
+    let fallback: Vec<usize> = pending
+        .iter()
+        .copied()
+        .filter(|i| {
+            invention.invented.contains_key(i)
+                && !invention.other_check.contains(i)
+                && !transport_failed.contains(i)
+        })
+        .collect();
+    for &idx in &fallback {
+        let reason = why.get(&idx).cloned().unwrap_or_default();
+        if let Some(Some(direction)) = invention.invented.get(&idx) {
+            let f = &mut findings[idx];
+            f.detail = format!("{} {direction}", f.detail.trim_end());
+        }
+        crate::report_export::mark_scan_detail(&mut findings[idx], &reason);
+    }
+    if !fallback.is_empty() {
+        eprintln!(
+            "[camerata-server] detail regeneration: {} finding(s) in {repo} had no explanation \
+             pass the exploit-precondition check in any round; each ships the scan's own \
+             statement plus the accepted fix direction as its detail. The run is complete.",
+            fallback.len()
+        );
+        pending.retain(|i| !fallback.contains(i));
     }
     let mut failed_passes = Vec::new();
     if !pending.is_empty() {
