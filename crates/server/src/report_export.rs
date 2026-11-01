@@ -1275,6 +1275,28 @@ pub fn carried_from(f: &Finding) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The `Finding::captures` key the fix stage writes, with [`STANDARD_FIX`], on a finding whose
+/// model-written fix was turned down by the checks in every round and which ships the rule's own
+/// authored fix instead (D8). Absent: the fix, if any, is the model's, written for this code.
+pub const FIX_SOURCE_CAPTURE: &str = "fix_source";
+/// The [`FIX_SOURCE_CAPTURE`] value of a finding that ships the rule's own authored fix.
+pub const STANDARD_FIX: &str = "standard";
+/// The `Finding::captures` key holding why the checks turned the model's fix down, for the
+/// operator's failure report only. Never read by an exporter.
+pub const FIX_REJECTION_CAPTURE: &str = "fix_rejection";
+
+/// Mark `f` as shipping the rule's own authored fix, keeping `why` (the checks' reasons, secrets
+/// scrubbed and capped) for the operator's report.
+pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {
+    f.captures
+        .insert(FIX_SOURCE_CAPTURE.to_string(), STANDARD_FIX.to_string());
+    let why = camerata_llm::failure::scrub_message(
+        &camerata_secrets::redact_str(why),
+        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    f.captures.insert(FIX_REJECTION_CAPTURE.to_string(), why);
+}
+
 /// The absorbed members of a row, split by place: those at a DIFFERENT place from the row and
 /// from each other (the "other sites"), and those at a place already named (the row's own, or
 /// an earlier member's), flagged with whether that place is the row's own.
