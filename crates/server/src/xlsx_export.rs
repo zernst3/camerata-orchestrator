@@ -1071,6 +1071,11 @@ fn build_convention_rows(
 /// evaluated must be distinguishable from one that was assessed and found clean.
 #[derive(Serialize)]
 struct NotAssessedRow {
+    /// The service the row is about, set only when the project has several repos (the same
+    /// column `deviations` and `conventions` carry): a rule not assessed in one service says
+    /// nothing about another.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     rule_title: String,
     rule_id: String,
     /// The structured reason in client language. The payload's `reason_detail` is the
@@ -1106,6 +1111,11 @@ fn build_not_assessed_rows(
         .iter()
         .filter_map(|row| match &row.kind.0 {
             Some(FindingKind::NotAssessed(na)) => Some(NotAssessedRow {
+                repo: if row.multi_repo {
+                    row.repo.clone()
+                } else {
+                    String::new()
+                },
                 rule_title: rule_title(&row.rule_id, corpus),
                 rule_id: row.rule_id.clone(),
                 why: not_assessed_reason_label(na.reason, row.multi_repo).to_string(),
@@ -1115,7 +1125,9 @@ fn build_not_assessed_rows(
             _ => None,
         })
         .collect();
-    out.sort_by(|a, b| (&a.rule_title, &a.rule_id).cmp(&(&b.rule_title, &b.rule_id)));
+    out.sort_by(|a, b| {
+        (&a.rule_title, &a.rule_id, &a.repo).cmp(&(&b.rule_title, &b.rule_id, &b.repo))
+    });
     out
 }
 
@@ -2071,20 +2083,25 @@ fn write_coverage_sheet(
     if !not_assessed.is_empty() {
         ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
-        for (c, h) in [
+        let na_multi = not_assessed.iter().any(|r| !r.repo.is_empty());
+        let mut na_headers = vec![
             "What was checked",
             "Why",
             "What we observed",
             "Detail",
             "Rule ID",
-        ]
-        .iter()
-        .enumerate()
-        {
+        ];
+        if na_multi {
+            na_headers.push("Service");
+        }
+        for (c, h) in na_headers.iter().enumerate() {
             ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
         next_r += 1;
         for row in not_assessed {
+            if na_multi {
+                ws.write_string_with_format(next_r, 5, &row.repo, &fmts.cell(None, false, false))?;
+            }
             ws.write_string_with_format(next_r, 0, &row.rule_title, &fmts.cell(None, true, false))?;
             ws.write_string_with_format(next_r, 1, &row.why, &fmts.cell(None, true, false))?;
             ws.write_string_with_format(next_r, 2, &row.headline, &fmts.cell(None, true, false))?;
@@ -6339,6 +6356,94 @@ mod tests {
             "{:?} vs {first_words:?}",
             groups[0].recommended_fix
         );
+    }
+
+    /// R1-5: in a multi-repo export the not-assessed rows say which service each is about, in the
+    /// same `repo` column `deviations` and `conventions` carry (the CSV and the JSON, and a
+    /// Service column in the workbook's Coverage section). A single-repo export keeps its shape.
+    #[test]
+    fn r1_5_not_assessed_rows_name_their_repo_in_a_multi_repo_export() {
+        use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+        let not_assessed = |repo: &str, reason| {
+            let mut f = kinded(
+                finding("RUST-NO-UNWRAP-1", "", 0, "info"),
+                FindingKind::NotAssessed(NotAssessedKind {
+                    reason,
+                    reason_detail: "internal diagnostic".to_string(),
+                }),
+            );
+            f.repo = repo.to_string();
+            f
+        };
+        let mut report = report_with(
+            vec![
+                not_assessed("owner/api", NotAssessedReason::PassFailed),
+                not_assessed("owner/web", NotAssessedReason::NoFilesMatched),
+            ],
+            vec![],
+        );
+        report.repos = vec!["owner/api".to_string(), "owner/web".to_string()];
+        let sealed = report.clone().seal();
+
+        let csv_of = |sealed: &crate::onboard::SealedReport| -> Vec<(String, Vec<u8>)> {
+            build_csv_exports(sealed, &HashMap::new(), None, &empty_opts()).unwrap()
+        };
+        let exports = csv_of(&sealed);
+        let bytes = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/not-assessed.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(bytes.as_slice());
+        let headers = rdr.headers().unwrap().clone();
+        let repo_col = headers
+            .iter()
+            .position(|h| h == "repo")
+            .expect("a multi-repo not-assessed.csv carries the repo column");
+        let mut repos: Vec<String> = rdr
+            .records()
+            .map(|r| r.unwrap()[repo_col].to_string())
+            .collect();
+        repos.sort();
+        assert_eq!(repos, vec!["owner/api", "owner/web"]);
+
+        let json = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(
+            &json
+                .iter()
+                .find(|(n, _)| n == "json/not-assessed.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let mut json_repos: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["repo"].as_str().unwrap())
+            .collect();
+        json_repos.sort();
+        assert_eq!(json_repos, vec!["owner/api", "owner/web"]);
+
+        // The workbook still builds, with the Service column in the Coverage section.
+        let book = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        assert_eq!(&book[0..2], b"PK");
+
+        // A single-repo export is unchanged: no repo column, still valid.
+        let single = report_with(
+            vec![not_assessed("owner/repo", NotAssessedReason::PassFailed)],
+            vec![],
+        )
+        .seal();
+        let exports = csv_of(&single);
+        let bytes = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/not-assessed.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(bytes.as_slice());
+        assert!(!rdr.headers().unwrap().iter().any(|h| h == "repo"));
+        assert_eq!(rdr.records().count(), 1);
     }
 
     /// req_pass3: the Conventions sheet reports the two convention statements DISTINCTLY and
