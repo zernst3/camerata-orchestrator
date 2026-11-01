@@ -2883,11 +2883,21 @@ pub(crate) fn resolve_fix(
 ) -> Option<String> {
     let rule = corpus_rule_for(rule_id, corpus)?;
     let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
-    let option = rule.resolved_option(evaluated)?;
-    let remediation = option.remediation.as_deref()?.trim();
-    if remediation.is_empty() {
-        return None;
-    }
+    let authored = |o: &camerata_rules::RuleOption| {
+        o.remediation
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+    };
+    // R1-3: an option with no authored remediation of its own (a legitimate alternative such as
+    // `parse-in-handler`) falls back to the rule's DEFAULT option's remediation, which ships as
+    // the rule's standard fix, so a row never goes out with an empty fix while the rule has one.
+    let remediation = rule
+        .resolved_option(evaluated)
+        .and_then(authored)
+        .or_else(|| rule.resolved_option(None).and_then(authored))?;
+    let remediation = remediation.as_str();
     // The authored text is a TOML multi-line string: join its hard line wraps here, once, so no
     // artifact ever sees a mid-sentence newline (see `fix_text`).
     Some(fix_text::prepare(&instantiate_remediation(

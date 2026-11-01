@@ -905,14 +905,18 @@ fn build_deviation_groups(
             } else {
                 crate::report_export::STANDARD_FIX_LABEL.to_string()
             };
+            let deviating_sites = declared_numerator.max(sites_represented);
             DeviationGroupRow {
                 repo,
                 category: group[0].category.clone(),
                 rule_title: rule_title(&rule_id, corpus),
                 rule_id,
                 convention_label,
-                deviating_sites: declared_numerator.max(sites_represented),
-                assessed_sites,
+                deviating_sites,
+                // R1-3: the denominator is never below the numerator ("4 of 3 sites" came from
+                // a first row that counted 3 while the sheet lists 4). `None` stays "not
+                // counted".
+                assessed_sites: assessed_sites.map(|a| a.max(deviating_sites)),
                 worst_severity,
                 locations,
                 recommended_fix,
@@ -6220,6 +6224,121 @@ mod tests {
         let bytes =
             build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
         assert_eq!(cell_number(&bytes, "Deviations", "D2"), 1.0);
+    }
+
+    /// R1-3 (i): the denominator is never below the numerator. The first row of a group counted
+    /// 3 assessed sites while the sheet lists 4 deviating ones, and the row read "4 of 3 sites".
+    #[test]
+    fn r1_3_a_deviation_group_never_shows_more_deviating_than_assessed_sites() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let rows: Vec<Finding> = (0..4)
+            .map(|i| {
+                kinded(
+                    finding(
+                        "ARCH-TYPED-PATH-PARAMS-1",
+                        &format!("app/api/r{i}/route.ts"),
+                        4,
+                        "medium",
+                    ),
+                    FindingKind::Deviation(DeviationKind {
+                        deviating_sites: 3,
+                        assessed_sites: Some(3),
+                        convention_option_id: None,
+                        convention_label: "Typed path params".to_string(),
+                    }),
+                )
+            })
+            .collect();
+        let report = report_with(rows, vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let groups = build_deviation_groups(&live, None);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].deviating_sites, 4);
+        assert_eq!(
+            groups[0].assessed_sites,
+            Some(4),
+            "never fewer assessed than deviating"
+        );
+        // A producer that could not count stays "not counted", never invented.
+        let dev = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        let report = report_with(vec![dev], vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        assert_eq!(build_deviation_groups(&live, None)[0].assessed_sites, None);
+    }
+
+    /// R1-3 (ii): a group whose chosen option has no authored remediation (`parse-in-handler` in
+    /// `arch-typed-path-params-1.toml`) ships the rule's default option's remediation, labelled
+    /// Standard fix, instead of an empty fix and fix type.
+    #[tokio::test]
+    async fn r1_3_a_chosen_option_with_no_remediation_falls_back_to_the_default_options() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let rule = corpus
+            .get_by_id("ARCH-TYPED-PATH-PARAMS-1")
+            .expect("the rule is in the corpus");
+        let default_fix = rule
+            .resolved_option(None)
+            .and_then(|o| o.remediation.clone())
+            .expect("the default option has a remediation");
+        assert!(
+            rule.resolved_option(Some("parse-in-handler"))
+                .is_some_and(|o| o.remediation.is_none()),
+            "the premise: the chosen option has none"
+        );
+        let mut f = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: Some(3),
+                convention_option_id: Some("typed-extraction".to_string()),
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        f.evaluated_option_id = Some("parse-in-handler".to_string());
+        let report = report_with(vec![f], vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let groups = build_deviation_groups(&live, Some(&corpus));
+        assert_eq!(groups.len(), 1);
+        assert!(
+            !groups[0].recommended_fix.is_empty(),
+            "the fix must not be empty"
+        );
+        assert_eq!(groups[0].fix_type, "Standard fix");
+        let first_words: String = default_fix
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            groups[0].recommended_fix.contains(&first_words),
+            "{:?} vs {first_words:?}",
+            groups[0].recommended_fix
+        );
     }
 
     /// req_pass3: the Conventions sheet reports the two convention statements DISTINCTLY and
