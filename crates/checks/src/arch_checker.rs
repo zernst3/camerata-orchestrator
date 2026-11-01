@@ -300,6 +300,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
     vec![
         Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
         Box::new(crate::supabase::search_path_checker::SupabaseFnSearchPathChecker),
+        Box::new(crate::supabase::service_role_client_checker::SupabaseServiceRoleClientChecker),
         Box::new(crate::supabase::dynamic_sql_exec_checker::DynamicSqlExecInjectionChecker),
         Box::new(crate::supabase::privileged_no_authz_checker::PrivilegedFunctionNoAuthzChecker),
         Box::new(crate::supabase::cross_tenant_definer_read_checker::CrossTenantDefinerReadChecker),
