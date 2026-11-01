@@ -6534,20 +6534,34 @@ pub async fn generate_fix_specifics(
     // fix. Only work that never ran (the call failed in transport, or the spend limit or an
     // outage stopped it) stays a failed part, and so stays incomplete and resumable. A finding
     // with no authored fix to ship has no Standard fix either, so it stays a failed part too.
+    //
+    // "Rejected every round" is read from the ledger as: the model answered, and the LAST attempt
+    // was an answer (a later call that failed in transport or was stopped by the limit leaves a
+    // `last_miss`). A finding answered once and then lost did not get its rounds.
+    //
+    // A finding that stays a failed part gets NO fix written into `fix_specific`: the scan cache
+    // carries a finding forward, and the next inspection's fix stage skips one that already has a
+    // fix, so a pre-filled one would be labelled a tailored fix and never be asked of the model.
+    // The export still shows the rule's own authored fix for it, as a Standard fix.
     let mut unfinished: Vec<usize> = Vec::new();
+    let mut with_authored_fix = 0usize;
     let mut standard = 0usize;
     for &idx in &pending {
-        let rejected_every_round = ledger.answered.contains(&idx);
+        let rejected_every_round =
+            ledger.answered.contains(&idx) && !ledger.last_miss.contains_key(&idx);
         let fallback =
             crate::report_export::resolve_fix(&findings[idx].rule_id, corpus, &findings[idx], None);
-        if let Some(fallback) = fallback {
-            findings[idx].fix_specific = Some(camerata_secrets::redact_str(&fallback).into_owned());
-            if rejected_every_round {
+        if rejected_every_round {
+            if let Some(fallback) = fallback {
+                findings[idx].fix_specific =
+                    Some(camerata_secrets::redact_str(&fallback).into_owned());
                 let why = fix_rejections(&findings, &[idx], &feedback, &ledger);
                 crate::report_export::mark_standard_fix(&mut findings[idx], &why.join(" "));
                 standard += 1;
                 continue;
             }
+        } else if fallback.is_some() {
+            with_authored_fix += 1;
         }
         unfinished.push(idx);
     }
@@ -6561,10 +6575,7 @@ pub async fn generate_fix_specifics(
     }
     if !unfinished.is_empty() {
         let gave_up = unfinished.len();
-        let instantiated = unfinished
-            .iter()
-            .filter(|&&i| findings[i].fix_specific.is_some())
-            .count();
+        let instantiated = with_authored_fix;
         let uncovered = gave_up - instantiated;
         eprintln!(
             "[camerata-server] fix-specific generation did not finish for {gave_up} finding(s) \
@@ -23371,9 +23382,120 @@ mod tests {
                 .contains_key(crate::report_export::FIX_SOURCE_CAPTURE),
             "work that never ran is not a standard fix"
         );
+        // D8 review 2: nothing is pre-filled either. A fix written into `fix_specific` here would
+        // be carried forward by the scan cache, skipped by the next inspection's fix stage (it
+        // skips a finding that has a fix) and labelled "Tailored fix" with no fix work done.
+        assert_eq!(out[0].fix_specific, None);
         let mut report = crate::onboard::ScanReport::gated(&[]);
         report.failed_passes = failed_passes;
         assert!(!report.incomplete_reasons().is_empty());
+
+        // The next inspection, from what the cache carried forward, sends it to the fix stage.
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Enable RLS on `profiles` in supabase/migrations/1.sql."}]}"#,
+        ]);
+        let (again, failed) =
+            generate_fix_specifics(&completer, "o/r", out, &files, None, None, Some(&corpus)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the finding went to the model"
+        );
+        assert_eq!(
+            again[0].fix_specific.as_deref(),
+            Some("Enable RLS on `profiles` in supabase/migrations/1.sql.")
+        );
+        assert!(!again[0]
+            .captures
+            .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
+    }
+
+    /// Answers the first call with a fix naming something that exists nowhere, then fails every
+    /// later call in transport.
+    struct AnswersOnceThenFails {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for AnswersOnceThenFails {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            if self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                > 0
+            {
+                anyhow::bail!("simulated transport failure");
+            }
+            let text = super::reply_schemas::check::address_by_id(
+                &req.prompt,
+                r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+            );
+            Ok(LlmResponse {
+                text,
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let resp = self.complete(req).await?;
+            on_delta(&resp.text);
+            Ok(resp)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// D8 review 3: "rejected every round" means the LAST attempt was answered and turned down. A
+    /// finding answered and rejected in round one and then lost to transport in the later rounds
+    /// did not get all its rounds, so it is a failed part, not a Standard fix.
+    #[tokio::test]
+    async fn d8_a_fix_answered_once_then_lost_to_transport_is_a_failed_part_not_a_standard_fix() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let mut f = fx(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "no RLS evidence for `profiles`",
+            "CREATE TABLE profiles (...)",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
+        let completer = AnswersOnceThenFails {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let (out, failed_passes) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![f],
+            &files,
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+        assert_eq!(failed_passes.len(), 1, "{failed_passes:?}");
+        assert!(!out[0]
+            .captures
+            .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
+        assert_eq!(out[0].fix_specific, None);
     }
 
     // ── C6-B3: instantiated authored-remediation fallback on give-up ───────────────────
@@ -23420,20 +23542,12 @@ mod tests {
         )
         .await;
 
-        let fix = out[0].fix_specific.as_deref().expect(
-            "a give-up with an authored remediation available must still populate \
-                     fix_specific — never leave the row with no codebase-specific fix line",
-        );
-        assert!(
-            fix.contains("profiles"),
-            "the instantiated fallback must name THIS finding's own identifier (the table \
-             `profiles`, from its `captures`), not the bare `<table>` token or a generic \
-             filler: {fix}"
-        );
-        assert!(
-            !fix.contains('<'),
-            "every placeholder token must be substituted — no raw `<token>` left in the \
-             client-facing fix: {fix}"
+        // D8 review 2: a part that never ran (the transport was down) pre-fills nothing; the
+        // export falls back to the rule's own authored fix (labelled a Standard fix), and the next
+        // inspection sends the finding to the fix stage again.
+        assert_eq!(
+            out[0].fix_specific, None,
+            "work that never ran must not leave a fix in fix_specific"
         );
         assert!(
             !out[0].needs_review,
