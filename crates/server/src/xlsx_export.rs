@@ -460,8 +460,19 @@ fn partition_rows(
             .join("\n");
         // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
-        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
-            .map(|s| crate::report_export::fix_text::plain(&s));
+        let is_deviation = matches!(f.kind, Some(FindingKind::Deviation(_)));
+        let fix = if is_deviation {
+            // R1-3: a deviation row falls back to the rule's default option's remediation.
+            crate::report_export::resolve_deviation_fix(
+                &f.rule_id,
+                corpus,
+                f,
+                chosen_option_for_rule,
+            )
+        } else {
+            resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
+        }
+        .map(|s| crate::report_export::fix_text::plain(&s));
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -6336,6 +6347,11 @@ mod tests {
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
+        // The strict resolver (defect rows) still omits; only the deviation resolver falls back.
+        assert_eq!(
+            crate::report_export::resolve_fix("ARCH-TYPED-PATH-PARAMS-1", Some(&corpus), &f, None),
+            None
+        );
         let report = report_with(vec![f], vec![]);
         let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();

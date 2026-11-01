@@ -2881,6 +2881,31 @@ pub(crate) fn resolve_fix(
     finding: &Finding,
     chosen_option: Option<&str>,
 ) -> Option<String> {
+    resolve_fix_inner(rule_id, corpus, finding, chosen_option, false)
+}
+
+/// R1-3: [`resolve_fix`] for a consistency DEVIATION row. When the option the row was judged
+/// under has no authored remediation of its own (an alternative such as `parse-in-handler` in
+/// `arch-typed-path-params-1.toml`), the rule's DEFAULT option's remediation ships instead, as
+/// the rule's standard fix, so a deviation row never goes out with an empty fix while the rule
+/// has one. [`resolve_fix`] itself stays strict (an option with no remediation omits the Fix
+/// block): for a defect row the default option's advice may not fit the option in force.
+pub(crate) fn resolve_deviation_fix(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    resolve_fix_inner(rule_id, corpus, finding, chosen_option, true)
+}
+
+fn resolve_fix_inner(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+    fall_back_to_rule_default: bool,
+) -> Option<String> {
     let rule = corpus_rule_for(rule_id, corpus)?;
     let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
     let authored = |o: &camerata_rules::RuleOption| {
@@ -2890,13 +2915,14 @@ pub(crate) fn resolve_fix(
             .filter(|r| !r.is_empty())
             .map(str::to_string)
     };
-    // R1-3: an option with no authored remediation of its own (a legitimate alternative such as
-    // `parse-in-handler`) falls back to the rule's DEFAULT option's remediation, which ships as
-    // the rule's standard fix, so a row never goes out with an empty fix while the rule has one.
     let remediation = rule
         .resolved_option(evaluated)
         .and_then(authored)
-        .or_else(|| rule.resolved_option(None).and_then(authored))?;
+        .or_else(|| {
+            fall_back_to_rule_default
+                .then(|| rule.resolved_option(None).and_then(authored))
+                .flatten()
+        })?;
     let remediation = remediation.as_str();
     // The authored text is a TOML multi-line string: join its hard line wraps here, once, so no
     // artifact ever sees a mid-sentence newline (see `fix_text`).
