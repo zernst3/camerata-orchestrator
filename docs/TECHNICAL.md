@@ -6299,8 +6299,16 @@ identifiers, ships in `fix_specific`, and the finding is marked in two `captures
 scrubbed and capped). The run is complete: exit 0. Fix work that never ran stays a failed part, so
 the run stays incomplete and resumable: a call that failed in transport, or one the spend limit or
 an outage stop refused. A rejected finding whose rule has no authored remediation has nothing to
-ship as a Standard fix and also stays a failed part (the row is held for review). A primary that
-inherits a merged member's fix inherits the marker with it. Every export labels each fix with
+ship as a Standard fix and also stays a failed part (the row is held for review). "Rejected every
+round" means the LAST attempt was an answer that the checks turned down: a finding answered once and
+then lost to transport or the spend limit in a later round is a failed part. A finding that stays a
+failed part gets no fix written into `fix_specific`: the scan cache carries a finding forward and the
+next inspection's fix stage skips one that has a fix, so a pre-filled one would be labelled tailored
+and never be asked of the model; the export shows the rule's own fix for it as a Standard fix. The
+no-code pre-filter's authored fix is marked a Standard fix too (with no rejection reason). A row with
+no mark at all (an old saved run, an old scan cache, a carried-forward row) whose `fix_specific`
+equals the rule's authored text, as the export prints it, is labelled a Standard fix by that
+equality. A primary that inherits a merged member's fix inherits the marker with it. Every export labels each fix with
 `report_export::fix_type_label`: "Tailored fix" (a `fix_specific` that is not marked), "Standard fix"
 (the marked one, or a row with only the rule's own `fix`), or empty (no fix text). The label is the
 `fix_type` field of every `findings.json` row and every row of `json/all-findings.json` and its CSV,
