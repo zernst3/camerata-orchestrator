@@ -297,7 +297,7 @@ async fn an_unmarked_fix_equal_to_the_authored_text_is_a_standard_fix_in_every_f
     let authored = crate::report_export::resolve_fix(&f.rule_id, Some(&corpus), &f, None)
         .expect("the rule has an authored fix");
     f.fix_specific = Some(authored);
-    assert!(f.captures.get("fix_source").is_none(), "no mark");
+    assert!(!f.captures.contains_key("fix_source"), "no mark");
     let mut report = scan_report();
     report.findings = vec![f];
 
