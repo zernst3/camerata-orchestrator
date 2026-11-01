@@ -278,3 +278,66 @@ async fn the_pdf_labels_each_fix_in_its_data_and_in_the_rendered_page() {
     assert!(text.contains("Tailored fix:"), "{text:?}");
     assert!(text.contains("Standard fix:"), "{text:?}");
 }
+
+/// D8 review 4: an old saved run, an old scan cache or a carried-forward row has no mark, so an
+/// authored fix that an earlier build wrote into `fix_specific` must still read as a Standard fix.
+/// The text is the rule's own authored fix, so the label follows from the text itself, in every
+/// format.
+#[tokio::test]
+async fn an_unmarked_fix_equal_to_the_authored_text_is_a_standard_fix_in_every_format() {
+    let (corpus, errors) =
+        camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut f = scan_report().findings.remove(0);
+    f.rule_id = "SUPABASE-RLS-ENABLED-1".to_string();
+    f.path = "supabase/migrations/1.sql".to_string();
+    f.line = 7;
+    f.captures
+        .insert("table".to_string(), "profiles".to_string());
+    let authored = crate::report_export::resolve_fix(&f.rule_id, Some(&corpus), &f, None)
+        .expect("the rule has an authored fix");
+    f.fix_specific = Some(authored);
+    assert!(f.captures.get("fix_source").is_none(), "no mark");
+    let mut report = scan_report();
+    report.findings = vec![f];
+
+    let sealed = report.seal();
+    let options = client_options();
+    let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        Some(&corpus),
+        &options,
+        STEM,
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles");
+
+    let doc: Value = serde_json::from_slice(&package.findings_json).expect("parses");
+    assert_eq!(doc["findings"][0]["fix_type"], STANDARD_FIX_LABEL);
+    let datasets: BTreeMap<String, Vec<u8>> = package.datasets.iter().cloned().collect();
+    let all: Vec<Value> =
+        serde_json::from_slice(&datasets["json/all-findings.json"]).expect("parses");
+    assert_eq!(all[0]["fix_type"], STANDARD_FIX_LABEL);
+    let mut reader = csv::Reader::from_reader(datasets["csv/all-findings.csv"].as_slice());
+    let headers: Vec<String> = reader.headers().unwrap().iter().map(String::from).collect();
+    let col = headers.iter().position(|h| h == "fix_type").unwrap();
+    let record = reader.records().next().unwrap().unwrap();
+    assert_eq!(&record[col], STANDARD_FIX_LABEL);
+
+    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let col = grid[0].iter().position(|h| h == "Fix type").unwrap();
+    assert_eq!(grid[1][col], STANDARD_FIX_LABEL);
+
+    let sites = package
+        .report_json
+        .curated_findings
+        .iter()
+        .chain(&package.report_json.held_for_review_findings)
+        .flat_map(|g| g.sites.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].fix_type, STANDARD_FIX_LABEL);
+}

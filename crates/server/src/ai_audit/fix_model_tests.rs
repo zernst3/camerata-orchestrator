@@ -298,7 +298,7 @@ async fn the_prefilter_authored_fix_is_labelled_a_standard_fix_and_is_not_a_reje
     let f = &out[0];
     assert!(f.fix_specific.is_some());
     assert_eq!(
-        crate::report_export::fix_type_label(f, true, true),
+        crate::report_export::fix_type_label(f, true, true, false),
         crate::report_export::STANDARD_FIX_LABEL
     );
     assert!(

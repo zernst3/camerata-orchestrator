@@ -538,14 +538,20 @@ fn partition_rows(
                 .as_deref()
                 .map(crate::report_export::fix_text::plain)
                 .filter(|s| !s.is_empty()),
-            fix_type: crate::report_export::fix_type_label(
-                f,
-                f.fix_specific
+            fix_type: {
+                let specific = f
+                    .fix_specific
                     .as_deref()
-                    .is_some_and(|s| !crate::report_export::fix_text::plain(s).is_empty()),
-                fix.is_some(),
-            )
-            .to_string(),
+                    .map(crate::report_export::fix_text::plain)
+                    .filter(|s| !s.is_empty());
+                crate::report_export::fix_type_label(
+                    f,
+                    specific.is_some(),
+                    fix.is_some(),
+                    specific.is_some() && specific == fix,
+                )
+                .to_string()
+            },
             fix,
             is_fp,
             fp_reason,

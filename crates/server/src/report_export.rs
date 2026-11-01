@@ -1318,11 +1318,21 @@ pub const STANDARD_FIX_LABEL: &str = "Standard fix";
 /// was written for this code and passed the checks, [`STANDARD_FIX_LABEL`] when the fix is the
 /// rule's own guidance, and empty when the row carries no fix text at all. One definition, read
 /// by the PDF data, `findings.json`, every dataset and the workbook.
-pub fn fix_type_label(f: &Finding, has_specific: bool, has_standard: bool) -> &'static str {
-    let standard_marked = f
-        .captures
-        .get(FIX_SOURCE_CAPTURE)
-        .is_some_and(|v| v == STANDARD_FIX);
+///
+/// `specific_is_authored` is true when the finding's `fix_specific`, as the export prints it, is
+/// the same text as the rule's own authored fix. An old saved run, an old scan cache or a
+/// carried-forward row has no [`FIX_SOURCE_CAPTURE`] mark, and an authored fix an earlier build
+/// wrote into `fix_specific` is still a Standard fix.
+pub fn fix_type_label(
+    f: &Finding,
+    has_specific: bool,
+    has_standard: bool,
+    specific_is_authored: bool,
+) -> &'static str {
+    let standard_marked = specific_is_authored
+        || f.captures
+            .get(FIX_SOURCE_CAPTURE)
+            .is_some_and(|v| v == STANDARD_FIX);
     if has_specific && !standard_marked {
         TAILORED_FIX_LABEL
     } else if has_specific || has_standard {
@@ -5088,12 +5098,16 @@ pub fn build_report_json(
                     },
                     // D8: the label beside the fix, from the same two facts the fields above
                     // were built from (the specific fix and the rule's own authored one).
-                    fix_type: fix_type_label(
-                        f,
-                        specific_fix.is_some(),
-                        resolve_fix(&rule_id, corpus, f, chosen_option_for_rule).is_some(),
-                    )
-                    .to_string(),
+                    fix_type: {
+                        let authored = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        fix_type_label(
+                            f,
+                            specific_fix.is_some(),
+                            authored.is_some(),
+                            specific_fix.is_some() && authored == specific_fix,
+                        )
+                        .to_string()
+                    },
                     // The model's text gets the same wrap-joining as the authored text, so the
                     // equality above compares like with like.
                     fix_for_this_finding: specific_fix,
