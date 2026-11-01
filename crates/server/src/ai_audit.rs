@@ -23365,10 +23365,9 @@ mod tests {
         .await;
         assert_eq!(failed_passes.len(), 1, "{failed_passes:?}");
         assert!(
-            out[0]
+            !out[0]
                 .captures
-                .get(crate::report_export::FIX_SOURCE_CAPTURE)
-                .is_none(),
+                .contains_key(crate::report_export::FIX_SOURCE_CAPTURE),
             "work that never ran is not a standard fix"
         );
         let mut report = crate::onboard::ScanReport::gated(&[]);
