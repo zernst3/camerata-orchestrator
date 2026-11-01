@@ -1297,6 +1297,30 @@ pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {
     f.captures.insert(FIX_REJECTION_CAPTURE.to_string(), why);
 }
 
+/// What every export prints for a fix written for this code that passed the checks.
+pub const TAILORED_FIX_LABEL: &str = "Tailored fix";
+/// What every export prints for the rule's own guidance (the fix of a row whose model-written fix
+/// did not pass the checks, or that the fix stage never wrote one for). Neutral client wording.
+pub const STANDARD_FIX_LABEL: &str = "Standard fix";
+
+/// The label every export prints beside a finding's fix (D8): [`TAILORED_FIX_LABEL`] when the fix
+/// was written for this code and passed the checks, [`STANDARD_FIX_LABEL`] when the fix is the
+/// rule's own guidance, and empty when the row carries no fix text at all. One definition, read
+/// by the PDF data, `findings.json`, every dataset and the workbook.
+pub fn fix_type_label(f: &Finding, has_specific: bool, has_standard: bool) -> &'static str {
+    let standard_marked = f
+        .captures
+        .get(FIX_SOURCE_CAPTURE)
+        .is_some_and(|v| v == STANDARD_FIX);
+    if has_specific && !standard_marked {
+        TAILORED_FIX_LABEL
+    } else if has_specific || has_standard {
+        STANDARD_FIX_LABEL
+    } else {
+        ""
+    }
+}
+
 /// The absorbed members of a row, split by place: those at a DIFFERENT place from the row and
 /// from each other (the "other sites"), and those at a place already named (the row's own, or
 /// an earlier member's), flagged with whether that place is the row's own.

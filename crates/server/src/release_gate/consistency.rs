@@ -266,6 +266,74 @@ pub fn dataset_parity_problems(entries: &Entries) -> Vec<Problem> {
             )),
         }
     }
+    problems.extend(fix_label_problems(entries));
+    problems
+}
+
+/// The only labels a fix carries in a client file (D8): empty (the row has no fix text), or one of
+/// the two the exporters write. Anything else, or a row with fix text and no label, is a defect
+/// of the exporter, so the gate refuses the package.
+fn fix_label_is_valid(row: &Value) -> bool {
+    let label = cell_text(row, "fix_type");
+    let has_fix = !cell_text(row, "fix").is_empty() || !cell_text(row, "fix_specific").is_empty();
+    match label.as_str() {
+        crate::report_export::TAILORED_FIX_LABEL => !cell_text(row, "fix_specific").is_empty(),
+        crate::report_export::STANDARD_FIX_LABEL => has_fix,
+        "" => !has_fix,
+        _ => false,
+    }
+}
+
+/// Every fix in `findings.json`, `json/all-findings.json` and `json/deviations.json` is labelled,
+/// and labelled with one of the two client labels. The CSVs are the same rows by the parity check
+/// above, so a label missing from a CSV already shows there as a column or cell difference.
+fn fix_label_problems(entries: &Entries) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let mut check = |file: &str, rows: Vec<Value>, location: &dyn Fn(usize) -> String| {
+        for (i, row) in rows.iter().enumerate() {
+            if row.get("fix_type").is_none() {
+                problems.push(problem(
+                    file,
+                    &location(i),
+                    "a row has no fix_type field, so its fix is not labelled",
+                ));
+            } else if !fix_label_is_valid(row) {
+                problems.push(problem(
+                    file,
+                    &location(i),
+                    "the fix_type of a row is not Tailored fix or Standard fix, or does not match the fix the row carries",
+                ));
+            }
+        }
+    };
+    if let Some(Ok(doc)) = entries
+        .get("findings.json")
+        .map(|b| serde_json::from_slice::<Value>(b))
+    {
+        let rows = doc
+            .get("findings")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        check("findings.json", rows, &|i| format!("findings[{i}]"));
+    }
+    for file in ["json/all-findings.json", "json/deviations.json"] {
+        if let Some(Ok(rows)) = entries.get(file).map(|b| rows_of(b)) {
+            // A deviations row carries its fix as `recommended_fix`; read it under the same name.
+            // A deviations row without that key is not a group row, so it has no fix to label.
+            let rows: Vec<Value> = rows
+                .into_iter()
+                .filter_map(|mut row| {
+                    if file == "json/deviations.json" {
+                        let fix = row.get("recommended_fix").cloned()?;
+                        row["fix"] = fix;
+                    }
+                    Some(row)
+                })
+                .collect();
+            check(file, rows, &|i| format!("row {}", i + 1));
+        }
+    }
     problems
 }
 

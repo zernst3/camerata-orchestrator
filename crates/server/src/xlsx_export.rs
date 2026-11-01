@@ -172,6 +172,10 @@ pub struct FindingRow {
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
     /// authored `remediation` yet.
     fix: Option<String>,
+    /// D8: `"Tailored fix"` (written for this code, passed the checks), `"Standard fix"` (the
+    /// rule's own guidance) or empty (the row carries no fix text). Neutral client wording; one
+    /// definition, [`crate::report_export::fix_type_label`].
+    fix_type: String,
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
@@ -534,6 +538,14 @@ fn partition_rows(
                 .as_deref()
                 .map(crate::report_export::fix_text::plain)
                 .filter(|s| !s.is_empty()),
+            fix_type: crate::report_export::fix_type_label(
+                f,
+                f.fix_specific
+                    .as_deref()
+                    .is_some_and(|s| !crate::report_export::fix_text::plain(s).is_empty()),
+                fix.is_some(),
+            )
+            .to_string(),
             fix,
             is_fp,
             fp_reason,
@@ -832,6 +844,9 @@ struct DeviationGroupRow {
     /// The rule's authored, client-facing remediation — one convention, one fix. Blank when
     /// the rule has no authored remediation (never fabricated).
     recommended_fix: String,
+    /// D8: the label for `recommended_fix`. It is always the rule's own guidance, so
+    /// `"Standard fix"`; empty when the rule has no authored remediation.
+    fix_type: String,
 }
 
 /// Group the Deviation rows by rule into the `Deviations` sheet's rows. Sorted worst-severity
@@ -879,6 +894,11 @@ fn build_deviation_groups(
             let sites_represented: usize = group.iter().map(|r| r.site_count).sum();
             let worst_severity = worst_severity_label(&group);
             let recommended_fix = group.iter().find_map(|r| r.fix.clone()).unwrap_or_default();
+            let fix_type = if recommended_fix.is_empty() {
+                String::new()
+            } else {
+                crate::report_export::STANDARD_FIX_LABEL.to_string()
+            };
             DeviationGroupRow {
                 repo,
                 category: group[0].category.clone(),
@@ -890,6 +910,7 @@ fn build_deviation_groups(
                 worst_severity,
                 locations,
                 recommended_fix,
+                fix_type,
             }
         })
         .collect();
