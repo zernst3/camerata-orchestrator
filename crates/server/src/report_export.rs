@@ -1289,6 +1289,13 @@ pub const STANDARD_FIX: &str = "standard";
 /// operator's failure report only. Never read by an exporter.
 pub const FIX_REJECTION_CAPTURE: &str = "fix_rejection";
 
+/// Mark `f` as shipping the rule's own authored fix with no rejection to report: the fix was
+/// never asked of the model (the no-code pre-filter), so there are no reasons to keep.
+pub(crate) fn mark_standard_fix_source(f: &mut Finding) {
+    f.captures
+        .insert(FIX_SOURCE_CAPTURE.to_string(), STANDARD_FIX.to_string());
+}
+
 /// Mark `f` as shipping the rule's own authored fix, keeping `why` (the checks' reasons, secrets
 /// scrubbed and capped) for the operator's report.
 pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {

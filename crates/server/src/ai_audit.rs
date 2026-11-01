@@ -6292,6 +6292,7 @@ fn apply_authored_remediation_without_model(
             ) {
                 findings[idx].fix_specific =
                     Some(camerata_secrets::redact_str(&fallback).into_owned());
+                crate::report_export::mark_standard_fix_source(&mut findings[idx]);
                 handled += 1;
                 continue;
             }
