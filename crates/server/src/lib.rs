@@ -7104,7 +7104,7 @@ fn preview_is_native_rule_tool(
     let wanted = normalised_tool_rule_id(preview_rule_id);
     selectors
         .and_then(|m| m.get(native_id))
-        .is_some_and(|sels| sels.iter().any(|s| *s == wanted))
+        .is_some_and(|sels| sels.contains(&wanted))
 }
 
 /// [`dedup_scan_previews`] with the corpus's tool mapping. A preview row collapses into an
