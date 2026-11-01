@@ -6587,10 +6587,9 @@ pub async fn generate_fix_specifics(
             reason: format!(
                 "per-finding fix generation gave up on {gave_up} finding(s) this run after \
                  {MAX_FIX_REGENERATIONS} batched retries plus one single-finding retry; \
-                 {instantiated} shipped the rule's own authored remediation, instantiated \
-                 against the finding's own identifiers, in place of a model-generated fix, \
-                 and {uncovered} had no authored remediation to fall back to either (routed \
-                 to held for manual review rather than shipped with no fix at all)"
+                 {instantiated} have the rule's own authored fix to show as a Standard fix \
+                 once the part completes, and {uncovered} have no authored fix (they would \
+                 be held for manual review rather than shipped with no fix at all)"
             ),
             files_not_reviewed: 0,
             class: trail.class(),
@@ -23500,14 +23499,13 @@ mod tests {
 
     // ── C6-B3: instantiated authored-remediation fallback on give-up ───────────────────
 
-    /// When fix-GENERATION itself gives up (transport unreachable — every batched retry AND
-    /// the C6-B3.4 solo retry fail) but the rule DOES carry an authored remediation with a
-    /// `<table>` placeholder, `fix_specific` must still end up populated — with the
-    /// remediation INSTANTIATED against this finding's own `captures`, not a generic/bare
-    /// rendering and not left `None`. `SUPABASE-RLS-ENABLED-1`'s authored remediation names
-    /// `<table>` twice (`crates/rules/principles/supabase/rls/supabase-rls-enabled-1.toml`).
+    /// When fix-GENERATION never runs to an answer (transport unreachable — every batched retry
+    /// AND the C6-B3.4 solo retry fail), `fix_specific` stays `None` even though the rule
+    /// carries an authored remediation (D8): the part is a failed, resumable part, and a
+    /// pre-filled authored fix would be carried forward by the scan cache and later read as a
+    /// model fix. The instantiated Standard fix is pinned by the rejected-every-round D8 test.
     #[tokio::test]
-    async fn generate_fix_specifics_instantiates_the_authored_remediation_on_give_up() {
+    async fn generate_fix_specifics_leaves_fix_specific_empty_when_the_fix_stage_never_ran() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(
@@ -23567,8 +23565,10 @@ mod tests {
             failed_passes[0].reason
         );
         assert!(
-            failed_passes[0].reason.contains("1 shipped"),
-            "the disclosure must say how many give-ups the instantiated fallback covered: {}",
+            failed_passes[0]
+                .reason
+                .contains("1 have the rule's own authored fix"),
+            "the disclosure must say how many unfinished findings have an authored fix: {}",
             failed_passes[0].reason
         );
     }
@@ -23615,9 +23615,11 @@ mod tests {
         assert!(!out[0].needs_review);
         assert_eq!(failed_passes.len(), 1);
         assert!(
-            failed_passes[0].reason.contains("0 shipped"),
-            "the disclosure must say explicitly that zero of this run's give-ups got an \
-             instantiated fallback: {}",
+            failed_passes[0]
+                .reason
+                .contains("0 have the rule's own authored fix"),
+            "the disclosure must say explicitly that none of this run's unfinished findings \
+             has an authored fix: {}",
             failed_passes[0].reason
         );
     }
