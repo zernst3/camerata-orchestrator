@@ -9693,7 +9693,12 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     // 1. Structured identity: disjoint detector captures veto on their own.
     let ca = normalized_capture_values(a);
     let cb = normalized_capture_values(b);
-    if !ca.is_empty() && !cb.is_empty() && ca.is_disjoint(&cb) {
+    if !ca.is_empty()
+        && !cb.is_empty()
+        && !ca
+            .iter()
+            .any(|x| cb.iter().any(|y| object_names_match(x, y)))
+    {
         return true;
     }
     // 2. Prose objects, container-discounted.
@@ -9716,13 +9721,39 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     };
     // A genuinely shared object (one that is NOT just a shared container) is identity
     // evidence — no conflict.
-    if oa.intersection(&ob).any(|s| !is_container(s)) {
+    if oa
+        .iter()
+        .any(|s| !is_container(s) && ob.iter().any(|t| object_names_match(s, t)))
+    {
         return false;
     }
     // Otherwise judge disjointness over each side's DISCRIMINATING objects only.
     let da: std::collections::HashSet<&String> = oa.iter().filter(|s| !is_container(s)).collect();
     let db: std::collections::HashSet<&String> = ob.iter().filter(|s| !is_container(s)).collect();
-    !da.is_empty() && !db.is_empty() && da.is_disjoint(&db)
+    !da.is_empty()
+        && !db.is_empty()
+        && !da
+            .iter()
+            .any(|s| db.iter().any(|t| object_names_match(s, t)))
+}
+
+/// Whether two lowercased object names can be the same object: equal, or one is the bare name
+/// of the other's schema-qualified form (`member_contacts` and `public.member_contacts`). A
+/// deterministic checker captures the bare table name while the model's row names the qualified
+/// one for the same table, and treating those as different objects kept the two rows apart
+/// (R1B-5). Two qualified names in different schemas (`public.orders`, `private.orders`) are
+/// still different objects.
+fn object_names_match(x: &str, y: &str) -> bool {
+    if x == y {
+        return true;
+    }
+    let bare_of = |bare: &str, qualified: &str| {
+        !bare.contains('.')
+            && qualified
+                .rsplit_once('.')
+                .is_some_and(|(_, last)| last == bare)
+    };
+    bare_of(x, y) || bare_of(y, x)
 }
 
 /// Minimum length (characters, after trimming) for a shared `Finding::captures` VALUE to count
@@ -14735,6 +14766,24 @@ mod tests {
         let (findings, _) = parse_ai_findings("me/api", raw, &none);
         assert_eq!(findings.len(), 1, "{findings:#?}");
         assert_eq!(findings[0].line, 12);
+    }
+
+    /// R1B-5: a bare table name and its schema-qualified form are the same object, so they do
+    /// not veto a same-rule merge; different tables and different schemas still do.
+    #[test]
+    fn object_names_match_bare_against_qualified_but_not_different_tables_or_schemas() {
+        assert!(object_names_match(
+            "member_contacts",
+            "public.member_contacts"
+        ));
+        assert!(object_names_match(
+            "public.member_contacts",
+            "member_contacts"
+        ));
+        assert!(object_names_match("public.orders", "public.orders"));
+        assert!(!object_names_match("profiles", "public.member_contacts"));
+        assert!(!object_names_match("public.orders", "private.orders"));
+        assert!(!object_names_match("orders", "public.order_items"));
     }
 
     /// R1B-3: a rule id the model mistyped by one or two characters is keyed to the one adopted
