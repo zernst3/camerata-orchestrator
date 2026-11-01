@@ -6292,6 +6292,7 @@ fn apply_authored_remediation_without_model(
             ) {
                 findings[idx].fix_specific =
                     Some(camerata_secrets::redact_str(&fallback).into_owned());
+                crate::report_export::mark_standard_fix_source(&mut findings[idx]);
                 handled += 1;
                 continue;
             }
@@ -6528,39 +6529,67 @@ pub async fn generate_fix_specifics(
         m.record_fix_outcome(ledger.outcome(&pending, authored_directly));
     }
     let mut failed_passes = Vec::new();
-    if !pending.is_empty() {
-        let gave_up = pending.len();
-        let mut instantiated = 0usize;
-        for &idx in &pending {
-            eprintln!(
-                "[camerata-server] fix-specific generation gave up for {repo} {}:{} ({}) after \
-                 {MAX_FIX_REGENERATIONS} batched retries plus one single-finding retry — \
-                 falling back to the rule's authored remediation, instantiated against this \
-                 finding's own identifiers, not a client-facing hedge.",
-                findings[idx].path, findings[idx].line, findings[idx].rule_id
-            );
-            if let Some(fallback) = crate::report_export::resolve_fix(
-                &findings[idx].rule_id,
-                corpus,
-                &findings[idx],
-                None,
-            ) {
+    // D8: a finding the model ANSWERED and the checks turned down in every round is not an
+    // incomplete part: the fix stage ran, and the rule's own authored fix ships as a Standard
+    // fix. Only work that never ran (the call failed in transport, or the spend limit or an
+    // outage stopped it) stays a failed part, and so stays incomplete and resumable. A finding
+    // with no authored fix to ship has no Standard fix either, so it stays a failed part too.
+    //
+    // "Rejected every round" is read from the ledger as: the model answered, and the LAST attempt
+    // was an answer (a later call that failed in transport or was stopped by the limit leaves a
+    // `last_miss`). A finding answered once and then lost did not get its rounds.
+    //
+    // A finding that stays a failed part gets NO fix written into `fix_specific`: the scan cache
+    // carries a finding forward, and the next inspection's fix stage skips one that already has a
+    // fix, so a pre-filled one would be labelled a tailored fix and never be asked of the model.
+    // The export still shows the rule's own authored fix for it, as a Standard fix.
+    let mut unfinished: Vec<usize> = Vec::new();
+    let mut with_authored_fix = 0usize;
+    let mut standard = 0usize;
+    for &idx in &pending {
+        let rejected_every_round =
+            ledger.answered.contains(&idx) && !ledger.last_miss.contains_key(&idx);
+        let fallback =
+            crate::report_export::resolve_fix(&findings[idx].rule_id, corpus, &findings[idx], None);
+        if rejected_every_round {
+            if let Some(fallback) = fallback {
                 findings[idx].fix_specific =
                     Some(camerata_secrets::redact_str(&fallback).into_owned());
-                instantiated += 1;
+                let why = fix_rejections(&findings, &[idx], &feedback, &ledger);
+                crate::report_export::mark_standard_fix(&mut findings[idx], &why.join(" "));
+                standard += 1;
+                continue;
             }
+        } else if fallback.is_some() {
+            with_authored_fix += 1;
         }
+        unfinished.push(idx);
+    }
+    if standard > 0 {
+        eprintln!(
+            "[camerata-server] fix-specific generation: {standard} finding(s) in {repo} had no \
+             model-written fix pass the checks after {MAX_FIX_REGENERATIONS} batched retries \
+             plus one single-finding retry; each ships the rule's own authored remediation, \
+             instantiated against its own identifiers, as a standard fix. The run is complete."
+        );
+    }
+    if !unfinished.is_empty() {
+        let gave_up = unfinished.len();
+        let instantiated = with_authored_fix;
         let uncovered = gave_up - instantiated;
+        eprintln!(
+            "[camerata-server] fix-specific generation did not finish for {gave_up} finding(s) \
+             in {repo}; the part is incomplete."
+        );
         failed_passes.push(FailedPass {
             repo: repo.to_string(),
             pass: "fix-specific generation".to_string(),
             reason: format!(
                 "per-finding fix generation gave up on {gave_up} finding(s) this run after \
                  {MAX_FIX_REGENERATIONS} batched retries plus one single-finding retry; \
-                 {instantiated} shipped the rule's own authored remediation, instantiated \
-                 against the finding's own identifiers, in place of a model-generated fix, \
-                 and {uncovered} had no authored remediation to fall back to either (routed \
-                 to held for manual review rather than shipped with no fix at all)"
+                 {instantiated} have the rule's own authored fix to show as a Standard fix \
+                 once the part completes, and {uncovered} have no authored fix (they would \
+                 be held for manual review rather than shipped with no fix at all)"
             ),
             files_not_reviewed: 0,
             class: trail.class(),
@@ -9061,7 +9090,9 @@ fn merge_location_group(mut group: Vec<Finding>) -> Finding {
     // one) inherits the first member's rather than shipping fix-less when a perfectly good one
     // was sitting right there in the group it just absorbed.
     if primary.fix_specific.is_none() {
-        primary.fix_specific = group.iter().find_map(|f| f.fix_specific.clone());
+        if let Some(donor) = group.iter().find(|f| f.fix_specific.is_some()) {
+            inherit_fix(&mut primary, donor);
+        }
     }
     primary.also_matches = also;
     // Belt and braces: the members are already redacted at construction; a carried-forward
@@ -10265,10 +10296,10 @@ fn merge_semantic_group(mut group: Vec<Finding>) -> Finding {
     // C5-1: computed before the loop below (which only reads `f.fix_specific` incidentally via
     // `&group`, never consumes it) — a deterministic primary inherits the first member's
     // codebase-specific fix when it has none of its own yet.
-    let inherited_fix_specific = primary
+    let fix_donor = primary
         .fix_specific
         .is_none()
-        .then(|| group.iter().find_map(|f| f.fix_specific.clone()))
+        .then(|| group.iter().find(|f| f.fix_specific.is_some()).cloned())
         .flatten();
     for f in &group {
         if seen.insert(f.rule_id.clone()) {
@@ -10326,10 +10357,31 @@ fn merge_semantic_group(mut group: Vec<Finding>) -> Finding {
     primary.also_matches = also;
     primary.also_locations = also_locations;
     if primary.fix_specific.is_none() {
-        primary.fix_specific = inherited_fix_specific;
+        if let Some(donor) = &fix_donor {
+            inherit_fix(&mut primary, donor);
+        }
     }
     crate::onboard::redact::redact_finding(&mut primary);
     primary
+}
+
+/// A primary with no fix of its own takes `donor`'s, with the donor's label (D8): a standard fix
+/// stays a standard fix, and a model-written one stays a tailored one.
+fn inherit_fix(primary: &mut Finding, donor: &Finding) {
+    primary.fix_specific.clone_from(&donor.fix_specific);
+    for key in [
+        crate::report_export::FIX_SOURCE_CAPTURE,
+        crate::report_export::FIX_REJECTION_CAPTURE,
+    ] {
+        match donor.captures.get(key) {
+            Some(v) => {
+                primary.captures.insert(key.to_string(), v.clone());
+            }
+            None => {
+                primary.captures.remove(key);
+            }
+        }
+    }
 }
 
 /// P7 (the codebase-inspection hardening notes): drop any finding whose rule
@@ -22494,6 +22546,30 @@ mod tests {
         }
     }
 
+    /// D7: hearth's fix stage gave up on a finding because the model wrote `process.env.TZ`, in
+    /// prose, to pin the timezone of a test (the stored rejection). Unquoted, the word reads as
+    /// a file name (stem `process.env`, extension `TZ`), and `TZ` is the operating system's own
+    /// variable, not one the repository chose. A platform variable is accepted however it is
+    /// written; an application's own variable (`process.env.CHARGE_SIGNING_SECRET`) is not.
+    #[test]
+    fn find_ungrounded_identifier_accepts_platform_environment_variables() {
+        let evidence = "tests/format.test.ts line 10 calls formatDate with a fixed ISO input";
+        for fix in [
+            "Pin the timezone for this assertion by setting the test's timezone to a fixed zone \
+             before calling `formatDate` in tests/format.test.ts (for example via a test setup \
+             setting process.env.TZ to UTC), so the '2025' check does not depend on the machine.",
+            "Set `process.env.TZ` to UTC in the test setup.",
+            "Run it with `process.env.TZ = 'UTC'` before `formatDate`.",
+            "Guard on `process.env.NODE_ENV` in tests/format.test.ts.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+        assert_eq!(
+            find_ungrounded_identifier("Read `process.env.CHARGE_SIGNING_SECRET` first.", evidence),
+            Some("process.env.CHARGE_SIGNING_SECRET".to_string())
+        );
+    }
+
     /// D3: a known ESLint rule name (core, `react-hooks/`, `@typescript-eslint/`) is not invented.
     #[test]
     fn find_ungrounded_identifier_accepts_known_eslint_rule_names() {
@@ -23207,16 +23283,229 @@ mod tests {
         assert_eq!(failed_passes[0].pass, "fix-specific generation");
     }
 
+    // ── D8: a fix rejected in every round is a standard fix, not an incomplete run ─────
+
+    /// A finding the model ANSWERED in every round and the checks turned down every time ships
+    /// the rule's own authored fix as a standard fix, and the part is NOT a failed part (so the
+    /// run is complete). The reasons are kept for the operator.
+    #[tokio::test]
+    async fn d8_a_fix_rejected_in_every_round_ships_the_authored_fix_and_is_not_a_failed_part() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let mut f = fx(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "no RLS evidence for `profiles`",
+            "CREATE TABLE profiles (...)",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
+        // Answers every round with a fix naming something that exists nowhere.
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+        ]);
+        let (out, failed_passes) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![f],
+            &files,
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+        assert!(
+            failed_passes.is_empty(),
+            "a fix rejected in every round must not be a failed part: {failed_passes:?}"
+        );
+        let fix = out[0]
+            .fix_specific
+            .as_deref()
+            .expect("the authored fix ships");
+        assert!(fix.contains("profiles"), "{fix}");
+        assert_eq!(
+            out[0]
+                .captures
+                .get(crate::report_export::FIX_SOURCE_CAPTURE)
+                .map(String::as_str),
+            Some(crate::report_export::STANDARD_FIX)
+        );
+        let why = out[0]
+            .captures
+            .get(crate::report_export::FIX_REJECTION_CAPTURE)
+            .expect("the reasons are kept for the operator");
+        assert!(why.contains("neverInEvidence"), "{why}");
+        let mut report = crate::onboard::ScanReport::gated(&[]);
+        report.failed_passes = failed_passes;
+        assert!(report.incomplete_reasons().is_empty());
+    }
+
+    /// The mirror: fix work that never ran (every call failed in transport) is still a failed
+    /// part, and so still makes the run incomplete and resumable.
+    #[tokio::test]
+    async fn d8_a_fix_stage_that_never_ran_is_still_a_failed_part() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let mut f = fx(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "no RLS evidence for `profiles`",
+            "CREATE TABLE profiles (...)",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
+        let (out, failed_passes) = generate_fix_specifics(
+            &FailingCompleter,
+            "o/r",
+            vec![f],
+            &files,
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+        assert_eq!(failed_passes.len(), 1, "{failed_passes:?}");
+        assert!(
+            !out[0]
+                .captures
+                .contains_key(crate::report_export::FIX_SOURCE_CAPTURE),
+            "work that never ran is not a standard fix"
+        );
+        // D8 review 2: nothing is pre-filled either. A fix written into `fix_specific` here would
+        // be carried forward by the scan cache, skipped by the next inspection's fix stage (it
+        // skips a finding that has a fix) and labelled "Tailored fix" with no fix work done.
+        assert_eq!(out[0].fix_specific, None);
+        let mut report = crate::onboard::ScanReport::gated(&[]);
+        report.failed_passes = failed_passes;
+        assert!(!report.incomplete_reasons().is_empty());
+
+        // The next inspection, from what the cache carried forward, sends it to the fix stage.
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Enable RLS on `profiles` in supabase/migrations/1.sql."}]}"#,
+        ]);
+        let (again, failed) =
+            generate_fix_specifics(&completer, "o/r", out, &files, None, None, Some(&corpus)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the finding went to the model"
+        );
+        assert_eq!(
+            again[0].fix_specific.as_deref(),
+            Some("Enable RLS on `profiles` in supabase/migrations/1.sql.")
+        );
+        assert!(!again[0]
+            .captures
+            .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
+    }
+
+    /// Answers the first call with a fix naming something that exists nowhere, then fails every
+    /// later call in transport.
+    struct AnswersOnceThenFails {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for AnswersOnceThenFails {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            if self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                > 0
+            {
+                anyhow::bail!("simulated transport failure");
+            }
+            let text = super::reply_schemas::check::address_by_id(
+                &req.prompt,
+                r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+            );
+            Ok(LlmResponse {
+                text,
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let resp = self.complete(req).await?;
+            on_delta(&resp.text);
+            Ok(resp)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// D8 review 3: "rejected every round" means the LAST attempt was answered and turned down. A
+    /// finding answered and rejected in round one and then lost to transport in the later rounds
+    /// did not get all its rounds, so it is a failed part, not a Standard fix.
+    #[tokio::test]
+    async fn d8_a_fix_answered_once_then_lost_to_transport_is_a_failed_part_not_a_standard_fix() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let mut f = fx(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "no RLS evidence for `profiles`",
+            "CREATE TABLE profiles (...)",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
+        let completer = AnswersOnceThenFails {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let (out, failed_passes) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![f],
+            &files,
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+        assert_eq!(failed_passes.len(), 1, "{failed_passes:?}");
+        assert!(!out[0]
+            .captures
+            .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
+        assert_eq!(out[0].fix_specific, None);
+    }
+
     // ── C6-B3: instantiated authored-remediation fallback on give-up ───────────────────
 
-    /// When fix-GENERATION itself gives up (transport unreachable — every batched retry AND
-    /// the C6-B3.4 solo retry fail) but the rule DOES carry an authored remediation with a
-    /// `<table>` placeholder, `fix_specific` must still end up populated — with the
-    /// remediation INSTANTIATED against this finding's own `captures`, not a generic/bare
-    /// rendering and not left `None`. `SUPABASE-RLS-ENABLED-1`'s authored remediation names
-    /// `<table>` twice (`crates/rules/principles/supabase/rls/supabase-rls-enabled-1.toml`).
+    /// When fix-GENERATION never runs to an answer (transport unreachable — every batched retry
+    /// AND the C6-B3.4 solo retry fail), `fix_specific` stays `None` even though the rule
+    /// carries an authored remediation (D8): the part is a failed, resumable part, and a
+    /// pre-filled authored fix would be carried forward by the scan cache and later read as a
+    /// model fix. The instantiated Standard fix is pinned by the rejected-every-round D8 test.
     #[tokio::test]
-    async fn generate_fix_specifics_instantiates_the_authored_remediation_on_give_up() {
+    async fn generate_fix_specifics_leaves_fix_specific_empty_when_the_fix_stage_never_ran() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(
@@ -23251,20 +23540,12 @@ mod tests {
         )
         .await;
 
-        let fix = out[0].fix_specific.as_deref().expect(
-            "a give-up with an authored remediation available must still populate \
-                     fix_specific — never leave the row with no codebase-specific fix line",
-        );
-        assert!(
-            fix.contains("profiles"),
-            "the instantiated fallback must name THIS finding's own identifier (the table \
-             `profiles`, from its `captures`), not the bare `<table>` token or a generic \
-             filler: {fix}"
-        );
-        assert!(
-            !fix.contains('<'),
-            "every placeholder token must be substituted — no raw `<token>` left in the \
-             client-facing fix: {fix}"
+        // D8 review 2: a part that never ran (the transport was down) pre-fills nothing; the
+        // export falls back to the rule's own authored fix (labelled a Standard fix), and the next
+        // inspection sends the finding to the fix stage again.
+        assert_eq!(
+            out[0].fix_specific, None,
+            "work that never ran must not leave a fix in fix_specific"
         );
         assert!(
             !out[0].needs_review,
@@ -23284,8 +23565,10 @@ mod tests {
             failed_passes[0].reason
         );
         assert!(
-            failed_passes[0].reason.contains("1 shipped"),
-            "the disclosure must say how many give-ups the instantiated fallback covered: {}",
+            failed_passes[0]
+                .reason
+                .contains("1 have the rule's own authored fix"),
+            "the disclosure must say how many unfinished findings have an authored fix: {}",
             failed_passes[0].reason
         );
     }
@@ -23332,9 +23615,11 @@ mod tests {
         assert!(!out[0].needs_review);
         assert_eq!(failed_passes.len(), 1);
         assert!(
-            failed_passes[0].reason.contains("0 shipped"),
-            "the disclosure must say explicitly that zero of this run's give-ups got an \
-             instantiated fallback: {}",
+            failed_passes[0]
+                .reason
+                .contains("0 have the rule's own authored fix"),
+            "the disclosure must say explicitly that none of this run's unfinished findings \
+             has an authored fix: {}",
             failed_passes[0].reason
         );
     }

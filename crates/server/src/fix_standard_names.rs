@@ -362,10 +362,44 @@ fn dotted_names() -> &'static HashSet<String> {
     })
 }
 
+/// Environment variables the operating system or Node defines, not the application
+/// (`process.env.TZ` pins a test's timezone, D7). An application's own variable
+/// (`process.env.CHARGE_SIGNING_SECRET`) is not here and stays a name to ground.
+const PLATFORM_ENV_VARS: &[&str] = &[
+    "TZ",
+    "NODE_ENV",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_DEBUG",
+    "NODE_NO_WARNINGS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "UV_THREADPOOL_SIZE",
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "PWD",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "CI",
+    "NO_COLOR",
+    "FORCE_COLOR",
+];
+
+fn is_platform_env_var(word: &str) -> bool {
+    word.strip_prefix("process.env.")
+        .is_some_and(|name| PLATFORM_ENV_VARS.contains(&name))
+}
+
 /// Whether `word` is a standard JavaScript, Web or Node name: a bare standard name
 /// (`URLSearchParams`, `randomUUID`), or `namespace.member` from the lists above, optionally
-/// reached through `globalThis.` or `window.`. A trailing call or dot is the caller's to trim.
+/// reached through `globalThis.` or `window.`, or a platform environment variable
+/// (`process.env.TZ`). A trailing call or dot is the caller's to trim.
 pub fn is_standard_js_name(word: &str) -> bool {
+    if is_platform_env_var(word) {
+        return true;
+    }
     let word = GLOBAL_PREFIXES
         .iter()
         .find_map(|p| word.strip_prefix(p))
@@ -396,6 +430,20 @@ mod tests {
             "Math.max",
         ] {
             assert!(is_standard_js_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn platform_environment_variables_are_standard_and_the_applications_own_are_not() {
+        for name in ["process.env.TZ", "process.env.NODE_ENV", "process.env.CI"] {
+            assert!(is_standard_js_name(name), "{name}");
+        }
+        for name in [
+            "process.env.CHARGE_SIGNING_SECRET",
+            "process.env.TZX",
+            "env.TZ",
+        ] {
+            assert!(!is_standard_js_name(name), "{name}");
         }
     }
 

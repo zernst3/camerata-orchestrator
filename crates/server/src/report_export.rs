@@ -1208,6 +1208,10 @@ pub struct CuratedSiteJson {
     /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
     /// line, so the row never ships with no fix at all.
     pub fix_for_this_finding: Option<String>,
+    /// D8: the label printed beside this site's fix, [`TAILORED_FIX_LABEL`] or
+    /// [`STANDARD_FIX_LABEL`] (see [`fix_type_label`]); empty when the site carries no fix text.
+    /// The same value `findings.json` and the datasets carry in `fix_type`.
+    pub fix_type: String,
     /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
     /// (`Finding::also_locations`, verbatim) — carried in the PDF's own data so the three
     /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
@@ -1273,6 +1277,69 @@ pub fn carried_from(f: &Finding) -> Option<String> {
         .get(CARRIED_FROM_CAPTURE)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The `Finding::captures` key the fix stage writes, with [`STANDARD_FIX`], on a finding whose
+/// model-written fix was turned down by the checks in every round and which ships the rule's own
+/// authored fix instead (D8). Absent: the fix, if any, is the model's, written for this code.
+pub const FIX_SOURCE_CAPTURE: &str = "fix_source";
+/// The [`FIX_SOURCE_CAPTURE`] value of a finding that ships the rule's own authored fix.
+pub const STANDARD_FIX: &str = "standard";
+/// The `Finding::captures` key holding why the checks turned the model's fix down, for the
+/// operator's failure report only. Never read by an exporter.
+pub const FIX_REJECTION_CAPTURE: &str = "fix_rejection";
+
+/// Mark `f` as shipping the rule's own authored fix with no rejection to report: the fix was
+/// never asked of the model (the no-code pre-filter), so there are no reasons to keep.
+pub(crate) fn mark_standard_fix_source(f: &mut Finding) {
+    f.captures
+        .insert(FIX_SOURCE_CAPTURE.to_string(), STANDARD_FIX.to_string());
+}
+
+/// Mark `f` as shipping the rule's own authored fix, keeping `why` (the checks' reasons, secrets
+/// scrubbed and capped) for the operator's report.
+pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {
+    f.captures
+        .insert(FIX_SOURCE_CAPTURE.to_string(), STANDARD_FIX.to_string());
+    let why = camerata_llm::failure::scrub_message(
+        &camerata_secrets::redact_str(why),
+        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    f.captures.insert(FIX_REJECTION_CAPTURE.to_string(), why);
+}
+
+/// What every export prints for a fix written for this code that passed the checks.
+pub const TAILORED_FIX_LABEL: &str = "Tailored fix";
+/// What every export prints for the rule's own guidance (the fix of a row whose model-written fix
+/// did not pass the checks, or that the fix stage never wrote one for). Neutral client wording.
+pub const STANDARD_FIX_LABEL: &str = "Standard fix";
+
+/// The label every export prints beside a finding's fix (D8): [`TAILORED_FIX_LABEL`] when the fix
+/// was written for this code and passed the checks, [`STANDARD_FIX_LABEL`] when the fix is the
+/// rule's own guidance, and empty when the row carries no fix text at all. One definition, read
+/// by the PDF data, `findings.json`, every dataset and the workbook.
+///
+/// `specific_is_authored` is true when the finding's `fix_specific`, as the export prints it, is
+/// the same text as the rule's own authored fix. An old saved run, an old scan cache or a
+/// carried-forward row has no [`FIX_SOURCE_CAPTURE`] mark, and an authored fix an earlier build
+/// wrote into `fix_specific` is still a Standard fix.
+pub fn fix_type_label(
+    f: &Finding,
+    has_specific: bool,
+    has_standard: bool,
+    specific_is_authored: bool,
+) -> &'static str {
+    let standard_marked = specific_is_authored
+        || f.captures
+            .get(FIX_SOURCE_CAPTURE)
+            .is_some_and(|v| v == STANDARD_FIX);
+    if has_specific && !standard_marked {
+        TAILORED_FIX_LABEL
+    } else if has_specific || has_standard {
+        STANDARD_FIX_LABEL
+    } else {
+        ""
+    }
 }
 
 /// The absorbed members of a row, split by place: those at a DIFFERENT place from the row and
@@ -5028,6 +5095,18 @@ pub fn build_report_json(
                         } else {
                             generic
                         }
+                    },
+                    // D8: the label beside the fix, from the same two facts the fields above
+                    // were built from (the specific fix and the rule's own authored one).
+                    fix_type: {
+                        let authored = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        fix_type_label(
+                            f,
+                            specific_fix.is_some(),
+                            authored.is_some(),
+                            specific_fix.is_some() && authored == specific_fix,
+                        )
+                        .to_string()
                     },
                     // The model's text gets the same wrap-joining as the authored text, so the
                     // equality above compares like with like.
@@ -13493,7 +13572,7 @@ mod tests {
             .find(r#"if site.fix_for_this_finding != none ["#)
             .expect("the primary branch must gate on fix_for_this_finding first");
         let fix_label_idx = template[primary_idx..]
-            .find(r#"[Fix: ]#fix_body(site.fix_for_this_finding)"#)
+            .find(r#"[#site.fix_type: ]#fix_body(site.fix_for_this_finding)"#)
             .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
         let secondary_idx = template[primary_idx..]
             .find("General guidance: ")

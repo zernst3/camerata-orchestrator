@@ -544,6 +544,9 @@ mod patterns_tests;
 mod merged_site_tests;
 
 #[cfg(test)]
+mod fix_label_tests;
+
+#[cfg(test)]
 mod junk_content_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".

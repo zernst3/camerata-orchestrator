@@ -172,6 +172,10 @@ pub struct FindingRow {
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
     /// authored `remediation` yet.
     fix: Option<String>,
+    /// D8: `"Tailored fix"` (written for this code, passed the checks), `"Standard fix"` (the
+    /// rule's own guidance) or empty (the row carries no fix text). Neutral client wording; one
+    /// definition, [`crate::report_export::fix_type_label`].
+    fix_type: String,
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
@@ -534,6 +538,20 @@ fn partition_rows(
                 .as_deref()
                 .map(crate::report_export::fix_text::plain)
                 .filter(|s| !s.is_empty()),
+            fix_type: {
+                let specific = f
+                    .fix_specific
+                    .as_deref()
+                    .map(crate::report_export::fix_text::plain)
+                    .filter(|s| !s.is_empty());
+                crate::report_export::fix_type_label(
+                    f,
+                    specific.is_some(),
+                    fix.is_some(),
+                    specific.is_some() && specific == fix,
+                )
+                .to_string()
+            },
             fix,
             is_fp,
             fp_reason,
@@ -832,6 +850,9 @@ struct DeviationGroupRow {
     /// The rule's authored, client-facing remediation — one convention, one fix. Blank when
     /// the rule has no authored remediation (never fabricated).
     recommended_fix: String,
+    /// D8: the label for `recommended_fix`. It is always the rule's own guidance, so
+    /// `"Standard fix"`; empty when the rule has no authored remediation.
+    fix_type: String,
 }
 
 /// Group the Deviation rows by rule into the `Deviations` sheet's rows. Sorted worst-severity
@@ -879,6 +900,11 @@ fn build_deviation_groups(
             let sites_represented: usize = group.iter().map(|r| r.site_count).sum();
             let worst_severity = worst_severity_label(&group);
             let recommended_fix = group.iter().find_map(|r| r.fix.clone()).unwrap_or_default();
+            let fix_type = if recommended_fix.is_empty() {
+                String::new()
+            } else {
+                crate::report_export::STANDARD_FIX_LABEL.to_string()
+            };
             DeviationGroupRow {
                 repo,
                 category: group[0].category.clone(),
@@ -890,6 +916,7 @@ fn build_deviation_groups(
                 worst_severity,
                 locations,
                 recommended_fix,
+                fix_type,
             }
         })
         .collect();
@@ -1234,7 +1261,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 28] = [
+const HEADERS: [&str; 29] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1274,11 +1301,14 @@ const HEADERS: [&str; 28] = [
     "Severity adjustments",
     // H11: the earlier inspection a carried-forward row came from.
     "Carried from",
+    // D8: whether the fix is "Tailored fix" (written for this code) or "Standard fix" (the
+    // rule's own guidance).
+    "Fix type",
 ];
 
-const WIDTHS: [f64; 28] = [
+const WIDTHS: [f64; 29] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0,
 ];
 
 /// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
@@ -1386,6 +1416,7 @@ fn write_finding_row(
         &fmts.cell(bg, true, false),
     )?;
     ws.write_string_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
+    ws.write_string_with_format(r, 28, &row.fix_type, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1573,8 +1604,9 @@ fn write_deviations_sheet(
         "Where",
         "Recommended fix",
         "Rule ID",
+        "Fix type",
     ];
-    let mut widths = vec![16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0];
+    let mut widths = vec![16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0, 14.0];
     if multi {
         headers.push("Service");
         widths.push(30.0);
@@ -1624,12 +1656,13 @@ fn write_deviations_sheet(
         ws.write_string_with_format(r, 6, g.locations.join("\n"), &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
+        ws.write_string_with_format(r, 9, &g.fix_type, &fmts.cell(bg, false, false))?;
         if multi {
-            ws.write_string_with_format(r, 9, &g.repo, &fmts.cell(bg, false, false))?;
+            ws.write_string_with_format(r, 10, &g.repo, &fmts.cell(bg, false, false))?;
         }
     }
 
-    ws.autofilter(0, 0, groups.len() as u32, if multi { 9 } else { 8 })?;
+    ws.autofilter(0, 0, groups.len() as u32, if multi { 10 } else { 9 })?;
     ws.set_freeze_panes(1, 0)?;
     Ok(())
 }
@@ -3352,9 +3385,12 @@ mod tests {
         // False-negative audit (M2/M8, H11): 26 -> 28 — "Severity adjustments" and "Carried
         // from" append after "Also found at" (same exception (a): a lowered severity and a
         // carried-forward row must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 28);
+        // D8: 28 -> 29 — "Fix type" appends after "Carried from" (same exception (a): the
+        // label beside each fix must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 29);
         assert_eq!(HEADERS[26], "Severity adjustments");
         assert_eq!(HEADERS[27], "Carried from");
+        assert_eq!(HEADERS[28], "Fix type");
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.

@@ -263,6 +263,51 @@ async fn the_no_code_prefilter_still_applies_on_the_haiku_path() {
     );
 }
 
+/// D8 review: the authored fix the no-code pre-filter ships is a Standard fix, labelled so in every
+/// export. It is not a rejected model fix, so the operator's rejection list does not hold it.
+#[tokio::test]
+async fn the_prefilter_authored_fix_is_labelled_a_standard_fix_and_is_not_a_rejection() {
+    let (corpus, errors) =
+        camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut f = Finding {
+        repo: "o/r".to_string(),
+        path: "supabase/migrations/1.sql".to_string(),
+        line: 0,
+        rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
+        severity: "high".to_string(),
+        snippet: "CREATE TABLE profiles (...)".to_string(),
+        detail: "no RLS evidence for `profiles`".to_string(),
+        ..Finding::default()
+    };
+    f.captures
+        .insert("table".to_string(), "profiles".to_string());
+    let llm = Recorder::default();
+    let (out, failed) = generate_fix_specifics(
+        &llm,
+        "o/r",
+        vec![f],
+        &[],
+        Some(FIX_STAGE_HAIKU_MODEL),
+        None,
+        Some(&corpus),
+    )
+    .await;
+    assert!(llm.requests.lock().unwrap().is_empty(), "no model call");
+    assert!(failed.is_empty());
+    let f = &out[0];
+    assert!(f.fix_specific.is_some());
+    assert_eq!(
+        crate::report_export::fix_type_label(f, true, true, false),
+        crate::report_export::STANDARD_FIX_LABEL
+    );
+    assert!(
+        !f.captures
+            .contains_key(crate::report_export::FIX_REJECTION_CAPTURE),
+        "nothing was rejected"
+    );
+}
+
 /// A finding whose every call failed in transport was never heard from: it is a transport
 /// failure, not a give-up, and it does not enter the give-up rate.
 #[tokio::test]

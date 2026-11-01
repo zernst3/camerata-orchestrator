@@ -37,11 +37,29 @@ pub struct FailureEntry {
     pub resolved_at: Option<String>,
 }
 
+/// A finding that ships the rule's own authored fix (a "Standard fix" in the export) because no
+/// model-written fix passed the checks in any round (D8). Not a failure: the run is complete.
+/// Listed here as a quality signal, since a checker bug can hide behind one (D7 did).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandardFixEntry {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    /// Why the checks turned the model's fix down, secrets scrubbed and capped.
+    pub reasons: String,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureReport {
     pub generated_at: String,
     pub entries: Vec<FailureEntry>,
+    /// Every finding of this run that ships a Standard fix after the checks turned the model's fix
+    /// down in every round. Operator only, like the rest of the file. `serde(default)` so a report
+    /// written before D8 still loads.
+    #[serde(default)]
+    pub standard_fixes: Vec<StandardFixEntry>,
 }
 
 /// The entries for every failed part of `report`. A disclosed scope limit (a tool not run by
@@ -68,15 +86,38 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
             }
         })
         .collect();
+    let standard_fixes = report
+        .findings
+        .iter()
+        .filter(|f| {
+            f.captures
+                .get(crate::report_export::FIX_SOURCE_CAPTURE)
+                .is_some_and(|v| v == crate::report_export::STANDARD_FIX)
+                && f.captures
+                    .contains_key(crate::report_export::FIX_REJECTION_CAPTURE)
+        })
+        .map(|f| StandardFixEntry {
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            rule_id: f.rule_id.clone(),
+            reasons: f
+                .captures
+                .get(crate::report_export::FIX_REJECTION_CAPTURE)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect();
     FailureReport {
         generated_at: crate::client_source::records::now_rfc3339(),
         entries,
+        standard_fixes,
     }
 }
 
 impl FailureReport {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.standard_fixes.is_empty()
     }
 
     /// The entries that still fail.
@@ -121,6 +162,22 @@ impl FailureReport {
                 )
             }
         );
+        if !self.standard_fixes.is_empty() {
+            out.push_str(&format!(
+                "\n## Standard fixes ({})\n\nThese findings ship the rule's own authored fix, \
+                 labelled \"Standard fix\" in the export, because no model-written fix passed \
+                 the checks in any round. The run is complete. A reason that names a real, \
+                 ordinary name is a signal the checker is too strict (defect D7 was one).\n",
+                self.standard_fixes.len()
+            ));
+            for s in &self.standard_fixes {
+                out.push_str(&format!(
+                    "\n- {} {}:{} {}: {}",
+                    s.repo, s.path, s.line, s.rule_id, s.reasons
+                ));
+            }
+            out.push('\n');
+        }
         for (i, e) in self.entries.iter().enumerate() {
             out.push_str(&format!(
                 "\n## {}. {} ({}){}\n\nClass: {}. Files: {}. Attempts: {}.",
@@ -234,6 +291,7 @@ pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> Failu
     FailureReport {
         generated_at: current.generated_at.clone(),
         entries,
+        standard_fixes: current.standard_fixes.clone(),
     }
 }
 
@@ -402,6 +460,57 @@ mod tests {
         );
         let text = std::fs::read_to_string(md).unwrap();
         assert!(text.contains("resolved"), "{text}");
+    }
+
+    fn report_with_a_standard_fix() -> crate::onboard::ScanReport {
+        let mut r = report_with(Vec::new());
+        let mut f = r.findings.remove(0);
+        f.repo = "acme/api".to_string();
+        f.path = "tests/format.test.ts".to_string();
+        f.line = 10;
+        f.fix_specific = Some("The rule's own fix.".to_string());
+        crate::report_export::mark_standard_fix(
+            &mut f,
+            "tests/format.test.ts:10 R-1: you named `zzRejectedName`, which appears neither in \
+             this finding's evidence nor anywhere in the repository",
+        );
+        r.findings = vec![f];
+        r
+    }
+
+    /// D8: a finding that ships a Standard fix is listed for the operator with the reason the
+    /// checks turned the model's fix down, is not a failed part, and keeps the files written
+    /// even though nothing failed.
+    #[test]
+    fn every_standard_fix_is_listed_with_its_rejection_reason_and_is_not_a_failure() {
+        let fr = build(&report_with_a_standard_fix());
+        assert!(fr.entries.is_empty(), "not a failed part");
+        assert!(fr.stderr_lines().is_empty(), "not printed as a failure");
+        assert_eq!(fr.standard_fixes.len(), 1);
+        let s = &fr.standard_fixes[0];
+        assert_eq!((s.path.as_str(), s.line), ("tests/format.test.ts", 10));
+        assert!(s.reasons.contains("zzRejectedName"), "{}", s.reasons);
+        let md = fr.render_md();
+        assert!(md.contains("Standard fixes (1)"), "{md}");
+        assert!(md.contains("zzRejectedName"), "{md}");
+        assert!(md.contains("tests/format.test.ts:10"), "{md}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("x-1234.ledger.json");
+        let (json, _md) = write(&ledger, &fr).unwrap().expect("written");
+        let back: FailureReport =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(back.standard_fixes, fr.standard_fixes);
+        // A report written before this field existed still loads.
+        let old: FailureReport =
+            serde_json::from_str(r#"{"generated_at":"t","entries":[]}"#).unwrap();
+        assert!(old.standard_fixes.is_empty());
+    }
+
+    /// A run with no Standard fix and no failure lists none.
+    #[test]
+    fn a_clean_run_lists_no_standard_fixes() {
+        assert!(build(&report_with(Vec::new())).standard_fixes.is_empty());
     }
 
     #[test]

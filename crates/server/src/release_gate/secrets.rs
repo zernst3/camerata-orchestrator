@@ -162,9 +162,10 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
                 // 2. as one string, which also sees a value whose NAME sits in a neighbouring
                 //    field (a rule id naming a key beside a bare value in the snippet).
                 // The one-string scan invents exactly one false shape: a named secret literal
-                // whose "value" is itself an environment variable NAME, quoted by the JSON
-                // encoding, beside a rule id naming a key (the efficiency run's refused export).
-                // Only that shape is skipped, and only on the one-string pass.
+                // whose "value" is itself a NAME, not a value, beside a rule id naming a key:
+                // an environment variable name (the efficiency run's refused export) or an HTTP
+                // header name such as `Access-Control-Allow-Credentials` (D6, the faktura and
+                // lumen exports). Only that shape is skipped, and only on the one-string pass.
                 Some(value) => {
                     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
                     for p in json_problems(file, &value) {
@@ -177,8 +178,10 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
                         ));
                     }
                     for p in scan_text_except(file, &at, cell, false, &|m, text| {
-                        m.shape == camerata_secrets::SecretShape::NamedSecretLiteral
-                            && is_environment_variable_name(&text[m.value.clone()])
+                        m.shape == camerata_secrets::SecretShape::NamedSecretLiteral && {
+                            let value = &text[m.value.clone()];
+                            is_environment_variable_name(value) || is_http_header_name(value)
+                        }
                     }) {
                         if seen.insert((p.message.clone(), p.evidence.clone())) {
                             problems.push(p);
@@ -205,6 +208,107 @@ fn is_environment_variable_name(value: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         && name.contains('_')
         && name.chars().filter(char::is_ascii_digit).count() < 4
+}
+
+/// Words an HTTP header name is built from (`Access-Control-Allow-Credentials`,
+/// `Strict-Transport-Security`, `Cross-Origin-Opener-Policy`), lower case. A value is a header
+/// name only when EVERY part is one of these, so a passphrase of ordinary words
+/// (`Correct-Horse-Battery-Staple`) or a hyphenated random token is still a credential, and a
+/// header outside the list stays refused (the safe direction: the gate fails closed).
+const HEADER_WORDS: &[&str] = &[
+    "access",
+    "control",
+    "allow",
+    "credentials",
+    "origin",
+    "headers",
+    "methods",
+    "expose",
+    "max",
+    "age",
+    "content",
+    "type",
+    "security",
+    "policy",
+    "strict",
+    "transport",
+    "request",
+    "forwarded",
+    "for",
+    "proto",
+    "host",
+    "cache",
+    "frame",
+    "options",
+    "referrer",
+    "permitted",
+    "cross",
+    "domain",
+    "policies",
+    "embedder",
+    "opener",
+    "resource",
+    "real",
+    "ip",
+    "requested",
+    "with",
+    "accept",
+    "language",
+    "encoding",
+    "disposition",
+    "length",
+    "vary",
+    "etag",
+    "location",
+    "user",
+    "agent",
+    "csrf",
+    "xsrf",
+    "fetch",
+    "site",
+    "dest",
+    "mode",
+    "timing",
+    "report",
+    "only",
+    "private",
+    "network",
+    "local",
+    "x",
+    "upgrade",
+    "insecure",
+    "requests",
+    "public",
+    "pins",
+    "permissions",
+    // `Public-Key-Pins-Report-Only`: the word is a header word only in company with the others,
+    // since every part of a value must be one of these.
+    "key",
+];
+
+/// Whether a matched "value" is an HTTP header NAME: two or more alphabetic words joined by `-`,
+/// all Title-Case or all lower case, every one a header word (see [`HEADER_WORDS`]). No digit,
+/// no mixed case inside a word: the shape of `Access-Control-Allow-Origin`, not of a key.
+fn is_http_header_name(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    let well_cased = |title: bool| {
+        parts.iter().all(|part| {
+            let mut chars = part.chars();
+            let first_ok = chars.next().is_some_and(|c| {
+                if title {
+                    c.is_ascii_uppercase()
+                } else {
+                    c.is_ascii_lowercase()
+                }
+            });
+            first_ok && chars.all(|c| c.is_ascii_lowercase())
+        })
+    };
+    parts.len() >= 2
+        && (well_cased(true) || well_cased(false))
+        && parts
+            .iter()
+            .all(|part| HEADER_WORDS.contains(&part.to_ascii_lowercase().as_str()))
 }
 
 /// The parsed value of a CSV cell holding a nested JSON list or object, as `json_array_to_csv`

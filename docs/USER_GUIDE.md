@@ -1876,6 +1876,17 @@ generated and vendored files.
 - **`findings.json` is the data.** It carries the whole set, every kind included, for anything
   programmatic downstream.
 
+### Tailored fix and Standard fix
+
+Every fix in every file carries one of two labels: **Tailored fix** or **Standard fix**. A Tailored fix
+was written for your code and passed Camerata's checks (every name it mentions exists in your
+code, and it agrees with the finding). A Standard fix is the rule's own guidance, filled in with the
+file and names from the finding. A finding gets a Standard fix when no tailored fix passed the checks,
+or when no tailored fix was written for it. Both are real fixes; the label tells you which kind you
+are reading. The label is in the PDF beside the fix, in the workbook's **Fix type** column, and in the
+`fix_type` field of `findings.json` and of the CSV and JSON files. A finding with no fix text has an
+empty label. A finding that ships a Standard fix does not make the inspection incomplete.
+
 ### The workbook's sheets
 
 Restructured on 2026-10-11 from a single flat findings sheet into one sheet per kind of statement, so
@@ -2006,7 +2017,7 @@ command and has no button for it.
 | 3 | The release gate refused the export. Nothing was written. |
 | 4 | The spend limit stopped the run. Raise the limit and resume. |
 | 5 | The AI service could not be reached (three failed calls in a row, or a login or billing failure). Resume when it is back. |
-| 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. |
+| 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. A finding whose tailored fix never passed the checks does not cause this: it ships a Standard fix and the run is complete. |
 
 Saved runs live in the Camerata state folder under `runs/`, one folder per run, readable only by
 you: they hold model answers derived from the code. Camerata keeps the newest five runs of each

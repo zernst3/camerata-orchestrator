@@ -366,14 +366,16 @@
     #if site.fix_for_this_finding != none or site.fix != none [
       #line(length: 100%, stroke: 0.5pt + line_c)
     ]
+    // D8: the label is the row's `fix_type` ("Tailored fix" or "Standard fix"). A standard fix IS
+    // the rule's own guidance, so the "General guidance" line (the same text) is not repeated.
     #if site.fix_for_this_finding != none [
-      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix_for_this_finding)
-      #if site.fix != none [
+      #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix_for_this_finding)
+      #if site.fix != none and site.fix_type != "Standard fix" [
         #v(0.05cm)
         #text(size: 8.5pt, fill: ink_faint)[General guidance: #fix_body(site.fix)]
       ]
     ] else if site.fix != none [
-      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix)
+      #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix)
     ]
     #v(2pt)
     #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition]

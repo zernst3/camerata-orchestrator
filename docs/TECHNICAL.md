@@ -3045,6 +3045,14 @@ and the rule names of ESLint core and of the `react-hooks`, `react`, `jsx-a11y`,
 `security`, `@next/next` and `@typescript-eslint` plugins. `Number.toCents`, `crypto.makeToken`,
 `react-hooks/hook-order-checker` and `process.env.SOME_SECRET` are still refused.
 
+*Platform environment variables are standard names (D7).* hearth gave up on a finding (and so the
+whole run was incomplete, exit 6) because the model wrote `process.env.TZ` to pin a test's
+timezone: unquoted, the grounding check read it as a file name (stem `process.env`, extension
+`TZ`) found in neither the evidence nor the repository, on every round. `fix_standard_names` now
+holds a short exact list of variables the operating system or Node defines (`TZ`, `NODE_ENV`,
+`NODE_OPTIONS`, `PATH`, `HOME`, `CI`, `LANG` and a few more), accepted as `process.env.NAME` however
+they are written; an application's own variable is still a name to ground.
+
 *The fix stage asks only about faults (D2).* A row of an informational kind
 (`FindingKind::is_informational`: convention observed, no convention, not assessed) has no
 defect to fix. The fix prompt tells the model to omit an id it cannot ground, and the stage
@@ -3940,6 +3948,17 @@ object BOTH ways and reports the union: parsed and walked string by string as it
 one-string pass only, is a named secret literal whose "value" is itself an environment variable
 name (upper case, underscores, fewer than four digits). A real key inside the cell, quoted,
 escaped, nested or split from its name across fields, is still found.
+
+*An HTTP header name is not a credential (D6).* The faktura and lumen exports were refused on the
+`also_locations` cell: a merged CORS site whose snippet names `Access-Control-Allow-Credentials`
+(32 characters) or `Access-Control-Allow-Origin` (27) beside a rule id ending in `CREDENTIALS`
+read, on the one-string pass, as a secret literal whose value is the header name. That pass now
+also skips a value that is an HTTP header name: two or more alphabetic words joined by `-`, all
+Title-Case or all lower case, EVERY word taken from a fixed list of header words
+(`HEADER_WORDS`). The list is closed on purpose: an unlisted header stays refused (the gate fails
+closed), and `Correct-Horse-Battery-Staple`, a hyphenated random token, or a real key next to a
+header name in the same snippet or the next site are all still found. Tests use the two stored
+cells and the planted-key cases.
 
 **Known limits.** A finding's `path` and `repo` are not rewritten (a file named after a key is
 caught by the gate, not redacted). Calls that pass `repo_read_dir` give the model on-demand read
@@ -6271,6 +6290,38 @@ production build and see the warning and the note instead.
 
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
+
+**Standard fixes (D8).** A finding the fix model ANSWERED and the checks (identifier grounding,
+contradiction, methodology leak) turned down in every round, the single-finding retry included, is
+not a failed part. The rule's own authored remediation, instantiated against the finding's own
+identifiers, ships in `fix_specific`, and the finding is marked in two `captures` keys
+(`report_export::FIX_SOURCE_CAPTURE` = `standard`, `FIX_REJECTION_CAPTURE` = the reasons, secrets
+scrubbed and capped). The run is complete: exit 0. Fix work that never ran stays a failed part, so
+the run stays incomplete and resumable: a call that failed in transport, or one the spend limit or
+an outage stop refused. A rejected finding whose rule has no authored remediation has nothing to
+ship as a Standard fix and also stays a failed part (the row is held for review). "Rejected every
+round" means the LAST attempt was an answer that the checks turned down: a finding answered once and
+then lost to transport or the spend limit in a later round is a failed part. A finding that stays a
+failed part gets no fix written into `fix_specific`: the scan cache carries a finding forward and the
+next inspection's fix stage skips one that has a fix, so a pre-filled one would be labelled tailored
+and never be asked of the model; the export shows the rule's own fix for it as a Standard fix. The
+no-code pre-filter's authored fix is marked a Standard fix too (with no rejection reason). A row with
+no mark at all (an old saved run, an old scan cache, a carried-forward row) whose `fix_specific`
+equals the rule's authored text, as the export prints it, is labelled a Standard fix by that
+equality. A primary that inherits a merged member's fix inherits the marker with it. Every export labels each fix with
+`report_export::fix_type_label`: "Tailored fix" (a `fix_specific` that is not marked), "Standard fix"
+(the marked one, or a row with only the rule's own `fix`), or empty (no fix text). The label is the
+`fix_type` field of every `findings.json` row and every row of `json/all-findings.json` and its CSV,
+of `json/deviations.json` (always "Standard fix", the rule's own guidance) and of each curated site
+in the PDF's data; the workbook has a "Fix type" column on the findings sheets and the Deviations
+sheet, and the PDF prints the label in front of the fix. The release gate's dataset check demands
+it: a row with a fix and no `fix_type`, a label other than the two, or a label that does not match the
+fix the row carries is refused. The reasons the checks gave never reach a client file (a test pins
+it, and pins that the label wording holds no word like failed, fallback, rejected or incomplete).
+The operator's failure report lists every Standard fix of the run in a `standard_fixes` section of
+`failures.json` and under "Standard fixes" in `failures.md`, each with its reasons, as a quality
+signal: a reason that names a plain, real name means a checker is too strict (D7 was one). It is not
+a failure and is not printed as one.
 
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
 attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An

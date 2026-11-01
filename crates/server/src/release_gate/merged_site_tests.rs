@@ -221,3 +221,98 @@ fn an_environment_variable_name_beside_a_key_rule_id_in_a_csv_cell_is_clean() {
 fn csv_quote(cell: &str) -> String {
     format!("\"{}\"", cell.replace('"', "\"\""))
 }
+
+/// Defect D6, the exact cells of the Saturday accuracy runs: a merged site whose snippet is a
+/// CORS header NAME (`Access-Control-Allow-Credentials`, `Access-Control-Allow-Origin`) beside
+/// a rule id that names credentials. Scanned as one string, the rule id reads as the name of a
+/// secret and the header name (32 and 27 characters, hyphen-joined words) as its value; the gate
+/// refused the faktura and lumen exports on `also_locations`. A header name is not a credential.
+#[test]
+fn an_http_header_name_beside_a_credentials_rule_id_in_a_csv_cell_is_clean() {
+    let cells = [
+        // faktura: the redacted evidence was "...ials (32 chars)".
+        serde_json::json!([{
+            "repo": "faktura", "path": "app/clients/search/route.ts", "line": 19,
+            "rule_id": "AI-PERMISSIVE-CORS-WITH-CREDENTIALS",
+            "snippet": "'Access-Control-Allow-Credentials': 'true',",
+            "consequence": false, "severity": "high",
+            "headline": "Arbitrary Origin reflected with Allow-Credentials true"
+        }]),
+        // lumen: the redacted evidence was "...igin (27 chars)".
+        serde_json::json!([{
+            "repo": "lumen", "path": "middleware.ts", "line": 40,
+            "rule_id": "AI-CORS-ORIGIN-REFLECTION-WITH-CREDENTIALS",
+            "snippet": "res.headers.set('Access-Control-Allow-Origin', req.headers.get('origin') ?? '*')",
+            "consequence": false, "severity": "high",
+            "headline": "CORS reflects any Origin (or '*') with Allow-Credentials true on all /api routes"
+        }]),
+    ];
+    for cell in cells {
+        let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+        let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+        assert!(problems.is_empty(), "{cell}: {problems:?}");
+    }
+}
+
+/// The header-name exemption must not be a way past the gate: a real key beside a header name, in
+/// the same snippet or in the next site, is still refused, as is a header-shaped passphrase made
+/// of ordinary words and a mixed-case hyphenated random token.
+#[test]
+fn a_real_key_beside_an_http_header_name_in_a_csv_cell_is_still_blocked() {
+    let key = "Qm3vX9pL2sKd8Rt4Wn7Yz1Hb5Jc0Tf6";
+    let cells = [
+        serde_json::json!([{
+            "rule_id": "AI-PERMISSIVE-CORS-WITH-CREDENTIALS",
+            "snippet": "'Access-Control-Allow-Credentials': 'true',"
+        }, {
+            "rule_id": "SEC-API-KEY-1", "snippet": key
+        }]),
+        serde_json::json!([{
+            "rule_id": "AI-PERMISSIVE-CORS-WITH-CREDENTIALS",
+            "snippet": format!("'Access-Control-Allow-Credentials': 'true', apiKey: '{key}'")
+        }]),
+        // A passphrase shaped like a header name, named by a credentials rule id.
+        serde_json::json!([{
+            "rule_id": "SEC-HARDCODED-CREDENTIALS-1",
+            "snippet": "password = 'Correct-Horse-Battery-Staple-Mountain'"
+        }]),
+        // Hyphen-joined random chunks that only look like words.
+        serde_json::json!([{
+            "rule_id": "SEC-HARDCODED-CREDENTIALS-1",
+            "snippet": "token = 'Qm3vX9-pL2sKd8-Rt4Wn7-Yz1Hb5Jc0'"
+        }]),
+    ];
+    for cell in cells {
+        let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+        let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+        assert!(!problems.is_empty(), "missed in {cell}");
+        let shown = format!("{problems:?}");
+        assert!(!shown.contains(key), "{shown}");
+    }
+}
+
+/// D6 review: the other security header names a merged CORS or hardening site can quote, beside a
+/// rule id that names a key, a token, a secret or a credential, are not credentials either.
+#[test]
+fn more_http_header_names_beside_a_secret_naming_rule_id_in_a_csv_cell_are_clean() {
+    for header in [
+        "X-Permitted-Cross-Domain-Policies",
+        "Upgrade-Insecure-Requests",
+        "Public-Key-Pins-Report-Only",
+    ] {
+        for rule in [
+            "SEC-HARDCODED-KEY-1",
+            "SEC-TOKEN-IN-HEADER-1",
+            "SEC-SECRET-LEAK-1",
+            "AI-WEAK-CREDENTIALS-HEADERS",
+        ] {
+            let cell = serde_json::json!([{
+                "rule_id": rule,
+                "snippet": format!("res.setHeader('{header}', value)"),
+            }]);
+            let csv = format!("id,also_locations\n1,{}\n", csv_quote(&cell.to_string()));
+            let problems = secrets::csv_problems("csv/all-findings.csv", csv.as_bytes());
+            assert!(problems.is_empty(), "{header} beside {rule}: {problems:?}");
+        }
+    }
+}
