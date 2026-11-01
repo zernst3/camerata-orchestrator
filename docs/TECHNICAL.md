@@ -6291,6 +6291,30 @@ production build and see the warning and the note instead.
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
 
+**Standard fixes (D8).** A finding the fix model ANSWERED and the checks (identifier grounding,
+contradiction, methodology leak) turned down in every round, the single-finding retry included, is
+not a failed part. The rule's own authored remediation, instantiated against the finding's own
+identifiers, ships in `fix_specific`, and the finding is marked in two `captures` keys
+(`report_export::FIX_SOURCE_CAPTURE` = `standard`, `FIX_REJECTION_CAPTURE` = the reasons, secrets
+scrubbed and capped). The run is complete: exit 0. Fix work that never ran stays a failed part, so
+the run stays incomplete and resumable: a call that failed in transport, or one the spend limit or
+an outage stop refused. A rejected finding whose rule has no authored remediation has nothing to
+ship as a Standard fix and also stays a failed part (the row is held for review). A primary that
+inherits a merged member's fix inherits the marker with it. Every export labels each fix with
+`report_export::fix_type_label`: "Tailored fix" (a `fix_specific` that is not marked), "Standard fix"
+(the marked one, or a row with only the rule's own `fix`), or empty (no fix text). The label is the
+`fix_type` field of every `findings.json` row and every row of `json/all-findings.json` and its CSV,
+of `json/deviations.json` (always "Standard fix", the rule's own guidance) and of each curated site
+in the PDF's data; the workbook has a "Fix type" column on the findings sheets and the Deviations
+sheet, and the PDF prints the label in front of the fix. The release gate's dataset check demands
+it: a row with a fix and no `fix_type`, a label other than the two, or a label that does not match the
+fix the row carries is refused. The reasons the checks gave never reach a client file (a test pins
+it, and pins that the label wording holds no word like failed, fallback, rejected or incomplete).
+The operator's failure report lists every Standard fix of the run in a `standard_fixes` section of
+`failures.json` and under "Standard fixes" in `failures.md`, each with its reasons, as a quality
+signal: a reason that names a plain, real name means a checker is too strict (D7 was one). It is not
+a failure and is not printed as one.
+
 **Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
 attempts as history: a part that a later attempt completed stays with a `resolved_at` time. An
 attempt of a part whose replies came back and were turned down lists why in `rejections`, one line
