@@ -1208,6 +1208,10 @@ pub struct CuratedSiteJson {
     /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
     /// line, so the row never ships with no fix at all.
     pub fix_for_this_finding: Option<String>,
+    /// D8: the label printed beside this site's fix, [`TAILORED_FIX_LABEL`] or
+    /// [`STANDARD_FIX_LABEL`] (see [`fix_type_label`]); empty when the site carries no fix text.
+    /// The same value `findings.json` and the datasets carry in `fix_type`.
+    pub fix_type: String,
     /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
     /// (`Finding::also_locations`, verbatim) — carried in the PDF's own data so the three
     /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
@@ -5075,6 +5079,14 @@ pub fn build_report_json(
                             generic
                         }
                     },
+                    // D8: the label beside the fix, from the same two facts the fields above
+                    // were built from (the specific fix and the rule's own authored one).
+                    fix_type: fix_type_label(
+                        f,
+                        specific_fix.is_some(),
+                        resolve_fix(&rule_id, corpus, f, chosen_option_for_rule).is_some(),
+                    )
+                    .to_string(),
                     // The model's text gets the same wrap-joining as the authored text, so the
                     // equality above compares like with like.
                     fix_for_this_finding: specific_fix,
@@ -13539,7 +13551,7 @@ mod tests {
             .find(r#"if site.fix_for_this_finding != none ["#)
             .expect("the primary branch must gate on fix_for_this_finding first");
         let fix_label_idx = template[primary_idx..]
-            .find(r#"[Fix: ]#fix_body(site.fix_for_this_finding)"#)
+            .find(r#"[#site.fix_type: ]#fix_body(site.fix_for_this_finding)"#)
             .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
         let secondary_idx = template[primary_idx..]
             .find("General guidance: ")

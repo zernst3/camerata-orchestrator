@@ -1255,7 +1255,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 28] = [
+const HEADERS: [&str; 29] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1295,11 +1295,14 @@ const HEADERS: [&str; 28] = [
     "Severity adjustments",
     // H11: the earlier inspection a carried-forward row came from.
     "Carried from",
+    // D8: whether the fix is "Tailored fix" (written for this code) or "Standard fix" (the
+    // rule's own guidance).
+    "Fix type",
 ];
 
-const WIDTHS: [f64; 28] = [
+const WIDTHS: [f64; 29] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0,
 ];
 
 /// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
@@ -1407,6 +1410,7 @@ fn write_finding_row(
         &fmts.cell(bg, true, false),
     )?;
     ws.write_string_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
+    ws.write_string_with_format(r, 28, &row.fix_type, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1594,8 +1598,9 @@ fn write_deviations_sheet(
         "Where",
         "Recommended fix",
         "Rule ID",
+        "Fix type",
     ];
-    let mut widths = vec![16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0];
+    let mut widths = vec![16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0, 14.0];
     if multi {
         headers.push("Service");
         widths.push(30.0);
@@ -1645,12 +1650,13 @@ fn write_deviations_sheet(
         ws.write_string_with_format(r, 6, g.locations.join("\n"), &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
         ws.write_string_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
+        ws.write_string_with_format(r, 9, &g.fix_type, &fmts.cell(bg, false, false))?;
         if multi {
-            ws.write_string_with_format(r, 9, &g.repo, &fmts.cell(bg, false, false))?;
+            ws.write_string_with_format(r, 10, &g.repo, &fmts.cell(bg, false, false))?;
         }
     }
 
-    ws.autofilter(0, 0, groups.len() as u32, if multi { 9 } else { 8 })?;
+    ws.autofilter(0, 0, groups.len() as u32, if multi { 10 } else { 9 })?;
     ws.set_freeze_panes(1, 0)?;
     Ok(())
 }
@@ -3373,9 +3379,12 @@ mod tests {
         // False-negative audit (M2/M8, H11): 26 -> 28 — "Severity adjustments" and "Carried
         // from" append after "Also found at" (same exception (a): a lowered severity and a
         // carried-forward row must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 28);
+        // D8: 28 -> 29 — "Fix type" appends after "Carried from" (same exception (a): the
+        // label beside each fix must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 29);
         assert_eq!(HEADERS[26], "Severity adjustments");
         assert_eq!(HEADERS[27], "Carried from");
+        assert_eq!(HEADERS[28], "Fix type");
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.

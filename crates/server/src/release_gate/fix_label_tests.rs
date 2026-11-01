@@ -217,3 +217,64 @@ enum Tamper {
     Remove,
     Rename,
 }
+
+/// The workbook's All Findings sheet carries the same label beside each fix.
+#[test]
+fn the_workbook_labels_each_fix_beside_the_fix() {
+    let package = package_for(report("Raw SQL built by string formatting."));
+    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let header = &grid[0];
+    let col = |name: &str| {
+        header
+            .iter()
+            .position(|h| h == name)
+            .unwrap_or_else(|| panic!("no column {name:?} in {header:?}"))
+    };
+    let (fix_col, type_col) = (col("Fix (specific to this finding)"), col("Fix type"));
+    let mut seen = BTreeMap::new();
+    for row in &grid[1..] {
+        seen.insert(row[fix_col].clone(), row[type_col].clone());
+    }
+    assert_eq!(
+        seen["Bind the value as a parameter in db.rs instead of formatting it in."],
+        TAILORED_FIX_LABEL
+    );
+    assert_eq!(
+        seen["Use a parameterized query for the SQL built at this place."],
+        STANDARD_FIX_LABEL
+    );
+    assert_eq!(seen[""], "");
+}
+
+/// The PDF prints the same label in front of each fix. The curated sites of the PDF's data carry
+/// it in `fix_type`, and the compiled PDF (when Typst is installed) shows it.
+#[tokio::test]
+async fn the_pdf_labels_each_fix_in_its_data_and_in_the_rendered_page() {
+    let sealed = report("Raw SQL built by string formatting.").seal();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &client_options());
+    let labels: BTreeMap<usize, String> = json
+        .curated_findings
+        .iter()
+        .chain(&json.held_for_review_findings)
+        .flat_map(|group| group.sites.iter())
+        .map(|site| (site.line, site.fix_type.clone()))
+        .collect();
+    assert_eq!(labels[&10], TAILORED_FIX_LABEL, "{labels:?}");
+    assert_eq!(labels[&20], STANDARD_FIX_LABEL, "{labels:?}");
+    assert_eq!(labels[&30], "", "{labels:?}");
+
+    if std::process::Command::new("typst")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping the rendered-page leg: typst is not on PATH");
+        return;
+    }
+    let pdf = crate::report_export::compile_pdf(&json)
+        .await
+        .expect("the PDF compiles");
+    let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF text");
+    assert!(text.contains("Tailored fix:"), "{text:?}");
+    assert!(text.contains("Standard fix:"), "{text:?}");
+}
