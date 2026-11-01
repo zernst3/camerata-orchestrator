@@ -475,7 +475,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 28] = [
+const FINDING_HEADERS: [&str; 29] = [
     "Severity",
     "Headline",
     "Repo",
@@ -504,9 +504,10 @@ const FINDING_HEADERS: [&str; 28] = [
     "Also found at",
     "Severity adjustments",
     "Carried from",
+    "Fix type",
 ];
 
-const FINDING_RENDERED: [&str; 26] = [
+const FINDING_RENDERED: [&str; 27] = [
     "severity",
     "headline",
     "repo",
@@ -533,6 +534,7 @@ const FINDING_RENDERED: [&str; 26] = [
     "kind",
     "severity_adjustments",
     "carried_from",
+    "fix_type",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -560,7 +562,7 @@ const FINDING_EXTRA_KEYS: [&str; 12] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 30] = [
+const FINDING_BASE_KEYS: [&str; 31] = [
     "severity",
     "headline",
     "repo",
@@ -589,6 +591,7 @@ const FINDING_BASE_KEYS: [&str; 30] = [
     "site_count",
     "severity_adjustments",
     "carried_from",
+    "fix_type",
     "is_fp",
     "fp_reason",
 ];
@@ -665,6 +668,7 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
         locations_text(row),
         text(row, "severity_adjustments"),
         text(row, "carried_from"),
+        text(row, "fix_type"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));
@@ -795,6 +799,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
             "locations",
             "recommended_fix",
             "rule_id",
+            "fix_type",
         ],
         &[],
     );
@@ -808,6 +813,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
         "Where",
         "Recommended fix",
         "Rule ID",
+        "Fix type",
     ];
     let expected: Vec<Vec<String>> = rows
         .iter()
@@ -832,6 +838,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
                     .join("\n"),
                 text(r, "recommended_fix"),
                 text(r, "rule_id"),
+                text(r, "fix_type"),
             ]
         })
         .collect();
