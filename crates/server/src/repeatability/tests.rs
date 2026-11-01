@@ -191,7 +191,13 @@ fn the_diff_serializes_every_table() {
 #[test]
 fn the_same_defect_quoted_two_lines_apart_matches_by_site() {
     let first = vec![ai("SUPA-X-1", "src/a.ts", 15, "high", "const k = key;")];
-    let second = vec![ai("SUPA-X-1", "src/a.ts", 17, "high", "export const k = key")];
+    let second = vec![ai(
+        "SUPA-X-1",
+        "src/a.ts",
+        17,
+        "high",
+        "export const k = key",
+    )];
     let diff = diff_runs(&first, &second);
     assert_eq!(diff.matched, 0, "the fingerprint count is unchanged");
     assert_eq!(diff.matched_by_site, 1);
