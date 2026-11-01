@@ -1871,6 +1871,52 @@ fn adopted_near_match(norm: &str, adopted: &std::collections::HashSet<String>) -
         .cloned()
 }
 
+/// The fewest characters a label needs before a typo match is tried: a short id sits within
+/// two edits of too many others to mean one.
+const TYPO_MATCH_MIN_LEN: usize = 12;
+
+/// The most edits (insert, delete, substitute) between a label and an adopted id for the label
+/// to be read as a typo of it.
+const TYPO_MATCH_MAX_EDITS: usize = 2;
+
+/// The adopted rule id a mistyped label means (R1B-3): the one adopted id within
+/// [`TYPO_MATCH_MAX_EDITS`] edits of the label (`JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1`
+/// for `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1`). Two or more adopted ids that close, no
+/// adopted id that close, a short or unhyphenated label or one naming a placeholder: `None`, so
+/// the label keeps its `AI-` invented id and the junk filter still sees a placeholder.
+fn adopted_typo_match(norm: &str, adopted: &std::collections::HashSet<String>) -> Option<String> {
+    if norm.len() < TYPO_MATCH_MIN_LEN
+        || !norm.contains('-')
+        || crate::junk_finding::is_placeholder_rule_id(norm)
+    {
+        return None;
+    }
+    let mut close = adopted.iter().filter(|a| {
+        a.len() >= TYPO_MATCH_MIN_LEN
+            && a.len().abs_diff(norm.len()) <= TYPO_MATCH_MAX_EDITS
+            && edit_distance(norm, a) <= TYPO_MATCH_MAX_EDITS
+    });
+    match (close.next(), close.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// The Levenshtein distance between two ASCII-or-not strings, counted in characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != *cb);
+            cur.push(substitute.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 /// A model-written line number (M5): a number, a numeric string, `L42`, `line 42`, or a range such as
 /// `42-47` (its first line). Anything else is 0, "no line".
 fn parse_model_line(v: &serde_json::Value) -> usize {
@@ -1930,6 +1976,8 @@ pub fn parse_ai_findings(
                 near
             } else if let Some(canon) = canonical_adopted_rule(&norm, adopted) {
                 canon
+            } else if let Some(typo) = adopted_typo_match(&norm, adopted) {
+                typo
             } else {
                 format!("AI-{norm}")
             };
@@ -14687,6 +14735,72 @@ mod tests {
         let (findings, _) = parse_ai_findings("me/api", raw, &none);
         assert_eq!(findings.len(), 1, "{findings:#?}");
         assert_eq!(findings[0].line, 12);
+    }
+
+    /// R1B-3: a rule id the model mistyped by one or two characters is keyed to the one adopted
+    /// rule it is closest to (`TYPESRIPT` for `TYPESCRIPT`), not left as an `AI-` invented id.
+    #[test]
+    fn parse_ai_findings_canonicalises_a_typo_to_the_one_adopted_rule_within_two_edits() {
+        let adopted: std::collections::HashSet<String> = [
+            "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1".to_string(),
+            "JAVASCRIPT-TYPESCRIPT-NO-ANY-1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":3,"rule":"JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1",
+            "title":"Non-null assertion","code":"user!.id","detail":"The assertion hides a null."}],
+            "proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(
+            findings[0].rule_id,
+            "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
+        );
+    }
+
+    /// R1B-3: an id within two edits of TWO adopted ids is ambiguous, so it keeps today's
+    /// behaviour (the `AI-` invented id); so does an id with no adopted id that close.
+    #[test]
+    fn parse_ai_findings_leaves_an_ambiguous_or_distant_typo_as_an_invented_id() {
+        let adopted: std::collections::HashSet<String> = [
+            "SUPABASE-STORAGE-BUCKET-POLICY-A-1".to_string(),
+            "SUPABASE-STORAGE-BUCKET-POLICY-B-1".to_string(),
+            "SUPABASE-AUTH-SESSION-REFRESH-ROTATION-1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        // One edit from both policy ids: ambiguous, so not canonicalised.
+        let ambiguous = "SUPABASE-STORAGE-BUCKET-POLICY-C-1";
+        assert_eq!(adopted_typo_match(ambiguous, &adopted), None);
+        assert_eq!(
+            adopted_typo_match("SUPABASE-AUTH-SESSION-REFRESH-ROTATON-1", &adopted),
+            Some("SUPABASE-AUTH-SESSION-REFRESH-ROTATION-1".to_string()),
+            "one adopted id within two edits"
+        );
+        for rule in [ambiguous, "SUPABASE-AUTH-SESSION-TIMEOUT-HANDLING-1"] {
+            let raw = format!(
+                r#"{{"findings":[{{"path":"a.ts","line":3,"rule":"{rule}",
+                "title":"A real title","code":"x.y()","detail":"A real explanation."}}],
+                "proposed_rules":[]}}"#
+            );
+            let (findings, _) = parse_ai_findings("me/api", &raw, &adopted);
+            assert_eq!(findings.len(), 1, "{findings:#?}");
+            assert_eq!(findings[0].rule_id, format!("AI-{rule}"));
+        }
+    }
+
+    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still drops it.
+    #[test]
+    fn parse_ai_findings_does_not_canonicalise_a_placeholder_id_onto_an_adopted_rule() {
+        let adopted: std::collections::HashSet<String> =
+            ["JAVASCRIPT-TYPESCRIPT-PLACEHOLDER-1".to_string()]
+                .into_iter()
+                .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":3,"rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER-1",
+            "title":"A real title","code":"user!.id","detail":"A real explanation."}],
+            "proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 
     /// D1: each junk shape is refused on its own (an empty reply for code and detail, a
