@@ -211,21 +211,20 @@ fn a_site_match_needs_the_same_rule_path_and_a_line_inside_the_window() {
     let base = ai("SUPA-X-1", "src/a.ts", 15, "high", "one");
     let window = crate::ai_audit::SEMANTIC_MERGE_WINDOW;
 
+    let one = std::slice::from_ref(&base);
+
     let mut edge = ai("SUPA-X-1", "src/a.ts", 15 + window, "high", "two");
-    assert_eq!(
-        diff_runs(&[base.clone()], &[edge.clone()]).matched_by_site,
-        1
-    );
+    assert_eq!(diff_runs(one, &[edge.clone()]).matched_by_site, 1);
     edge.line = 15 + window + 1;
-    let beyond = diff_runs(&[base.clone()], &[edge]);
+    let beyond = diff_runs(one, &[edge]);
     assert_eq!(beyond.matched_by_site, 0);
     assert_eq!(beyond.only_in_first.len(), 1);
     assert_eq!(beyond.only_in_second.len(), 1);
 
     let other_rule = ai("SUPA-Y-1", "src/a.ts", 16, "high", "two");
-    assert_eq!(diff_runs(&[base.clone()], &[other_rule]).matched_by_site, 0);
+    assert_eq!(diff_runs(one, &[other_rule]).matched_by_site, 0);
     let other_path = ai("SUPA-X-1", "src/b.ts", 16, "high", "two");
-    assert_eq!(diff_runs(&[base], &[other_path]).matched_by_site, 0);
+    assert_eq!(diff_runs(one, &[other_path]).matched_by_site, 0);
 }
 
 #[test]
