@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use camerata::inspect_cmd::{
     resume_inspect, run_inspect_pipeline_with, InspectArgs, InspectError, InspectOutcome, Seams,
-    EXIT_INCOMPLETE_RUN, EXIT_OUTAGE_STOPPED,
+    EXIT_INCOMPLETE_RUN, EXIT_OUTAGE_STOPPED, EXIT_RELEASE_BLOCKED,
 };
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse, ProjectBackend};
 use camerata_server::run_store::journal::classify;
@@ -32,6 +32,8 @@ struct Outage {
     scan_of: Option<&'static str>,
     /// Every scan call whose prompt frames this file gets an answer that holds no JSON.
     malformed_scan_of: Option<&'static str>,
+    /// Every scan answer quotes a line that is in no file.
+    fabricate_quotes: bool,
 }
 
 struct Scripted {
@@ -89,14 +91,26 @@ impl Scripted {
         let text = match kind {
             _ if malformed => "I could not produce a JSON answer for these files.".to_string(),
             PartKind::Scan => {
+                // Each finding quotes the real first line of the file the request frames: the
+                // engine checks that quoted evidence exists, so a made-up quote is held.
+                let first_lines = first_lines_of_framed_files(&req.prompt);
                 let findings: Vec<serde_json::Value> = files
                     .iter()
                     .map(|path| {
+                        let (line, code) = first_lines
+                            .get(path)
+                            .cloned()
+                            .unwrap_or((1, "// FIXTURE".to_string()));
+                        let code = if down.fabricate_quotes {
+                            "this line is in no file".to_string()
+                        } else {
+                            code
+                        };
                         serde_json::json!({
-                            "path": path, "line": 1, "severity": "medium",
+                            "path": path, "line": line, "severity": "medium",
                             "rule": "unchecked-input",
                             "title": format!("Input is not checked in {path}"),
-                            "code": "// FIXTURE",
+                            "code": code,
                             "detail": format!("{path} passes input on without checking it."),
                         })
                     })
@@ -152,6 +166,38 @@ impl Scripted {
             truncated: false,
         })
     }
+}
+
+/// The first non-blank line of each file a request frames, with its line number: the request
+/// shows a file as `<<<UNTRUSTED token "path">>>`, then its lines as `   N| text`.
+fn first_lines_of_framed_files(prompt: &str) -> BTreeMap<String, (usize, String)> {
+    let mut out = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in prompt.lines() {
+        if let Some(rest) = line.strip_prefix("<<<UNTRUSTED ") {
+            current = rest
+                .split_once(' ')
+                .map(|(_, label)| label.trim_end_matches(">>>"))
+                .and_then(|label| serde_json::from_str::<String>(label).ok());
+            continue;
+        }
+        if line.starts_with("<<<END UNTRUSTED") {
+            current = None;
+            continue;
+        }
+        let Some(path) = &current else { continue };
+        if out.contains_key(path) {
+            continue;
+        }
+        if let Some((number, text)) = line.split_once("| ") {
+            if let Ok(n) = number.trim().parse::<usize>() {
+                if !text.trim().is_empty() {
+                    out.insert(path.clone(), (n, text.trim().to_string()));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -505,6 +551,44 @@ fn the_run_id(err: &InspectError) -> String {
         InspectError::IncompleteRun(run) => run.run_id.clone().expect("the run was saved"),
         other => panic!("expected a refused export, got {other}"),
     }
+}
+
+/// The model quotes lines that are in no file. The run itself completes (every stage ran), and
+/// only the release is refused: exit 3, the gate names each row, and no zip is written.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_fabricated_quote_refuses_the_release_with_exit_3_and_names_the_row() {
+    if !typst_available("a_fabricated_quote_refuses_the_release") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("blocked.zip");
+    let model = Scripted::new(Outage {
+        fabricate_quotes: true,
+        ..Outage::default()
+    });
+    let err = run(&model, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("a row quoting a line that does not exist is not released");
+    assert_eq!(err.exit_code(), EXIT_RELEASE_BLOCKED);
+    match &err {
+        InspectError::ReleaseBlocked(failure) => {
+            let text = failure.to_string();
+            assert!(text.contains("Cargo.toml line 1"), "{text}");
+            assert!(text.contains("src/lib.rs line 1"), "{text}");
+            assert!(text.contains("AI-UNCHECKED-INPUT"), "{text}");
+            assert!(text.contains("no reviewer decision"), "{text}");
+        }
+        other => panic!("expected the release to be blocked, got {other}"),
+    }
+    assert!(!export.exists(), "no zip is written");
+    // The run itself completed: the scan, calibration and fix stages all ran.
+    assert!(model.sent_of(PartKind::Scan) > 0);
+    assert!(model.sent_of(PartKind::Calibration) > 0);
+    assert!(model.sent_of(PartKind::Fix) > 0);
 }
 
 /// One repo, the fix stage down: the export is refused, nothing is written; after the provider is
