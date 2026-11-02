@@ -610,6 +610,273 @@ fn cap_snippet_for_workbook(snippet: &str) -> String {
     out
 }
 
+// ── M8: cells that fit, and every site on the Sites sheet ───────────────────────────
+
+/// Excel refuses a cell over 32,767 characters, and `rust_xlsxwriter` turns that into an error
+/// that aborts the whole export. Nothing may be written past this, so it sits a little under the
+/// limit to leave room for the pointer text.
+const WORKBOOK_CELL_HARD_MAX_CHARS: usize = 30_000;
+
+/// The most a cell that lists sites shows before the rest goes to the Sites sheet. Far under the
+/// hard limit: a cell of 30,000 characters cannot be read, and the sheet beside it can.
+const SITE_LIST_CELL_MAX_CHARS: usize = 8_000;
+
+/// The sheet that holds one row per site, so a cell that lists many can point at it by name.
+/// Reserved before any area sheet is named, so no area can take the name.
+pub const SITES_SHEET: &str = "Sites";
+
+/// Data rows per Sites sheet. A sheet holds 1,048,576 rows including the header; a report with
+/// more sites than this continues on "Sites (2)" and so on rather than dropping any.
+const SITES_SHEET_MAX_ROWS: usize = 1_000_000;
+
+/// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
+/// `findings.json` and the `json/` and `csv/` files of the same export, none of which has a cell
+/// limit.
+const CELL_CUT_POINTER: &str = "\n[cut to fit Excel's 32,767-character cell limit: the full text \
+     is in findings.json and the json/ and csv/ files of this export]";
+
+/// `text` as a cell may hold it: unchanged when it fits, otherwise cut on a character boundary
+/// with [`CELL_CUT_POINTER`] at the end. The last line of defence for every cell this module
+/// writes, so no input can abort the export. Site lists do not rely on it: [`site_list_cell`]
+/// moves them whole to the Sites sheet instead.
+fn fit_cell(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().count() <= WORKBOOK_CELL_HARD_MAX_CHARS {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let keep = WORKBOOK_CELL_HARD_MAX_CHARS - CELL_CUT_POINTER.chars().count();
+    let mut out: String = text.chars().take(keep).collect();
+    out.push_str(CELL_CUT_POINTER);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Every string this module writes goes through here, so an oversized value is cut with a
+/// pointer rather than failing the workbook.
+trait CellText {
+    fn write_text(
+        &mut self,
+        row: u32,
+        col: u16,
+        text: impl AsRef<str>,
+    ) -> Result<&mut Worksheet, XlsxError>;
+    fn write_text_with_format(
+        &mut self,
+        row: u32,
+        col: u16,
+        text: impl AsRef<str>,
+        format: &Format,
+    ) -> Result<&mut Worksheet, XlsxError>;
+}
+
+impl CellText for Worksheet {
+    fn write_text(
+        &mut self,
+        row: u32,
+        col: u16,
+        text: impl AsRef<str>,
+    ) -> Result<&mut Worksheet, XlsxError> {
+        self.write_string(row, col, fit_cell(text.as_ref()).into_owned())
+    }
+
+    fn write_text_with_format(
+        &mut self,
+        row: u32,
+        col: u16,
+        text: impl AsRef<str>,
+        format: &Format,
+    ) -> Result<&mut Worksheet, XlsxError> {
+        self.write_string_with_format(row, col, fit_cell(text.as_ref()).into_owned(), format)
+    }
+}
+
+/// A list of sites as one cell, one per line. When it would pass [`SITE_LIST_CELL_MAX_CHARS`]
+/// the cell shows the first sites that fit and ends with "and N more sites, see Sites sheet",
+/// where N is exactly the number left out. Every site is on the Sites sheet whether or not the
+/// cell shows it, so the cell is only ever a convenience.
+fn site_list_cell(items: &[String]) -> String {
+    site_list_cell_within(items, SITE_LIST_CELL_MAX_CHARS)
+}
+
+fn site_list_cell_within(items: &[String], max_chars: usize) -> String {
+    let total: usize = items.iter().map(|s| s.chars().count() + 1).sum();
+    if total <= max_chars + 1 {
+        return items.join("\n");
+    }
+    let pointer = |left_out: usize| format!("and {left_out} more sites, see {SITES_SHEET} sheet");
+    // The pointer is sized for the worst case (every site left out) so it always fits.
+    let reserved = pointer(items.len()).chars().count() + 1;
+    let mut shown: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for item in items {
+        let cost = item.chars().count() + 1;
+        if used + cost + reserved > max_chars {
+            break;
+        }
+        used += cost;
+        shown.push(item);
+    }
+    let mut out = shown.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&pointer(items.len() - shown.len()));
+    out
+}
+
+/// One row of the Sites sheet: one site of one finding, in full.
+struct SiteRow {
+    /// Which finding the site belongs to: its rule at its own (first) place. The same rule,
+    /// repo, file and line columns sit on the finding's row in its own sheet.
+    finding: String,
+    rule_id: String,
+    repo: String,
+    path: String,
+    line: usize,
+    /// "Primary", "Also found", "Also affected" or "Also flagged here".
+    site_type: &'static str,
+    severity: String,
+    snippet: String,
+    /// The sheet the finding's own row is on.
+    listed_on: &'static str,
+    headline: String,
+}
+
+/// The Sites sheet's rows: for every row of the export (false positives included) its own site
+/// first, then every site a merge absorbed into it, none left out. This is the full list that
+/// the capped "Also found at" and "Where" cells point at.
+fn build_site_rows(rows: &[FindingRow]) -> Vec<SiteRow> {
+    let mut out = Vec::new();
+    for row in rows {
+        let listed_on = if row.is_fp {
+            "False Positives"
+        } else {
+            match kind_sheet(row) {
+                KindSheet::Findings => "All Findings",
+                KindSheet::Conventions => "Conventions",
+                KindSheet::Coverage => "Coverage",
+            }
+        };
+        let finding = format!(
+            "{} @ {}",
+            row.rule_id,
+            site_label(row.multi_repo, &row.repo, &row.path, row.line)
+        );
+        out.push(SiteRow {
+            finding: finding.clone(),
+            rule_id: row.rule_id.clone(),
+            repo: row.repo.clone(),
+            path: row.path.clone(),
+            line: row.line,
+            site_type: "Primary",
+            severity: title_case(&row.severity),
+            snippet: row.snippet.clone(),
+            listed_on,
+            headline: row.headline.clone(),
+        });
+        let split = crate::report_export::split_absorbed(row.place.clone(), &row.also_locations);
+        let absorbed = split
+            .other_sites
+            .into_iter()
+            .map(|l| {
+                (
+                    l,
+                    if l.consequence {
+                        "Also affected"
+                    } else {
+                        "Also found"
+                    },
+                )
+            })
+            .chain(
+                split
+                    .same_place
+                    .into_iter()
+                    .map(|(l, _)| (l, "Also flagged here")),
+            );
+        for (l, site_type) in absorbed {
+            out.push(SiteRow {
+                finding: finding.clone(),
+                rule_id: l.rule_id.clone(),
+                repo: if l.repo.is_empty() {
+                    row.repo.clone()
+                } else {
+                    l.repo.clone()
+                },
+                path: l.path.clone(),
+                line: l.line,
+                site_type,
+                severity: if l.severity.trim().is_empty() {
+                    title_case(&row.severity)
+                } else {
+                    title_case(l.severity.trim())
+                },
+                snippet: cap_snippet_for_workbook(&l.snippet),
+                listed_on,
+                headline: l.headline.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The Sites sheet(s): one row per site, every site of every row of the export. `chunk` rows per
+/// sheet; the sheets after the first are named by `names`.
+fn write_sites_sheets(
+    wb: &mut Workbook,
+    names: &[String],
+    sites: &[SiteRow],
+    chunk: usize,
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    const HEADERS: [&str; 10] = [
+        "Finding (rule @ first site)",
+        "Rule ID",
+        "Repo",
+        "File",
+        "Line",
+        "Site",
+        "Severity",
+        "Snippet",
+        "Row is on sheet",
+        "Headline",
+    ];
+    const WIDTHS: [f64; 10] = [52.0, 28.0, 18.0, 44.0, 7.0, 18.0, 10.0, 60.0, 16.0, 50.0];
+    let pages: Vec<&[SiteRow]> = if sites.is_empty() {
+        vec![&[]]
+    } else {
+        sites.chunks(chunk).collect()
+    };
+    for (page, name) in pages.iter().zip(names) {
+        let ws = wb.add_worksheet();
+        ws.set_name(name)?;
+        let _ = ws.set_tab_color(Color::from("#6B7280"));
+        for (c, h) in HEADERS.iter().enumerate() {
+            ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
+        }
+        ws.set_row_height(0, 28)?;
+        for (c, w) in WIDTHS.iter().enumerate() {
+            ws.set_column_width(c as u16, *w)?;
+        }
+        let text = fmts.cell(None, false, false);
+        let wrap = fmts.cell(None, true, false);
+        for (i, s) in page.iter().enumerate() {
+            let r = (i + 1) as u32;
+            ws.write_text_with_format(r, 0, &s.finding, &text)?;
+            ws.write_text_with_format(r, 1, &s.rule_id, &text)?;
+            ws.write_text_with_format(r, 2, &s.repo, &text)?;
+            ws.write_text_with_format(r, 3, &s.path, &text)?;
+            ws.write_number_with_format(r, 4, s.line as f64, &text)?;
+            ws.write_text_with_format(r, 5, s.site_type, &text)?;
+            ws.write_text_with_format(r, 6, &s.severity, &text)?;
+            ws.write_text_with_format(r, 7, &s.snippet, &wrap)?;
+            ws.write_text_with_format(r, 8, s.listed_on, &text)?;
+            ws.write_text_with_format(r, 9, &s.headline, &wrap)?;
+        }
+        ws.autofilter(0, 0, page.len() as u32, (HEADERS.len() - 1) as u16)?;
+        ws.set_freeze_panes(1, 0)?;
+    }
+    Ok(())
+}
+
 /// `Confirmed` is open here for exactly the reason it is open in the PDF (see
 /// `report_export::Disposition::Confirmed`): the auditor established the finding is real and
 /// nobody has fixed it. The workbook's disposition summary is required to reconcile with the
@@ -1004,6 +1271,10 @@ struct ConventionRow {
     detail: String,
     sites: usize,
     also_found_at: String,
+    /// The same sites as `also_found_at`, one per entry, so the workbook can cap the cell and
+    /// point at the Sites sheet while `conventions.json` keeps the whole list.
+    #[serde(skip)]
+    also_found_items: Vec<String>,
 }
 
 fn build_convention_rows(
@@ -1036,6 +1307,11 @@ fn build_convention_rows(
                 ),
                 _ => return None,
             };
+            let also_found_items: Vec<String> = site_locations(row)
+                .into_iter()
+                .skip(1)
+                .chain(flagged_here_notes(row))
+                .collect();
             Some(ConventionRow {
                 rank,
                 repo: if row.multi_repo {
@@ -1052,12 +1328,8 @@ fn build_convention_rows(
                 headline: row.headline.clone(),
                 detail: row.detail.clone(),
                 sites: row.site_count,
-                also_found_at: site_locations(row)
-                    .into_iter()
-                    .skip(1)
-                    .chain(flagged_here_notes(row))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                also_found_at: also_found_items.join("\n"),
+                also_found_items,
             })
         })
         .collect();
@@ -1358,56 +1630,56 @@ fn write_finding_row(
         None
     };
 
-    ws.write_string_with_format(
+    ws.write_text_with_format(
         r,
         0,
         title_case(&row.severity),
         &fmts.severity_cell(&row.severity),
     )?;
-    ws.write_string_with_format(r, 1, &row.headline, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(r, 2, &row.repo, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 3, &row.path, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 1, &row.headline, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(r, 2, &row.repo, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 3, &row.path, &fmts.cell(bg, false, false))?;
     ws.write_number_with_format(r, 4, row.line as f64, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 5, &row.rule_id, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 6, &row.category, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 5, &row.rule_id, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 6, &row.category, &fmts.cell(bg, false, false))?;
     let action = if row.is_fp {
         String::new()
     } else {
         bucket_title(row.bucket).to_string()
     };
-    ws.write_string_with_format(r, 7, &action, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 8, &row.disposition_label, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(r, 9, &row.effort, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 10, &row.est_hours, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 11, &row.confidence, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(
+    ws.write_text_with_format(r, 7, &action, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 8, &row.disposition_label, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(r, 9, &row.effort, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 10, &row.est_hours, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 11, &row.confidence, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(
         r,
         NEEDS_REVIEW_COL,
         if row.needs_review { "Yes" } else { "" },
         &fmts.cell(bg, false, false),
     )?;
-    ws.write_string_with_format(
+    ws.write_text_with_format(
         r,
         13,
         if row.in_test { "Yes" } else { "" },
         &fmts.cell(bg, false, false),
     )?;
-    ws.write_string_with_format(r, 14, &row.provenance, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 15, &row.citation_label, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(r, 16, &row.citation_urls, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(r, 17, &row.also_matches, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 18, &row.status, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, SNIPPET_COL, &row.snippet, &fmts.cell(bg, true, true))?;
-    ws.write_string_with_format(r, 20, &row.detail, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(r, 14, &row.provenance, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 15, &row.citation_label, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(r, 16, &row.citation_urls, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(r, 17, &row.also_matches, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 18, &row.status, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, SNIPPET_COL, &row.snippet, &fmts.cell(bg, true, true))?;
+    ws.write_text_with_format(r, 20, &row.detail, &fmts.cell(bg, true, false))?;
     // P2: fix_specific (the PRIMARY, codebase-specific fix) renders in the column BEFORE the
     // rule's generic Recommended Fix — same first-vs-secondary ordering as the PDF template.
-    ws.write_string_with_format(
+    ws.write_text_with_format(
         r,
         21,
         row.fix_specific.as_deref().unwrap_or(""),
         &fmts.cell(bg, true, false),
     )?;
-    ws.write_string_with_format(
+    ws.write_text_with_format(
         r,
         22,
         row.fix.as_deref().unwrap_or(""),
@@ -1416,7 +1688,7 @@ fn write_finding_row(
     // A5.6: the row's kind tag — the SAME wire discriminator findings.json serializes
     // (`KindOnWire::tag`, "unspecified" when the producer never assigned one), never a
     // re-derivation.
-    ws.write_string_with_format(r, 23, row.kind.tag(), &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 23, row.kind.tag(), &fmts.cell(bg, false, false))?;
     // W7 (C5): the site count plus every absorbed site, rendered as `path:line` (one per
     // line; a consequence site — no independently-fixable code of its own — is labeled). No
     // raw rule ids here: this cell is client-facing, and each absorbed site's own rule
@@ -1424,22 +1696,29 @@ fn write_finding_row(
     ws.write_number_with_format(r, 24, row.site_count as f64, &fmts.cell(bg, false, false))?;
     // Only members at a different place are listed as sites; those at a place already named
     // read "Also flagged here as <headline> (<severity>)".
-    let also_found_at = site_locations(row)
+    // M8: a row that stands for thousands of sites shows the first that fit and points at the
+    // Sites sheet for the rest. The cross-repo credential note is one line and stays whole.
+    let listed_sites = site_locations(row)
         .into_iter()
         .skip(usize::from(!row.path.is_empty()))
         .chain(flagged_here_notes(row))
-        .chain(Some(row.same_credential_note.clone()).filter(|n| !n.is_empty()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    ws.write_string_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(
+        .collect::<Vec<_>>();
+    let mut also_found_at = site_list_cell(&listed_sites);
+    if !row.same_credential_note.is_empty() {
+        if !also_found_at.is_empty() {
+            also_found_at.push('\n');
+        }
+        also_found_at.push_str(&row.same_credential_note);
+    }
+    ws.write_text_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
+    ws.write_text_with_format(
         r,
         26,
         &row.severity_adjustments,
         &fmts.cell(bg, true, false),
     )?;
-    ws.write_string_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
-    ws.write_string_with_format(r, 28, &row.fix_type, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(r, 28, &row.fix_type, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1462,10 +1741,10 @@ fn write_findings_sheet(
     }
 
     for (c, h) in HEADERS.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, FP_REASON_COL, "FP Reason", &fmts.header)?;
+        ws.write_text_with_format(0, FP_REASON_COL, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -1488,7 +1767,7 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(
+            ws.write_text_with_format(
                 r,
                 FP_REASON_COL,
                 &row.fp_reason,
@@ -1542,7 +1821,7 @@ fn write_dependencies_sheet(
         "Recommended action",
     ];
     for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
     for (c, w) in [30.0, 60.0, 12.0, 18.0, 14.0, 48.0].iter().enumerate() {
@@ -1558,19 +1837,19 @@ fn write_dependencies_sheet(
 
     for (i, row) in sorted.iter().enumerate() {
         let r = (i + 1) as u32;
-        ws.write_string_with_format(r, 0, &row.package, &fmts.cell(None, false, false))?;
-        ws.write_string_with_format(r, 1, &row.advisory, &fmts.cell(None, true, false))?;
-        ws.write_string_with_format(
+        ws.write_text_with_format(r, 0, &row.package, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 1, &row.advisory, &fmts.cell(None, true, false))?;
+        ws.write_text_with_format(
             r,
             2,
             title_case(&row.severity),
             &fmts.severity_cell(&row.severity),
         )?;
-        ws.write_string_with_format(r, 3, &row.repo, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 3, &row.repo, &fmts.cell(None, false, false))?;
         // W33: "Fixed in" is the upgrade target when a patch exists; the action spells out what
         // to do when it does not (monitor / accept / replace) — the ownership split, made visible.
         let fixed = row.fixed_version.as_deref().unwrap_or("(no patch yet)");
-        ws.write_string_with_format(r, 4, fixed, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 4, fixed, &fmts.cell(None, false, false))?;
         let action = if row.action.is_empty() {
             row.fixed_version
                 .as_deref()
@@ -1579,7 +1858,7 @@ fn write_dependencies_sheet(
         } else {
             row.action.clone()
         };
-        ws.write_string_with_format(r, 5, &action, &fmts.cell(None, true, false))?;
+        ws.write_text_with_format(r, 5, &action, &fmts.cell(None, true, false))?;
     }
 
     let last_row = sorted.len() as u32;
@@ -1588,10 +1867,10 @@ fn write_dependencies_sheet(
 
     let mut r = last_row + 2;
     if !coverage_notes.is_empty() {
-        ws.write_string_with_format(r, 0, "Dependency-audit coverage notes", &fmts.section_title)?;
+        ws.write_text_with_format(r, 0, "Dependency-audit coverage notes", &fmts.section_title)?;
         r += 1;
         for note in coverage_notes {
-            ws.write_string(r, 0, note)?;
+            ws.write_text(r, 0, note)?;
             r += 1;
         }
     }
@@ -1635,7 +1914,7 @@ fn write_deviations_sheet(
         widths.push(30.0);
     }
     for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
     for (c, w) in widths.iter().enumerate() {
@@ -1645,7 +1924,7 @@ fn write_deviations_sheet(
     if groups.is_empty() {
         // An empty STRUCTURAL tab says "we looked and found none"; a missing tab says "we
         // never looked". Never let the absence of a section read as the absence of the check.
-        ws.write_string(
+        ws.write_text(
             1,
             0,
             "No consistency deviations were identified in this inspection.",
@@ -1657,31 +1936,34 @@ fn write_deviations_sheet(
     for (i, g) in groups.iter().enumerate() {
         let r = (i + 1) as u32;
         let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
-        ws.write_string_with_format(r, 0, &g.category, &fmts.cell(bg, false, false))?;
-        ws.write_string_with_format(r, 1, &g.rule_title, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 2, &g.convention_label, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 0, &g.category, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(r, 1, &g.rule_title, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 2, &g.convention_label, &fmts.cell(bg, true, false))?;
         ws.write_number_with_format(r, 3, g.deviating_sites as f64, &fmts.cell(bg, false, false))?;
         // An unknown denominator renders as an explicit words-not-number cell. Writing 0 (or
         // repeating the numerator) would fabricate a denominator the producer refused to
         // claim, which is the one thing `assessed_sites: None` exists to prevent.
         match g.assessed_sites {
             Some(n) => ws.write_number_with_format(r, 4, n as f64, &fmts.cell(bg, false, false))?,
-            None => {
-                ws.write_string_with_format(r, 4, "not counted", &fmts.cell(bg, false, false))?
-            }
+            None => ws.write_text_with_format(r, 4, "not counted", &fmts.cell(bg, false, false))?,
         };
-        ws.write_string_with_format(
+        ws.write_text_with_format(
             r,
             5,
             &g.worst_severity,
             &fmts.severity_cell(&g.worst_severity.to_ascii_lowercase()),
         )?;
-        ws.write_string_with_format(r, 6, g.locations.join("\n"), &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
-        ws.write_string_with_format(r, 9, &g.fix_type, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(
+            r,
+            6,
+            site_list_cell(&g.locations),
+            &fmts.cell(bg, true, false),
+        )?;
+        ws.write_text_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(r, 9, &g.fix_type, &fmts.cell(bg, false, false))?;
         if multi {
-            ws.write_string_with_format(r, 10, &g.repo, &fmts.cell(bg, false, false))?;
+            ws.write_text_with_format(r, 10, &g.repo, &fmts.cell(bg, false, false))?;
         }
     }
 
@@ -1726,7 +2008,7 @@ fn write_conventions_sheet(
         widths.push(30.0);
     }
     for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
     for (c, w) in widths.iter().enumerate() {
@@ -1734,7 +2016,7 @@ fn write_conventions_sheet(
     }
 
     if rows.is_empty() {
-        ws.write_string(
+        ws.write_text(
             1,
             0,
             "This inspection derived no codebase conventions. A convention is reported here \
@@ -1747,18 +2029,23 @@ fn write_conventions_sheet(
     for (i, row) in rows.iter().enumerate() {
         let r = (i + 1) as u32;
         let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
-        ws.write_string_with_format(r, 0, &row.category, &fmts.cell(bg, false, false))?;
-        ws.write_string_with_format(r, 1, &row.rule_title, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 2, &row.status, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 3, &row.convention_label, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 4, &row.patterns_in_use, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 5, &row.headline, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 6, &row.detail, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 0, &row.category, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(r, 1, &row.rule_title, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 2, &row.status, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 3, &row.convention_label, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 4, &row.patterns_in_use, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 5, &row.headline, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 6, &row.detail, &fmts.cell(bg, true, false))?;
         ws.write_number_with_format(r, 7, row.sites as f64, &fmts.cell(bg, false, false))?;
-        ws.write_string_with_format(r, 8, &row.also_found_at, &fmts.cell(bg, true, false))?;
-        ws.write_string_with_format(r, 9, &row.rule_id, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(
+            r,
+            8,
+            site_list_cell(&row.also_found_items),
+            &fmts.cell(bg, true, false),
+        )?;
+        ws.write_text_with_format(r, 9, &row.rule_id, &fmts.cell(bg, false, false))?;
         if multi {
-            ws.write_string_with_format(r, 10, &row.repo, &fmts.cell(bg, false, false))?;
+            ws.write_text_with_format(r, 10, &row.repo, &fmts.cell(bg, false, false))?;
         }
     }
 
@@ -1784,15 +2071,15 @@ fn write_patterns_sheet(
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
-    ws.write_string_with_format(0, 0, "Patterns across services", &fmts.section_title)?;
-    ws.write_string(1, 0, &patterns.note)?;
+    ws.write_text_with_format(0, 0, "Patterns across services", &fmts.section_title)?;
+    ws.write_text(1, 0, &patterns.note)?;
     const HEADER_ROW: u32 = 3;
-    ws.write_string_with_format(HEADER_ROW, 0, "What was checked", &fmts.header)?;
+    ws.write_text_with_format(HEADER_ROW, 0, "What was checked", &fmts.header)?;
     for (i, repo) in patterns.repos.iter().enumerate() {
-        ws.write_string_with_format(HEADER_ROW, (i + 1) as u16, repo, &fmts.header)?;
+        ws.write_text_with_format(HEADER_ROW, (i + 1) as u16, repo, &fmts.header)?;
     }
     let rule_col = (patterns.repos.len() + 1) as u16;
-    ws.write_string_with_format(HEADER_ROW, rule_col, "Rule ID", &fmts.header)?;
+    ws.write_text_with_format(HEADER_ROW, rule_col, "Rule ID", &fmts.header)?;
     ws.set_row_height(HEADER_ROW, 28)?;
     ws.set_column_width(0, 56.0)?;
     for i in 0..patterns.repos.len() {
@@ -1801,7 +2088,7 @@ fn write_patterns_sheet(
     ws.set_column_width(rule_col, 28.0)?;
 
     if patterns.rows.is_empty() {
-        ws.write_string(
+        ws.write_text(
             HEADER_ROW + 1,
             0,
             "No rule was found violated in one service and clean in another.",
@@ -1812,7 +2099,7 @@ fn write_patterns_sheet(
     for (i, row) in patterns.rows.iter().enumerate() {
         let r = HEADER_ROW + 1 + i as u32;
         let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
-        ws.write_string_with_format(r, 0, &row.statement, &fmts.cell(bg, true, false))?;
+        ws.write_text_with_format(r, 0, &row.statement, &fmts.cell(bg, true, false))?;
         for (c, repo) in patterns.repos.iter().enumerate() {
             let label = row
                 .cells
@@ -1820,9 +2107,9 @@ fn write_patterns_sheet(
                 .find(|cell| &cell.repo == repo)
                 .map(|cell| sheet_cell_label(&cell.state))
                 .unwrap_or_default();
-            ws.write_string_with_format(r, (c + 1) as u16, &label, &fmts.cell(bg, true, false))?;
+            ws.write_text_with_format(r, (c + 1) as u16, &label, &fmts.cell(bg, true, false))?;
         }
-        ws.write_string_with_format(r, rule_col, &row.rule_id, &fmts.cell(bg, false, false))?;
+        ws.write_text_with_format(r, rule_col, &row.rule_id, &fmts.cell(bg, false, false))?;
     }
     ws.autofilter(
         HEADER_ROW,
@@ -1917,8 +2204,8 @@ fn write_coverage_sheet(
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
     // The one-line client summary comes FIRST, above the table it summarises.
-    ws.write_string_with_format(0, 0, "Coverage", &fmts.section_title)?;
-    ws.write_string(
+    ws.write_text_with_format(0, 0, "Coverage", &fmts.section_title)?;
+    ws.write_text(
         1,
         0,
         coverage_summary_line(coverage_rows, not_assessed.len(), multi_repo),
@@ -1934,7 +2221,7 @@ fn write_coverage_sheet(
         "Rule ID",
     ];
     for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(HEADER_ROW, 28)?;
     for (c, w) in [16.0, 60.0, 20.0, 18.0, 40.0, 28.0].iter().enumerate() {
@@ -1982,17 +2269,17 @@ fn write_coverage_sheet(
                 result.push_str(&format!("\n{}: {}", cell.repo, cell.result));
             }
         }
-        ws.write_string_with_format(r, 0, &row.category, &fmts.cell(None, false, false))?;
-        ws.write_string_with_format(r, 1, &row.title, &fmts.cell(None, true, false))?;
-        ws.write_string_with_format(r, 2, &result, &result_fmt)?;
-        ws.write_string_with_format(
+        ws.write_text_with_format(r, 0, &row.category, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 1, &row.title, &fmts.cell(None, true, false))?;
+        ws.write_text_with_format(r, 2, &result, &result_fmt)?;
+        ws.write_text_with_format(
             r,
             3,
             how_checked_label(&row.citation_kind),
             &fmts.cell(None, false, false),
         )?;
-        ws.write_string_with_format(r, 4, &row.citation_label, &fmts.cell(None, true, false))?;
-        ws.write_string_with_format(r, 5, &row.rule_id, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 4, &row.citation_label, &fmts.cell(None, true, false))?;
+        ws.write_text_with_format(r, 5, &row.rule_id, &fmts.cell(None, false, false))?;
     }
 
     let last_row = HEADER_ROW + coverage_rows.len() as u32;
@@ -2010,7 +2297,7 @@ fn write_coverage_sheet(
     // the thing worth writing down rather than leaving the next reader to rediscover. The
     // modern equivalent is the `rules_not_run` section below, sourced from the scan ledger.
     if !excluded_mechanical_rules.is_empty() {
-        ws.write_string_with_format(
+        ws.write_text_with_format(
             next_r,
             0,
             "Excluded from this code-only audit (mechanical, CI-enforced instead)",
@@ -2018,7 +2305,7 @@ fn write_coverage_sheet(
         )?;
         next_r += 1;
         for rid in excluded_mechanical_rules {
-            ws.write_string(next_r, 0, rid)?;
+            ws.write_text(next_r, 0, rid)?;
             next_r += 1;
         }
         next_r += 1;
@@ -2029,7 +2316,7 @@ fn write_coverage_sheet(
     // rule's concern was even judged applicable. A wrong pick costs a glance at this table
     // instead of surfacing as a false finding in the report body.
     if !rules_applied.is_empty() {
-        ws.write_string_with_format(
+        ws.write_text_with_format(
             next_r,
             0,
             "Rules applied (alternative selection)",
@@ -2042,22 +2329,22 @@ fn write_coverage_sheet(
             ra_headers.push("Service");
         }
         for (c, h) in ra_headers.iter().enumerate() {
-            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
         next_r += 1;
         let ra_header_row = next_r - 1;
         for row in rules_applied {
-            ws.write_string_with_format(next_r, 0, &row.rule_id, &fmts.cell(None, false, false))?;
-            ws.write_string_with_format(next_r, 1, &row.chosen, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(next_r, 2, &row.evidence, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(
+            ws.write_text_with_format(next_r, 0, &row.rule_id, &fmts.cell(None, false, false))?;
+            ws.write_text_with_format(next_r, 1, &row.chosen, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 2, &row.evidence, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(
                 next_r,
                 3,
                 if row.applicable { "Yes" } else { "No" },
                 &fmts.cell(None, false, false),
             )?;
             if ra_multi {
-                ws.write_string_with_format(next_r, 4, &row.repo, &fmts.cell(None, false, false))?;
+                ws.write_text_with_format(next_r, 4, &row.repo, &fmts.cell(None, false, false))?;
             }
             next_r += 1;
         }
@@ -2073,10 +2360,10 @@ fn write_coverage_sheet(
     // Before W7 only osv-scanner notes reached any artifact (on the Dependencies sheet), so
     // a failed semgrep/eslint/ruff/clippy tier was invisible to a client here too.
     if !tool_coverage_notes.is_empty() {
-        ws.write_string_with_format(next_r, 0, "Tool coverage notes", &fmts.section_title)?;
+        ws.write_text_with_format(next_r, 0, "Tool coverage notes", &fmts.section_title)?;
         next_r += 1;
         for note in tool_coverage_notes {
-            ws.write_string(next_r, 0, note)?;
+            ws.write_text(next_r, 0, note)?;
             next_r += 1;
         }
         next_r += 1;
@@ -2088,7 +2375,7 @@ fn write_coverage_sheet(
     // EXPORTED ROW (it reaches findings.json), so this section renders each row's own
     // headline verbatim — that is what keeps artifact parity true after the kind partition.
     if !not_assessed.is_empty() {
-        ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
+        ws.write_text_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
         let na_multi = not_assessed.iter().any(|r| !r.repo.is_empty());
         let mut na_headers = vec![
@@ -2102,18 +2389,18 @@ fn write_coverage_sheet(
             na_headers.push("Service");
         }
         for (c, h) in na_headers.iter().enumerate() {
-            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
         next_r += 1;
         for row in not_assessed {
             if na_multi {
-                ws.write_string_with_format(next_r, 5, &row.repo, &fmts.cell(None, false, false))?;
+                ws.write_text_with_format(next_r, 5, &row.repo, &fmts.cell(None, false, false))?;
             }
-            ws.write_string_with_format(next_r, 0, &row.rule_title, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(next_r, 1, &row.why, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(next_r, 2, &row.headline, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(next_r, 3, &row.detail, &fmts.cell(None, true, false))?;
-            ws.write_string_with_format(next_r, 4, &row.rule_id, &fmts.cell(None, false, false))?;
+            ws.write_text_with_format(next_r, 0, &row.rule_title, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 1, &row.why, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 2, &row.headline, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 3, &row.detail, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 4, &row.rule_id, &fmts.cell(None, false, false))?;
             next_r += 1;
         }
         next_r += 1;
@@ -2124,15 +2411,15 @@ fn write_coverage_sheet(
     // workbook (the meat-and-potatoes artifact) never implies a never-run rule was
     // checked-and-clean.
     if !rules_not_run.is_empty() {
-        ws.write_string_with_format(next_r, 0, "Rules not run this scan", &fmts.section_title)?;
+        ws.write_text_with_format(next_r, 0, "Rules not run this scan", &fmts.section_title)?;
         next_r += 1;
         for (c, h) in ["Rule ID", "Reason"].iter().enumerate() {
-            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
         next_r += 1;
         for (rid, reason) in rules_not_run {
-            ws.write_string_with_format(next_r, 0, rid, &fmts.cell(None, false, false))?;
-            ws.write_string_with_format(next_r, 1, reason, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 0, rid, &fmts.cell(None, false, false))?;
+            ws.write_text_with_format(next_r, 1, reason, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
         next_r += 1;
@@ -2142,15 +2429,15 @@ fn write_coverage_sheet(
     // `report_export::coverage_gaps` the PDF and findings.json carry. Every skipped file is
     // listed here in full (the PDF shows the first ones and points here).
     if !gaps.is_empty() {
-        ws.write_string_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
+        ws.write_text_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
         next_r += 1;
         for line in gaps.failed_ai_passes.iter().chain(&gaps.dependency_gaps) {
-            ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
         // H10: rules checked against only the files in their language or declared scope.
         if let Some(note) = &gaps.scope_limited_note {
-            ws.write_string_with_format(next_r, 0, note, &fmts.cell(None, true, false))?;
+            ws.write_text_with_format(next_r, 0, note, &fmts.cell(None, true, false))?;
             next_r += 1;
             for (c, h) in [
                 "Rule ID",
@@ -2162,11 +2449,11 @@ fn write_coverage_sheet(
             .iter()
             .enumerate()
             {
-                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+                ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
             }
             next_r += 1;
             for rule in &gaps.scope_limited_rules {
-                ws.write_string_with_format(
+                ws.write_text_with_format(
                     next_r,
                     0,
                     &rule.rule_id,
@@ -2174,7 +2461,7 @@ fn write_coverage_sheet(
                 )?;
                 ws.write_number(next_r, 1, rule.files_checked as f64)?;
                 ws.write_number(next_r, 2, rule.files_total as f64)?;
-                ws.write_string_with_format(
+                ws.write_text_with_format(
                     next_r,
                     3,
                     if rule.changed_files_only {
@@ -2184,35 +2471,25 @@ fn write_coverage_sheet(
                     },
                     &fmts.cell(None, false, false),
                 )?;
-                ws.write_string_with_format(
-                    next_r,
-                    4,
-                    &rule.scope,
-                    &fmts.cell(None, false, false),
-                )?;
+                ws.write_text_with_format(next_r, 4, &rule.scope, &fmts.cell(None, false, false))?;
                 next_r += 1;
             }
             next_r += 1;
         }
         if !gaps.skipped_files.is_empty() || gaps.skipped_beyond_cap_total > 0 {
             for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
-                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+                ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
             }
             next_r += 1;
             for skipped in &gaps.skipped_files {
-                ws.write_string_with_format(
+                ws.write_text_with_format(
                     next_r,
                     0,
                     &skipped.repo,
                     &fmts.cell(None, false, false),
                 )?;
-                ws.write_string_with_format(
-                    next_r,
-                    1,
-                    &skipped.path,
-                    &fmts.cell(None, true, false),
-                )?;
-                ws.write_string_with_format(
+                ws.write_text_with_format(next_r, 1, &skipped.path, &fmts.cell(None, true, false))?;
+                ws.write_text_with_format(
                     next_r,
                     2,
                     &skipped.reason,
@@ -2222,7 +2499,7 @@ fn write_coverage_sheet(
             }
             // The list is bounded per reason; the files past the bound are counted, not named.
             if let Some(note) = &gaps.skipped_beyond_cap_note {
-                ws.write_string_with_format(next_r, 1, note, &fmts.cell(None, true, false))?;
+                ws.write_text_with_format(next_r, 1, note, &fmts.cell(None, true, false))?;
             }
         }
     }
@@ -2257,7 +2534,7 @@ fn write_index_sheet(
     // pass. Wording now matches the PDF's own neutral "Codebase Inspection"/"Repos inspected"/
     // "Inspection model" language exactly (see `audit_report.typ`'s cover + methodology
     // sections and `NEUTRAL_COVER_TITLE`).
-    ws.write_string_with_format(
+    ws.write_text_with_format(
         r,
         0,
         "Camerata Codebase Inspection — Product Export Index",
@@ -2265,25 +2542,25 @@ fn write_index_sheet(
     )?;
     r += 2;
     if !opts.project_title.is_empty() {
-        ws.write_string(r, 0, &opts.project_title)?;
+        ws.write_text(r, 0, &opts.project_title)?;
         r += 1;
     }
     let client = crate::report_export::clean_client_name(&opts.client_name);
     if !client.is_empty() {
-        ws.write_string(r, 0, format!("Prepared for {client}"))?;
+        ws.write_text(r, 0, format!("Prepared for {client}"))?;
         r += 1;
     }
     if !opts.prepared_by.is_empty() {
-        ws.write_string(r, 0, format!("Prepared by {}", opts.prepared_by))?;
+        ws.write_text(r, 0, format!("Prepared by {}", opts.prepared_by))?;
         r += 1;
     }
     r += 1;
 
     // ── Provenance ──────────────────────────────────────────────────────────
-    ws.write_string_with_format(r, 0, "Provenance", &fmts.section_title)?;
+    ws.write_text_with_format(r, 0, "Provenance", &fmts.section_title)?;
     r += 1;
-    ws.write_string(r, 0, "Repos inspected")?;
-    ws.write_string(r, 1, report.repos.join(", "))?;
+    ws.write_text(r, 0, "Repos inspected")?;
+    ws.write_text(r, 1, report.repos.join(", "))?;
     r += 1;
     for aref in &report.provenance.audited_refs {
         let sha = aref
@@ -2293,19 +2570,19 @@ fn write_index_sheet(
             .unwrap_or_else(|| "no commit recorded".to_string());
         let branch = aref.branch.as_deref().unwrap_or("unknown branch");
         let dirty = if aref.dirty { " (dirty)" } else { "" };
-        ws.write_string(r, 0, &aref.repo)?;
-        ws.write_string(r, 1, format!("{sha} on {branch}{dirty}"))?;
+        ws.write_text(r, 0, &aref.repo)?;
+        ws.write_text(r, 1, format!("{sha} on {branch}{dirty}"))?;
         r += 1;
     }
-    ws.write_string(r, 0, "Inspection model")?;
-    ws.write_string(
+    ws.write_text(r, 0, "Inspection model")?;
+    ws.write_text(
         r,
         1,
         report.provenance.audit_model.as_deref().unwrap_or("n/a"),
     )?;
     r += 1;
-    ws.write_string(r, 0, "Calibration model")?;
-    ws.write_string(
+    ws.write_text(r, 0, "Calibration model")?;
+    ws.write_text(
         r,
         1,
         report
@@ -2315,47 +2592,47 @@ fn write_index_sheet(
             .unwrap_or("n/a"),
     )?;
     r += 1;
-    ws.write_string(r, 0, "Camerata version")?;
-    ws.write_string(r, 1, &report.provenance.camerata_version)?;
+    ws.write_text(r, 0, "Camerata version")?;
+    ws.write_text(r, 1, &report.provenance.camerata_version)?;
     r += 1;
-    ws.write_string(r, 0, "Generated")?;
+    ws.write_text(r, 0, "Generated")?;
     // The SCAN time, the SAME string the PDF cover prints — not the wall clock at
     // serialization. See `report_export::generated_at_label`: a workbook re-exported months
     // later used to claim it was generated months after the audit it describes, and the cell
     // straddled a minute boundary under load (source 2 in
     // `crates/cli/tests/inspect_export_equivalence.rs`'s normalization).
-    ws.write_string(
+    ws.write_text(
         r,
         1,
         crate::report_export::generated_at_label(&report.provenance),
     )?;
     r += 1;
-    ws.write_string(r, 0, "Files scanned")?;
+    ws.write_text(r, 0, "Files scanned")?;
     ws.write_number(r, 1, report.files_scanned as f64)?;
     r += 1;
-    ws.write_string(r, 0, "Files excluded as noise")?;
+    ws.write_text(r, 0, "Files excluded as noise")?;
     ws.write_number(r, 1, report.files_excluded as f64)?;
     r += 1;
-    ws.write_string(r, 0, "Code volume (characters)")?;
+    ws.write_text(r, 0, "Code volume (characters)")?;
     ws.write_number(r, 1, report.code_chars as f64)?;
     if report.repos.len() > 1 {
         for v in &report.volume_by_repo {
             r += 1;
-            ws.write_string(r, 0, format!("Code volume: {}", v.repo))?;
-            ws.write_string(r, 1, format!("{} lines in {} files", v.lines, v.files))?;
+            ws.write_text(r, 0, format!("Code volume: {}", v.repo))?;
+            ws.write_text(r, 1, format!("{} lines in {} files", v.lines, v.files))?;
         }
     }
     r += 2;
 
     // ── Counts matrix: category x severity ─────────────────────────────────
-    ws.write_string_with_format(r, 0, "Findings by category", &fmts.section_title)?;
+    ws.write_text_with_format(r, 0, "Findings by category", &fmts.section_title)?;
     r += 1;
     let matrix_header_row = r;
     for (c, h) in ["Category", "Critical", "High", "Medium", "Low", "Total"]
         .iter()
         .enumerate()
     {
-        ws.write_string_with_format(matrix_header_row, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(matrix_header_row, c as u16, *h, &fmts.header)?;
     }
     r += 1;
 
@@ -2377,7 +2654,7 @@ fn write_index_sheet(
 
     let mut totals = [0usize; 4];
     for (cat, counts) in &by_cat {
-        ws.write_string(r, 0, cat)?;
+        ws.write_text(r, 0, cat)?;
         for (i, count) in counts.iter().enumerate() {
             ws.write_number(r, (i + 1) as u16, *count as f64)?;
             totals[i] += *count;
@@ -2386,7 +2663,7 @@ fn write_index_sheet(
         ws.write_number(r, 5, total as f64)?;
         r += 1;
     }
-    ws.write_string_with_format(r, 0, "Total", &fmts.bold)?;
+    ws.write_text_with_format(r, 0, "Total", &fmts.bold)?;
     for (i, total) in totals.iter().enumerate() {
         ws.write_number_with_format(r, (i + 1) as u16, *total as f64, &fmts.bold)?;
     }
@@ -2398,7 +2675,7 @@ fn write_index_sheet(
     // multi-tab workbook needs to know, in one glance, which tab holds what and how much is
     // in it. The counts are over the SAME `live_rows` set the category matrix above uses, so
     // this block and that matrix always total the same number.
-    ws.write_string_with_format(r, 0, "Statement types", &fmts.section_title)?;
+    ws.write_text_with_format(r, 0, "Statement types", &fmts.section_title)?;
     r += 1;
     let mut defects = 0usize;
     let mut deviations = 0usize;
@@ -2427,23 +2704,23 @@ fn write_index_sheet(
         ("no_convention", no_convention, "Conventions"),
         ("not_assessed", not_assessed, "Coverage"),
     ] {
-        ws.write_string(r, 0, statement_type_label(tag))?;
+        ws.write_text(r, 0, statement_type_label(tag))?;
         ws.write_number(r, 1, count as f64)?;
-        ws.write_string(r, 2, where_to_look)?;
+        ws.write_text(r, 2, where_to_look)?;
         r += 1;
     }
     // Shown ONLY when non-zero, so that when it appears it means something: a row whose
     // producer assigned no kind is an unmapped emission path, and A5.6's backfill rule is
     // that such a row is surfaced as a gap rather than silently counted as a defect.
     if unclassified > 0 {
-        ws.write_string_with_format(
+        ws.write_text_with_format(
             r,
             0,
             statement_type_label(camerata_api_types::audit::UNSPECIFIED_KIND_TAG),
             &fmts.bold,
         )?;
         ws.write_number_with_format(r, 1, unclassified as f64, &fmts.bold)?;
-        ws.write_string(r, 2, "All Findings")?;
+        ws.write_text(r, 2, "All Findings")?;
         r += 1;
     }
     r += 1;
@@ -2492,7 +2769,7 @@ fn write_index_sheet(
     }
     let held_for_review_total = informational + held;
     let open = unresolved.saturating_sub(held_for_review_total);
-    ws.write_string(
+    ws.write_text(
         r,
         0,
         format!(
@@ -2510,16 +2787,16 @@ fn write_index_sheet(
     r += 2;
 
     // ── Legend ──────────────────────────────────────────────────────────────
-    ws.write_string_with_format(r, 0, "Legend", &fmts.section_title)?;
+    ws.write_text_with_format(r, 0, "Legend", &fmts.section_title)?;
     r += 1;
-    ws.write_string(r, 0, "Severity")?;
+    ws.write_text(r, 0, "Severity")?;
     r += 1;
     for sev in ["critical", "high", "medium", "low"] {
-        ws.write_string_with_format(r, 0, title_case(sev), &fmts.severity_cell(sev))?;
+        ws.write_text_with_format(r, 0, title_case(sev), &fmts.severity_cell(sev))?;
         r += 1;
     }
     r += 1;
-    ws.write_string_with_format(r, 0, "Disposition vocabulary", &fmts.bold)?;
+    ws.write_text_with_format(r, 0, "Disposition vocabulary", &fmts.bold)?;
     r += 1;
     for line in [
         "Open (recommended: ...) — no triage decision yet this session",
@@ -2532,11 +2809,11 @@ fn write_index_sheet(
         "False positive — auditor-dispositioned, excluded from every working sheet (see \
          the False Positives sheet)",
     ] {
-        ws.write_string(r, 0, line)?;
+        ws.write_text(r, 0, line)?;
         r += 1;
     }
     r += 1;
-    ws.write_string_with_format(r, 0, "Provenance vocabulary", &fmts.bold)?;
+    ws.write_text_with_format(r, 0, "Provenance vocabulary", &fmts.bold)?;
     r += 1;
     for line in [
         "Deterministic: corpus-grounded, cites an authoritative external source",
@@ -2545,27 +2822,27 @@ fn write_index_sheet(
         "Related standard (in the Citation column): a published standard matched to a model \
          finding by keyword, not a rule Camerata checked",
     ] {
-        ws.write_string(r, 0, line)?;
+        ws.write_text(r, 0, line)?;
         r += 1;
     }
     r += 1;
-    ws.write_string_with_format(r, 0, "Confidence", &fmts.bold)?;
+    ws.write_text_with_format(r, 0, "Confidence", &fmts.bold)?;
     r += 1;
     for line in [
         "high — a clear, concrete violation",
         "needs-review — the calibration pass flagged it as debatable/theoretical/under-evidenced",
     ] {
-        ws.write_string(r, 0, line)?;
+        ws.write_text(r, 0, line)?;
         r += 1;
     }
     r += 2;
 
     // ── Hyperlinked table of contents ───────────────────────────────────────
-    ws.write_string_with_format(r, 0, "Contents", &fmts.section_title)?;
+    ws.write_text_with_format(r, 0, "Contents", &fmts.section_title)?;
     r += 1;
     let toc_header_row = r;
     for (c, h) in ["Sheet", "Findings", "Worst severity"].iter().enumerate() {
-        ws.write_string_with_format(toc_header_row, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(toc_header_row, c as u16, *h, &fmts.header)?;
     }
     r += 1;
     for sheet in sheet_plan {
@@ -2575,7 +2852,7 @@ fn write_index_sheet(
         if sheet.display_name != PATTERNS_SHEET {
             ws.write_number(r, 1, sheet.count as f64)?;
         }
-        ws.write_string(r, 2, &sheet.worst_severity)?;
+        ws.write_text(r, 2, &sheet.worst_severity)?;
         r += 1;
     }
 
@@ -2669,6 +2946,9 @@ pub fn build_workbook(
 
     let mut used_names: HashSet<String> = HashSet::new();
     used_names.insert("Index".to_string());
+    // M8: the Sites sheet is named before any area, so a category that happens to be called
+    // "Sites" takes the suffix and the pointer in a capped cell stays true.
+    used_names.insert(SITES_SHEET.to_string());
 
     let mut sheet_plan: Vec<SheetSummary> = Vec::new();
     let all_findings_name = sanitize_sheet_name("All Findings", &mut used_names);
@@ -2755,6 +3035,31 @@ pub fn build_workbook(
         });
         name
     });
+
+    // M8: one row per site of every row, in full. The capped "Also found at" and "Where" cells
+    // point here. A report with more sites than one sheet holds continues on "Sites (2)".
+    let site_rows = build_site_rows(&rows);
+    let site_sheet_count = site_rows.len().div_ceil(SITES_SHEET_MAX_ROWS).max(1);
+    let site_sheet_names: Vec<String> = (0..site_sheet_count)
+        .map(|i| {
+            if i == 0 {
+                SITES_SHEET.to_string()
+            } else {
+                sanitize_sheet_name(SITES_SHEET, &mut used_names)
+            }
+        })
+        .collect();
+    for (i, name) in site_sheet_names.iter().enumerate() {
+        sheet_plan.push(SheetSummary {
+            display_name: name.clone(),
+            sheet_name: name.clone(),
+            count: site_rows
+                .len()
+                .saturating_sub(i * SITES_SHEET_MAX_ROWS)
+                .min(SITES_SHEET_MAX_ROWS),
+            worst_severity: String::new(),
+        });
+    }
 
     let dep_coverage_notes: Vec<String> = report
         .coverage_notes
@@ -2870,6 +3175,16 @@ pub fn build_workbook(
         triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
             .context("writing the Triage Log sheet")?;
     }
+
+    // M8: after every other sheet, so each keeps its position.
+    write_sites_sheets(
+        &mut wb,
+        &site_sheet_names,
+        &site_rows,
+        SITES_SHEET_MAX_ROWS,
+        &fmts,
+    )
+    .context("writing the Sites sheet")?;
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
@@ -3138,6 +3453,7 @@ mod tests {
     use crate::onboard::{AuditedRef, Finding, ScanProvenance};
     use std::io::Read;
 
+    mod export_scale;
     mod related_citation;
 
     fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {

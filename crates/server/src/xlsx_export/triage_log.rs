@@ -33,6 +33,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::CellText;
 use serde::Serialize;
 
 use crate::onboard::Finding;
@@ -246,17 +247,17 @@ pub(super) fn write_triage_log_sheet(
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
     let ws = wb.add_worksheet();
     ws.set_name(TRIAGE_LOG_SHEET)?;
-    ws.write_string_with_format(0, 0, TRIAGE_LOG_SHEET, &fmts.section_title)?;
-    ws.write_string(
+    ws.write_text_with_format(0, 0, TRIAGE_LOG_SHEET, &fmts.section_title)?;
+    ws.write_text(
         1,
         0,
         "Per rule: what the AI pass proposed, what review kept, held or set aside, what it \
          threw out and why.",
     )?;
-    ws.write_string(2, 0, caption(deduped))?;
+    ws.write_text(2, 0, caption(deduped))?;
     const HEADER_ROW: u32 = 3;
     for (c, h) in COLUMNS.iter().enumerate() {
-        ws.write_string_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
+        ws.write_text_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
     }
     for (c, w) in [28.0, 40.0, 12.0, 8.0, 10.0, 12.0, 10.0, 80.0]
         .iter()
@@ -268,8 +269,8 @@ pub(super) fn write_triage_log_sheet(
         let row = HEADER_ROW + 1 + i as u32;
         let text = fmts.cell(None, false, false);
         let wrap = fmts.cell(None, true, false);
-        ws.write_string_with_format(row, 0, &r.rule_id, &text)?;
-        ws.write_string_with_format(row, 1, &r.rule, &wrap)?;
+        ws.write_text_with_format(row, 0, &r.rule_id, &text)?;
+        ws.write_text_with_format(row, 1, &r.rule, &wrap)?;
         for (c, n) in [
             r.proposed,
             r.kept,
@@ -282,7 +283,7 @@ pub(super) fn write_triage_log_sheet(
         {
             ws.write_number(row, 2 + c as u16, *n as f64)?;
         }
-        ws.write_string_with_format(row, 7, &r.why, &wrap)?;
+        ws.write_text_with_format(row, 7, &r.why, &wrap)?;
     }
     let last = HEADER_ROW + rows.len() as u32;
     ws.autofilter(HEADER_ROW, 0, last, 7)?;
