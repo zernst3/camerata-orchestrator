@@ -1871,6 +1871,70 @@ fn adopted_near_match(norm: &str, adopted: &std::collections::HashSet<String>) -
         .cloned()
 }
 
+/// The fewest characters a label needs before a typo match is tried: a short id sits within
+/// two edits of too many others to mean one.
+const TYPO_MATCH_MIN_LEN: usize = 12;
+
+/// The most edits (insert, delete, substitute) between a label and an adopted id for the label
+/// to be read as a typo of it.
+const TYPO_MATCH_MAX_EDITS: usize = 2;
+
+/// The adopted rule id a mistyped label means (R1B-3): the one adopted id within
+/// [`TYPO_MATCH_MAX_EDITS`] edits of the label (`JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1`
+/// for `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1`), judged on the id without its numeric
+/// suffix, which must be identical. Two or more adopted ids that close, no
+/// adopted id that close, a short or unhyphenated label or one naming a placeholder: `None`, so
+/// the label keeps its `AI-` invented id and the junk filter still sees a placeholder.
+fn adopted_typo_match(norm: &str, adopted: &std::collections::HashSet<String>) -> Option<String> {
+    if norm.len() < TYPO_MATCH_MIN_LEN
+        || !norm.contains('-')
+        || crate::junk_finding::is_placeholder_rule_id(norm)
+    {
+        return None;
+    }
+    // The trailing `-<digits>` names which rule of a numbered family it is (`RUST-DIOXUS-3` and
+    // `RUST-DIOXUS-7` are different rules), so it is never a typo: suffixes must be identical
+    // and only the stems are compared.
+    let (stem, suffix) = split_numeric_suffix(norm);
+    let mut close = adopted.iter().filter(|a| {
+        let (a_stem, a_suffix) = split_numeric_suffix(a);
+        a.len() >= TYPO_MATCH_MIN_LEN
+            && a_suffix == suffix
+            && a_stem.len().abs_diff(stem.len()) <= TYPO_MATCH_MAX_EDITS
+            && edit_distance(stem, a_stem) <= TYPO_MATCH_MAX_EDITS
+    });
+    match (close.next(), close.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Split a rule id at its trailing `-<digits>`: `("RUST-DIOXUS", "-3")`. An id with no numeric
+/// suffix returns the whole id and an empty suffix.
+fn split_numeric_suffix(id: &str) -> (&str, &str) {
+    match id.rfind('-') {
+        Some(i) if i + 1 < id.len() && id[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            id.split_at(i)
+        }
+        _ => (id, ""),
+    }
+}
+
+/// The Levenshtein distance between two ASCII-or-not strings, counted in characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != *cb);
+            cur.push(substitute.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 /// A model-written line number (M5): a number, a numeric string, `L42`, `line 42`, or a range such as
 /// `42-47` (its first line). Anything else is 0, "no line".
 fn parse_model_line(v: &serde_json::Value) -> usize {
@@ -1930,6 +1994,8 @@ pub fn parse_ai_findings(
                 near
             } else if let Some(canon) = canonical_adopted_rule(&norm, adopted) {
                 canon
+            } else if let Some(typo) = adopted_typo_match(&norm, adopted) {
+                typo
             } else {
                 format!("AI-{norm}")
             };
@@ -9299,7 +9365,7 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// between an AI finding and the native checker for the same policy, with margin, while staying
 /// inside the harness's ±2 line-grading tolerance for the surviving primary (whose line is the
 /// deterministic anchor, never the drifted sibling's).
-const SEMANTIC_MERGE_WINDOW: usize = 5;
+pub(crate) const SEMANTIC_MERGE_WINDOW: usize = 5;
 
 /// The closed semantic taxonomy (design §1a). A finding is only ever merged with another of the
 /// SAME category, so the set is deliberately coarse — one bucket per defect *family*, not per
@@ -9656,7 +9722,12 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     // 1. Structured identity: disjoint detector captures veto on their own.
     let ca = normalized_capture_values(a);
     let cb = normalized_capture_values(b);
-    if !ca.is_empty() && !cb.is_empty() && ca.is_disjoint(&cb) {
+    if !ca.is_empty()
+        && !cb.is_empty()
+        && !ca
+            .iter()
+            .any(|x| cb.iter().any(|y| object_names_match(x, y)))
+    {
         return true;
     }
     // 2. Prose objects, container-discounted.
@@ -9679,13 +9750,38 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     };
     // A genuinely shared object (one that is NOT just a shared container) is identity
     // evidence — no conflict.
-    if oa.intersection(&ob).any(|s| !is_container(s)) {
+    if oa
+        .iter()
+        .any(|s| !is_container(s) && ob.iter().any(|t| object_names_match(s, t)))
+    {
         return false;
     }
     // Otherwise judge disjointness over each side's DISCRIMINATING objects only.
     let da: std::collections::HashSet<&String> = oa.iter().filter(|s| !is_container(s)).collect();
     let db: std::collections::HashSet<&String> = ob.iter().filter(|s| !is_container(s)).collect();
-    !da.is_empty() && !db.is_empty() && da.is_disjoint(&db)
+    !da.is_empty()
+        && !db.is_empty()
+        && !da
+            .iter()
+            .any(|s| db.iter().any(|t| object_names_match(s, t)))
+}
+
+/// Whether two lowercased object names can be the same object: equal, or one is the bare name
+/// of the other's `public`-qualified form (`member_contacts` and `public.member_contacts`). A
+/// deterministic checker captures the bare table name while the model's row names the qualified
+/// one for the same table, and treating those as different objects kept the two rows apart
+/// (R1B-5). Two qualified names in different schemas (`public.orders`, `private.orders`) are
+/// still different objects.
+fn object_names_match(x: &str, y: &str) -> bool {
+    if x == y {
+        return true;
+    }
+    // A bare name means the `public` schema: the floor's `bare_object_name` strips exactly
+    // `public.`. So `users` is not `auth.users` and `orders` is not `private.orders`.
+    let bare_of = |bare: &str, qualified: &str| {
+        !bare.contains('.') && qualified.split_once('.') == Some(("public", bare))
+    };
+    bare_of(x, y) || bare_of(y, x)
 }
 
 /// Minimum length (characters, after trimming) for a shared `Finding::captures` VALUE to count
@@ -14701,6 +14797,103 @@ mod tests {
         let (findings, _) = parse_ai_findings("me/api", raw, &none);
         assert_eq!(findings.len(), 1, "{findings:#?}");
         assert_eq!(findings[0].line, 12);
+    }
+
+    /// R1B-5: a bare table name and its schema-qualified form are the same object, so they do
+    /// not veto a same-rule merge; different tables and different schemas still do.
+    #[test]
+    fn object_names_match_bare_against_qualified_but_not_different_tables_or_schemas() {
+        assert!(object_names_match(
+            "member_contacts",
+            "public.member_contacts"
+        ));
+        assert!(object_names_match(
+            "public.member_contacts",
+            "member_contacts"
+        ));
+        assert!(object_names_match("public.orders", "public.orders"));
+        assert!(!object_names_match("profiles", "public.member_contacts"));
+        assert!(!object_names_match("public.orders", "private.orders"));
+        assert!(!object_names_match("orders", "public.order_items"));
+        // A bare name means the public schema (the floor strips exactly `public.`), so it never
+        // matches a table of the same name in another schema.
+        assert!(!object_names_match("users", "auth.users"));
+        assert!(!object_names_match("orders", "private.orders"));
+        assert!(!object_names_match("orders", "app.db.orders"));
+        assert!(!object_names_match("auth.users", "users"));
+    }
+
+    /// R1B-3: a rule id the model mistyped by one or two characters is keyed to the one adopted
+    /// rule it is closest to (`TYPESRIPT` for `TYPESCRIPT`), not left as an `AI-` invented id.
+    #[test]
+    fn parse_ai_findings_canonicalises_a_typo_to_the_one_adopted_rule_within_two_edits() {
+        let adopted: std::collections::HashSet<String> = [
+            "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1".to_string(),
+            "JAVASCRIPT-TYPESCRIPT-NO-ANY-1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":3,"rule":"JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1",
+            "title":"Non-null assertion","code":"user!.id","detail":"The assertion hides a null."}],
+            "proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(
+            findings[0].rule_id,
+            "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
+        );
+    }
+
+    /// R1B-3: an id within two edits of TWO adopted ids is ambiguous, so it keeps today's
+    /// behaviour (the `AI-` invented id); so does an id with no adopted id that close.
+    #[test]
+    fn parse_ai_findings_leaves_an_ambiguous_or_distant_typo_as_an_invented_id() {
+        let adopted: std::collections::HashSet<String> = [
+            "SUPABASE-STORAGE-BUCKET-POLICY-A-1".to_string(),
+            "SUPABASE-STORAGE-BUCKET-POLICY-B-1".to_string(),
+            "SUPABASE-AUTH-SESSION-REFRESH-ROTATION-1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        // One edit from both policy ids: ambiguous, so not canonicalised.
+        let ambiguous = "SUPABASE-STORAGE-BUCKET-POLICY-C-1";
+        assert_eq!(adopted_typo_match(ambiguous, &adopted), None);
+        assert_eq!(
+            adopted_typo_match("SUPABASE-AUTH-SESSION-REFRESH-ROTATON-1", &adopted),
+            Some("SUPABASE-AUTH-SESSION-REFRESH-ROTATION-1".to_string()),
+            "one adopted id within two edits"
+        );
+        // The numeric suffix names a different rule per number, so it is never a typo.
+        let numbered: std::collections::HashSet<String> =
+            ["RUST-DIOXUS-3".to_string(), "SQL-DB-INDEX-1".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(adopted_typo_match("RUST-DIOXUS-7", &numbered), None);
+        assert_eq!(adopted_typo_match("SQL-DB-INDEX-2", &numbered), None);
+        for rule in [ambiguous, "SUPABASE-AUTH-SESSION-TIMEOUT-HANDLING-1"] {
+            let raw = format!(
+                r#"{{"findings":[{{"path":"a.ts","line":3,"rule":"{rule}",
+                "title":"A real title","code":"x.y()","detail":"A real explanation."}}],
+                "proposed_rules":[]}}"#
+            );
+            let (findings, _) = parse_ai_findings("me/api", &raw, &adopted);
+            assert_eq!(findings.len(), 1, "{findings:#?}");
+            assert_eq!(findings[0].rule_id, format!("AI-{rule}"));
+        }
+    }
+
+    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still drops it.
+    #[test]
+    fn parse_ai_findings_does_not_canonicalise_a_placeholder_id_onto_an_adopted_rule() {
+        let adopted: std::collections::HashSet<String> =
+            ["JAVASCRIPT-TYPESCRIPT-PLACEHOLDER-1".to_string()]
+                .into_iter()
+                .collect();
+        let raw = r#"{"findings":[{"path":"a.ts","line":3,"rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER-1",
+            "title":"A real title","code":"user!.id","detail":"A real explanation."}],
+            "proposed_rules":[]}"#;
+        let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 
     /// D1: each junk shape is refused on its own (an empty reply for code and detail, a

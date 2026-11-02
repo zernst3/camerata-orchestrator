@@ -25,10 +25,28 @@ pub fn finding_match_key(f: &Finding) -> String {
     )
 }
 
-/// Which engine produced `f`: `"preview"` (a scan-time tool pass), `"ai"` (the model tier,
-/// [`crate::report_export::is_ai_tier`]) or `"deterministic"` (the floor).
+/// Which engine produced `f`: `"preview"` (a scan-time external tool pass), `"convention"` (a
+/// convention-observed, no-convention or not-assessed row: they carry no calibration
+/// confidence but cite model-chosen evidence, so they are not the deterministic floor), `"ai"`
+/// (the model tier, [`crate::report_export::is_ai_tier`]) or `"deterministic"` (the floor,
+/// which includes the native architectural checkers: their rows carry
+/// [`crate::onboard::ARCH_PREVIEW_TOOL`] as their `preview_tool` but are exact by construction).
 pub fn finding_tier(f: &Finding) -> &'static str {
-    if f.preview_tool.is_some() {
+    use camerata_api_types::audit::FindingKind;
+    // Convention-class kinds come first: a not-assessed architectural row also carries
+    // `preview_tool = camerata-arch`, but it is an honesty row, never a deterministic result.
+    if matches!(
+        f.kind,
+        Some(
+            FindingKind::ConventionObserved(_)
+                | FindingKind::NoConvention(_)
+                | FindingKind::NotAssessed(_)
+        )
+    ) {
+        "convention"
+    } else if f.preview_tool.as_deref() == Some(crate::onboard::ARCH_PREVIEW_TOOL) {
+        "deterministic"
+    } else if f.preview_tool.is_some() {
         "preview"
     } else if crate::report_export::is_ai_tier(f) {
         "ai"
@@ -98,6 +116,12 @@ pub struct RunDiff {
     pub second_total: usize,
     /// Findings present in both runs (matched by [`finding_match_key`], counting repeats).
     pub matched: usize,
+    /// Findings the fingerprint pass left unmatched that the second pass paired by site: the
+    /// same repo, path and rule id within [`crate::ai_audit::SEMANTIC_MERGE_WINDOW`] lines.
+    /// The model quoting the same defect on a neighbouring line changes the snippet and so
+    /// the fingerprint; these pairs are one defect. Reported separately from [`Self::matched`]
+    /// and removed from the two unmatched lists.
+    pub matched_by_site: usize,
     pub by_tier: Vec<CountRow>,
     pub by_rule: Vec<CountRow>,
     pub by_severity: Vec<CountRow>,
@@ -106,7 +130,8 @@ pub struct RunDiff {
 }
 
 impl RunDiff {
-    /// True when every finding of each run matched one in the other.
+    /// True when every finding of each run matched one in the other (by fingerprint or by
+    /// site).
     pub fn identical(&self) -> bool {
         self.only_in_first.is_empty() && self.only_in_second.is_empty()
     }
@@ -124,14 +149,48 @@ pub fn diff_runs(first: &[Finding], second: &[Finding]) -> RunDiff {
         groups.entry(finding_match_key(f)).or_default().1.push(f);
     }
     let mut matched = 0;
-    let mut only_in_first = Vec::new();
-    let mut only_in_second = Vec::new();
+    let mut left_first: Vec<&Finding> = Vec::new();
+    let mut left_second: Vec<&Finding> = Vec::new();
     for (a, b) in groups.values() {
         let pairs = a.len().min(b.len());
         matched += pairs;
-        only_in_first.extend(a[pairs..].iter().map(|f| unmatched(f)));
-        only_in_second.extend(b[pairs..].iter().map(|f| unmatched(f)));
+        left_first.extend(a[pairs..].iter().copied());
+        left_second.extend(b[pairs..].iter().copied());
     }
+    left_first.sort_by_key(|f| (&f.repo, &f.path, f.line));
+    left_second.sort_by_key(|f| (&f.repo, &f.path, f.line));
+    // Second pass: pair leftovers by site (repo, path, rule id, nearest line within the
+    // window). Each leftover pairs at most once; the closest line wins, the earlier one on a tie.
+    let mut matched_by_site = 0;
+    let mut second_used = vec![false; left_second.len()];
+    let mut only_in_first = Vec::new();
+    for f in &left_first {
+        let best = left_second
+            .iter()
+            .enumerate()
+            .filter(|(i, g)| {
+                !second_used[*i]
+                    && g.repo == f.repo
+                    && g.path == f.path
+                    && g.rule_id == f.rule_id
+                    && g.line.abs_diff(f.line) <= crate::ai_audit::SEMANTIC_MERGE_WINDOW
+            })
+            .min_by_key(|(_, g)| g.line.abs_diff(f.line))
+            .map(|(i, _)| i);
+        match best {
+            Some(i) => {
+                second_used[i] = true;
+                matched_by_site += 1;
+            }
+            None => only_in_first.push(unmatched(f)),
+        }
+    }
+    let mut only_in_second: Vec<UnmatchedFinding> = left_second
+        .iter()
+        .zip(&second_used)
+        .filter(|(_, used)| !**used)
+        .map(|(f, _)| unmatched(f))
+        .collect();
     let order = |x: &UnmatchedFinding, y: &UnmatchedFinding| {
         (&x.repo, &x.path, x.line, &x.rule_id).cmp(&(&y.repo, &y.path, y.line, &y.rule_id))
     };
@@ -141,6 +200,7 @@ pub fn diff_runs(first: &[Finding], second: &[Finding]) -> RunDiff {
         first_total: first.len(),
         second_total: second.len(),
         matched,
+        matched_by_site,
         by_tier: count_rows(first, second, |f| finding_tier(f).to_string()),
         by_rule: count_rows(first, second, |f| f.rule_id.clone()),
         by_severity: count_rows(first, second, |f| f.severity.to_ascii_lowercase()),

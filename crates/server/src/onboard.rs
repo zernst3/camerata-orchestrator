@@ -4413,6 +4413,63 @@ mod tests {
         assert_eq!(entry.merged_into.len(), 1);
     }
 
+    /// R1B-5: the deterministic `SupabaseRlsChecker` row and the model's row for the SAME rule
+    /// id at the SAME migration line (a table created with no RLS) end as ONE row in the
+    /// cross-family merge, keeping the deterministic tier and the model's evidence site.
+    #[test]
+    fn cross_family_merge_collapses_a_real_rls_checker_row_and_the_models_row_at_one_site() {
+        let migration = "-- 0002_profiles.sql\n\ncreate table public.profiles (\n  id uuid primary key\n);\n\nalter table public.profiles enable row level security;\n\ncreate table public.member_contacts (\n  id uuid primary key default gen_random_uuid(),\n  email text not null\n);\n";
+        let path = "supabase/migrations/0002_profiles.sql";
+        let files = vec![(path.to_string(), migration.to_string())];
+        use camerata_checks::arch_checker::ArchChecker;
+        let violations = camerata_checks::supabase::rls_checker::SupabaseRlsChecker.check(
+            &camerata_checks::arch_checker::RepoView {
+                spec: "acme/portal",
+                files: &files,
+            },
+        );
+        let floor: Vec<Finding> = violations
+            .iter()
+            .filter(|v| v.rule_id == "SUPABASE-RLS-ENABLED-1")
+            .map(|v| architectural::arch_violation_to_finding("acme/portal", v))
+            .collect();
+        assert_eq!(floor.len(), 1, "{floor:#?}");
+        let site = floor[0].line;
+        assert_eq!(site, 9, "the checker anchors on the create table line");
+
+        let mut model = Finding {
+            repo: "acme/portal".to_string(),
+            path: path.to_string(),
+            line: site,
+            rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
+            severity: "critical".to_string(),
+            snippet: "create table public.member_contacts (".to_string(),
+            detail: "Contacts table has no RLS — The member_contacts table holds names, emails and phone numbers and never enables row level security.".to_string(),
+            confidence: Some("high".to_string()),
+            ..Finding::default()
+        };
+        model.category = Some("rls-policy".to_string());
+
+        let findings = vec![floor[0].clone(), model];
+        let pre = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &files);
+        assert_eq!(
+            out.len(),
+            1,
+            "floor row + model row at one site must be one row: {out:#?}"
+        );
+        assert!(
+            out[0].preview_tool.is_some() && out[0].confidence.is_none(),
+            "the deterministic row is the survivor: {:?}",
+            out[0]
+        );
+        let acc = account_location_merge(&pre, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, out.len(), acc);
+        assert_eq!(entry.unaccounted, 0, "{entry:?}");
+    }
+
     /// REGRESSION for a REAL scan's `cross-family-merge rows 116 -> 83 merged=32 ... held=0
     /// informational=0 deduped=0 unaccounted=1 !! UNACCOUNTED` — a DIFFERENT leak than the
     /// same-rule-id-N-site-collapse case above, and different from the already-fixed
