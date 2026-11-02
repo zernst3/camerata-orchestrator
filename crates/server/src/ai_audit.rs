@@ -9738,7 +9738,7 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
 }
 
 /// Whether two lowercased object names can be the same object: equal, or one is the bare name
-/// of the other's schema-qualified form (`member_contacts` and `public.member_contacts`). A
+/// of the other's `public`-qualified form (`member_contacts` and `public.member_contacts`). A
 /// deterministic checker captures the bare table name while the model's row names the qualified
 /// one for the same table, and treating those as different objects kept the two rows apart
 /// (R1B-5). Two qualified names in different schemas (`public.orders`, `private.orders`) are
@@ -9747,11 +9747,10 @@ fn object_names_match(x: &str, y: &str) -> bool {
     if x == y {
         return true;
     }
+    // A bare name means the `public` schema: the floor's `bare_object_name` strips exactly
+    // `public.`. So `users` is not `auth.users` and `orders` is not `private.orders`.
     let bare_of = |bare: &str, qualified: &str| {
-        !bare.contains('.')
-            && qualified
-                .rsplit_once('.')
-                .is_some_and(|(_, last)| last == bare)
+        !bare.contains('.') && qualified.split_once('.') == Some(("public", bare))
     };
     bare_of(x, y) || bare_of(y, x)
 }
@@ -14784,6 +14783,12 @@ mod tests {
         assert!(!object_names_match("profiles", "public.member_contacts"));
         assert!(!object_names_match("public.orders", "private.orders"));
         assert!(!object_names_match("orders", "public.order_items"));
+        // A bare name means the public schema (the floor strips exactly `public.`), so it never
+        // matches a table of the same name in another schema.
+        assert!(!object_names_match("users", "auth.users"));
+        assert!(!object_names_match("orders", "private.orders"));
+        assert!(!object_names_match("orders", "app.db.orders"));
+        assert!(!object_names_match("auth.users", "users"));
     }
 
     /// R1B-3: a rule id the model mistyped by one or two characters is keyed to the one adopted
