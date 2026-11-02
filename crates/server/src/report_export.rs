@@ -1308,6 +1308,29 @@ pub(crate) fn mark_standard_fix(f: &mut Finding, why: &str) {
     f.captures.insert(FIX_REJECTION_CAPTURE.to_string(), why);
 }
 
+/// The `Finding::captures` key the detail stage writes, with [`SCAN_DETAIL`], on a finding whose
+/// regenerated explanation was turned down in every round for inventing an exploit precondition
+/// and which ships the scan's own statement plus the model's accepted fix direction instead
+/// (R1-1). Never read by an exporter.
+pub const DETAIL_SOURCE_CAPTURE: &str = "detail_source";
+/// The [`DETAIL_SOURCE_CAPTURE`] value of a finding that ships the scan's own statement.
+pub const SCAN_DETAIL: &str = "scan";
+/// The `Finding::captures` key holding why the checks turned the regenerated explanation down,
+/// for the operator's failure report only. Never read by an exporter.
+pub const DETAIL_REJECTION_CAPTURE: &str = "detail_rejection";
+
+/// Mark `f` as shipping the scan's own statement (and the accepted fix direction) as its detail,
+/// keeping `why` (the checks' reasons, secrets scrubbed and capped) for the operator's report.
+pub(crate) fn mark_scan_detail(f: &mut Finding, why: &str) {
+    f.captures
+        .insert(DETAIL_SOURCE_CAPTURE.to_string(), SCAN_DETAIL.to_string());
+    let why = camerata_llm::failure::scrub_message(
+        &camerata_secrets::redact_str(why),
+        camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+    );
+    f.captures.insert(DETAIL_REJECTION_CAPTURE.to_string(), why);
+}
+
 /// What every export prints for a fix written for this code that passed the checks.
 pub const TAILORED_FIX_LABEL: &str = "Tailored fix";
 /// What every export prints for the rule's own guidance (the fix of a row whose model-written fix
@@ -2858,13 +2881,69 @@ pub(crate) fn resolve_fix(
     finding: &Finding,
     chosen_option: Option<&str>,
 ) -> Option<String> {
+    resolve_fix_inner(rule_id, corpus, finding, chosen_option, false)
+}
+
+/// R1-3: [`resolve_fix`] for a consistency DEVIATION row. When the option the row was judged
+/// under has no authored remediation of its own (an alternative such as `parse-in-handler` in
+/// `arch-typed-path-params-1.toml`), the rule's DEFAULT option's remediation ships instead, as
+/// the rule's standard fix, so a deviation row never goes out with an empty fix while the rule
+/// has one. [`resolve_fix`] itself stays strict (an option with no remediation omits the Fix
+/// block): for a defect row the default option's advice may not fit the option in force.
+pub(crate) fn resolve_deviation_fix(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    resolve_fix_inner(rule_id, corpus, finding, chosen_option, true)
+}
+
+/// Kind-aware [`resolve_fix`] used by every export surface that prints a row's fix (the PDF
+/// data, `findings.json`, the datasets and the workbook, and the held-for-review routing): a
+/// consistency deviation row resolves through [`resolve_deviation_fix`], every other row stays
+/// strict, so one row never has a fix in one artifact and none in another.
+pub(crate) fn resolve_fix_for_row(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        finding.kind,
+        Some(camerata_api_types::audit::FindingKind::Deviation(_))
+    ) {
+        resolve_deviation_fix(rule_id, corpus, finding, chosen_option)
+    } else {
+        resolve_fix(rule_id, corpus, finding, chosen_option)
+    }
+}
+
+fn resolve_fix_inner(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+    fall_back_to_rule_default: bool,
+) -> Option<String> {
     let rule = corpus_rule_for(rule_id, corpus)?;
     let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
-    let option = rule.resolved_option(evaluated)?;
-    let remediation = option.remediation.as_deref()?.trim();
-    if remediation.is_empty() {
-        return None;
-    }
+    let authored = |o: &camerata_rules::RuleOption| {
+        o.remediation
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+    };
+    let remediation = rule
+        .resolved_option(evaluated)
+        .and_then(authored)
+        .or_else(|| {
+            fall_back_to_rule_default
+                .then(|| rule.resolved_option(None).and_then(authored))
+                .flatten()
+        })?;
+    let remediation = remediation.as_str();
     // The authored text is a TOML multi-line string: join its hard line wraps here, once, so no
     // artifact ever sees a mid-sentence newline (see `fix_text`).
     Some(fix_text::prepare(&instantiate_remediation(
@@ -2894,7 +2973,7 @@ fn has_any_fix(
         .fix_specific
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty())
-        || resolve_fix(&finding.rule_id, corpus, finding, chosen_option).is_some()
+        || resolve_fix_for_row(&finding.rule_id, corpus, finding, chosen_option).is_some()
 }
 
 // ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────
@@ -5089,7 +5168,8 @@ pub fn build_report_json(
                     // `fix_for_this_finding`, so the template's secondary line only ever adds
                     // information, never echoes the primary line back.
                     fix: {
-                        let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        let generic =
+                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
                         if generic == specific_fix {
                             None
                         } else {
@@ -5099,7 +5179,8 @@ pub fn build_report_json(
                     // D8: the label beside the fix, from the same two facts the fields above
                     // were built from (the specific fix and the rule's own authored one).
                     fix_type: {
-                        let authored = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        let authored =
+                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
                         fix_type_label(
                             f,
                             specific_fix.is_some(),
@@ -8535,6 +8616,32 @@ mod tests {
             "a category with >= 1 finding must show >= 1 rules checked, got {}",
             row.audited_rules
         );
+    }
+
+    /// Review of R1-2: a same-id preview merge records which tool also saw the row, but that
+    /// provenance is not a rule id, so the scorecard's "rules checked" count is unchanged.
+    #[test]
+    fn a_same_id_preview_merge_does_not_change_the_scorecard_rule_counts() {
+        let id = "SEC-NO-HARDCODED-SECRETS-1";
+        let counts = |merged: bool| {
+            let mut rows = vec![finding(id, "a.rs", 1, "critical")];
+            if merged {
+                let mut preview = finding(id, "a.rs", 1, "critical");
+                preview.preview = true;
+                preview.preview_tool = Some("camerata-arch".to_string());
+                let out = crate::dedup_scan_previews(&mut rows, vec![preview]);
+                assert!(out.is_empty(), "merged into the existing row");
+            }
+            let report = report_with(rows, vec![id]);
+            let json =
+                build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+            json.scorecard
+                .rows
+                .iter()
+                .map(|r| (r.category.clone(), r.audited_rules, r.clean_rules))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts(true), counts(false));
     }
 
     #[test]

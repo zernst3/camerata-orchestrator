@@ -84,8 +84,8 @@ use crate::report_export::{
     bucket_title, category_for, category_for_finding, citation_for_finding, classify,
     client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
     finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings, title_for_finding,
-    Disposition, DispositionWire, ReportOptions,
+    resolve_citation, resolve_effort, sanitize_report_findings, title_for_finding, Disposition,
+    DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -166,7 +166,7 @@ pub struct FindingRow {
     /// latter is a pipeline gap only (C3-1b), never a hedge; the `fix` column below still
     /// carries the rule's authored remediation in that case.
     fix_specific: Option<String>,
-    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
+    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that
     /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
@@ -460,8 +460,15 @@ fn partition_rows(
             .join("\n");
         // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
-        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
-            .map(|s| crate::report_export::fix_text::plain(&s));
+        // R1-3: kind-aware, so a deviation row falls back to the rule's default option's
+        // remediation here exactly as in the PDF data.
+        let fix = crate::report_export::resolve_fix_for_row(
+            &f.rule_id,
+            corpus,
+            f,
+            chosen_option_for_rule,
+        )
+        .map(|s| crate::report_export::fix_text::plain(&s));
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -905,14 +912,18 @@ fn build_deviation_groups(
             } else {
                 crate::report_export::STANDARD_FIX_LABEL.to_string()
             };
+            let deviating_sites = declared_numerator.max(sites_represented);
             DeviationGroupRow {
                 repo,
                 category: group[0].category.clone(),
                 rule_title: rule_title(&rule_id, corpus),
                 rule_id,
                 convention_label,
-                deviating_sites: declared_numerator.max(sites_represented),
-                assessed_sites,
+                deviating_sites,
+                // R1-3: the denominator is never below the numerator ("4 of 3 sites" came from
+                // a first row that counted 3 while the sheet lists 4). `None` stays "not
+                // counted".
+                assessed_sites: assessed_sites.map(|a| a.max(deviating_sites)),
                 worst_severity,
                 locations,
                 recommended_fix,
@@ -1067,6 +1078,11 @@ fn build_convention_rows(
 /// evaluated must be distinguishable from one that was assessed and found clean.
 #[derive(Serialize)]
 struct NotAssessedRow {
+    /// The service the row is about, set only when the project has several repos (the same
+    /// column `deviations` and `conventions` carry): a rule not assessed in one service says
+    /// nothing about another.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    repo: String,
     rule_title: String,
     rule_id: String,
     /// The structured reason in client language. The payload's `reason_detail` is the
@@ -1102,6 +1118,11 @@ fn build_not_assessed_rows(
         .iter()
         .filter_map(|row| match &row.kind.0 {
             Some(FindingKind::NotAssessed(na)) => Some(NotAssessedRow {
+                repo: if row.multi_repo {
+                    row.repo.clone()
+                } else {
+                    String::new()
+                },
                 rule_title: rule_title(&row.rule_id, corpus),
                 rule_id: row.rule_id.clone(),
                 why: not_assessed_reason_label(na.reason, row.multi_repo).to_string(),
@@ -1111,7 +1132,9 @@ fn build_not_assessed_rows(
             _ => None,
         })
         .collect();
-    out.sort_by(|a, b| (&a.rule_title, &a.rule_id).cmp(&(&b.rule_title, &b.rule_id)));
+    out.sort_by(|a, b| {
+        (&a.rule_title, &a.rule_id, &a.repo).cmp(&(&b.rule_title, &b.rule_id, &b.repo))
+    });
     out
 }
 
@@ -2067,20 +2090,25 @@ fn write_coverage_sheet(
     if !not_assessed.is_empty() {
         ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
-        for (c, h) in [
+        let na_multi = not_assessed.iter().any(|r| !r.repo.is_empty());
+        let mut na_headers = vec![
             "What was checked",
             "Why",
             "What we observed",
             "Detail",
             "Rule ID",
-        ]
-        .iter()
-        .enumerate()
-        {
+        ];
+        if na_multi {
+            na_headers.push("Service");
+        }
+        for (c, h) in na_headers.iter().enumerate() {
             ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
         }
         next_r += 1;
         for row in not_assessed {
+            if na_multi {
+                ws.write_string_with_format(next_r, 5, &row.repo, &fmts.cell(None, false, false))?;
+            }
             ws.write_string_with_format(next_r, 0, &row.rule_title, &fmts.cell(None, true, false))?;
             ws.write_string_with_format(next_r, 1, &row.why, &fmts.cell(None, true, false))?;
             ws.write_string_with_format(next_r, 2, &row.headline, &fmts.cell(None, true, false))?;
@@ -6220,6 +6248,283 @@ mod tests {
         let bytes =
             build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
         assert_eq!(cell_number(&bytes, "Deviations", "D2"), 1.0);
+    }
+
+    /// R1-3 (i): the denominator is never below the numerator. The first row of a group counted
+    /// 3 assessed sites while the sheet lists 4 deviating ones, and the row read "4 of 3 sites".
+    #[test]
+    fn r1_3_a_deviation_group_never_shows_more_deviating_than_assessed_sites() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let rows: Vec<Finding> = (0..4)
+            .map(|i| {
+                kinded(
+                    finding(
+                        "ARCH-TYPED-PATH-PARAMS-1",
+                        &format!("app/api/r{i}/route.ts"),
+                        4,
+                        "medium",
+                    ),
+                    FindingKind::Deviation(DeviationKind {
+                        deviating_sites: 3,
+                        assessed_sites: Some(3),
+                        convention_option_id: None,
+                        convention_label: "Typed path params".to_string(),
+                    }),
+                )
+            })
+            .collect();
+        let report = report_with(rows, vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let groups = build_deviation_groups(&live, None);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].deviating_sites, 4);
+        assert_eq!(
+            groups[0].assessed_sites,
+            Some(4),
+            "never fewer assessed than deviating"
+        );
+        // A producer that could not count stays "not counted", never invented.
+        let dev = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        let report = report_with(vec![dev], vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        assert_eq!(build_deviation_groups(&live, None)[0].assessed_sites, None);
+    }
+
+    /// R1-3 (ii): a group whose chosen option has no authored remediation (`parse-in-handler` in
+    /// `arch-typed-path-params-1.toml`) ships the rule's default option's remediation, labelled
+    /// Standard fix, instead of an empty fix and fix type.
+    #[tokio::test]
+    async fn r1_3_a_chosen_option_with_no_remediation_falls_back_to_the_default_options() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let rule = corpus
+            .get_by_id("ARCH-TYPED-PATH-PARAMS-1")
+            .expect("the rule is in the corpus");
+        let default_fix = rule
+            .resolved_option(None)
+            .and_then(|o| o.remediation.clone())
+            .expect("the default option has a remediation");
+        assert!(
+            rule.resolved_option(Some("parse-in-handler"))
+                .is_some_and(|o| o.remediation.is_none()),
+            "the premise: the chosen option has none"
+        );
+        let mut f = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: Some(3),
+                convention_option_id: Some("typed-extraction".to_string()),
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        f.evaluated_option_id = Some("parse-in-handler".to_string());
+        // The strict resolver (defect rows) still omits; only the deviation resolver falls back.
+        assert_eq!(
+            crate::report_export::resolve_fix("ARCH-TYPED-PATH-PARAMS-1", Some(&corpus), &f, None),
+            None
+        );
+        let report = report_with(vec![f], vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let groups = build_deviation_groups(&live, Some(&corpus));
+        assert_eq!(groups.len(), 1);
+        assert!(
+            !groups[0].recommended_fix.is_empty(),
+            "the fix must not be empty"
+        );
+        assert_eq!(groups[0].fix_type, "Standard fix");
+        let first_words: String = default_fix
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            groups[0].recommended_fix.contains(&first_words),
+            "{:?} vs {first_words:?}",
+            groups[0].recommended_fix
+        );
+    }
+
+    /// Review of R1-3 (ii): one deviation row, one fix, in every artifact. The workbook's group
+    /// fix, `findings.json`'s `fix` and the PDF data's curated site fix are the same Standard fix
+    /// (the default option's remediation) for the ARCH-TYPED-PATH-PARAMS-1 / parse-in-handler
+    /// deviation, and a defect row stays strict in all of them.
+    #[tokio::test]
+    async fn r1_3_a_deviation_row_has_the_same_fix_in_every_artifact() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let mut f = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: Some(3),
+                convention_option_id: Some("typed-extraction".to_string()),
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        f.evaluated_option_id = Some("parse-in-handler".to_string());
+        let report = report_with(vec![f], vec!["ARCH-TYPED-PATH-PARAMS-1"]);
+        let sealed = report.clone().seal();
+
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let workbook_fix = build_deviation_groups(&live, Some(&corpus))[0]
+            .recommended_fix
+            .clone();
+        assert!(!workbook_fix.is_empty());
+
+        let json = crate::report_export::build_report_json(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let findings_json_fix = export.findings[0].fix.clone().unwrap_or_default();
+        assert_eq!(findings_json_fix, workbook_fix, "findings.json fix");
+
+        let pdf_fix = json
+            .curated_findings
+            .iter()
+            .flat_map(|g| g.sites.iter())
+            .find(|s| s.path == "app/api/x/route.ts")
+            .expect("the deviation site is in the curated data")
+            .fix
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(
+            crate::report_export::fix_text::plain(&pdf_fix),
+            workbook_fix,
+            "PDF curated site fix"
+        );
+    }
+
+    /// R1-5: in a multi-repo export the not-assessed rows say which service each is about, in the
+    /// same `repo` column `deviations` and `conventions` carry (the CSV and the JSON, and a
+    /// Service column in the workbook's Coverage section). A single-repo export keeps its shape.
+    #[test]
+    fn r1_5_not_assessed_rows_name_their_repo_in_a_multi_repo_export() {
+        use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+        let not_assessed = |repo: &str, reason| {
+            let mut f = kinded(
+                finding("RUST-NO-UNWRAP-1", "", 0, "info"),
+                FindingKind::NotAssessed(NotAssessedKind {
+                    reason,
+                    reason_detail: "internal diagnostic".to_string(),
+                }),
+            );
+            f.repo = repo.to_string();
+            f
+        };
+        let mut report = report_with(
+            vec![
+                not_assessed("owner/api", NotAssessedReason::PassFailed),
+                not_assessed("owner/web", NotAssessedReason::NoFilesMatched),
+            ],
+            vec![],
+        );
+        report.repos = vec!["owner/api".to_string(), "owner/web".to_string()];
+        let sealed = report.clone().seal();
+
+        let csv_of = |sealed: &crate::onboard::SealedReport| -> Vec<(String, Vec<u8>)> {
+            build_csv_exports(sealed, &HashMap::new(), None, &empty_opts()).unwrap()
+        };
+        let exports = csv_of(&sealed);
+        let bytes = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/not-assessed.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(bytes.as_slice());
+        let headers = rdr.headers().unwrap().clone();
+        let repo_col = headers
+            .iter()
+            .position(|h| h == "repo")
+            .expect("a multi-repo not-assessed.csv carries the repo column");
+        let mut repos: Vec<String> = rdr
+            .records()
+            .map(|r| r.unwrap()[repo_col].to_string())
+            .collect();
+        repos.sort();
+        assert_eq!(repos, vec!["owner/api", "owner/web"]);
+
+        let json = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(
+            &json
+                .iter()
+                .find(|(n, _)| n == "json/not-assessed.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let mut json_repos: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["repo"].as_str().unwrap())
+            .collect();
+        json_repos.sort();
+        assert_eq!(json_repos, vec!["owner/api", "owner/web"]);
+
+        // The workbook still builds, with the Service column in the Coverage section.
+        let book = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        assert_eq!(&book[0..2], b"PK");
+
+        // A single-repo export is unchanged: no repo column, still valid.
+        let single = report_with(
+            vec![not_assessed("owner/repo", NotAssessedReason::PassFailed)],
+            vec![],
+        )
+        .seal();
+        let exports = csv_of(&single);
+        let bytes = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/not-assessed.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(bytes.as_slice());
+        assert!(!rdr.headers().unwrap().iter().any(|h| h == "repo"));
+        assert_eq!(rdr.records().count(), 1);
     }
 
     /// req_pass3: the Conventions sheet reports the two convention statements DISTINCTLY and

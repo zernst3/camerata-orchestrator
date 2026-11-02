@@ -9599,6 +9599,17 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // would otherwise read as one object and fuse the two findings.
     "gitignore-status",
     "secret-kind",
+    // Provenance and fix/detail-source marks the pipeline writes onto a row. `fix_source` and
+    // its rejection text are on every Standard-fix row (D8), `detail_source` and its rejection
+    // text on every row that shipped the scan's statement (R1-1), `also_seen_by` on a row that
+    // absorbed a same-id preview of another tool (R1-2). The same value on two rows says the
+    // same bookkeeping applied, not that they are about the same object, and carried rows
+    // re-enter the cross-family merge with last run's marks.
+    crate::report_export::FIX_SOURCE_CAPTURE,
+    crate::report_export::FIX_REJECTION_CAPTURE,
+    crate::report_export::DETAIL_SOURCE_CAPTURE,
+    crate::report_export::DETAIL_REJECTION_CAPTURE,
+    crate::ALSO_SEEN_BY_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -11453,9 +11464,9 @@ fn apply_alternative_decision(
 ///   (`Finding::also_locations`) that was originally flagged under the rule. A same-location
 ///   demotion into another row's `also_matches` is deliberately NOT counted (it has no site
 ///   record of its own) — the count can under-tell, never over-tell.
-/// - The DENOMINATOR is `rec.assessed_sites` only when it is at least the numerator we
-///   actually counted; a model count smaller than reality is dropped to `None` rather than
-///   rendered as a nonsense "3 of 2 sites".
+/// - The DENOMINATOR is `rec.assessed_sites`, raised to the numerator we actually counted when
+///   the model's count is smaller (never a nonsense "3 of 2 sites", and never dropped: R1-4).
+///   With no model count it stays `None`, "not counted".
 /// - A rule whose decided option is `violates` is SKIPPED: its rows are defects (A5.4), not
 ///   consistency deviations. A `no_convention`/not-applicable recommendation is skipped too
 ///   (those rules have no decided convention to deviate from; their rows were hard-filtered).
@@ -11507,7 +11518,10 @@ pub(crate) fn assign_deviation_kinds(
         if deviating_sites == 0 {
             continue;
         }
-        let assessed_sites = rec.assessed_sites.filter(|total| *total >= deviating_sites);
+        // R1-4: a model count smaller than the sites we counted ourselves is raised to our
+        // count (the denominator is at least the numerator), not dropped: dropping it left the
+        // row with no denominator at all. No model count stays `None` (not counted).
+        let assessed_sites = rec.assessed_sites.map(|total| total.max(deviating_sites));
         for f in findings
             .iter_mut()
             .filter(|f| f.rule_id.eq_ignore_ascii_case(&rec.rule_id))
@@ -19931,26 +19945,39 @@ mod tests {
         );
     }
 
-    /// req A5.2/A5.6 honesty: a model denominator SMALLER than the structurally-counted
-    /// numerator is dropped to None (render the numerator alone), never shipped as a
-    /// nonsense "3 of 2 sites". Verified failing before the `filter(total >= numerator)`
-    /// guard by removing it: assessed_sites came through as Some(1).
+    /// req A5.2/A5.6 honesty, amended by R1-4: a model denominator SMALLER than the
+    /// structurally-counted numerator is raised to the numerator, never shipped as a nonsense
+    /// "3 of 2 sites" and never dropped to None (tutorly's row showed no denominator at all).
+    /// The earlier test here pinned the drop, which was the defect; it is replaced.
     #[test]
-    fn req_a5_2_deviation_denominator_below_numerator_is_dropped_not_rendered() {
+    fn req_a5_2_deviation_denominator_below_numerator_is_raised_to_the_numerator() {
         let mut findings = vec![
             deviation_fixture("MULTI-RULE-1", "src/a.rs", 10),
             deviation_fixture("MULTI-RULE-1", "src/b.rs", 20),
+            deviation_fixture("MULTI-RULE-1", "src/c.rs", 30),
         ];
-        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(1))];
+        // Deviating 3, the model's sites_total 2: Some(3), not None.
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(2))];
         let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
         assign_deviation_kinds(&mut findings, &recs, &alts);
         match &findings[0].kind {
             Some(camerata_api_types::audit::FindingKind::Deviation(d)) => {
-                assert_eq!(d.deviating_sites, 2);
+                assert_eq!(d.deviating_sites, 3);
                 assert_eq!(
-                    d.assessed_sites, None,
-                    "a denominator below the counted numerator must be dropped, not rendered"
+                    d.assessed_sites,
+                    Some(3),
+                    "a denominator below the counted numerator is raised to it, not dropped"
                 );
+            }
+            other => panic!("expected Deviation, got {other:?}"),
+        }
+        // No model count at all stays "not counted".
+        let mut findings = vec![deviation_fixture("MULTI-RULE-1", "src/a.rs", 10)];
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", None)];
+        assign_deviation_kinds(&mut findings, &recs, &alts);
+        match &findings[0].kind {
+            Some(camerata_api_types::audit::FindingKind::Deviation(d)) => {
+                assert_eq!(d.assessed_sites, None);
             }
             other => panic!("expected Deviation, got {other:?}"),
         }

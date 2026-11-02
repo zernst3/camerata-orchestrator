@@ -50,6 +50,20 @@ pub struct StandardFixEntry {
     pub reasons: String,
 }
 
+/// A finding that ships the scan's own statement plus the accepted fix direction as its detail
+/// because the model's regenerated explanation was turned down in every round for inventing an
+/// exploit precondition (R1-1). Not a failure: the run is complete. Listed here as a quality
+/// signal, since a checker bug can hide behind one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailFallbackEntry {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    /// Why the checks turned the model's explanation down, secrets scrubbed and capped.
+    pub reasons: String,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureReport {
@@ -60,6 +74,11 @@ pub struct FailureReport {
     /// written before D8 still loads.
     #[serde(default)]
     pub standard_fixes: Vec<StandardFixEntry>,
+    /// Every finding of this run that ships the scan's own statement as its detail after the
+    /// regenerated explanation was turned down in every round for inventing a precondition.
+    /// Operator only. `serde(default)` so a report written before R1-1 still loads.
+    #[serde(default)]
+    pub detail_fallbacks: Vec<DetailFallbackEntry>,
 }
 
 /// The entries for every failed part of `report`. A disclosed scope limit (a tool not run by
@@ -108,16 +127,41 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
                 .unwrap_or_default(),
         })
         .collect();
+    let detail_fallbacks = report
+        .findings
+        .iter()
+        .filter(|f| {
+            f.captures
+                .get(crate::report_export::DETAIL_SOURCE_CAPTURE)
+                .is_some_and(|v| v == crate::report_export::SCAN_DETAIL)
+                && f.captures
+                    .contains_key(crate::report_export::DETAIL_REJECTION_CAPTURE)
+        })
+        .map(|f| DetailFallbackEntry {
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            rule_id: f.rule_id.clone(),
+            reasons: f
+                .captures
+                .get(crate::report_export::DETAIL_REJECTION_CAPTURE)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect();
     FailureReport {
         generated_at: crate::client_source::records::now_rfc3339(),
         entries,
         standard_fixes,
+        detail_fallbacks,
     }
 }
 
 impl FailureReport {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.standard_fixes.is_empty()
+        self.entries.is_empty()
+            && self.standard_fixes.is_empty()
+            && self.detail_fallbacks.is_empty()
     }
 
     /// The entries that still fail.
@@ -171,6 +215,25 @@ impl FailureReport {
                 self.standard_fixes.len()
             ));
             for s in &self.standard_fixes {
+                out.push_str(&format!(
+                    "\n- {} {}:{} {}: {}",
+                    s.repo, s.path, s.line, s.rule_id, s.reasons
+                ));
+            }
+            out.push('\n');
+        }
+        if !self.detail_fallbacks.is_empty() {
+            out.push_str(&format!(
+                "\n## Scan statements shipped as the detail ({})\n\nThese findings ship the \
+                 scan's own statement plus the model's accepted fix direction as their detail, \
+                 because the model's full explanation was turned down in every round for adding \
+                 an exploit precondition that neither the statement nor the code shown makes. \
+                 The rejected text is not shipped. The run is complete. A reason that restates \
+                 what the code shown says is a signal the checker is too strict (defect R1-1 \
+                 was one).\n",
+                self.detail_fallbacks.len()
+            ));
+            for s in &self.detail_fallbacks {
                 out.push_str(&format!(
                     "\n- {} {}:{} {}: {}",
                     s.repo, s.path, s.line, s.rule_id, s.reasons
@@ -292,6 +355,7 @@ pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> Failu
         generated_at: current.generated_at.clone(),
         entries,
         standard_fixes: current.standard_fixes.clone(),
+        detail_fallbacks: current.detail_fallbacks.clone(),
     }
 }
 
