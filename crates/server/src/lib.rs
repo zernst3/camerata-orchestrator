@@ -7133,15 +7133,23 @@ pub(crate) fn dedup_scan_previews_with(
         // An existing finding at the same location that is the same rule, the native rule this
         // tool rule enforces, or (security) the same category. The category must be Some (we
         // don't collapse unrecognized categories).
-        let twin_idx = existing.iter().position(|f| {
-            f.repo == preview.repo
-                && f.path == preview.path
-                && f.line == preview.line
-                && (f.rule_id == preview.rule_id
-                    || preview_is_native_rule_tool(&preview.rule_id, &f.rule_id, selectors)
-                    || preview_cat
-                        .is_some_and(|cat| finding_security_category(&f.rule_id) == Some(cat)))
-        });
+        let same_place = |f: &crate::onboard::Finding| {
+            f.repo == preview.repo && f.path == preview.path && f.line == preview.line
+        };
+        // The row with the IDENTICAL rule id wins over the first row that merely shares a
+        // category or a tool mapping.
+        let twin_idx = existing
+            .iter()
+            .position(|f| same_place(f) && f.rule_id == preview.rule_id)
+            .or_else(|| {
+                existing.iter().position(|f| {
+                    same_place(f)
+                        && (preview_is_native_rule_tool(&preview.rule_id, &f.rule_id, selectors)
+                            || preview_cat.is_some_and(|cat| {
+                                finding_security_category(&f.rule_id) == Some(cat)
+                            }))
+                })
+            });
 
         if let Some(idx) = twin_idx {
             let existing_rank = finding_dedup_rank(&existing[idx]);
@@ -7157,10 +7165,20 @@ pub(crate) fn dedup_scan_previews_with(
 
             if preview_rank >= existing_rank {
                 // Existing row has equal or higher precedence: keep it, fold preview in.
-                if preview.rule_id != existing[idx].rule_id
-                    && !existing[idx].also_matches.contains(&preview.rule_id)
-                {
-                    existing[idx].also_matches.push(preview.rule_id.clone());
+                // Both ids stay on the row. For the same id the second "id" is the preview
+                // tool's provenance (`<tool>:<rule id>`), so which tool also saw it is kept.
+                let folded = if preview.rule_id != existing[idx].rule_id {
+                    Some(preview.rule_id.clone())
+                } else {
+                    preview
+                        .preview_tool
+                        .as_deref()
+                        .map(|tool| format!("{tool}:{}", preview.rule_id))
+                };
+                if let Some(folded) = folded {
+                    if !existing[idx].also_matches.contains(&folded) {
+                        existing[idx].also_matches.push(folded);
+                    }
                 }
                 existing[idx].severity = severity;
                 // drop the preview finding (continue to next)
@@ -25770,9 +25788,10 @@ mod tests {
         assert_eq!(out[0].line, 9);
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].severity, "medium", "the higher severity wins");
-        assert!(
-            existing[0].also_matches.is_empty(),
-            "same id, nothing to add"
+        assert_eq!(
+            existing[0].also_matches,
+            vec!["camerata-arch:UI-UTC-DATES-1".to_string()],
+            "same id: only the preview tool's provenance is added"
         );
 
         // The other way round: the existing row is the higher one and stays so.
@@ -25789,6 +25808,81 @@ mod tests {
         );
         assert!(out.is_empty());
         assert_eq!(existing[0].severity, "high");
+    }
+
+    /// Review of R1-2: with two candidate rows at one place, the preview folds into the row with
+    /// the IDENTICAL rule id, not the first row that merely shares its category.
+    #[test]
+    fn dedup_prefers_the_row_with_the_identical_rule_id() {
+        // A security-category twin listed first, the identical-id row second.
+        let mut existing = vec![
+            native_row("src/h.js", 8, "SEC-NO-HARDCODED-SECRETS-1", "high"),
+            native_row(
+                "src/h.js",
+                8,
+                "camerata.security.hardcoded-secret",
+                "medium",
+            ),
+        ];
+        let preview = tool_preview(
+            "src/h.js",
+            8,
+            "camerata.security.hardcoded-secret",
+            "semgrep",
+            "medium",
+        );
+        let out = dedup_scan_previews(&mut existing, vec![preview]);
+        assert!(out.is_empty());
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "the category twin listed first is not touched: {:?}",
+            existing[0].also_matches
+        );
+        assert_eq!(existing[1].rule_id, "camerata.security.hardcoded-secret");
+        assert!(
+            existing[1]
+                .also_matches
+                .iter()
+                .any(|m| m.contains("semgrep")),
+            "the identical-id row took the merge: {:?}",
+            existing[1].also_matches
+        );
+    }
+
+    /// Review of R1-2: a same-id merge keeps which tool the preview came from, so the
+    /// provenance of the folded row is not lost (the merged row stays a native row).
+    #[test]
+    fn a_same_id_merge_records_the_preview_tool() {
+        let mut existing = vec![native_row("src/a.ts", 4, "UI-UTC-DATES-1", "low")];
+        let out = dedup_scan_previews(
+            &mut existing,
+            vec![tool_preview(
+                "src/a.ts",
+                4,
+                "UI-UTC-DATES-1",
+                "camerata-arch",
+                "medium",
+            )],
+        );
+        assert!(out.is_empty());
+        assert_eq!(existing[0].rule_id, "UI-UTC-DATES-1");
+        assert!(!existing[0].preview, "the merged row stays a native row");
+        assert_eq!(
+            existing[0].also_matches,
+            vec!["camerata-arch:UI-UTC-DATES-1".to_string()]
+        );
+        // Merging the same preview again does not repeat it.
+        let _ = dedup_scan_previews(
+            &mut existing,
+            vec![tool_preview(
+                "src/a.ts",
+                4,
+                "UI-UTC-DATES-1",
+                "camerata-arch",
+                "medium",
+            )],
+        );
+        assert_eq!(existing[0].also_matches.len(), 1);
     }
 
     /// R1-2: the eslint rule that enforces a native rule collapses into the native rule's row on
