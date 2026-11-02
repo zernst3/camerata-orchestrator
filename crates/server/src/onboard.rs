@@ -1432,6 +1432,9 @@ impl ScanReport {
         self.discarded.retain(|f| !replaced(f));
         self.discarded.extend(discarded);
         self.ledger.set_discarded(&self.discarded);
+        // The stored report is handed out as it is (the rescan route only sweeps secrets), so the
+        // new rows are keyed and the tree is rebuilt now, not at the next seal.
+        self.assign_site_keys();
     }
 
     /// A10: whether the rows the engine threw out and kept ([`Self::discarded`]) are the rows the

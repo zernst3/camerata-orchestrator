@@ -206,4 +206,40 @@ mod tests {
             sealed.ledger.discarded()
         );
     }
+
+    /// After a rescan fold, every shipped and thrown-out row carries a site key and the tree names
+    /// exactly the shipped rows' keys (no key of a replaced row, none missing).
+    #[test]
+    fn a_rescan_fold_leaves_every_row_keyed_and_the_tree_in_step() {
+        let mut report = crate::onboard::ScanReport::gated(&[]);
+        report.findings = vec![
+            at("me/ok", "MULTI-RULE-1", "old ok"),
+            at("me/ok", "OTHER-RULE-1", "other rule"),
+        ];
+        report.assign_site_keys();
+        let mut thrown = at("me/ok", "MULTI-RULE-1", "new discarded");
+        mark(&mut thrown, NO_CONVENTION);
+        let refreshed = vec![("me/ok".to_string(), vec!["MULTI-RULE-1".to_string()])];
+        report.fold_rescan_rows(
+            &refreshed,
+            vec![at("me/ok", "MULTI-RULE-1", "new ok")],
+            vec![thrown],
+        );
+        assert!(report.findings.iter().all(|f| !f.site_key.is_empty()));
+        assert_eq!(report.discarded.len(), 1);
+        assert!(report.discarded.iter().all(|f| !f.site_key.is_empty()));
+        let mut row_keys: Vec<String> =
+            report.findings.iter().map(|f| f.site_key.clone()).collect();
+        row_keys.sort();
+        let mut member_keys: Vec<String> = report
+            .tree
+            .as_ref()
+            .expect("a tree")
+            .nodes
+            .iter()
+            .flat_map(|n| n.members.clone())
+            .collect();
+        member_keys.sort();
+        assert_eq!(member_keys, row_keys);
+    }
 }
