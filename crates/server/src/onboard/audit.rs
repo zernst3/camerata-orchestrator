@@ -241,6 +241,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                     );
                     findings.push(Finding {
                         could_be_intentional: false,
+                        site_key: String::new(),
                         repo: repo.to_string(),
                         path: path.to_string(),
                         line: 0,
@@ -308,6 +309,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             };
             findings.push(Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: repo.to_string(),
                 path: path.to_string(),
                 line: line_no,
@@ -557,6 +559,7 @@ pub(crate) fn classify_repo_findings(
     for w in reasonless_waivers(&inline) {
         findings.push(Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: repo.to_string(),
             path: w.path.clone(),
             line: w.line,

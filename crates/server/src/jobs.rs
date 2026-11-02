@@ -528,6 +528,7 @@ mod tests {
     fn finding(rule: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "me/api".into(),
             kind: None,
             path: "src/x.rs".into(),

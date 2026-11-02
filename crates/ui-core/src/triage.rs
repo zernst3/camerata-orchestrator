@@ -264,6 +264,30 @@ pub struct FindingView {
     pub category: Option<String>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+    /// The stable site key the server assigned this row
+    /// ([`camerata_api_types::site_key::site_key`]), mirrored from
+    /// `camerata_server::onboard::Finding::site_key`. Empty for a row the server never keyed
+    /// (an old report); [`finding_key`] then falls back to the ordinal-0 key.
+    #[serde(default)]
+    pub site_key: String,
+}
+
+#[cfg(test)]
+impl FindingView {
+    /// Give this fixture row the key the server would give it if its line were the ordinal:
+    /// rows that differ only by line stay distinct, as repeats of one snippet do once the server
+    /// has numbered them. Call it AFTER setting `line`; a fixture left unkeyed gets the
+    /// ordinal-0 key, so two rows that differ only by line would share one.
+    pub(crate) fn keyed_by_line(mut self) -> Self {
+        self.site_key = camerata_api_types::site_key::site_key(
+            &self.repo,
+            &self.path,
+            &self.rule_id,
+            &self.snippet,
+            self.line,
+        );
+        self
+    }
 }
 
 impl FindingView {
@@ -1104,23 +1128,17 @@ pub fn finding_location_label(f: &FindingView) -> String {
 /// the scan surface (re-exported here so `FindingView`'s serde attribute resolves within core).
 pub use crate::scan::default_finding_status;
 
-/// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
-/// so its disposition survives table switches and re-sorts.
+/// Stable identity for a finding across the triage tables and across reruns, so its
+/// disposition survives table switches, re-sorts and a code edit that moves the line. It is the
+/// server's site key ([`camerata_api_types::site_key`]: repo, path, rule and snippet
+/// fingerprint, ordinal), read off the row; a row the server never keyed gets the ordinal-0
+/// key. `camerata_server::report_export::finding_key` is the same function over the server's
+/// `Finding`, and a test in the server crate pins that the two agree byte for byte.
 pub fn finding_key(f: &FindingView) -> String {
-    let key = format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-        f.repo, f.rule_id, f.path, f.line, f.snippet
-    );
-    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
-    // version in one lockfile shared the whole key and dispositioning one buried the other. The
-    // advisory id (carried on dependency rows only) tells them apart. Every other row's key is
-    // unchanged. Must match `camerata_server::report_export::finding_key` byte for byte.
-    match f.captures.get("advisory") {
-        Some(advisory) if f.rule_id == "DEP-AUDIT-1" && !advisory.is_empty() => {
-            format!("{key}\u{0}{advisory}")
-        }
-        _ => key,
+    if !f.site_key.is_empty() {
+        return f.site_key.clone();
     }
+    camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0)
 }
 
 /// The disposition state for a finding (Unresolved when absent from the map).
@@ -1897,49 +1915,72 @@ mod tests {
     use super::*;
 
     fn finding(json: serde_json::Value) -> FindingView {
-        serde_json::from_value(json).expect("valid FindingView fixture")
+        let row: FindingView = serde_json::from_value(json).expect("valid FindingView fixture");
+        if row.site_key.is_empty() {
+            row.keyed_by_line()
+        } else {
+            row
+        }
     }
 
     // ── moved from the scan adapter (path prefix changed only) ────────────────
 
     #[test]
-    fn finding_key_combines_identity_fields() {
+    fn finding_key_is_the_site_key_and_ignores_the_line() {
+        let row = |line: usize, snippet: &str| -> FindingView {
+            serde_json::from_value(serde_json::json!({
+                "repo": "owner/repo", "path": "src/a.rs", "line": line,
+                "rule_id": "RULE-X", "severity": "high", "snippet": snippet, "detail": ""
+            }))
+            .unwrap()
+        };
+        let key = finding_key(&row(7, "snip"));
+        assert_eq!(
+            key,
+            camerata_api_types::site_key::site_key("owner/repo", "src/a.rs", "RULE-X", "snip", 0)
+        );
+        // The line moving does not rename the site; the code changing does.
+        assert_eq!(key, finding_key(&row(70, "snip")));
+        assert_ne!(key, finding_key(&row(7, "other")));
+    }
+
+    #[test]
+    fn a_row_carrying_the_servers_site_key_is_keyed_by_it() {
         let f = finding(serde_json::json!({
-            "repo": "owner/repo", "path": "src/a.rs", "line": 7,
-            "rule_id": "RULE-X", "severity": "high", "snippet": "snip", "detail": ""
+            "repo": "o/r", "path": "Cargo.lock", "line": 0,
+            "rule_id": "DEP-AUDIT-1", "severity": "high",
+            "snippet": "time@0.1.45", "detail": "", "site_key": "the-servers-key"
         }));
-        let key = finding_key(&f);
-        assert!(key.contains("owner/repo"));
-        assert!(key.contains("RULE-X"));
-        assert!(key.contains("src/a.rs"));
-        assert!(key.contains('7'));
-        assert!(key.contains("snip"));
+        assert_eq!(finding_key(&f), "the-servers-key");
     }
 
     #[test]
     fn two_advisories_on_one_package_version_do_not_share_a_key() {
-        let dep = |advisory: &str| {
+        // The server tells them apart with the ordinal it puts in the key (advisory-id order),
+        // and the UI reads that key off the row.
+        let dep = |advisory: &str, site_key: &str| {
             finding(serde_json::json!({
                 "repo": "o/r", "path": "Cargo.lock", "line": 0,
                 "rule_id": "DEP-AUDIT-1", "severity": "high",
-                "snippet": "time@0.1.45", "detail": "",
+                "snippet": "time@0.1.45", "detail": "", "site_key": site_key,
                 "captures": { "advisory": advisory }
             }))
         };
-        let (a, b) = (dep("RUSTSEC-2020-0071"), dep("RUSTSEC-2021-0001"));
-        assert_ne!(finding_key(&a), finding_key(&b));
-        // The server builds the same bytes (`report_export::finding_key`).
-        assert_eq!(
-            finding_key(&a),
-            "o/r\u{0}DEP-AUDIT-1\u{0}Cargo.lock\u{0}0\u{0}time@0.1.45\u{0}RUSTSEC-2020-0071"
+        let key = |ordinal| {
+            camerata_api_types::site_key::site_key(
+                "o/r",
+                "Cargo.lock",
+                "DEP-AUDIT-1",
+                "time@0.1.45",
+                ordinal,
+            )
+        };
+        let (a, b) = (
+            dep("RUSTSEC-2020-0071", &key(0)),
+            dep("RUSTSEC-2021-0001", &key(1)),
         );
-        // Any other row keeps the five-part key, even with an "advisory" capture of its own.
-        let other = finding(serde_json::json!({
-            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "RULE-X",
-            "severity": "low", "snippet": "s", "detail": "",
-            "captures": { "advisory": "X" }
-        }));
-        assert_eq!(finding_key(&other), "o/r\u{0}RULE-X\u{0}a.rs\u{0}1\u{0}s");
+        assert_ne!(finding_key(&a), finding_key(&b));
+        assert_eq!(finding_key(&a), key(0));
     }
 
     #[test]
@@ -2881,8 +2922,10 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let b = deviation_labelled("NAMING-1", 5, None, "snake_case");
         let groups = deviation_groups(&[a1.clone(), defect("D", "high"), a2.clone(), b.clone()]);
 
@@ -2920,10 +2963,13 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let mut a3 = a1.clone();
         a3.path = "src/admin.rs".into();
+        a3 = a3.keyed_by_line();
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);
@@ -3242,10 +3288,13 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let mut a3 = a1.clone();
         a3.path = "src/admin.rs".into();
+        a3 = a3.keyed_by_line();
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);

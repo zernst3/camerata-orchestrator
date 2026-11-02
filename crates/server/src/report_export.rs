@@ -298,29 +298,17 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
     report
 }
 
-/// Stable identity for a `Finding`, matching `camerata_ui_core::triage::finding_key`'s
-/// wire format BYTE-FOR-BYTE (same fields, same order, same NUL separator) so a
-/// disposition keyed off the client's `FindingView` looks up correctly here. The two
-/// crates can't share the function directly (server does not depend on ui-core); the
-/// round-trip test below (`finding_key_matches_ui_core_format`) pins the format so the two
-/// can never silently drift apart.
+/// Stable identity for a `Finding`: its site key ([`camerata_api_types::site_key`]: repo, path,
+/// rule and snippet fingerprint, ordinal; never the line). `camerata_ui_core::triage::
+/// finding_key` is the same function over the UI's `FindingView`, so a disposition keyed off the
+/// client's row looks up correctly here; `ui_and_server_site_key_agree_byte_for_byte` pins it.
+/// A row whose key was never assigned ([`crate::inspections::backfill_site_keys`]) gets the
+/// ordinal-0 key.
 pub fn finding_key(f: &Finding) -> String {
-    let key = format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-        f.repo, f.rule_id, f.path, f.line, f.snippet
-    );
-    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
-    // version in one lockfile share the whole key, and dispositioning one used to bury the other.
-    // The advisory id (kept for dependency rows only) tells them apart. Every other row's key
-    // is unchanged. `camerata_ui_core::triage::finding_key` appends the same suffix.
-    match f.captures.get(crate::dep_audit::ADVISORY_CAPTURE) {
-        Some(advisory)
-            if f.rule_id == crate::dep_audit::DEP_AUDIT_RULE_ID && !advisory.is_empty() =>
-        {
-            format!("{key}\u{0}{advisory}")
-        }
-        _ => key,
+    if !f.site_key.is_empty() {
+        return f.site_key.clone();
     }
+    camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0)
 }
 
 // ── Effective disposition (status + wire, reconciled) ───────────────────────────
@@ -6316,18 +6304,85 @@ mod tests {
         }
     }
 
-    // ── finding_key round-trip with ui-core's format ──────────────────────────
+    // ── finding_key is the shared site key, and the UI computes the same bytes ──────
 
-    /// Pins the wire format so `report_export::finding_key` can never silently drift from
-    /// `camerata_ui_core::triage::finding_key` — the two crates can't share the function
-    /// (server doesn't depend on ui-core), so this is the contract test.
+    /// The key is `repo\0path\0fingerprint(rule, snippet)\0ordinal`: no line, no rule id in the
+    /// clear. An unkeyed row gets ordinal 0.
     #[test]
-    fn finding_key_matches_ui_core_format() {
+    fn finding_key_is_the_site_key_with_no_line_in_it() {
         let f = finding("RULE-X", "src/a.rs", 7, "high");
-        let key = finding_key(&f);
-        // Exact format: repo\0rule_id\0path\0line\0snippet
-        let expected = format!("owner/repo\u{0}RULE-X\u{0}src/a.rs\u{0}7\u{0}{}", f.snippet);
-        assert_eq!(key, expected);
+        let expected = camerata_api_types::site_key::site_key(
+            "owner/repo",
+            "src/a.rs",
+            "RULE-X",
+            &f.snippet,
+            0,
+        );
+        assert_eq!(finding_key(&f), expected);
+        let mut moved = f.clone();
+        moved.line = 700;
+        assert_eq!(finding_key(&moved), finding_key(&f));
+        // A keyed row reports the key it was given.
+        let mut keyed = f.clone();
+        keyed.site_key = "assigned".to_string();
+        assert_eq!(finding_key(&keyed), "assigned");
+    }
+
+    /// The server's `Finding` and the UI's `FindingView` must name every row identically, or a
+    /// disposition the UI keyed would never be found here. The UI row is built the way the wire
+    /// builds it (the `Finding` serialised, then read as a `FindingView`), after the keys were
+    /// assigned the way an inspection assigns them, over a set that includes a repeated line and
+    /// two advisories on one package version.
+    #[test]
+    fn ui_and_server_site_key_agree_byte_for_byte() {
+        let mut rows = vec![
+            finding("RULE-X", "src/a.rs", 7, "high"),
+            finding("RULE-X", "src/a.rs", 40, "high"),
+            finding("RULE-Y", "src/b.rs", 3, "low"),
+        ];
+        for advisory in ["RUSTSEC-2021-0001", "RUSTSEC-2020-0071"] {
+            let mut dep = finding(crate::dep_audit::DEP_AUDIT_RULE_ID, "Cargo.lock", 0, "high");
+            dep.snippet = "time@0.1.45".to_string();
+            dep.captures.insert(
+                crate::dep_audit::ADVISORY_CAPTURE.to_string(),
+                advisory.to_string(),
+            );
+            rows.push(dep);
+        }
+        // The two RULE-X rows share a snippet, so they are a repeat; the advisories share one too.
+        let shared = rows[0].snippet.clone();
+        rows[1].snippet = shared;
+        crate::inspections::backfill_site_keys(&mut rows);
+
+        let keys: std::collections::BTreeSet<String> = rows.iter().map(finding_key).collect();
+        assert_eq!(keys.len(), rows.len(), "every row has its own key");
+        for f in &rows {
+            let wire = serde_json::to_value(f).unwrap();
+            let view: camerata_ui_core::triage::FindingView = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                camerata_ui_core::triage::finding_key(&view),
+                finding_key(f),
+                "UI and server disagree for {} at line {}",
+                f.rule_id,
+                f.line
+            );
+        }
+        // The advisory whose id sorts first gets ordinal 0 whatever order the rows arrived in.
+        let by_advisory = |id: &str| {
+            rows.iter()
+                .find(|f| f.captures.get("advisory").map(String::as_str) == Some(id))
+                .unwrap()
+        };
+        assert!(finding_key(by_advisory("RUSTSEC-2020-0071")).ends_with("\u{0}0"));
+        assert!(finding_key(by_advisory("RUSTSEC-2021-0001")).ends_with("\u{0}1"));
+        // And a row the server never keyed reads the same on both sides.
+        let unkeyed = finding("RULE-Z", "src/z.rs", 1, "low");
+        let view: camerata_ui_core::triage::FindingView =
+            serde_json::from_value(serde_json::to_value(&unkeyed).unwrap()).unwrap();
+        assert_eq!(
+            camerata_ui_core::triage::finding_key(&view),
+            finding_key(&unkeyed)
+        );
     }
 
     // ── C4-R3 defect 3: zero-width/BOM code points never survive into JSON/xlsx fields ──

@@ -103,6 +103,9 @@ pub mod remediation_plan;
 pub mod repeatability;
 pub mod report_export;
 pub mod review_agent;
+/// The review tree's cross-run site matching (`match_runs`); the stable site key it matches on is
+/// `camerata_api_types::site_key`.
+pub mod review_tree;
 pub mod routine;
 pub mod run;
 pub mod run_health;
@@ -28698,6 +28701,7 @@ mod tests {
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/main.rs".to_string(),

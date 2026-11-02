@@ -2040,6 +2040,7 @@ pub fn parse_ai_findings(
             };
             let mut finding = Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
                 line: ["line", "start_line", "line_number"]
@@ -10666,6 +10667,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     });
     let mut group_finding = Finding {
         could_be_intentional: false,
+        site_key: String::new(),
         repo: primary.repo.clone(),
         path: primary.path.clone(),
         line: primary.line,
@@ -13845,6 +13847,7 @@ mod tests {
     fn site_finding(rule_id: &str, path: &str, line: usize, sev: &str, title: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "o/r".to_string(),
             kind: None,
             path: path.to_string(),
@@ -15002,6 +15005,7 @@ mod tests {
     fn finding(rule: &str, sev: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "me/api".into(),
             kind: None,
             path: "a.rs".into(),
@@ -17753,6 +17757,7 @@ mod tests {
     fn bug7_merge_location_group_earliest_appearance_wins_on_tie() {
         let make = |rule: &str, sev: &str, snippet: &str| Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "r/r".to_string(),
             kind: None,
             path: "src/lib.rs".to_string(),

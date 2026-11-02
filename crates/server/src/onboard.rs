@@ -372,6 +372,14 @@ pub struct Finding {
     /// engine's uncertainty.
     #[serde(default)]
     pub could_be_intentional: bool,
+    /// The stable name of this row across reruns: repo, path, the fingerprint of rule id plus
+    /// snippet, and an ordinal for repeats ([`camerata_api_types::site_key`]). Never contains
+    /// the line, so an edit above the site does not rename it. Empty until
+    /// [`crate::inspections::backfill_site_keys`] assigns it (when an inspection is recorded
+    /// and when one is loaded from disk); [`crate::report_export::finding_key`] reads it, and
+    /// falls back to the ordinal-0 key while it is empty.
+    #[serde(default)]
+    pub site_key: String,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -518,6 +526,7 @@ impl Default for Finding {
     fn default() -> Self {
         Self {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: String::new(),
             path: String::new(),
             line: 0,
@@ -5544,6 +5553,7 @@ mod tests {
         ];
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "me/api".into(),
             kind: None,
             path: path.into(),
@@ -5586,6 +5596,7 @@ mod tests {
         let findings = vec![
             Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: "me/api".into(),
                 kind: None,
                 path: "a.rs".into(),
@@ -5612,6 +5623,7 @@ mod tests {
             },
             Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: "me/web".into(),
                 kind: None,
                 path: "b.tsx".into(),
@@ -5659,6 +5671,7 @@ mod tests {
     fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: repo.to_string(),
             kind: None,
             path: path.to_string(),
@@ -5809,6 +5822,7 @@ mod tests {
     fn tech_debt_csv_escapes_special_fields_correctly() {
         let f = Finding {
             could_be_intentional: false,
+            site_key: String::new(),
             repo: "me/api".into(),
             kind: None,
             path: "src/tricky,path.rs".into(),
