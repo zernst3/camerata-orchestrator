@@ -347,3 +347,55 @@ fn a_site_mark_from_an_earlier_run_is_cleared_when_every_site_now_verifies() {
     assert!(!marked(&rows[0]));
     assert!(sites_listed(&rows[0]).is_none());
 }
+
+// ── a structural group keeps its occurrences' marks ──────────────────────────────────────────
+
+fn structural(line: usize, snippet: &str) -> Finding {
+    Finding {
+        severity: "low".to_string(),
+        category: Some("arch-conformance".to_string()),
+        confidence: Some("needs-review".to_string()),
+        rule_id: "AI-ARCH-LAYERING".to_string(),
+        ..row(line, snippet)
+    }
+}
+
+#[test]
+fn a_group_whose_occurrence_has_a_fabricated_snippet_is_held_and_names_the_site() {
+    // The check runs on the occurrences; the group row is built afterwards and its own snippet
+    // ("2 location(s)") is synthetic, so the marks must be carried onto it.
+    let mut rows = vec![
+        structural(3, "const app = express();"),
+        structural(6, "this line was never written"),
+    ];
+    verify_evidence(&mut rows, &files(), None);
+    let grouped = crate::ai_audit::group_structural_needs_review(rows);
+    assert_eq!(grouped.len(), 1);
+    let group = &grouped[0];
+    assert_eq!(group.snippet, "2 location(s)");
+    assert!(marked(group), "the group is held: {:?}", group.captures);
+    assert_eq!(sites_listed(group), Some("src/app.ts:6"));
+}
+
+#[test]
+fn a_group_names_a_failing_primary_and_an_occurrences_failing_absorbed_site_once_each() {
+    let mut first = structural(3, "never written either");
+    first.also_locations = vec![site("src/app.ts", 5, "also never written")];
+    let mut second = structural(6, REAL);
+    second.also_locations = vec![site("src/app.ts", 5, "also never written")];
+    let mut rows = vec![first, second];
+    verify_evidence(&mut rows, &files(), None);
+    let grouped = crate::ai_audit::group_structural_needs_review(rows);
+    let group = &grouped[0];
+    assert!(marked(group));
+    assert_eq!(sites_listed(group), Some("src/app.ts:3\nsrc/app.ts:5"));
+}
+
+#[test]
+fn a_group_of_verified_occurrences_is_not_held_by_this_rule() {
+    let mut rows = vec![structural(3, "const app = express();"), structural(6, REAL)];
+    verify_evidence(&mut rows, &files(), None);
+    let grouped = crate::ai_audit::group_structural_needs_review(rows);
+    assert!(!marked(&grouped[0]));
+    assert!(sites_listed(&grouped[0]).is_none());
+}

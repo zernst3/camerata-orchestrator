@@ -10707,6 +10707,9 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         // represents (its members all share one rule, hence one kind).
         kind: primary.kind.clone(),
     };
+    // M5: the evidence check ran on the occurrences, before they were grouped, and this row's own
+    // snippet is synthetic. Carry the marks across so a fabricated occurrence holds its group.
+    crate::onboard::evidence_check::carry_marks_to_group(&occurrences, &mut group_finding.captures);
     crate::onboard::redact::redact_finding(&mut group_finding);
     group_finding
 }

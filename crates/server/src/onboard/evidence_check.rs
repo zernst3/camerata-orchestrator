@@ -40,6 +40,16 @@ pub const EVIDENCE_UNVERIFIED_CAPTURE: &str = "evidence_unverified";
 /// when a site failed; the row also carries [`EVIDENCE_UNVERIFIED_CAPTURE`], which holds it.
 pub const EVIDENCE_UNVERIFIED_SITES_CAPTURE: &str = "evidence_unverified_sites";
 
+/// The [`EVIDENCE_UNVERIFIED_CAPTURE`] value of a row whose own snippet verified but an absorbed
+/// site's did not.
+const ABSORBED_SITE_REASON: &str =
+    "an absorbed site's quoted snippet was not found near its own line";
+
+/// The [`EVIDENCE_UNVERIFIED_CAPTURE`] value of a group row built from occurrences, one of which
+/// failed.
+const GROUPED_OCCURRENCE_REASON: &str =
+    "a grouped occurrence's quoted snippet was not found near its line";
+
 /// The largest file the check will open from disk when it was not among the scanned files (for
 /// example a file over the scan's own size cap, or an unchanged file on an incremental run).
 const MAX_EVIDENCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -262,11 +272,8 @@ pub fn verify_evidence(
         } else {
             primary_unverified_reason(f, &mut sources)
         };
-        let why = primary_why.or_else(|| {
-            (!failed_sites.is_empty()).then(|| {
-                "an absorbed site's quoted snippet was not found near its own line".to_string()
-            })
-        });
+        let why = primary_why
+            .or_else(|| (!failed_sites.is_empty()).then(|| ABSORBED_SITE_REASON.to_string()));
         if failed_sites.is_empty() {
             f.captures.remove(EVIDENCE_UNVERIFIED_SITES_CAPTURE);
         } else {
@@ -356,6 +363,46 @@ fn verify_sites(
         }
     }
     failed
+}
+
+/// Carry the evidence marks of `occurrences` onto `captures`, the captures of the row built from
+/// them (the structural group, whose own snippet is synthetic and cannot be checked). The check
+/// runs on the occurrences before they are grouped; this puts what it found on the group so it is
+/// held, and names each failing site: an occurrence whose own snippet failed is named by its
+/// `path:line`, and the absorbed sites that failed are named as they were.
+pub fn carry_marks_to_group(
+    occurrences: &[Finding],
+    captures: &mut std::collections::BTreeMap<String, String>,
+) {
+    let mut sites: Vec<String> = Vec::new();
+    let mut add = |site: String| {
+        if !sites.contains(&site) {
+            sites.push(site);
+        }
+    };
+    let mut held = false;
+    for f in occurrences {
+        let Some(reason) = f.captures.get(EVIDENCE_UNVERIFIED_CAPTURE) else {
+            continue;
+        };
+        held = true;
+        if reason != ABSORBED_SITE_REASON {
+            add(format!("{}:{}", f.path, f.line));
+        }
+        if let Some(listed) = f.captures.get(EVIDENCE_UNVERIFIED_SITES_CAPTURE) {
+            listed.lines().for_each(|l| add(l.to_string()));
+        }
+    }
+    if held {
+        captures.insert(
+            EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+            GROUPED_OCCURRENCE_REASON.to_string(),
+        );
+        captures.insert(
+            EVIDENCE_UNVERIFIED_SITES_CAPTURE.to_string(),
+            sites.join("\n"),
+        );
+    }
 }
 
 /// [`verify_evidence`] over one repo's finished rows, with its counts added to the scan's ledger.
