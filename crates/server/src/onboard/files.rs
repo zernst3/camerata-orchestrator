@@ -507,6 +507,9 @@ pub struct ExtractedRepo {
     /// path-only floor rules still run over each, so a `.p12` is flagged by its name though it
     /// could not be read.
     pub skipped_unreadable: Vec<String>,
+    /// The size in bytes of each file named in the three `skipped_*` lists, by path, so Coverage
+    /// states how big the file was. Every skipped file the walk could measure is here.
+    pub skipped_sizes: std::collections::HashMap<String, u64>,
     pub excluded_noise: usize,
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
@@ -567,6 +570,15 @@ impl ExtractedRepo {
 /// Paths are relative to the repo root, forward-slashed. Synchronous (blocking IO) —
 /// call via `tokio::task::spawn_blocking`.
 pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
+    read_local_repo_files_capped(root, HARD_CAP_FILES)
+}
+
+/// [`read_local_repo_files`] with the file limit as a parameter: [`HARD_CAP_FILES`] in
+/// production, a small number in tests of what a repo past the limit reports.
+pub(crate) fn read_local_repo_files_capped(
+    root: &std::path::Path,
+    cap: usize,
+) -> anyhow::Result<ExtractedRepo> {
     // A folder that is gone, or a path that is not a folder, is a repo that could not be read.
     // Walking it would return no files and no error, which reads as an empty repo with nothing
     // wrong in it.
@@ -577,9 +589,9 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
     }
     let extra_dirs = extra_exclude_dirs();
     if root.join(".git").exists() {
-        read_local_repo_files_gitignore(root, &extra_dirs, HARD_CAP_FILES)
+        read_local_repo_files_gitignore(root, &extra_dirs, cap)
     } else {
-        read_local_repo_files_noise_denylist(root, &extra_dirs, HARD_CAP_FILES)
+        read_local_repo_files_noise_denylist(root, &extra_dirs, cap)
     }
 }
 
@@ -592,6 +604,8 @@ struct AdmittedSink {
     oversize: Vec<String>,
     beyond_cap: Vec<String>,
     unreadable: Vec<String>,
+    /// Sizes of the files in `oversize`, `beyond_cap` and `unreadable`, by path.
+    sizes: std::collections::HashMap<String, u64>,
 }
 
 impl AdmittedSink {
@@ -602,6 +616,7 @@ impl AdmittedSink {
             oversize: Vec::new(),
             beyond_cap: Vec::new(),
             unreadable: Vec::new(),
+            sizes: std::collections::HashMap::new(),
         }
     }
 
@@ -613,10 +628,12 @@ impl AdmittedSink {
             return false;
         };
         if len as usize > MAX_FILE_BYTES {
+            self.sizes.insert(rel.clone(), len);
             self.oversize.push(rel);
             return false;
         }
         if self.files.len() >= self.cap {
+            self.sizes.insert(rel.clone(), len);
             self.beyond_cap.push(rel);
             return false;
         }
@@ -624,6 +641,7 @@ impl AdmittedSink {
         // (what Windows tools and SQL Server write), and otherwise named as unreadable. It is
         // never dropped without a trace.
         let Some(content) = std::fs::read(full).ok().and_then(|b| decode_text(&b)) else {
+            self.sizes.insert(rel.clone(), len);
             self.unreadable.push(rel);
             return false;
         };
@@ -783,6 +801,7 @@ fn read_local_repo_files_gitignore(
         skipped_oversize: admitted.oversize,
         skipped_beyond_cap: admitted.beyond_cap,
         skipped_unreadable: admitted.unreadable,
+        skipped_sizes: admitted.sizes,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }
@@ -881,6 +900,7 @@ fn read_local_repo_files_noise_denylist(
         skipped_oversize: admitted.oversize,
         skipped_beyond_cap: admitted.beyond_cap,
         skipped_unreadable: admitted.unreadable,
+        skipped_sizes: admitted.sizes,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }

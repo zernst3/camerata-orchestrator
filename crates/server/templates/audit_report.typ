@@ -948,7 +948,7 @@ Not performed in this engagement:
 // skipped files and points to the full list, which itself holds the first 1,000 per reason; the
 // rest are counted ("and K more").
 #let gaps = d.coverage_gaps
-#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or "scope_limited_note" in gaps [
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or gaps.file_limit_notes.len() > 0 or "skipped_summary" in gaps or "scope_limited_note" in gaps [
   #v(0.2cm)
   #card[
     #subheading[Coverage, not reviewed this scan]
@@ -959,9 +959,17 @@ Not performed in this engagement:
     #for line in gaps.dependency_gaps [
       - #line
     ]
+    // M5: the file limit as a limit on the run, then the count of every file not read, then each
+    // file with its size and reason.
+    #for line in gaps.file_limit_notes [
+      - #line
+    ]
+    #if "skipped_summary" in gaps [
+      - #gaps.skipped_summary
+    ]
     #let shown = calc.min(gaps.skipped_files.len(), 100)
     #for skipped in gaps.skipped_files.slice(0, shown) [
-      - #skipped.repo, #raw(skipped.path): #skipped.reason
+      - #skipped.repo, #raw(skipped.path)#if skipped.size != "" [ (#skipped.size)]: #skipped.reason
     ]
     #if gaps.skipped_files.len() > shown [
       - and #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json

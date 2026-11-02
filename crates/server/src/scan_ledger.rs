@@ -644,6 +644,59 @@ pub struct ScanInputFacts {
     /// more", so a bounded list never reads as the whole list. `serde(default)` for older ledgers.
     #[serde(default)]
     pub skipped_beyond_cap_total: usize,
+    /// How many files were skipped for each reason, over ALL of them: the named list is bounded,
+    /// these counts are not. The Coverage summary prints them. `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub skipped_totals: SkippedTotals,
+    /// Each repo that reached the file limit, with how many of its files the scan did not read.
+    /// `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub file_cap_hits: Vec<FileCapHit>,
+}
+
+/// Files skipped, counted per [`SkipReason`] over every file, named or not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedTotals {
+    #[serde(default)]
+    pub oversize: usize,
+    #[serde(default)]
+    pub beyond_file_cap: usize,
+    #[serde(default)]
+    pub not_text: usize,
+}
+
+impl SkippedTotals {
+    /// Files skipped for `reason`.
+    pub fn of(&self, reason: SkipReason) -> usize {
+        match reason {
+            SkipReason::Oversize => self.oversize,
+            SkipReason::BeyondFileCap => self.beyond_file_cap,
+            SkipReason::NotText => self.not_text,
+        }
+    }
+
+    /// Files skipped for any reason.
+    pub fn total(&self) -> usize {
+        self.oversize + self.beyond_file_cap + self.not_text
+    }
+
+    fn add(&mut self, reason: SkipReason) {
+        match reason {
+            SkipReason::Oversize => self.oversize += 1,
+            SkipReason::BeyondFileCap => self.beyond_file_cap += 1,
+            SkipReason::NotText => self.not_text += 1,
+        }
+    }
+}
+
+/// A repo whose walk reached the file limit (`onboard::files::HARD_CAP_FILES`): the scan read the
+/// first files in path order and did not read `not_scanned` more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileCapHit {
+    /// The repo (`owner/repo`).
+    pub repo: String,
+    /// Auditable files past the limit, none of which was read.
+    pub not_scanned: usize,
 }
 
 /// M5: the tally of the evidence check, which opens each row's file and looks for the quoted
@@ -701,11 +754,33 @@ pub struct SkippedFileList {
     listed: Vec<SkippedFile>,
     listed_per_reason: std::collections::HashMap<SkipReason, usize>,
     beyond_cap_total: usize,
+    totals: SkippedTotals,
+    file_cap_hits: Vec<FileCapHit>,
+}
+
+/// What one repo's walk skipped, as the walk reports it (`onboard::files::ExtractedRepo`).
+pub struct RepoSkips<'a> {
+    /// Files over `onboard::files::MAX_FILE_BYTES`.
+    pub oversize: Vec<String>,
+    /// Files past `onboard::files::HARD_CAP_FILES`.
+    pub beyond_cap: Vec<String>,
+    /// Files that are not text this scan can decode.
+    pub not_text: Vec<String>,
+    /// The size in bytes of each skipped file the walk could measure, by path.
+    pub sizes: &'a std::collections::HashMap<String, u64>,
 }
 
 impl SkippedFileList {
-    /// Record one skipped file: named while its reason is under the bound, counted after.
+    /// Record one skipped file of unknown size: named while its reason is under the bound,
+    /// counted after.
     pub fn push(&mut self, repo: &str, path: String, reason: SkipReason) {
+        self.push_sized(repo, path, reason, None);
+    }
+
+    /// [`Self::push`] with the file's size in bytes, when known. Every file is counted in the
+    /// per-reason totals, named or not.
+    pub fn push_sized(&mut self, repo: &str, path: String, reason: SkipReason, bytes: Option<u64>) {
+        self.totals.add(reason);
         let seen = self.listed_per_reason.entry(reason).or_insert(0);
         if *seen < SKIPPED_FILES_LISTED_PER_REASON {
             *seen += 1;
@@ -713,10 +788,43 @@ impl SkippedFileList {
                 repo: repo.to_string(),
                 path,
                 reason,
+                bytes,
             });
         } else {
             self.beyond_cap_total += 1;
         }
+    }
+
+    /// Record everything one repo's walk skipped, with sizes, and note the repo if it reached the
+    /// file limit. The one call the scan makes per repo.
+    pub fn record_repo(&mut self, repo: &str, skips: RepoSkips<'_>) {
+        let not_scanned = skips.beyond_cap.len();
+        for (paths, reason) in [
+            (skips.oversize, SkipReason::Oversize),
+            (skips.beyond_cap, SkipReason::BeyondFileCap),
+            (skips.not_text, SkipReason::NotText),
+        ] {
+            for path in paths {
+                let bytes = skips.sizes.get(&path).copied();
+                self.push_sized(repo, path, reason, bytes);
+            }
+        }
+        if not_scanned > 0 {
+            self.file_cap_hits.push(FileCapHit {
+                repo: repo.to_string(),
+                not_scanned,
+            });
+        }
+    }
+
+    /// The count of every skipped file per reason. Read before [`Self::finish`].
+    pub fn totals(&self) -> SkippedTotals {
+        self.totals
+    }
+
+    /// The repos that reached the file limit. Read before [`Self::finish`].
+    pub fn file_cap_hits(&self) -> Vec<FileCapHit> {
+        self.file_cap_hits.clone()
     }
 
     /// The named files and the count of those not named.
@@ -733,6 +841,10 @@ pub struct SkippedFile {
     /// Repo-relative, forward-slashed path.
     pub path: String,
     pub reason: SkipReason,
+    /// The file's size in bytes, when the walk could measure it. `serde(default)` so an older
+    /// ledger still loads.
+    #[serde(default)]
+    pub bytes: Option<u64>,
 }
 
 /// Why a file was not read.

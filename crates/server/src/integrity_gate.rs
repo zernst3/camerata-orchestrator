@@ -860,6 +860,8 @@ mod tests {
             audit_model: Some("claude-sonnet-5".to_string()),
             skipped_files: Vec::new(),
             skipped_beyond_cap_total: 0,
+            skipped_totals: crate::scan_ledger::SkippedTotals::default(),
+            file_cap_hits: Vec::new(),
         }
     }
 

@@ -12,7 +12,7 @@
 
 use serde::Serialize;
 
-use crate::scan_ledger::{SkipReason, SKIPPED_FILES_LISTED_PER_REASON};
+use crate::scan_ledger::{FileCapHit, SkipReason, SkippedTotals, SKIPPED_FILES_LISTED_PER_REASON};
 
 /// The pass name a whole-repo AI review failure is recorded under (the intake side writes it,
 /// every exporter reads it). Stable: a persisted report carries it.
@@ -73,6 +73,14 @@ pub struct CoverageGapsJson {
     pub skipped_files: Vec<SkippedFileJson>,
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
+    /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
+    /// were not scanned: 3 over the 400 KB file size limit, 9 beyond the 20,000-file limit.").
+    /// `None` when every auditable file was read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_summary: Option<String>,
+    /// One sentence per repo that reached the file limit, with how many of its files were not
+    /// scanned. The limit is a coverage limit on the run, not only a list of paths.
+    pub file_limit_notes: Vec<String>,
     /// The sentence every renderer prints for them ("and K more skipped files ..."); `None`
     /// when the list is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +141,78 @@ pub fn skipped_beyond_cap_sentence(omitted: usize) -> Option<String> {
     })
 }
 
+/// A file size as Coverage prints it: bytes under a kilobyte, whole kilobytes (1,000 bytes) under
+/// a megabyte, then megabytes to one decimal. Decimal units, like the "400 KB" file limit.
+pub fn format_size(bytes: u64) -> String {
+    if bytes < 1_000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{} KB", (bytes + 500) / 1_000)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
+}
+
+/// `n` with a comma between each group of three digits ("20,000").
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn files_noun(n: usize) -> &'static str {
+    if n == 1 {
+        "file was"
+    } else {
+        "files were"
+    }
+}
+
+/// The one sentence counting every file the scan did not read, by reason. `None` when none.
+fn skipped_summary_sentence(totals: &SkippedTotals) -> Option<String> {
+    let total = totals.total();
+    if total == 0 {
+        return None;
+    }
+    let parts: Vec<String> = [
+        SkipReason::Oversize,
+        SkipReason::BeyondFileCap,
+        SkipReason::NotText,
+    ]
+    .into_iter()
+    .filter(|r| totals.of(*r) > 0)
+    .map(|r| format!("{} {}", totals.of(r), r.label()))
+    .collect();
+    Some(format!(
+        "{total} {} not scanned: {}.",
+        files_noun(total),
+        parts.join(", ")
+    ))
+}
+
+/// One sentence per repo that reached the file limit, with the number of files it did not scan.
+fn file_limit_sentences(hits: &[FileCapHit]) -> Vec<String> {
+    hits.iter()
+        .map(|h| {
+            format!(
+                "{} reached the {}-file limit, so the scan read the first {} files in path order. \
+                 {} {} not scanned.",
+                h.repo,
+                group_digits(crate::onboard::files::HARD_CAP_FILES),
+                group_digits(crate::onboard::files::HARD_CAP_FILES),
+                h.not_scanned,
+                files_noun(h.not_scanned),
+            )
+        })
+        .collect()
+}
+
 /// One file the scan did not read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkippedFileJson {
@@ -142,6 +222,10 @@ pub struct SkippedFileJson {
     pub reason_code: SkipReason,
     /// The client-facing reason, as the Coverage section states it.
     pub reason: String,
+    /// The file's size in bytes, when the walk could measure it.
+    pub size_bytes: Option<u64>,
+    /// The size as the Coverage section prints it ("612 KB"); empty when unknown.
+    pub size: String,
 }
 
 impl CoverageGapsJson {
@@ -150,6 +234,8 @@ impl CoverageGapsJson {
             && self.dependency_gaps.is_empty()
             && self.skipped_files.is_empty()
             && self.skipped_beyond_cap_total == 0
+            && self.skipped_summary.is_none()
+            && self.file_limit_notes.is_empty()
             && self.scope_limited_rules.is_empty()
     }
 }
@@ -185,6 +271,8 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             path: s.path.clone(),
             reason_code: s.reason,
             reason: s.reason.label().to_string(),
+            size_bytes: s.bytes,
+            size: s.bytes.map(format_size).unwrap_or_default(),
         })
         .collect();
     let scope_limited_rules: Vec<ScopeLimitedRuleJson> = report
@@ -205,6 +293,8 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
         skipped_files,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
+        skipped_summary: skipped_summary_sentence(&input.skipped_totals),
+        file_limit_notes: file_limit_sentences(&input.file_cap_hits),
         scope_limited_note: scope_limited_sentence(&scope_limited_rules),
         scope_limited_rules,
     }
