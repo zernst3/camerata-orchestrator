@@ -2899,6 +2899,26 @@ pub(crate) fn resolve_deviation_fix(
     resolve_fix_inner(rule_id, corpus, finding, chosen_option, true)
 }
 
+/// Kind-aware [`resolve_fix`] used by every export surface that prints a row's fix (the PDF
+/// data, `findings.json`, the datasets and the workbook, and the held-for-review routing): a
+/// consistency deviation row resolves through [`resolve_deviation_fix`], every other row stays
+/// strict, so one row never has a fix in one artifact and none in another.
+pub(crate) fn resolve_fix_for_row(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        finding.kind,
+        Some(camerata_api_types::audit::FindingKind::Deviation(_))
+    ) {
+        resolve_deviation_fix(rule_id, corpus, finding, chosen_option)
+    } else {
+        resolve_fix(rule_id, corpus, finding, chosen_option)
+    }
+}
+
 fn resolve_fix_inner(
     rule_id: &str,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -2953,7 +2973,7 @@ fn has_any_fix(
         .fix_specific
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty())
-        || resolve_fix(&finding.rule_id, corpus, finding, chosen_option).is_some()
+        || resolve_fix_for_row(&finding.rule_id, corpus, finding, chosen_option).is_some()
 }
 
 // ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────
@@ -5148,7 +5168,8 @@ pub fn build_report_json(
                     // `fix_for_this_finding`, so the template's secondary line only ever adds
                     // information, never echoes the primary line back.
                     fix: {
-                        let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        let generic =
+                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
                         if generic == specific_fix {
                             None
                         } else {
@@ -5158,7 +5179,8 @@ pub fn build_report_json(
                     // D8: the label beside the fix, from the same two facts the fields above
                     // were built from (the specific fix and the rule's own authored one).
                     fix_type: {
-                        let authored = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        let authored =
+                            resolve_fix_for_row(&rule_id, corpus, f, chosen_option_for_rule);
                         fix_type_label(
                             f,
                             specific_fix.is_some(),

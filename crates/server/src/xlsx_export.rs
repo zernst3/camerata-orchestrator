@@ -84,8 +84,8 @@ use crate::report_export::{
     bucket_title, category_for, category_for_finding, citation_for_finding, classify,
     client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
     finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings, title_for_finding,
-    Disposition, DispositionWire, ReportOptions,
+    resolve_citation, resolve_effort, sanitize_report_findings, title_for_finding, Disposition,
+    DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -166,7 +166,7 @@ pub struct FindingRow {
     /// latter is a pipeline gap only (C3-1b), never a hedge; the `fix` column below still
     /// carries the rule's authored remediation in that case.
     fix_specific: Option<String>,
-    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
+    /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that
     /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
     /// `null`, never fabricated and never `directive` — when the rule's default option has no
@@ -460,18 +460,14 @@ fn partition_rows(
             .join("\n");
         // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
-        let is_deviation = matches!(f.kind, Some(FindingKind::Deviation(_)));
-        let fix = if is_deviation {
-            // R1-3: a deviation row falls back to the rule's default option's remediation.
-            crate::report_export::resolve_deviation_fix(
-                &f.rule_id,
-                corpus,
-                f,
-                chosen_option_for_rule,
-            )
-        } else {
-            resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
-        }
+        // R1-3: kind-aware, so a deviation row falls back to the rule's default option's
+        // remediation here exactly as in the PDF data.
+        let fix = crate::report_export::resolve_fix_for_row(
+            &f.rule_id,
+            corpus,
+            f,
+            chosen_option_for_rule,
+        )
         .map(|s| crate::report_export::fix_text::plain(&s));
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
@@ -6371,6 +6367,75 @@ mod tests {
             groups[0].recommended_fix.contains(&first_words),
             "{:?} vs {first_words:?}",
             groups[0].recommended_fix
+        );
+    }
+
+    /// Review of R1-3 (ii): one deviation row, one fix, in every artifact. The workbook's group
+    /// fix, `findings.json`'s `fix` and the PDF data's curated site fix are the same Standard fix
+    /// (the default option's remediation) for the ARCH-TYPED-PATH-PARAMS-1 / parse-in-handler
+    /// deviation, and a defect row stays strict in all of them.
+    #[tokio::test]
+    async fn r1_3_a_deviation_row_has_the_same_fix_in_every_artifact() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let mut f = kinded(
+            finding(
+                "ARCH-TYPED-PATH-PARAMS-1",
+                "app/api/x/route.ts",
+                4,
+                "medium",
+            ),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: Some(3),
+                convention_option_id: Some("typed-extraction".to_string()),
+                convention_label: "Typed path params".to_string(),
+            }),
+        );
+        f.evaluated_option_id = Some("parse-in-handler".to_string());
+        let report = report_with(vec![f], vec!["ARCH-TYPED-PATH-PARAMS-1"]);
+        let sealed = report.clone().seal();
+
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let workbook_fix = build_deviation_groups(&live, Some(&corpus))[0]
+            .recommended_fix
+            .clone();
+        assert!(!workbook_fix.is_empty());
+
+        let json = crate::report_export::build_report_json(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let findings_json_fix = export.findings[0].fix.clone().unwrap_or_default();
+        assert_eq!(findings_json_fix, workbook_fix, "findings.json fix");
+
+        let pdf_fix = json
+            .curated_findings
+            .iter()
+            .flat_map(|g| g.sites.iter())
+            .find(|s| s.path == "app/api/x/route.ts")
+            .expect("the deviation site is in the curated data")
+            .fix
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(
+            crate::report_export::fix_text::plain(&pdf_fix),
+            workbook_fix,
+            "PDF curated site fix"
         );
     }
 
