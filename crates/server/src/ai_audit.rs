@@ -8373,6 +8373,7 @@ async fn run_passes_batch(
         job,
         meter,
         per_item_usd,
+        max_body_bytes: batch_mode::max_batch_body_bytes(),
         fatal_errors: !eff.batch_default,
     };
     let all: Vec<&BatchWork> = work.iter().collect();
@@ -13854,6 +13855,9 @@ mod repo_map_tests;
 
 #[cfg(test)]
 mod request_budget_tests;
+
+#[cfg(test)]
+mod batch_split_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;
