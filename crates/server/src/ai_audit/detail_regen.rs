@@ -1011,12 +1011,12 @@ pub(super) fn accept_entry(
 /// fallback of [`regenerate_full_details`]).
 #[derive(Debug, Default)]
 struct InventionLedger {
-    /// Findings whose LATEST attempt was answered with a split reply (`why` and `fix_direction`)
-    /// that failed only the invented-precondition check, with the reply's fix direction when it
-    /// passed the same check.
+    /// Findings whose LATEST attempt was answered with a reply that failed only the
+    /// invented-precondition check, with the reply's fix direction when it was a split reply
+    /// (`why` and `fix_direction`) and the direction passed the same check.
     invented: std::collections::HashMap<usize, Option<String>>,
-    /// Findings an attempt turned down for any other check (a dropped name, or a reply that gave
-    /// no split to ship from): these are not eligible for the fallback.
+    /// Findings an attempt turned down for any other check (a dropped name) or got no usable
+    /// answer for (left out, cut off, a stray or duplicated id): not eligible for the fallback.
     other_check: std::collections::HashSet<usize>,
 }
 
@@ -1204,15 +1204,11 @@ async fn run_detail_round(
                         Reject::InventedPrecondition => {
                             rejections.invented_precondition += 1;
                             // Only a split reply (`why` and `fix_direction`) has a fix direction
-                            // to ship apart from the rejected explanation.
-                            if entry.why.is_some() {
-                                invention.invented.insert(
-                                    idx,
-                                    checked_fix_direction(entry, &blocks[pos].code_shown),
-                                );
-                            } else {
-                                invention.other_check.insert(idx);
-                            }
+                            // to ship apart from the rejected explanation; a single `detail`
+                            // reply falls back to the scan statement alone.
+                            invention
+                                .invented
+                                .insert(idx, checked_fix_direction(entry, &blocks[pos].code_shown));
                         }
                     }
                     turned_down.push((idx, reject.reason()));
@@ -1221,6 +1217,11 @@ async fn run_detail_round(
         }
         for (pos, &idx) in batch.iter().enumerate() {
             if !written[pos] {
+                // A finding with no usable answer this attempt (left out, cut off, a stray or
+                // duplicated id) did not get an answer in every round: not fallback-eligible.
+                if ambiguous[pos] || !answered[pos] {
+                    invention.other_check.insert(idx);
+                }
                 // One count per finding per attempt. An entry that failed a check was counted
                 // above under its reason; the rest are counted here.
                 if ambiguous[pos] {

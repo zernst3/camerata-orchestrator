@@ -3023,17 +3023,17 @@ was turned down because: <reason>." (the reason of its latest rejection, secrets
 retry is never an identical prompt. Round one is unchanged.
 
 *A finding the check keeps turning down still completes (R1-1 c).* When the model ANSWERED a
-finding in every attempt with a split reply (`why`, `fix_direction`) that failed only the
-invented-precondition check, the stage ran: the scan's own statement (already the finding's
-detail) plus the reply's fix direction ships as the detail, with no `[detail incomplete]`
-marker and no failed part. The fix direction ships only if it passes the same precondition
-reading; the rejected explanation never ships. The finding is marked in two `captures` keys
+finding in every attempt and the only rejection was the invented-precondition check, the stage
+ran: the scan's own statement (already the finding's detail) ships as the detail, plus the
+reply's fix direction when it was a split reply (`why`, `fix_direction`) and the direction
+passes the same precondition reading, with no `[detail incomplete]` marker and no failed part.
+One policy for split and single-`detail` replies alike; the rejected explanation never ships. The finding is marked in two `captures` keys
 (`report_export::DETAIL_SOURCE_CAPTURE` = `scan`, `DETAIL_REJECTION_CAPTURE` = the reason; never
 read by an exporter) and the operator's failure report lists it under "Scan statements shipped as
 the detail" (`detail_fallbacks` in `failures.json`), as D8 does for fixes. Work that never ran
 stays incomplete and resumable: a last attempt that failed in transport, a spend limit or outage
-stop, an attempt turned down by another check (a dropped name), or a single-`detail` reply (no
-split to ship from).
+stop, an attempt turned down by another check (a dropped name), or a round in which the finding
+got no usable answer (left out, cut off, a stray or duplicated id).
 
 *A resume asks a wholly rejected reply again (R1-1 d).* The run store used to replay a fix or
 detail reply every entry of which the stage had turned down, on the idea that the stage's next

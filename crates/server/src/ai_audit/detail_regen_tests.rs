@@ -1149,10 +1149,12 @@ async fn an_invented_exploit_precondition_keeps_the_short_statement() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
     let meter = meter_with(EfficiencyConfig::default());
     let (findings, failed) = audit(&llm, &meter).await;
+    // One policy (review of R1-1 c): rejected in every round for the precondition alone, the
+    // finding ships the checked scan statement, complete, with no marker.
     assert!(findings[0].detail.contains(SHORT));
-    assert!(findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(!findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
     assert!(!findings[0].detail.contains("requires a valid session"));
-    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL), "{failed:?}");
     // And what calibration saw was never the invented text.
     assert!(!llm
         .prompts(Role::Calibrate)
@@ -2396,18 +2398,14 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
 /// The failed part's last attempt lists, per finding, why its latest reply was turned down.
 #[tokio::test]
 async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
-    let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
-    let (_out, failed) = regenerate_full_details(
-        &llm,
-        REPO,
-        n_findings(1),
-        &files(),
-        &[],
-        &nonce(),
-        None,
-        None,
-    )
-    .await;
+    // A reply that drops the name the statement made fails a check that is not the fallback's.
+    let llm = SplitLlm::new(|_| {
+        SplitReply::Entry(
+            "The handler is wrong.".to_string(),
+            GOOD_DIRECTION.to_string(),
+        )
+    });
+    let (_out, failed) = regen_one(&llm).await;
     assert_eq!(failed.len(), 1);
     let listed: Vec<&String> = failed[0]
         .attempts
@@ -2415,7 +2413,7 @@ async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
         .flat_map(|a| a.rejections.iter())
         .collect();
     assert_eq!(listed.len(), 1, "{:?}", failed[0].attempts);
-    assert!(listed[0].contains("exploit precondition"), "{}", listed[0]);
+    assert!(listed[0].contains("dropped"), "{}", listed[0]);
 }
 
 // ── P7: a detail reply counts as wasted by the share of its entries rejected ────────────────
@@ -2515,6 +2513,8 @@ enum SplitReply {
     Entry(String, String),
     /// The transport fails.
     Down,
+    /// The reply holds no entry for any finding.
+    LeftOut,
 }
 
 /// A model that answers every regeneration call with `script(call_index)` for every finding of
@@ -2545,6 +2545,9 @@ impl LlmPort for SplitLlm {
         self.prompts.lock().unwrap().push(req.prompt.clone());
         let (why, direction) = match (self.script)(call) {
             SplitReply::Down => anyhow::bail!("connection reset"),
+            SplitReply::LeftOut => {
+                return Ok(stub_response(r#"{"details":{}}"#.to_string()));
+            }
             SplitReply::Entry(why, direction) => (why, direction),
         };
         let entries: serde_json::Map<String, serde_json::Value> = asked(&req.prompt)
@@ -2701,8 +2704,15 @@ async fn detail_work_that_never_ran_or_failed_another_check_stays_incomplete() {
         out[0].detail
     );
     assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
+}
 
-    // A single `detail` field (no split) has no fix direction to ship apart: still incomplete.
+/// Review of R1-1 (c): one policy for the fallback. A single `detail` reply (no split) rejected
+/// in every round for the invented precondition and nothing else ships the checked scan
+/// statement like a split reply does: no marker, no failed part, listed in the operator report.
+/// The earlier test pinned this case as incomplete (exit 6); that policy was inconsistent with
+/// the split case and is replaced.
+#[tokio::test]
+async fn a_single_detail_reply_rejected_only_for_a_precondition_ships_the_scan_statement() {
     let llm = RoleLlm::new("{}", Regen::InventsPrecondition);
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -2715,8 +2725,39 @@ async fn detail_work_that_never_ran_or_failed_another_check_stays_incomplete() {
         None,
     )
     .await;
-    assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
-    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+    assert!(failed.is_empty(), "{failed:?}");
+    let detail = &out[0].detail;
+    assert!(detail.contains(SHORT), "{detail}");
+    assert!(!detail.contains(DETAIL_INCOMPLETE_MARKER), "{detail}");
+    assert!(!detail.contains("valid session"), "{detail}");
+    assert_eq!(
+        out[0]
+            .captures
+            .get(crate::report_export::DETAIL_SOURCE_CAPTURE)
+            .map(String::as_str),
+        Some(crate::report_export::SCAN_DETAIL)
+    );
+}
+
+/// Review of R1-1 (c): "answered in every attempt". A finding the model left out in round one
+/// and invented a precondition for in rounds two and three did not get an answer every round,
+/// so it stays incomplete.
+#[tokio::test]
+async fn a_finding_left_out_in_an_earlier_round_is_not_fallback_eligible() {
+    let llm = SplitLlm::new(|call| {
+        if call == 0 {
+            SplitReply::LeftOut
+        } else {
+            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(
+        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        "{}",
+        out[0].detail
+    );
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
 }
 
 /// R1-1: a retry that answers cleanly (the reason in the prompt did its job) is written
