@@ -39,6 +39,10 @@ use crate::inspections::backfill_site_keys;
 use crate::onboard::Finding;
 use crate::repeatability::pair_runs;
 
+/// Name of the ledger stage that records the sites promoted to rows when an older report is
+/// loaded.
+pub const UNFOLD_STAGE: &str = "unfold-also-locations";
+
 /// File name of the run's key links, beside the rest of the run's artifacts.
 pub const KEY_LINKS_FILE: &str = "key_links.json";
 

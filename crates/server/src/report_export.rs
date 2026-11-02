@@ -8226,6 +8226,18 @@ mod tests {
     // real fixture, never a fixture-specific rule/file/table name — then builds the report and
     // asserts the cover's counts reflect the MERGED, distinct-defect set.
 
+    /// The rows of a report whose rule id is `rule_id`.
+    fn report_rows_with<'a>(
+        report: &'a crate::onboard::ScanReport,
+        rule_id: &str,
+    ) -> Vec<&'a crate::onboard::Finding> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .collect()
+    }
+
     #[tokio::test]
     async fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
         // Defect 1: one SQL-injection defect, flagged by BOTH a deterministic floor rule and an
@@ -8275,17 +8287,11 @@ mod tests {
             security,
         ];
 
-        // The real pipeline's two merge passes, in the real order: exact-location first, then
-        // cross-tier/cross-file.
-        let merged = crate::review_tree::test_support::cluster_heads(
-            crate::review_tree::test_support::collapse_located(raw, &files),
-            &files,
-        );
-        assert_eq!(
-            merged.len(),
-            3,
-            "six raw findings, three distinct defects — merging must land on exactly three"
-        );
+        // The real pipeline's two passes, in the real order: collapse, then group. EVERY row
+        // goes to the exporter, not only the cluster heads: nothing is merged away, so six raw
+        // findings are six rows (two rule families at one line are two rows, linked).
+        let merged = crate::review_tree::collapse_and_group(raw, &files);
+        assert_eq!(merged.len(), 6, "no row is dropped");
 
         // P3: the CORS security finding is an AI-tier rule id the corpus never saw (an
         // invented "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS" id) — the citation gate only lets
@@ -8307,11 +8313,11 @@ mod tests {
             &empty_opts(),
         );
 
-        // Cover critical count == distinct criticals: the SQL-injection defect is the only
-        // critical among the three merged defects, and it must count ONCE.
+        // Cover critical count == the critical ROWS: the floor rule and the model's rule for the
+        // SQL-injection defect are two rows, each critical, and each counts.
         assert_eq!(
-            json.cover.stats.critical, 1,
-            "the merged SQL-injection defect must count once, not twice"
+            json.cover.stats.critical, 2,
+            "both critical SQL-injection rows count, since neither is merged away"
         );
 
         // The CORS security finding must survive as its own curated row, never absorbed under
@@ -8329,14 +8335,20 @@ mod tests {
             "the security finding must never be downgraded below medium: {}",
             cors_group.sites[0].severity
         );
-        // This test feeds the exporter the cluster heads (one row per defect), so the
-        // structural row that lost primacy to the security finding is not among them.
-        assert!(
-            !json
-                .curated_findings
-                .iter()
-                .any(|g| g.rule_id == "ARCH-MIDDLEWARE-FIRST-1"),
-            "the structural row is not a head here"
+        // The structural row at the same line is still its own row, linked to the security
+        // finding that heads the pair.
+        let structural = report_rows_with(&report, "ARCH-MIDDLEWARE-FIRST-1");
+        assert_eq!(
+            structural.len(),
+            1,
+            "the structural row survives as its own row"
+        );
+        assert_eq!(
+            structural[0]
+                .possible_duplicate_of
+                .as_ref()
+                .map(|l| l.hint.as_str()),
+            Some("same_line")
         );
     }
 
@@ -8546,24 +8558,25 @@ mod tests {
             ("b.ts".to_string(), code_b.to_string()),
         ];
         let raw = vec![det_a, ai_a, det_b, ai_b];
-        let merged = crate::review_tree::test_support::cluster_heads(
-            crate::review_tree::test_support::collapse_located(raw, &files),
-            &files,
-        );
-        assert_eq!(
-            merged.len(),
-            2,
-            "4 raw findings describing 2 real defects must land on exactly 2 rows: {merged:?}"
-        );
+        // Every row goes to the exporter: four findings are four rows.
+        let merged = crate::review_tree::collapse_and_group(raw, &files);
+        assert_eq!(merged.len(), 4, "no row is merged away: {merged:?}");
 
         let report = report_with(merged, vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
+        // Every row is in exactly one matrix bucket, whether or not the citation gate also
+        // curates it, so the rows rendered in the body are the matrix rows.
         let rendered_critical_rows = json
-            .curated_findings
+            .matrix
+            .do_now
             .iter()
-            .flat_map(|g| &g.sites)
-            .filter(|s| s.severity == "critical")
+            .chain(&json.matrix.do_next)
+            .chain(&json.matrix.plan)
+            .chain(&json.matrix.accepted)
+            .chain(&json.matrix.informational)
+            .chain(&json.matrix.held)
+            .filter(|r| r.severity == "critical")
             .count();
         assert_eq!(
             json.cover.stats.critical, rendered_critical_rows,
@@ -8571,8 +8584,8 @@ mod tests {
              rendered in the body"
         );
         assert_eq!(
-            json.cover.stats.critical, 2,
-            "merging must land on exactly 2 criticals, never the raw pre-merge count of 4"
+            json.cover.stats.critical, 4,
+            "each of the four critical rows counts once: nothing is merged away"
         );
     }
 

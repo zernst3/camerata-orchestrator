@@ -57,6 +57,155 @@ fn grouped(rows: Vec<Finding>) -> (Vec<Finding>, ReviewTree) {
     (rows, tree)
 }
 
+/// The tree's membership against the rows: every node's members together are exactly the rows'
+/// keys, no key is in two nodes and none is in zero, and every row sits in the sub-group whose
+/// members name it.
+pub(super) fn assert_tree_covers_rows(rows: &[Finding], tree: &ReviewTree) {
+    let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for node in &tree.nodes {
+        for key in &node.members {
+            let twice = seen.insert(key.as_str(), node.id.as_str());
+            assert!(
+                twice.is_none(),
+                "{key:?} is in two nodes: {twice:?} and {}",
+                node.id
+            );
+        }
+    }
+    let row_keys: BTreeSet<&str> = rows.iter().map(|f| f.site_key.as_str()).collect();
+    assert_eq!(row_keys.len(), rows.len(), "row keys are unique");
+    let member_keys: BTreeSet<&str> = seen.keys().copied().collect();
+    assert_eq!(
+        member_keys, row_keys,
+        "the union of every node's members is the set of row keys"
+    );
+    for f in rows {
+        assert_eq!(
+            seen.get(f.site_key.as_str()).copied(),
+            f.group_path.get(2).map(String::as_str),
+            "{} is a member of the sub-group its group_path names",
+            f.site_key
+        );
+    }
+}
+
+/// How many rows [`rows_with_known_duplicates`] collapses: the exact copy and the tool row (2),
+/// the six-row same-rule group (5), and the nested pair (1).
+const KNOWN_COLLAPSED: usize = 8;
+
+/// Mixed rows plus KNOWN duplicates, so the collapse has exactly [`KNOWN_COLLAPSED`] sources to
+/// fold:
+/// - an exact copy of the first row, and the semgrep rule that enforces the same native rule on
+///   the same line (2);
+/// - an n-site group: six rows of one rule at one place (5);
+/// - a nested pair: two rows of one rule at one place, the second already carrying `flagged_by`
+///   sources of its own (1, and the carried sources must survive).
+fn rows_with_known_duplicates() -> Vec<Finding> {
+    let mut input = mixed_rows();
+    let copy = input[0].clone();
+    input.push(copy);
+    input.push(tool_row(
+        "camerata.security.sql-string-concat-python",
+        "semgrep",
+        "src/db.rs",
+        input[0].line,
+        &input[0].snippet.clone(),
+    ));
+    for i in 0..6 {
+        input.push(row(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/n.rs",
+            5,
+            &format!("query(&format!(\"select {{id}} /* variant {i} */\"))"),
+        ));
+    }
+    input.push(row(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        "src/nested.rs",
+        7,
+        "query(nested)",
+    ));
+    let mut carrying = row(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        "src/nested.rs",
+        7,
+        "query(nested)",
+    );
+    carrying.flagged_by = vec![
+        FlaggedBy {
+            rule_id: "tool-a".to_string(),
+            tool: Some("semgrep".to_string()),
+            site_key: "carried-key-a".to_string(),
+            path: "src/nested.rs".to_string(),
+            line: 8,
+        },
+        FlaggedBy {
+            rule_id: "tool-b".to_string(),
+            tool: Some("eslint".to_string()),
+            site_key: "carried-key-b".to_string(),
+            path: "src/nested.rs".to_string(),
+            line: 9,
+        },
+    ];
+    input.push(carrying);
+    input
+}
+
+/// What came out of the scan's two stages over `input`.
+struct Piped {
+    input_keys: Vec<String>,
+    carried_keys: Vec<String>,
+    collapse: CollapseOutcome,
+    rows: Vec<Finding>,
+    tree: ReviewTree,
+}
+
+fn pipe(input: Vec<Finding>) -> Piped {
+    let input_keys = crate::inspections::site_keys_of(&input);
+    let carried_keys: Vec<String> = input
+        .iter()
+        .flat_map(|f| f.flagged_by.iter().map(|b| b.site_key.clone()))
+        .collect();
+    let tools = ToolMap::builtin();
+    let mut collapse = collapse_identical(input, &tools);
+    let (mut rows, sub_nodes) = group_semantic(
+        std::mem::take(&mut collapse.rows),
+        &[],
+        &tools,
+        &mut SubgroupAllocator::new(),
+    );
+    let prev = ReviewTree {
+        nodes: sub_nodes,
+        ..ReviewTree::default()
+    };
+    backfill_site_keys(&mut rows);
+    let tree = build_tree(&mut rows, Some(prev), &tools, "run-1");
+    Piped {
+        input_keys,
+        carried_keys,
+        collapse,
+        rows,
+        tree,
+    }
+}
+
+/// Every input site is still there: as a row, or inside a `flagged_by` entry of the row it was
+/// collapsed into.
+fn assert_every_input_site_is_present(p: &Piped) {
+    let row_keys: BTreeSet<&str> = p.rows.iter().map(|f| f.site_key.as_str()).collect();
+    let flagged: BTreeSet<&str> = p
+        .rows
+        .iter()
+        .flat_map(|f| f.flagged_by.iter().map(|b| b.site_key.as_str()))
+        .collect();
+    for key in p.input_keys.iter().chain(&p.carried_keys) {
+        assert!(
+            row_keys.contains(key.as_str()) || flagged.contains(key.as_str()),
+            "input site {key:?} is neither a row nor a flagged_by entry"
+        );
+    }
+}
+
 /// Rows spread over files, rules and categories, with clusters, links and a lone AI row.
 fn mixed_rows() -> Vec<Finding> {
     let mut rows = vec![
@@ -120,11 +269,53 @@ fn mixed_rows() -> Vec<Finding> {
 
 #[test]
 fn grouping_never_changes_the_row_count() {
+    let input = rows_with_known_duplicates();
+    let rows_in = input.len();
+    let p = pipe(input);
+    // The collapse folds exactly the known duplicates (exact copy, tool row, six-row n-site
+    // group, nested pair) and nothing else; and it must fold something.
+    assert!(
+        !p.collapse.collapsed.is_empty(),
+        "the fixture must collapse something"
+    );
+    assert_eq!(
+        p.collapse.collapsed.len(),
+        KNOWN_COLLAPSED,
+        "{:?}",
+        p.collapse.collapsed
+    );
+    assert_eq!(
+        p.rows.len(),
+        rows_in - p.collapse.collapsed.len(),
+        "rows_out == rows_in - collapsed"
+    );
+    assert_eq!(p.rows.len(), rows_in - KNOWN_COLLAPSED);
+    // Grouping then returned every row it was given, and the tree holds each exactly once.
+    assert_tree_covers_rows(&p.rows, &p.tree);
+    assert_eq!(
+        p.tree.nodes.iter().map(|n| n.members.len()).sum::<usize>(),
+        p.rows.len()
+    );
+    assert_every_input_site_is_present(&p);
+    // The collapsed sources are all on the first row, which kept the floor text.
+    assert_eq!(p.rows[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1");
+    assert_eq!(p.rows[0].flagged_by.len(), 2);
+    // The n-site group is one row holding five sources; the nested pair holds the two sources it
+    // carried plus the row folded into it.
+    let n_site = p.rows.iter().find(|f| f.path == "src/n.rs").unwrap();
+    assert_eq!(n_site.flagged_by.len(), 5);
+    let nested = p.rows.iter().find(|f| f.path == "src/nested.rs").unwrap();
+    assert_eq!(nested.flagged_by.len(), 3);
+    // The n-site group is one row holding five sources; the nested pair holds the two sources it
+    // carried plus the row folded into it.
+    let n_site = p.rows.iter().find(|f| f.path == "src/n.rs").unwrap();
+    assert_eq!(n_site.flagged_by.len(), 5);
+    let nested = p.rows.iter().find(|f| f.path == "src/nested.rs").unwrap();
+    assert_eq!(nested.flagged_by.len(), 3);
+    // Grouping alone (no collapse) keeps the same rows in the same order at the same severity.
     let input = mixed_rows();
-    let n = input.len();
     let (rows, _tree) = grouped(input.clone());
-    assert_eq!(rows.len(), n, "every row in is a row out");
-    // The same rows, in the same order, at the same severity.
+    assert_eq!(rows.len(), input.len(), "every row in is a row out");
     for (before, after) in input.iter().zip(&rows) {
         assert_eq!(before.rule_id, after.rule_id);
         assert_eq!(before.path, after.path);
@@ -285,6 +476,21 @@ fn also_locations_unfold_to_rows_with_their_own_site_keys_on_load() {
         report.findings.len(),
         3,
         "the survivor and its two absorbed sites"
+    );
+    // The unfold is its own ledger stage, so the row arithmetic closes exactly:
+    // rows exported + collapsed == detected + unfolded.
+    let unfold: Vec<_> = report
+        .ledger
+        .stages()
+        .iter()
+        .filter(|s| s.stage == UNFOLD_STAGE)
+        .collect();
+    assert_eq!(unfold.len(), 1, "{:#?}", report.ledger.stages());
+    assert_eq!((unfold[0].rows_in, unfold[0].rows_out), (1, 3));
+    assert_eq!(unfold[0].unaccounted, 0);
+    assert_eq!(
+        report.findings.len(),
+        unfold[0].rows_in + (unfold[0].rows_out - unfold[0].rows_in),
     );
     assert!(report.findings.iter().all(|f| f.also_locations.is_empty()));
     let keys: BTreeSet<&String> = report.findings.iter().map(|f| &f.site_key).collect();
@@ -772,34 +978,255 @@ fn a_preview_of_another_family_on_the_same_line_is_not_folded_into_a_floor_row()
 #[test]
 fn collapse_and_group_stages_reconcile_in_the_scan_ledger() {
     // The same two calls the scan makes, accounted the way the scan accounts them.
-    let input = mixed_rows();
-    let mut ledger = crate::scan_ledger::ScanLedger::new();
-    let tools = ToolMap::builtin();
+    let input = rows_with_known_duplicates();
     let rows_in = input.len();
-    let c = collapse_identical(input, &tools);
-    let acc = c.accounting();
-    let collapsed = c.collapsed.len();
-    let rows_out = c.rows.len();
+    let p = pipe(input);
+    let mut ledger = crate::scan_ledger::ScanLedger::new();
+    let rows_out = p.rows.len();
+    let entry = ledger
+        .record_stage_for_repo(
+            "acme/app",
+            "collapse-identical",
+            rows_in,
+            rows_out,
+            p.collapse.accounting(),
+        )
+        .clone();
+    assert_eq!(entry.unaccounted, 0, "{entry:?}");
+    assert!(!p.collapse.collapsed.is_empty(), "something must collapse");
+    assert_eq!(
+        (entry.rows_in, entry.rows_out),
+        (rows_in, rows_in - KNOWN_COLLAPSED)
+    );
+    assert_eq!(
+        entry.merged_into.len(),
+        KNOWN_COLLAPSED,
+        "every collapsed row is named"
+    );
     assert_eq!(
         rows_in,
-        rows_out + collapsed,
+        entry.rows_out + entry.merged_into.len(),
         "rows_in == rows_out + collapsed"
     );
-    let entry =
-        ledger.record_stage_for_repo("acme/app", "collapse-identical", rows_in, rows_out, acc);
-    assert_eq!(entry.unaccounted, 0);
-    let (rows, _) = group_semantic(c.rows, &[], &tools, &mut SubgroupAllocator::new());
-    let entry = ledger.record_stage_for_repo(
-        "acme/app",
-        "group",
-        rows_out,
-        rows.len(),
-        crate::scan_ledger::StageAccounting::default(),
-    );
-    assert_eq!(entry.unaccounted, 0);
+    let entry = ledger
+        .record_stage_for_repo(
+            "acme/app",
+            "group",
+            rows_out,
+            p.tree.nodes.iter().map(|n| n.members.len()).sum(),
+            crate::scan_ledger::StageAccounting::default(),
+        )
+        .clone();
+    assert_eq!(entry.unaccounted, 0, "every row is in a node: {entry:?}");
+    assert_tree_covers_rows(&p.rows, &p.tree);
+    assert_every_input_site_is_present(&p);
+}
+
+// ---- successors for the deleted absorbing-merge tests ----------------------------------------
+
+#[test]
+fn an_n_site_same_rule_collapse_reconciles_with_every_source_kept() {
+    // Six rows of one rule at one place (n = 6): one survivor, five collapsed, five distinct
+    // source keys, and the ledger accounts for every one.
+    let input: Vec<Finding> = (0..6)
+        .map(|i| {
+            row(
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                "src/a.rs",
+                10,
+                &format!("query(&format!(\"select {{id}} /* variant {i} */\"))"),
+            )
+        })
+        .collect();
+    let input_keys: BTreeSet<String> = crate::inspections::site_keys_of(&input)
+        .into_iter()
+        .collect();
+    assert_eq!(input_keys.len(), 6);
+    let out = collapse(input);
+    assert_eq!(out.rows.len(), 1);
+    assert_eq!(out.collapsed.len(), 5);
     assert_eq!(
-        rows.len(),
-        rows_out,
-        "grouping accounts for nothing because it removes nothing"
+        out.rows.len() + out.collapsed.len(),
+        6,
+        "rows_in == rows_out + collapsed"
     );
+    let survivor = &out.rows[0];
+    assert_eq!(
+        survivor.flagged_by.len(),
+        5,
+        "one entry per collapsed source"
+    );
+    let mut all: BTreeSet<String> = survivor
+        .flagged_by
+        .iter()
+        .map(|b| b.site_key.clone())
+        .collect();
+    assert_eq!(all.len(), 5, "five distinct source keys");
+    all.insert(crate::inspections::site_keys_of(&out.rows)[0].clone());
+    // The survivor is the first row (earliest wins a tie), so every input key is accounted for.
+    assert_eq!(
+        all, input_keys,
+        "every input site is the survivor or a flagged_by source"
+    );
+    let mut ledger = crate::scan_ledger::ScanLedger::new();
+    let entry = ledger.record_stage("collapse-identical", 6, 1, out.accounting());
+    assert_eq!(entry.unaccounted, 0, "{entry:?}");
+    assert_eq!(entry.merged_into.len(), 5);
+}
+
+#[test]
+fn a_collapse_over_rows_that_already_carry_flagged_by_loses_no_source() {
+    let source = |rule: &str, line: usize| FlaggedBy {
+        rule_id: rule.to_string(),
+        tool: Some("semgrep".to_string()),
+        site_key: format!("key-{rule}-{line}"),
+        path: "src/a.rs".to_string(),
+        line,
+    };
+    let mut a = row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "query(x)");
+    a.flagged_by = vec![source("tool-one", 11)];
+    let mut b = row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "query(x)");
+    b.flagged_by = vec![source("tool-two", 12), source("tool-three", 13)];
+    let c = row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "query(x)");
+    let out = collapse(vec![a, b, c]);
+    assert_eq!(out.rows.len(), 1);
+    let kept: BTreeSet<(String, usize)> = out.rows[0]
+        .flagged_by
+        .iter()
+        .map(|b| (b.rule_id.clone(), b.line))
+        .collect();
+    // The survivor's own, the sources it had collected, and the two rows folded in.
+    for expected in [("tool-one", 11), ("tool-two", 12), ("tool-three", 13)] {
+        assert!(
+            kept.contains(&(expected.0.to_string(), expected.1)),
+            "{expected:?} was lost: {kept:?}"
+        );
+    }
+    assert_eq!(
+        out.rows[0].flagged_by.len(),
+        3 + 2,
+        "three carried sources plus the two rows collapsed in: {:?}",
+        out.rows[0].flagged_by
+    );
+}
+
+#[test]
+fn unfold_never_lists_a_site_twice_and_never_loses_one() {
+    let nested = || MergedLocation::site("acme/app", "src/other.rs", 9, "AI-NESTED", "x", false);
+    let mut a = row("AI-IDOR-INVOICES", "src/h.rs", 3, "db.get(invoice_id)");
+    a.also_locations = vec![nested(), nested()];
+    let mut b = row("AI-OTHER-NAME", "src/h.rs", 3, "db.get(invoice_id)");
+    b.also_locations = vec![nested()];
+    // A site that is already a row of the same rule at the same place, rated higher.
+    let mut c = row("AI-THIRD", "src/h.rs", 8, "db.get(other)");
+    c.also_locations = vec![MergedLocation::site(
+        "acme/app",
+        "src/h.rs",
+        3,
+        "AI-IDOR-INVOICES",
+        "db.get(invoice_id)",
+        false,
+    )
+    .with_rating("critical", "Any user can read any invoice")];
+    let before: BTreeSet<(String, usize, String)> = [&a, &b, &c]
+        .iter()
+        .flat_map(|f| {
+            std::iter::once((f.path.clone(), f.line, f.rule_id.clone())).chain(
+                f.also_locations
+                    .iter()
+                    .map(|l| (l.path.clone(), l.line, l.rule_id.clone())),
+            )
+        })
+        .collect();
+    let mut rows = vec![a, b, c];
+    let added = unfold_also_locations(&mut rows);
+    assert_eq!(
+        added, 1,
+        "only the shared nested site is new, and it is promoted once"
+    );
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|f| f.also_locations.is_empty()));
+    let places: Vec<(String, usize, String)> = rows
+        .iter()
+        .map(|f| (f.path.clone(), f.line, f.rule_id.clone()))
+        .collect();
+    let unique: BTreeSet<_> = places.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        places.len(),
+        "no site appears twice: {places:?}"
+    );
+    assert_eq!(unique, before, "no site is lost");
+    // The duplicate that was rated higher raised the row that stands for the place.
+    let idor = rows
+        .iter()
+        .find(|f| f.rule_id == "AI-IDOR-INVOICES")
+        .unwrap();
+    assert_eq!(idor.severity, "critical");
+    // Loading again changes nothing.
+    let again = rows.clone();
+    assert_eq!(unfold_also_locations(&mut rows), 0);
+    assert_eq!(rows, again);
+}
+
+#[test]
+fn the_same_structural_rule_in_two_repos_stays_separate_per_repo() {
+    let make = |repo: &str, path: &str, line: usize| {
+        let mut f = row(
+            "ARCH-SOME-PREFERENCE-1",
+            path,
+            line,
+            "let x = shared_shape();",
+        );
+        f.repo = repo.to_string();
+        f.category = Some("arch-conformance".to_string());
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        f.severity = "low".to_string();
+        f
+    };
+    // The very same place in each repo, and a second nearby row in each.
+    let input = vec![
+        make("acme/web", "src/index.ts", 12),
+        make("acme/web", "src/index.ts", 13),
+        make("acme/api", "src/index.ts", 12),
+        make("acme/api", "src/index.ts", 13),
+    ];
+    let repo_of_key = |key: &str| key.split('\u{0}').next().unwrap_or_default().to_string();
+    let collapsed = collapse(input.clone());
+    assert_eq!(
+        collapsed.rows.len() + collapsed.collapsed.len(),
+        input.len()
+    );
+    for repo in ["acme/web", "acme/api"] {
+        assert!(
+            collapsed.rows.iter().any(|f| f.repo == repo),
+            "{repo} keeps a row"
+        );
+    }
+    // A collapse never reaches across repos: every source a row holds is from the row's own.
+    for f in &collapsed.rows {
+        for b in &f.flagged_by {
+            assert_eq!(repo_of_key(&b.site_key), f.repo, "{f:?}");
+        }
+    }
+    // Grouping drops nothing, links stay inside a repo, and a sub-group formed for a shared
+    // cause holds rows of one repo only.
+    let mut alloc = SubgroupAllocator::new();
+    let (mut rows, nodes) = group_semantic(input, &[], &ToolMap::builtin(), &mut alloc);
+    assert_eq!(rows.len(), 4, "grouping drops nothing across repos");
+    backfill_site_keys(&mut rows);
+    for f in &rows {
+        assert!(f.flagged_by.is_empty(), "grouping collapses nothing");
+    }
+    for f in &rows {
+        if let Some(link) = &f.possible_duplicate_of {
+            assert_eq!(repo_of_key(&link.key), f.repo, "a link never crosses repos");
+        }
+    }
+    assert!(!nodes.is_empty(), "the adjacent rows form cause sub-groups");
+    for node in &nodes {
+        let repos: BTreeSet<String> = node.members.iter().map(|k| repo_of_key(k)).collect();
+        assert_eq!(repos.len(), 1, "{}: spans repos: {repos:?}", node.id);
+    }
 }

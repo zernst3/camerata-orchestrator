@@ -115,11 +115,13 @@ fn run(n: usize) -> std::time::Duration {
     let tree_time = t.elapsed();
 
     let tree = report.tree.as_ref().unwrap();
-    let members: usize = tree.nodes.iter().map(|n| n.members.len()).sum();
+    // Full coverage and uniqueness: the union of every node's members is exactly the row keys,
+    // no key is in two nodes and none in zero.
+    super::tree_tests::assert_tree_covers_rows(&report.findings, tree);
     assert_eq!(
-        members,
         report.findings.len(),
-        "every row is in exactly one node"
+        n - n / 50,
+        "rows_out == rows_in - collapsed"
     );
     assert!(report.findings.iter().all(|f| f.group_path.len() == 3));
     let total = collapse_time + group_time + tree_time;

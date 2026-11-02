@@ -1377,7 +1377,21 @@ impl ScanReport {
     /// built ([`Self::assign_site_keys`]). Idempotent; a report made by the current engine passes
     /// through unchanged.
     pub fn normalize_loaded(&mut self) {
-        crate::review_tree::unfold_also_locations(&mut self.findings);
+        let rows_in = self.findings.len();
+        let added = crate::review_tree::unfold_also_locations(&mut self.findings);
+        if added > 0 {
+            // The unfold is its own ledger stage, so rows in plus what it added equals rows out
+            // and the report's row arithmetic still closes: rows exported + collapsed - unfolded
+            // additions == rows detected.
+            let mut acc = crate::scan_ledger::StageAccounting::default();
+            acc.push_added("also_locations_unfolded", added);
+            self.ledger.record_stage(
+                crate::review_tree::UNFOLD_STAGE,
+                rows_in,
+                self.findings.len(),
+                acc,
+            );
+        }
         self.assign_site_keys();
     }
 

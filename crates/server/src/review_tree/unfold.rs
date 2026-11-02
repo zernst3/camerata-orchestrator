@@ -38,22 +38,90 @@ fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
     row
 }
 
+/// The identity of a site for "is this the same site": repo, path, line and rule id.
+type SiteIdentity = (String, String, usize, String);
+
+fn identity_of_row(f: &Finding) -> SiteIdentity {
+    (f.repo.clone(), f.path.clone(), f.line, f.rule_id.clone())
+}
+
+fn identity_of_site(l: &MergedLocation) -> SiteIdentity {
+    (l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone())
+}
+
 /// Promote every absorbed site to a row. Returns how many rows were added. The survivor keeps its
 /// own place and loses only its `also_locations`; each promoted row follows its survivor in the
 /// list, in the survivor's `group_path`.
+///
+/// A site never appears twice: one that two rows both absorbed, or that a row lists twice, is
+/// promoted once, and one that is already a row of the same rule at the same place is not
+/// promoted again (it is that row). Nothing is lost by that: if the duplicate was rated higher
+/// than the row that already stands for the place, that row takes the higher rating and records
+/// why.
 pub fn unfold_also_locations(findings: &mut Vec<Finding>) -> usize {
     if findings.iter().all(|f| f.also_locations.is_empty()) {
         return 0;
     }
-    let mut out: Vec<Finding> = Vec::with_capacity(findings.len());
-    let mut added = 0;
-    for mut f in std::mem::take(findings) {
-        let sites = std::mem::take(&mut f.also_locations);
-        let promoted: Vec<Finding> = sites.iter().map(|s| promote(&f, s)).collect();
-        added += promoted.len();
-        out.push(f);
-        out.extend(promoted);
+    /// The row that stands for a site: an original row, or the j-th row promoted after row i.
+    #[derive(Clone, Copy)]
+    enum Stands {
+        Original(usize),
+        Promoted(usize, usize),
     }
-    *findings = out;
+    let mut originals = std::mem::take(findings);
+    let sites: Vec<Vec<MergedLocation>> = originals
+        .iter_mut()
+        .map(|f| std::mem::take(&mut f.also_locations))
+        .collect();
+    let mut stands: std::collections::HashMap<SiteIdentity, Stands> =
+        std::collections::HashMap::new();
+    for (i, f) in originals.iter().enumerate() {
+        stands
+            .entry(identity_of_row(f))
+            .or_insert(Stands::Original(i));
+    }
+    let mut promoted: Vec<Vec<Finding>> = vec![Vec::new(); originals.len()];
+    let mut raises: Vec<(Stands, MergedLocation)> = Vec::new();
+    let mut added = 0;
+    for (i, row_sites) in sites.iter().enumerate() {
+        for site in row_sites {
+            let id = identity_of_site(site);
+            if let Some(&at) = stands.get(&id) {
+                raises.push((at, site.clone()));
+                continue;
+            }
+            promoted[i].push(promote(&originals[i], site));
+            stands.insert(id, Stands::Promoted(i, promoted[i].len() - 1));
+            added += 1;
+        }
+    }
+    for (at, site) in raises {
+        let row = match at {
+            Stands::Original(i) => &mut originals[i],
+            Stands::Promoted(i, j) => &mut promoted[i][j],
+        };
+        if !site.severity.is_empty()
+            && crate::ai_audit::severity_rank(&site.severity)
+                > crate::ai_audit::severity_rank(&row.severity)
+        {
+            let from = row.severity.clone();
+            crate::ai_audit::record_severity_adjustment(
+                row,
+                &from,
+                &site.severity,
+                &format!(
+                    "{} was absorbed at this place into another row at a higher rating",
+                    site.rule_id
+                ),
+            );
+            row.severity.clone_from(&site.severity);
+        }
+    }
+    let mut result: Vec<Finding> = Vec::with_capacity(originals.len() + added);
+    for (row, extra) in originals.into_iter().zip(promoted) {
+        result.push(row);
+        result.extend(extra);
+    }
+    *findings = result;
     added
 }
