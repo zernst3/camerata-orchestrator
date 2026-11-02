@@ -88,32 +88,3 @@ fn a_lower_or_equal_member_severity_is_not_shown() {
     let sites = &json.curated_findings[0].sites[0].also_sites;
     assert!(sites.iter().all(|s| s.severity.is_none()), "{sites:?}");
 }
-
-#[test]
-fn the_sites_vs_rows_check_counts_distinct_places() {
-    use camerata_api_types::audit::{DeviationKind, FindingKind};
-    // Two deviating sites are claimed; the row and a same-line member are ONE place.
-    let mut f = finding("ARCH-API-VERSIONING-1", "src/api/routes.rs", 42, "medium");
-    f.kind = Some(FindingKind::Deviation(DeviationKind {
-        deviating_sites: 2,
-        assessed_sites: None,
-        convention_option_id: None,
-        convention_label: "observed majority".to_string(),
-    }));
-    f.also_locations = vec![MergedLocation::site(
-        f.repo.clone(),
-        "src/api/routes.rs",
-        42,
-        "ARCH-API-VERSIONING-1",
-        "x",
-        false,
-    )];
-    let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
-    let before = report.findings.len();
-    apply_sites_vs_rows_check(&mut report);
-    assert_eq!(
-        report.findings.len(),
-        before + 1,
-        "one place is represented, two are claimed"
-    );
-}

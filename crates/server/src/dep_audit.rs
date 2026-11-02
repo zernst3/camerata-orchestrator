@@ -325,6 +325,10 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                 let mut finding = Finding {
                     could_be_intentional: false,
                     site_key: String::new(),
+                    group_path: Vec::new(),
+                    group_role: crate::review_tree::GroupRole::Primary,
+                    flagged_by: Vec::new(),
+                    possible_duplicate_of: None,
                     repo: repo.to_string(),
                     path: lockfile_rel.clone(),
                     line: 0,

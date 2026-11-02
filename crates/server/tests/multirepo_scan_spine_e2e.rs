@@ -465,10 +465,18 @@ async fn a_repo_with_no_cap_is_never_blocked() {
     assert!(report.ledger.rule_for_repo(RULE, "acme/one").unwrap().ran);
     assert!(report.ledger.rule_for_repo(RULE, "acme/two").unwrap().ran);
     assert_eq!(report.ledger.repos(), vec!["acme/one", "acme/two"]);
-    assert!(report
+    let per_repo: Vec<_> = report
         .ledger
         .stages()
         .iter()
-        .filter(|s| s.stage == "cross-family-merge")
+        .filter(|s| s.stage == "collapse-identical" || s.stage == "group")
+        .collect();
+    assert_eq!(per_repo.len(), 4, "a collapse and a group stage per repo");
+    assert!(per_repo
+        .iter()
         .all(|s| s.repo == "acme/one" || s.repo == "acme/two"));
+    assert!(
+        per_repo.iter().all(|s| s.unaccounted == 0),
+        "every stage reconciles: {per_repo:#?}"
+    );
 }

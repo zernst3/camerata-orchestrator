@@ -2,7 +2,7 @@
 //!
 //! The scan stub answers in the terse format (a one-sentence `detail`, no `proposed_rules`). The
 //! real production functions a scan calls after the model responds then run
-//! (`ai_audit::audit_repo` -> `ai_audit::merge_semantic_groups` ->
+//! (`ai_audit::audit_repo` -> `ai_audit::group_semantic` ->
 //! `report_export::build_report_json`), and the test reads the EXPORT:
 //!
 //! * regeneration works: every exported finding carries the regenerated full detail, and the
@@ -23,6 +23,7 @@ use camerata_server::efficiency::EfficiencyConfig;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::ScanReport;
 use camerata_server::report_export::{self, ReportOptions};
+use camerata_server::review_tree;
 use camerata_server::scan_ledger::ScanLedger;
 
 const HANDLER_PATH: &str = "src/handlers/webhook.rs";
@@ -135,6 +136,7 @@ fn report(
 ) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -201,7 +203,7 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
     .await
     .expect("audit_repo against the stub");
     let audited = findings.clone();
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
 
     let mut ledger = ScanLedger::new();
     for sample in stage_samples {

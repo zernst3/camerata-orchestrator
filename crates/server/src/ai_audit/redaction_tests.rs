@@ -140,7 +140,7 @@ fn merge_location_group_output_is_redacted_when_a_member_was_not() {
     let files = vec![(".env".to_string(), format!("# top\n{}\n", p.text))];
     let mut other = raw_finding(&p, 2);
     other.rule_id = "SEC-NO-HARDCODED-SECRETS-1".to_string();
-    let merged = merge_by_location(vec![raw_finding(&p, 2), other], &files);
+    let merged = crate::review_tree::collapse_and_group(vec![raw_finding(&p, 2), other], &files);
     assert!(!merged.is_empty());
     for f in &merged {
         assert!(!leaks(f, &p), "merged row leaked");
@@ -148,7 +148,7 @@ fn merge_location_group_output_is_redacted_when_a_member_was_not() {
 }
 
 #[test]
-fn merge_semantic_group_and_structural_group_outputs_are_redacted() {
+fn grouped_rows_are_redacted_when_a_member_was_not() {
     let p = secret();
     let mut a = raw_finding(&p, 2);
     a.category = Some("arch-conformance".to_string());
@@ -156,16 +156,14 @@ fn merge_semantic_group_and_structural_group_outputs_are_redacted() {
     a.severity = "low".to_string();
     let mut b = a.clone();
     b.line = 9;
-    let grouped = group_structural_needs_review(vec![a, b]);
-    assert_eq!(
-        grouped.len(),
-        1,
-        "two needs-review structural rows fold into one"
-    );
-    assert!(!leaks(&grouped[0], &p), "structural group row leaked");
-
     let files = vec![(".env".to_string(), format!("x\n{}\n", p.text))];
-    let merged = merge_semantic_groups(vec![raw_finding(&p, 2), raw_finding(&p, 3)], &files);
+    let grouped = crate::review_tree::collapse_and_group(vec![a, b], &files);
+    assert_eq!(grouped.len(), 2, "two rows in, two rows out");
+    for f in &grouped {
+        assert!(!leaks(f, &p), "grouped row leaked");
+    }
+
+    let merged = cluster_heads(vec![raw_finding(&p, 2), raw_finding(&p, 3)], &files);
     for f in &merged {
         assert!(!leaks(f, &p), "semantic group row leaked");
     }

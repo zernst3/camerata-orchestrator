@@ -242,6 +242,10 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                     findings.push(Finding {
                         could_be_intentional: false,
                         site_key: String::new(),
+                        group_path: Vec::new(),
+                        group_role: crate::review_tree::GroupRole::Primary,
+                        flagged_by: Vec::new(),
+                        possible_duplicate_of: None,
                         repo: repo.to_string(),
                         path: path.to_string(),
                         line: 0,
@@ -310,6 +314,10 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             findings.push(Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: repo.to_string(),
                 path: path.to_string(),
                 line: line_no,
@@ -560,6 +568,10 @@ pub(crate) fn classify_repo_findings(
         findings.push(Finding {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: repo.to_string(),
             path: w.path.clone(),
             line: w.line,

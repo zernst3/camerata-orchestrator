@@ -353,51 +353,56 @@ fn the_new_security_tokens_classify_idor_traversal_mass_assignment_and_privilege
 }
 
 #[test]
-fn an_absorbed_critical_keeps_its_rule_severity_and_headline_in_also_locations() {
+fn a_collapsed_critical_raises_the_survivor_and_keeps_its_own_rule_and_line_in_flagged_by() {
     let files = vec![(
         "src/h.rs".to_string(),
         "fn a() {}\nfn b() {}\ndb.get(invoice_id)\n".to_string(),
     )];
     let det = finding("SEC-NO-RAW-SQL-CONCAT-1", "medium", "Raw SQL concatenation");
-    let ai = finding(
-        "AI-ODD-NAME",
+    let mut tool = finding(
+        "camerata.security.sql-string-concat-python",
         "critical",
         &format!("Any user can read any invoice{HEADLINE_SEP}the handler never checks the owner"),
     );
-    let merged = merge_by_location(vec![det, ai], &files);
+    tool.preview = true;
+    tool.preview_tool = Some("semgrep".to_string());
+    let merged = collapse_located(vec![det, tool], &files);
     assert_eq!(merged.len(), 1);
     let row = &merged[0];
-    assert_eq!(row.rule_id, "SEC-NO-RAW-SQL-CONCAT-1");
     assert_eq!(
-        row.severity, "medium",
-        "which severity wins a merge is unchanged"
+        row.rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+        "the floor row's text survives"
     );
-    assert_eq!(row.also_locations.len(), 1, "{:?}", row.also_locations);
-    let site = &row.also_locations[0];
-    assert_eq!(site.rule_id, "AI-ODD-NAME");
-    assert_eq!(site.severity, "critical");
-    assert_eq!(site.headline, "Any user can read any invoice");
-    // The lowering is on the record.
+    assert_eq!(
+        row.severity, "critical",
+        "a collapse keeps the maximum severity: a collapsed critical is never lowered"
+    );
+    assert_eq!(row.flagged_by.len(), 1, "{:?}", row.flagged_by);
+    let source = &row.flagged_by[0];
+    assert_eq!(source.rule_id, "camerata.security.sql-string-concat-python");
+    assert_eq!(source.tool.as_deref(), Some("semgrep"));
+    assert_eq!((source.path.as_str(), source.line), ("src/h.rs", 3));
+    // The raising is on the record.
     let adj = adjustments(row);
     assert_eq!(adj.len(), 1, "{adj:?}");
     assert!(
-        adj[0].starts_with("severity lowered from critical to medium:"),
+        adj[0].starts_with("severity raised from medium to critical:"),
         "{}",
         adj[0]
     );
 }
 
 #[test]
-fn an_absorbed_member_of_the_same_rating_still_leaves_its_site_and_no_adjustment() {
+fn a_collapsed_row_of_the_same_rating_leaves_its_source_and_no_adjustment() {
     let files = vec![(
         "src/h.rs".to_string(),
         "fn a() {}\nfn b() {}\ndb.get(invoice_id)\n".to_string(),
     )];
     let a = finding("AI-IDOR-INVOICES", "high", "IDOR on invoices");
-    let b = finding("AI-OTHER-NAME", "high", "Missing owner check");
-    let merged = merge_by_location(vec![a, b], &files);
+    let b = finding("AI-IDOR-INVOICES", "high", "Missing owner check");
+    let merged = collapse_located(vec![a, b], &files);
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].also_locations.len(), 1);
+    assert_eq!(merged[0].flagged_by.len(), 1);
     assert!(adjustments(&merged[0]).is_empty());
 }
 
@@ -936,28 +941,6 @@ fn a_line_written_as_line_42_is_read() {
 }
 
 #[test]
-fn already_nested_sites_are_deduplicated_when_a_location_group_merges() {
-    let files = vec![(
-        "src/h.rs".to_string(),
-        "fn a() {}\nfn b() {}\ndb.get(invoice_id)\n".to_string(),
-    )];
-    let nested =
-        crate::onboard::MergedLocation::site(REPO, "src/other.rs", 9, "AI-NESTED", "x", false);
-    let mut a = finding("AI-IDOR-INVOICES", "high", "One");
-    a.also_locations = vec![nested.clone()];
-    let mut b = finding("AI-OTHER-NAME", "high", "Two");
-    b.also_locations = vec![nested];
-    let merged = merge_by_location(vec![a, b], &files);
-    assert_eq!(merged.len(), 1);
-    assert_eq!(
-        merged[0].also_locations.len(),
-        2,
-        "the shared nested site once, plus the absorbed member's own: {:?}",
-        merged[0].also_locations
-    );
-}
-
-#[test]
 fn a_legacy_batch_reply_that_bought_nothing_is_counted_wasted_without_being_staged_twice() {
     let mut results = crate::llm::BatchResults::default();
     results
@@ -1053,7 +1036,7 @@ fn the_same_adjustment_sentence_is_not_a_shared_object() {
     let b = with_bookkeeping("AI-HANDLER-TRUSTS-FLAG", "handler.rs", 80);
     assert!(!shared_captured_object(&a, &b));
     assert!(normalized_capture_values(&a).is_empty());
-    let out = merge_semantic_groups(vec![a, b], &[]);
+    let out = cluster_heads(vec![a, b], &[]);
     assert_eq!(out.len(), 2, "unrelated findings must not fuse: {out:?}");
 }
 
@@ -1075,7 +1058,7 @@ fn assert_sharing_only_this_key_does_not_fuse(key: &str, value: &str) {
     a.captures.insert(key.to_string(), value.to_string());
     b.captures.insert(key.to_string(), value.to_string());
     assert!(!shared_captured_object(&a, &b), "{key} linked two rows");
-    let out = merge_semantic_groups(vec![a, b], &[]);
+    let out = cluster_heads(vec![a, b], &[]);
     assert_eq!(out.len(), 2, "{key}: unrelated findings fused: {out:?}");
 }
 
@@ -1126,7 +1109,7 @@ fn a_real_shared_object_still_fuses_beside_the_new_bookkeeping_keys() {
             .insert("flag".to_string(), "debug_mode".to_string());
     }
     assert!(shared_captured_object(&a, &b));
-    assert_eq!(merge_semantic_groups(vec![a, b], &[]).len(), 1);
+    assert_eq!(cluster_heads(vec![a, b], &[]).len(), 1);
 }
 
 #[test]
@@ -1171,6 +1154,21 @@ fn a_short_snippet_inside_a_longer_one_is_not_a_repeat() {
         "let q = format!(\"select 1\");"
     ));
     assert!(!same_snippet("id", "let user_id = req.query.id"));
+}
+
+/// An absorbed site as the old merge recorded it, for the tests of how a stored report's
+/// `also_locations` are counted and worded (a report from before grouping stopped absorbing
+/// still holds them until it is loaded).
+fn absorbed_site(f: &Finding) -> crate::onboard::MergedLocation {
+    crate::onboard::MergedLocation::site(
+        f.repo.clone(),
+        f.path.clone(),
+        f.line,
+        f.rule_id.clone(),
+        f.snippet.clone(),
+        !f.located,
+    )
+    .with_rating(f.severity.clone(), finding_headline(f))
 }
 
 #[test]

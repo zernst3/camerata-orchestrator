@@ -4462,130 +4462,10 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
 /// for ones that deliberately populate it and assert `K > 0`.
 pub fn apply_evidence_gate(report: &mut crate::onboard::ScanReport) {
     apply_zero_finding_evidence_check(report);
-    apply_sites_vs_rows_check(report);
 }
 
-/// The marker sentence every [`apply_sites_vs_rows_check`] shortfall row's `detail` begins
-/// with — also the gate's own idempotency key (a rule already carrying a shortfall row is
-/// never checked again, so the gate can never ratchet).
-const SITES_VS_ROWS_SHORTFALL_PREFIX: &str =
-    "Site count integrity: the evaluation for this rule established";
-
-/// W7 (C2) — the sites-vs-rows integrity check, exporting shortfalls as HELD rows (never a
-/// refused export).
-///
-/// The original C2 defect: the zero-finding evidence check below skips any rule with >= 1
-/// finding, so an N-sites-but-1-row shortfall was never checked at ANY N — on one graded
-/// fixture the recommendation pass wrote down the planted site, the coverage evidence named
-/// both relevant sites, and "Findings this run" was 1, with nothing anywhere comparing the
-/// two numbers.
-///
-/// The check uses the STRUCTURED fields only (per the review: never re-derive counts from
-/// prose): a `FindingKind::Deviation` payload carries the GROUP-level `deviating_sites`
-/// numerator, computed structurally when the kind was stamped
-/// (`ai_audit::assign_deviation_kinds`: surviving rows plus absorbed merge sites). Later
-/// passes (cross-scan grouping, preview merges) can still lose sites AFTER that stamp — and a
-/// site lost after the stamp is exactly the "recall loss to over-merge looks like a detection
-/// miss" shape. So, pre-seal: for every rule whose rows claim `deviating_sites == N`, count
-/// the sites actually REPRESENTED (rows under the rule + `also_locations` entries under it);
-/// a shortfall becomes ONE held, needs-review row stating both numbers — visible to the
-/// curator and the client, never a dropped row and never an aborted export.
-fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
-    use camerata_api_types::audit::FindingKind;
-    // claimed deviating_sites per rule (group-level, identical on every row of the rule by
-    // construction — max is a safe reconciliation if they ever diverge), plus whether the
-    // rule already carries a shortfall row from a previous invocation.
-    let mut claimed: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut already_disclosed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for f in &report.findings {
-        if let Some(FindingKind::Deviation(d)) = &f.kind {
-            let e = claimed.entry(f.rule_id.to_ascii_uppercase()).or_insert(0);
-            *e = (*e).max(d.deviating_sites);
-        }
-        if f.detail.starts_with(SITES_VS_ROWS_SHORTFALL_PREFIX) {
-            already_disclosed.insert(f.rule_id.to_ascii_uppercase());
-        }
-    }
-    if claimed.is_empty() {
-        return;
-    }
-    let mut synthetic: Vec<Finding> = Vec::new();
-    for (rule_key, n_claimed) in &claimed {
-        if already_disclosed.contains(rule_key) {
-            continue;
-        }
-        // DISTINCT places: a member absorbed at its row's own line is the same site.
-        let mut places: std::collections::HashSet<crate::onboard::SitePlace> =
-            std::collections::HashSet::new();
-        for f in &report.findings {
-            if f.rule_id.eq_ignore_ascii_case(rule_key) {
-                places.insert(f.place());
-            }
-            for l in &f.also_locations {
-                if l.rule_id.eq_ignore_ascii_case(rule_key) {
-                    places.insert(l.place());
-                }
-            }
-        }
-        let represented = places.len();
-        if represented >= *n_claimed {
-            continue;
-        }
-        let missing = n_claimed - represented;
-        // Anchor the disclosure on the rule's first surviving row (same repo/file family);
-        // the missing sites' own locations are exactly what was lost, so line 0 is honest.
-        let Some(anchor) = report
-            .findings
-            .iter()
-            .find(|f| f.rule_id.eq_ignore_ascii_case(rule_key))
-        else {
-            continue;
-        };
-        synthetic.push(Finding {
-            repo: anchor.repo.clone(),
-            path: anchor.path.clone(),
-            line: 0,
-            rule_id: anchor.rule_id.clone(),
-            severity: "medium".to_string(),
-            snippet: format!(
-                "{n_claimed} deviating site(s) established; {represented} represented in this \
-                 report"
-            ),
-            detail: format!(
-                "{SITES_VS_ROWS_SHORTFALL_PREFIX} {n_claimed} deviating site(s) for this \
-                 rule, but only {represented} of them {} represented in this report's rows \
-                 and merged-site records. The remaining {missing} {} not individually listed \
-                 — held for a human reviewer rather than silently omitted.",
-                if represented == 1 { "is" } else { "are" },
-                if missing == 1 { "site is" } else { "sites are" },
-            ),
-            needs_review: true,
-            confidence: Some("needs-review".to_string()),
-            located: false,
-            // The shortfall row belongs to the same deviation group it reconciles — carry
-            // the group's own structured payload so the numerator/denominator stay on the
-            // wire (A5.6), rather than inventing a new kind for an honesty row.
-            kind: anchor.kind.clone(),
-            ..Finding::default()
-        });
-    }
-    if synthetic.is_empty() {
-        return;
-    }
-    let rows_in = report.findings.len();
-    let added = synthetic.len();
-    report.findings.extend(synthetic);
-    let rows_out = report.findings.len();
-    let mut acc = crate::scan_ledger::StageAccounting::default();
-    acc.push_added("sites_vs_rows_shortfall_disclosed", added);
-    report
-        .ledger
-        .record_stage("sites-vs-rows-gate", rows_in, rows_out, acc);
-}
-
-/// The ORIGINAL evidence gate (Defect 4): the zero-finding half. See
-/// [`apply_evidence_gate`]'s doc comment — this is its body, split out when W7 added the
-/// sites-vs-rows check so each half keeps its own no-op early return.
+/// The evidence gate (Defect 4): the zero-finding half. See [`apply_evidence_gate`]'s doc
+/// comment; this is its body.
 fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     if report.recommendations.is_empty() && report.recommendations_by_repo.is_empty() {
         return;
@@ -5595,7 +5475,7 @@ pub fn build_report_json(
     // C6-B2 design point 3: walk `do_now_sorted` in rank order, but SKIP a row that shares a
     // non-empty root-cause credential token (`FindingRefJson::root_cause_keys`) with a row
     // already selected — the defense-in-depth distinctness check for the case the merge pass
-    // (`ai_audit::merge_semantic_groups` / `backfill_credential_identity`) conservatively left
+    // (`ai_audit::group_semantic` / `backfill_credential_identity`) conservatively left
     // several sites of ONE leaked credential as separate rows. A skipped row is simply not
     // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
     // normally everywhere else the report lists do-now findings.
@@ -6305,6 +6185,7 @@ mod tests {
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             run_id: None,
+            tree: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -6644,7 +6525,7 @@ mod tests {
     /// that start with a digit — "...produced 1 candidate finding. 1 is curated for action..."
     /// — a shape this regex cannot distinguish from corruption and was never meant to police).
     /// This is a DURABLE regression gate, not a one-off fixture check: the synthetic finding
-    /// below exercises the full real pipeline — `ai_audit::merge_semantic_groups` (where the
+    /// below exercises the full real pipeline — `ai_audit::group_semantic` (where the
     /// corruption was actually introduced, in `split_into_sentences`/
     /// `strip_cross_reference_sentences`'s split-then-rejoin) feeding into `build_report_json`
     /// and `xlsx_export::build_findings_export` — so any FUTURE change anywhere in that chain
@@ -6666,7 +6547,7 @@ mod tests {
 
         // Run the finding through the SAME merge pass the real pipeline applies before a
         // report is ever built — this is where REG-5 actually lived.
-        let merged = crate::ai_audit::merge_semantic_groups(vec![f], &[]);
+        let merged = crate::review_tree::test_support::cluster_heads(vec![f], &[]);
 
         let report = report_with(merged, vec!["SEC-REG5-IDENTIFIER-HEAVY-1"]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
@@ -7836,7 +7717,7 @@ mod tests {
     }
 
     // ── C6-B2: top-3 "three distinct root causes" selector ─────────────────────────────────
-    // Defense in depth for the case the merge pass (`ai_audit::merge_semantic_groups` /
+    // Defense in depth for the case the merge pass (`ai_audit::group_semantic` /
     // `backfill_credential_identity`) conservatively leaves several sites of ONE leaked
     // credential as separate rows: the top-3 box must still never spend more than one slot on
     // them. These findings are deliberately fed to `build_report_json` WITHOUT running the merge
@@ -8340,10 +8221,22 @@ mod tests {
 
     // ── P1: deduplication + cross-tier merge, end-to-end through build_report_json ──────────
     // the codebase-inspection hardening notes, P1. Runs the SAME two merge
-    // passes the real audit pipeline runs (`ai_audit::merge_by_location` then
-    // `ai_audit::merge_semantic_groups`) over a faktura-SHAPED synthetic fixture — never the
+    // passes the real audit pipeline runs (`ai_audit::collapse_identical` then
+    // `ai_audit::group_semantic`) over a faktura-SHAPED synthetic fixture — never the
     // real fixture, never a fixture-specific rule/file/table name — then builds the report and
     // asserts the cover's counts reflect the MERGED, distinct-defect set.
+
+    /// The rows of a report whose rule id is `rule_id`.
+    fn report_rows_with<'a>(
+        report: &'a crate::onboard::ScanReport,
+        rule_id: &str,
+    ) -> Vec<&'a crate::onboard::Finding> {
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .collect()
+    }
 
     #[tokio::test]
     async fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
@@ -8394,17 +8287,11 @@ mod tests {
             security,
         ];
 
-        // The real pipeline's two merge passes, in the real order: exact-location first, then
-        // cross-tier/cross-file.
-        let merged = crate::ai_audit::merge_semantic_groups(
-            crate::ai_audit::merge_by_location(raw, &files),
-            &files,
-        );
-        assert_eq!(
-            merged.len(),
-            3,
-            "six raw findings, three distinct defects — merging must land on exactly three"
-        );
+        // The real pipeline's two passes, in the real order: collapse, then group. EVERY row
+        // goes to the exporter, not only the cluster heads: nothing is merged away, so six raw
+        // findings are six rows (two rule families at one line are two rows, linked).
+        let merged = crate::review_tree::collapse_and_group(raw, &files);
+        assert_eq!(merged.len(), 6, "no row is dropped");
 
         // P3: the CORS security finding is an AI-tier rule id the corpus never saw (an
         // invented "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS" id) — the citation gate only lets
@@ -8426,11 +8313,11 @@ mod tests {
             &empty_opts(),
         );
 
-        // Cover critical count == distinct criticals: the SQL-injection defect is the only
-        // critical among the three merged defects, and it must count ONCE.
+        // Cover critical count == the critical ROWS: the floor rule and the model's rule for the
+        // SQL-injection defect are two rows, each critical, and each counts.
         assert_eq!(
-            json.cover.stats.critical, 1,
-            "the merged SQL-injection defect must count once, not twice"
+            json.cover.stats.critical, 2,
+            "both critical SQL-injection rows count, since neither is merged away"
         );
 
         // The CORS security finding must survive as its own curated row, never absorbed under
@@ -8448,18 +8335,20 @@ mod tests {
             "the security finding must never be downgraded below medium: {}",
             cors_group.sites[0].severity
         );
-        assert!(cors_group.sites[0]
-            .also_matches
-            .contains(&"ARCH-MIDDLEWARE-FIRST-1".to_string()));
-
-        // The structural rule id must NOT appear as its own curated row (it lost primacy to the
-        // security finding it clustered with).
-        assert!(
-            !json
-                .curated_findings
-                .iter()
-                .any(|g| g.rule_id == "ARCH-MIDDLEWARE-FIRST-1"),
-            "the structural row must not survive as its own peer row once absorbed"
+        // The structural row at the same line is still its own row, linked to the security
+        // finding that heads the pair.
+        let structural = report_rows_with(&report, "ARCH-MIDDLEWARE-FIRST-1");
+        assert_eq!(
+            structural.len(),
+            1,
+            "the structural row survives as its own row"
+        );
+        assert_eq!(
+            structural[0]
+                .possible_duplicate_of
+                .as_ref()
+                .map(|l| l.hint.as_str()),
+            Some("same_line")
         );
     }
 
@@ -8489,25 +8378,39 @@ mod tests {
         ai.needs_review = true;
 
         let files = vec![("a.ts".to_string(), code.to_string())];
-        let merged = crate::ai_audit::merge_by_location(vec![det, ai], &files);
+        // Two rule families at one site are two rows now (a link, not a merge): each keeps its
+        // own severity and the deterministic row heads the pair.
+        let merged = crate::review_tree::collapse_and_group(vec![det, ai], &files);
         assert_eq!(
             merged.len(),
-            1,
-            "same-site findings must collapse to one row"
+            2,
+            "same-site findings of two rules are two rows"
+        );
+        let det_row = merged
+            .iter()
+            .find(|f| f.rule_id == "SEC-DETERMINISTIC-SITE-1")
+            .unwrap();
+        assert_eq!(
+            det_row.severity, "medium",
+            "the deterministic row keeps its own severity"
+        );
+        assert!(det_row.possible_duplicate_of.is_none(), "it heads the pair");
+        let ai_row = merged
+            .iter()
+            .find(|f| f.rule_id == "AI-SITE-DEFECT-1")
+            .unwrap();
+        assert_eq!(
+            ai_row.severity, "critical",
+            "the AI row keeps its own severity"
         );
         assert_eq!(
-            merged[0].rule_id, "SEC-DETERMINISTIC-SITE-1",
-            "the deterministic rule must win primacy, regardless of the AI member's higher \
-             (uncalibrated) severity"
+            ai_row
+                .possible_duplicate_of
+                .as_ref()
+                .map(|l| l.key.as_str()),
+            Some(det_row.site_key.as_str()),
+            "the lower-ranked row points at the deterministic one"
         );
-        assert_eq!(
-            merged[0].severity, "medium",
-            "the merged severity must be the deterministic primary's own, never the AI member's \
-             inflated critical"
-        );
-        assert!(merged[0]
-            .also_matches
-            .contains(&"AI-SITE-DEFECT-1".to_string()));
 
         let report = report_with(merged, vec!["SEC-DETERMINISTIC-SITE-1", "AI-SITE-DEFECT-1"]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
@@ -8530,7 +8433,6 @@ mod tests {
             Some("Use a parameterized query via the shared `db` client."),
             "the deterministic primary's own authored fix must survive"
         );
-        assert!(site.also_matches.contains(&"AI-SITE-DEFECT-1".to_string()));
 
         // Coverage: BOTH rule ids count as matched this run — neither is "verified clean".
         let healthy_ids: Vec<&str> = json
@@ -8574,9 +8476,9 @@ mod tests {
     }
 
     /// Safe twin: two findings of DIFFERENT defect classes/categories at one site (line 0 —
-    /// uncited/file-level, so `merge_by_location`'s "unrelated file-level issues legitimately
+    /// uncited/file-level, so `collapse_identical`'s "unrelated file-level issues legitimately
     /// share line 0" carve-out applies, and the categories are deliberately disjoint so
-    /// `merge_semantic_groups` has no shared signal either) must NEVER merge — they stay two
+    /// `group_semantic` has no shared signal either) must NEVER merge — they stay two
     /// independent rows, and both are counted. Proves C5-1's primacy/severity changes only
     /// affect findings that WERE already matched into one group; they never cause two distinct
     /// defects to collapse into one.
@@ -8589,8 +8491,8 @@ mod tests {
         b.category = Some("transport-security".to_string());
         b.snippet = "no rate limiting is configured".to_string();
 
-        let merged = crate::ai_audit::merge_semantic_groups(
-            crate::ai_audit::merge_by_location(vec![a, b], &[]),
+        let merged = crate::review_tree::test_support::cluster_heads(
+            crate::review_tree::test_support::collapse_located(vec![a, b], &[]),
             &[],
         );
         assert_eq!(
@@ -8656,24 +8558,25 @@ mod tests {
             ("b.ts".to_string(), code_b.to_string()),
         ];
         let raw = vec![det_a, ai_a, det_b, ai_b];
-        let merged = crate::ai_audit::merge_semantic_groups(
-            crate::ai_audit::merge_by_location(raw, &files),
-            &files,
-        );
-        assert_eq!(
-            merged.len(),
-            2,
-            "4 raw findings describing 2 real defects must land on exactly 2 rows: {merged:?}"
-        );
+        // Every row goes to the exporter: four findings are four rows.
+        let merged = crate::review_tree::collapse_and_group(raw, &files);
+        assert_eq!(merged.len(), 4, "no row is merged away: {merged:?}");
 
         let report = report_with(merged, vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
+        // Every row is in exactly one matrix bucket, whether or not the citation gate also
+        // curates it, so the rows rendered in the body are the matrix rows.
         let rendered_critical_rows = json
-            .curated_findings
+            .matrix
+            .do_now
             .iter()
-            .flat_map(|g| &g.sites)
-            .filter(|s| s.severity == "critical")
+            .chain(&json.matrix.do_next)
+            .chain(&json.matrix.plan)
+            .chain(&json.matrix.accepted)
+            .chain(&json.matrix.informational)
+            .chain(&json.matrix.held)
+            .filter(|r| r.severity == "critical")
             .count();
         assert_eq!(
             json.cover.stats.critical, rendered_critical_rows,
@@ -8681,8 +8584,8 @@ mod tests {
              rendered in the body"
         );
         assert_eq!(
-            json.cover.stats.critical, 2,
-            "merging must land on exactly 2 criticals, never the raw pre-merge count of 4"
+            json.cover.stats.critical, 4,
+            "each of the four critical rows counts once: nothing is merged away"
         );
     }
 
@@ -13139,13 +13042,12 @@ mod tests {
         }
     }
 
-    /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule, grouped by
-    /// `crate::ai_audit::group_structural_needs_review` into ONE finding, land as a SINGLE row
-    /// in the `held` bucket (C5-4: a needs-review row, which is what the grouped finding carries)
-    /// — never one row per occurrence, and never in a curated action tier — while a genuine
-    /// critical finding in the same report is untouched.
+    /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule are no longer folded into
+    /// one row. Every occurrence stays a row, grouped under one rule node of the review tree,
+    /// and every one of them is HELD (C5-4: a needs-review row), never in a curated action tier,
+    /// while a genuine critical finding in the same report is untouched.
     #[test]
-    fn grouped_structural_needs_review_finding_is_a_single_held_row() {
+    fn structural_needs_review_occurrences_all_stay_rows_held_and_in_one_rule_node() {
         let mut occ1 = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 10, "medium");
         occ1.category = Some("arch-conformance".to_string());
         occ1.confidence = Some("needs-review".to_string());
@@ -13157,14 +13059,21 @@ mod tests {
         occ3.confidence = Some("needs-review".to_string());
         let critical = finding("SEC-NO-HARDCODED-SECRETS-1", "d.rs", 1, "critical");
 
-        // Run the SAME grouping pass the real scan pipeline runs before build_report, proving
-        // this test exercises the actual N-rows-to-one-row behavior, not just is_informational.
-        let grouped =
-            crate::ai_audit::group_structural_needs_review(vec![occ1, occ2, occ3, critical]);
+        // Run the SAME grouping pass the real scan pipeline runs before build_report.
+        let grouped = crate::review_tree::collapse_and_group(vec![occ1, occ2, occ3, critical], &[]);
         assert_eq!(
             grouped.len(),
-            2,
-            "three structural occurrences + one critical must collapse to 2 findings: {grouped:?}"
+            4,
+            "nothing is folded away: three structural occurrences and one critical: {grouped:?}"
+        );
+        assert_eq!(
+            grouped
+                .iter()
+                .filter(|f| f.group_path.get(1).map(String::as_str)
+                    == Some("rule:ARCH-SOME-PREFERENCE-1"))
+                .count(),
+            3,
+            "the three occurrences share one rule node"
         );
 
         let report = report_with(
@@ -13175,11 +13084,15 @@ mod tests {
 
         assert_eq!(
             json.matrix.held.len(),
-            1,
-            "the grouped structural finding is ONE held row, not N: {:?}",
+            3,
+            "every structural occurrence is its own held row: {:?}",
             json.matrix.held
         );
-        assert_eq!(json.matrix.held[0].rule_id, "ARCH-SOME-PREFERENCE-1");
+        assert!(json
+            .matrix
+            .held
+            .iter()
+            .all(|r| r.rule_id == "ARCH-SOME-PREFERENCE-1"));
         assert!(
             json.matrix.informational.is_empty(),
             "a needs-review row never routes to informational (C5-4): {:?}",
@@ -14869,8 +14782,8 @@ mod tests {
         let mut sibling = finding("SOME-OTHER-HIGH-RULE", "middleware.ts", 12, "high");
         sibling.snippet = cors_code.to_string();
         let files = vec![("middleware.ts".to_string(), cors_code.to_string())];
-        let merged = crate::ai_audit::merge_semantic_groups(
-            crate::ai_audit::merge_by_location(vec![det, sibling], &files),
+        let merged = crate::review_tree::test_support::cluster_heads(
+            crate::review_tree::test_support::collapse_located(vec![det, sibling], &files),
             &files,
         );
         assert_eq!(
@@ -15034,7 +14947,7 @@ mod tests {
 //      as the accepted exception, not a regression.) STANDING (passes):
 //      `curated_rows_for_authored_floor_rules_have_a_non_empty_fix_and_estimate`.
 //  12. Pipeline-integrity ledger: a representative synthetic scan run through BOTH row-reducing
-//      merge stages (`ai_audit::merge_semantic_groups` — "cross-family-merge" — and
+//      merge stages (`ai_audit::group_semantic` — "cross-family-merge" — and
 //      `ai_audit::group_structural_needs_review` — "structural-needs-review-merge"), accounted
 //      for via `onboard::account_location_merge`, produces ZERO unaccounted rows at EVERY
 //      recorded stage. Traces to the real-world "cross-family-merge rows 45 -> 32 merged=8 ...
@@ -15095,6 +15008,7 @@ mod export_invariants_gate {
     fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             run_id: None,
+            tree: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -15188,7 +15102,7 @@ mod export_invariants_gate {
     /// - `ARCH-STYLE-NOTE-1` ("f_informational"): a plain `info`-severity note — the "ordinary"
     ///   held-for-review row (no confidence hedge at all; routed on severity alone).
     /// - `ARCH-CUSTOM-IDENTIFIER-1` ("f_identifier"): run through the REAL
-    ///   `ai_audit::merge_semantic_groups` pass (a singleton group — nothing to merge WITH, but
+    ///   `ai_audit::group_semantic` pass (a singleton group — nothing to merge WITH, but
     ///   this is exactly where REG-5 lived: the cross-reference-stripping pass that runs over
     ///   every finding regardless of group size) — detail text packed with a dotted call, a
     ///   filename, a migration-line reference, and an abbreviation, to exercise invariant 3.
@@ -15279,10 +15193,10 @@ mod export_invariants_gate {
                                 anon key can read every invoice total."
             .to_string();
         f_identifier.effort = Some("medium".to_string());
-        // REG-5 lived in `merge_semantic_groups`'s cross-reference-stripping pass, which runs
+        // REG-5 lived in `group_semantic`'s cross-reference-stripping pass, which runs
         // over EVERY finding regardless of group size — route this one through the real
         // function (a singleton group) rather than hand-simulating its output.
-        let f_identifier = crate::ai_audit::merge_semantic_groups(vec![f_identifier], &[])
+        let f_identifier = crate::review_tree::test_support::cluster_heads(vec![f_identifier], &[])
             .into_iter()
             .next()
             .expect("a singleton merge group must still return exactly one finding");
@@ -16023,12 +15937,12 @@ mod export_invariants_gate {
 
     // ── Invariant 12 (STANDING — REG-3) ─────────────────────────────────────────────────
 
-    /// REG-3: `ai_audit::semantic_pair_merges`'s same-construct-security override used to
+    /// REG-3: `ai_audit::same_cause_signal`'s same-construct-security override used to
     /// absorb ANY co-located rule into a security finding's `also_matches` as long as one side
     /// was security-tier, with no requirement the two findings share a defect class — so an
     /// unrelated indexing-strategy or pagination-convention finding could vanish from its own
     /// category/Coverage count by riding along in a security row's "Also violates" list. Fixed
-    /// in `semantic_pair_merges` itself (now requires a category-class match or a shared
+    /// in `same_cause_signal` itself (now requires a category-class match or a shared
     /// captured object); this is the EXPORT-LEVEL trip wire that makes a future re-loosening of
     /// that predicate visible here too, without needing to know the merge internals: across
     /// every curated/held-for-review group in the exported report, an `also_matches` member's
@@ -16072,7 +15986,7 @@ mod export_invariants_gate {
     }
 
     /// REG-3 regression test at the full export layer (mirrors the `ai_audit::tests` unit
-    /// coverage, but exercised end to end through `merge_semantic_groups` →
+    /// coverage, but exercised end to end through `group_semantic` →
     /// [`build_report_json`]): an injection finding and an unrelated pagination-convention
     /// finding, co-located in one construct, with different categories and no shared captured
     /// object, must export as TWO distinct curated groups — never one row with the pagination
@@ -16103,7 +16017,8 @@ mod export_invariants_gate {
         );
         pagination.detail = "This handler returns every row with no pagination.".to_string();
 
-        let merged = crate::ai_audit::merge_semantic_groups(vec![injection, pagination], &files);
+        let merged =
+            crate::review_tree::test_support::cluster_heads(vec![injection, pagination], &files);
         assert_eq!(
             merged.len(),
             2,
@@ -16382,178 +16297,6 @@ mod export_invariants_gate {
             "an unreconciled stage must disclose a pipeline-integrity gap naming the stage: \
              methodology={:?} executive_summary={:?}",
             json.methodology.failed_passes, json.executive_summary.failed_passes
-        );
-    }
-
-    /// Invariant 12. Builds a REPRESENTATIVE synthetic scan that deliberately exercises BOTH
-    /// row-reducing merge stages with the exact shapes that used to defeat the ledger:
-    ///
-    /// - An `also_matches`-id collision within `cross-family-merge` itself: three findings
-    ///   sharing ONE rule id collapse via `merge_semantic_group`'s "N occurrences of one rule"
-    ///   signal, which records NOTHING in `also_matches` (the id is already `seen` from the
-    ///   primary) — the exact shape of the real "rows 45 -> 32 ... unaccounted=5" defect.
-    /// - A SECOND collapse, `structural-needs-review-merge`, over findings that were themselves
-    ///   ALREADY-merged primaries carrying their own `also_matches`/`also_locations` — the real
-    ///   data-loss bug `build_structural_group_finding` used to have (nested absorbed members
-    ///   silently dropped on the second collapse).
-    ///
-    /// Both stages are instrumented the SAME way production code (`onboard::audit_repos`) does —
-    /// via `onboard::account_location_merge` — and the resulting ledger must reconcile to zero
-    /// unaccounted rows at EVERY stage. If a stage can structurally never reconcile, the fix
-    /// belongs in the instrumentation, never in loosening this assertion.
-    #[test]
-    fn pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage() {
-        use crate::onboard::MergedLocation;
-
-        fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
-            Finding {
-                repo: "demo/portal".to_string(),
-                path: path.to_string(),
-                line,
-                rule_id: rule_id.to_string(),
-                severity: severity.to_string(),
-                snippet: format!("snippet-{line}"),
-                detail: format!("detail for {rule_id}"),
-                ..Finding::default()
-            }
-        }
-
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-
-        // ── Stage 1: cross-family-merge, same-rule-id N-site collapse PLUS a fresh-vs-
-        // already-absorbed key collision ───────────────────────────────────────────────────
-        // The first three rows are the N-site collapse shape (`also_matches` records nothing —
-        // the id is already `seen` from the primary). The last two rows are the DIFFERENT,
-        // real-world `rows 116 -> 83 merged=32 ... unaccounted=1` shape: `collision_primary`
-        // already absorbed a site (acme/widgets, handler.rs, 52, SEC-COLLISION-DEMO-1) in an
-        // EARLIER stage (simulated via its own pre-populated `also_locations`), and
-        // `collision_fresh` is a SEPARATE, genuinely distinct top-level finding whose own
-        // identity happens to be IDENTICAL to that already-absorbed site —
-        // `ai_audit::merge_semantic_group` used to silently drop `collision_fresh`'s own
-        // absorption because its key collided with the pre-existing entry.
-        let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
-        collision_primary.repo = "acme/widgets".to_string();
-        collision_primary.also_locations = vec![crate::onboard::MergedLocation::site(
-            "acme/widgets".to_string(),
-            "handler.rs".to_string(),
-            52,
-            "SEC-COLLISION-DEMO-1".to_string(),
-            "already-absorbed-earlier".to_string(),
-            false,
-        )];
-        let mut collision_fresh = finding("SEC-COLLISION-DEMO-1", "handler.rs", 52, "medium");
-        collision_fresh.repo = "acme/widgets".to_string();
-
-        let cross_family_input = vec![
-            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 10, "medium"),
-            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 200, "medium"),
-            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 400, "medium"),
-            collision_primary,
-            collision_fresh,
-        ];
-        let rows_in = cross_family_input.len();
-        let pre = cross_family_input.clone();
-        let merged = crate::ai_audit::merge_semantic_groups(cross_family_input, &[]);
-        let rows_out = merged.len();
-        assert_eq!(
-            rows_out, 2,
-            "sanity: the N-site collapse and the collision pair are two independent groups, \
-             each producing one row: {merged:?}"
-        );
-        let collision_row = merged
-            .iter()
-            .find(|f| f.repo == "acme/widgets")
-            .expect("the collision group's primary must survive as its own row");
-        let sites_at_52 = collision_row
-            .also_locations
-            .iter()
-            .filter(|l| l.path == "handler.rs" && l.line == 52)
-            .count();
-        assert_eq!(
-            sites_at_52, 2,
-            "the pre-existing absorbed site and collision_fresh's own fresh absorption must \
-             BOTH survive as distinct also_locations entries: {:?}",
-            collision_row.also_locations
-        );
-        let acc = crate::onboard::account_location_merge(&pre, &merged);
-        let stage1 = ledger
-            .record_stage("cross-family-merge", rows_in, rows_out, acc)
-            .clone();
-        assert_eq!(
-            stage1.unaccounted, 0,
-            "cross-family-merge must fully reconcile, including the fresh-vs-already-absorbed \
-             collision: {stage1:?}"
-        );
-
-        // ── Stage 2: structural-needs-review-merge, over ALREADY-merged primaries ──────────
-        // `a`/`b` each simulate a finding that survived stage 1 as a merged primary, carrying
-        // its own already-absorbed rule id + site — exactly what `build_structural_group_finding`
-        // used to silently drop on this second collapse.
-        let mut a = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 1, "medium");
-        a.category = Some("arch-conformance".to_string());
-        a.confidence = Some("needs-review".to_string());
-        a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
-        a.also_locations = vec![MergedLocation::site(
-            a.repo.clone(),
-            "already-merged-a.rs".to_string(),
-            99,
-            "AI-ALREADY-MERGED-A-1".to_string(),
-            "prior evidence".to_string(),
-            false,
-        )];
-        let mut b = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 2, "medium");
-        b.category = Some("arch-conformance".to_string());
-        b.confidence = Some("needs-review".to_string());
-        b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
-        b.also_locations = vec![MergedLocation::site(
-            b.repo.clone(),
-            "already-merged-b.rs".to_string(),
-            199,
-            "AI-ALREADY-MERGED-B-1".to_string(),
-            "prior evidence".to_string(),
-            false,
-        )];
-        let structural_input = vec![a, b];
-        let rows_in = structural_input.len();
-        let pre = structural_input.clone();
-        let grouped = crate::ai_audit::group_structural_needs_review(structural_input);
-        let rows_out = grouped.len();
-        assert_eq!(
-            rows_out, 1,
-            "sanity: both occurrences of one rule collapse to one row: {grouped:?}"
-        );
-        let acc = crate::onboard::account_location_merge(&pre, &grouped);
-        let stage2 = ledger
-            .record_stage("structural-needs-review-merge", rows_in, rows_out, acc)
-            .clone();
-        assert_eq!(
-            stage2.unaccounted, 0,
-            "structural-needs-review-merge must fully reconcile: {stage2:?}"
-        );
-
-        // Both already-absorbed ids/sites must still be reachable in the final grouped row —
-        // the second collapse must not have dropped what the first collapse already recorded.
-        assert!(grouped[0]
-            .also_matches
-            .contains(&"AI-ALREADY-MERGED-A-1".to_string()));
-        assert!(grouped[0]
-            .also_matches
-            .contains(&"AI-ALREADY-MERGED-B-1".to_string()));
-        assert!(grouped[0]
-            .also_locations
-            .iter()
-            .any(|l| l.path == "already-merged-a.rs" && l.line == 99));
-        assert!(grouped[0]
-            .also_locations
-            .iter()
-            .any(|l| l.path == "already-merged-b.rs" && l.line == 199));
-
-        // The whole-scan identity: every stage, summed, has zero unaccounted rows.
-        assert_eq!(
-            ledger.total_unaccounted(),
-            0,
-            "a representative synthetic scan must leave NO stage unaccounted: {:#?}",
-            ledger.stages()
         );
     }
 
@@ -16860,17 +16603,15 @@ mod export_invariants_gate {
             .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
     }
 
-    // ── Pass-1 W7 (C2): the sites-vs-rows integrity check ─────────────────────────────────
+    // ── Pass-1 W7 (C2): the sites-vs-rows integrity check, retired ───────────────────────
 
-    /// req_c2: an N-sites-but-M-rows shortfall is checked at EVERY N — including rules with
-    /// >= 1 finding, which the zero-finding evidence check deliberately skips (the original
-    /// C2 defect: "the recommendation pass wrote down the planted site and nothing used
-    /// it"). A rule whose rows claim `deviating_sites == 3` (the structured, group-level
-    /// numerator stamped at kind assignment) while only 1 site is represented must export a
-    /// HELD row stating both numbers — never a dropped site, never a refused export.
     #[tokio::test]
-    async fn req_c2_a_sites_vs_rows_shortfall_exports_a_held_row_never_a_refused_export() {
+    async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are_its_sites() {
         use camerata_api_types::audit::{DeviationKind, FindingKind};
+        // A rule whose rows claim `deviating_sites == 3` while one row is present used to export
+        // a synthetic "site count integrity" row. Nothing absorbs a site into another row any
+        // more, so the number of rows IS the number of sites and there is nothing to reconcile:
+        // the evidence gate adds no row and records no `sites-vs-rows-gate` stage.
         let mut f = finding(
             "ARCH-API-VERSIONING-1",
             "demo/portal",
@@ -16878,9 +16619,6 @@ mod export_invariants_gate {
             42,
             "medium",
         );
-        // The group-level claim, stamped structurally by assign_deviation_kinds BEFORE later
-        // passes could lose sites. This fixture simulates exactly that loss: 3 claimed, one
-        // row, no absorbed also_locations entries.
         f.kind = Some(FindingKind::Deviation(DeviationKind {
             deviating_sites: 3,
             assessed_sites: Some(47),
@@ -16892,119 +16630,17 @@ mod export_invariants_gate {
         apply_evidence_gate(&mut report);
         assert_eq!(
             report.findings.len(),
-            rows_before + 1,
-            "the shortfall must synthesize exactly one disclosure row"
+            rows_before,
+            "no disclosure row is synthesized"
         );
-        let held = report
-            .findings
-            .iter()
-            .find(|f| f.needs_review && f.line == 0)
-            .expect("the shortfall row must exist");
-        assert_eq!(held.rule_id, "ARCH-API-VERSIONING-1");
-        assert_eq!(held.confidence.as_deref(), Some("needs-review"));
-        assert!(
-            held.detail.contains('3') && held.detail.contains('1'),
-            "the disclosure must state both the claimed and the represented count: {}",
-            held.detail
-        );
-        // The row carries the deviation group's own structured payload (A5.6).
-        assert!(
-            matches!(&held.kind, Some(FindingKind::Deviation(d)) if d.deviating_sites == 3),
-            "{:?}",
-            held.kind
-        );
-        // Accounted in the ledger as an addition-side stage, same as the evidence gate.
         assert!(
             report
                 .ledger
                 .stages()
                 .iter()
-                .any(|s| s.stage == "sites-vs-rows-gate" && s.unaccounted == 0),
+                .all(|s| s.stage != "sites-vs-rows-gate"),
             "{:#?}",
             report.ledger.stages()
-        );
-        // And downstream it is HELD — outside every action tier — not an action row and not
-        // a refused export.
-        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
-        let in_held = json
-            .matrix
-            .held
-            .iter()
-            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
-        let in_informational = json
-            .matrix
-            .informational
-            .iter()
-            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
-        assert!(
-            in_held || in_informational,
-            "the shortfall row must land in a held-for-review bucket, never an action tier: \
-             held={:?} informational={:?}",
-            json.matrix.held,
-            json.matrix.informational
-        );
-    }
-
-    /// req_c2: no shortfall, no row — a rule whose claimed deviating sites are fully
-    /// represented (rows + absorbed `also_locations`) is untouched, and the gate is
-    /// idempotent (a second invocation adds nothing on a report already carrying its
-    /// disclosure).
-    #[tokio::test]
-    async fn req_c2_no_shortfall_adds_nothing_and_the_gate_is_idempotent() {
-        use camerata_api_types::audit::{DeviationKind, FindingKind};
-        let deviation_kind = Some(FindingKind::Deviation(DeviationKind {
-            deviating_sites: 2,
-            assessed_sites: None,
-            convention_option_id: None,
-            convention_label: "observed majority".to_string(),
-        }));
-        let mut fully_represented = finding(
-            "ARCH-API-VERSIONING-1",
-            "demo/portal",
-            "src/api/routes.rs",
-            42,
-            "medium",
-        );
-        fully_represented.kind = deviation_kind.clone();
-        fully_represented.also_locations = vec![crate::onboard::MergedLocation::site(
-            "demo/portal".to_string(),
-            "src/api/users.rs".to_string(),
-            7,
-            "ARCH-API-VERSIONING-1".to_string(),
-            "router.get(\"/users\", ...)".to_string(),
-            false,
-        )];
-        let mut report = report_with(vec![fully_represented], vec!["ARCH-API-VERSIONING-1"]);
-        let rows_before = report.findings.len();
-        apply_evidence_gate(&mut report);
-        assert_eq!(
-            report.findings.len(),
-            rows_before,
-            "2 claimed, 2 represented: nothing to disclose"
-        );
-
-        // Idempotency on a genuine shortfall: running the gate twice adds exactly one row.
-        let mut short = finding(
-            "ARCH-API-VERSIONING-1",
-            "demo/portal",
-            "src/api/routes.rs",
-            42,
-            "medium",
-        );
-        short.kind = Some(FindingKind::Deviation(DeviationKind {
-            deviating_sites: 3,
-            assessed_sites: None,
-            convention_option_id: None,
-            convention_label: "observed majority".to_string(),
-        }));
-        let mut report = report_with(vec![short], vec!["ARCH-API-VERSIONING-1"]);
-        apply_evidence_gate(&mut report);
-        let after_first = report.findings.len();
-        apply_evidence_gate(&mut report);
-        assert_eq!(
-            report.findings.len(),
-            after_first,
-            "a second invocation must not ratchet more disclosure rows"
         );
     }
 

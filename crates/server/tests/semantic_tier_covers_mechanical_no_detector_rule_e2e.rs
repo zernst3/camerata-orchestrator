@@ -11,7 +11,7 @@
 //! OFF — an ordinary, honestly-scoped skip, not this file's happy path) and
 //! `semantic_tier_cross_file_backstop_e2e.rs` (the established pattern this file mirrors for
 //! driving the REAL production functions — `ai_audit::audit_repo` ->
-//! `ai_audit::merge_semantic_groups` -> `report_export::build_report_json` — with a STUBBED
+//! `ai_audit::group_semantic` -> `report_export::build_report_json` — with a STUBBED
 //! `LlmPort`, since `onboard::audit_repos` always constructs a real network-backed `Llm` from
 //! the process environment with no injection seam).
 //!
@@ -24,6 +24,7 @@ use camerata_server::ai_audit::{self, ScanMode};
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::ScanReport;
 use camerata_server::report_export::{self, ReportOptions};
+use camerata_server::review_tree;
 use camerata_server::scan_ledger::{RuleTier, ScanLedger};
 
 /// The real corpus rule under test: declares `enforcement = "mechanical"` but has no
@@ -145,6 +146,7 @@ fn minimal_report(
 ) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -258,7 +260,7 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
 
     // ═══ STEP 2: the real cross-family/location merge pass (singleton group — nothing to ═══
     // merge WITH here, but this is the exact function production code calls next).
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
     assert_eq!(
         merged.len(),
         1,

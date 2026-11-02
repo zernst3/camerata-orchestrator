@@ -127,6 +127,7 @@ pub fn two_repo_report() -> ScanReport {
 
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
