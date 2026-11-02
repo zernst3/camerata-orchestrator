@@ -60,6 +60,18 @@ fn the_tier_names_the_engine() {
 }
 
 #[test]
+fn an_architectural_checker_row_tallies_as_deterministic_not_preview() {
+    let mut arch = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical", "public.t");
+    arch.preview = true;
+    arch.preview_tool = Some(crate::onboard::ARCH_PREVIEW_TOOL.to_string());
+    assert_eq!(finding_tier(&arch), "deterministic");
+
+    let mut tool = finding("eslint/no-eval", "a", 1, "high", "x");
+    tool.preview_tool = Some("eslint".to_string());
+    assert_eq!(finding_tier(&tool), "preview");
+}
+
+#[test]
 fn convention_rows_with_no_confidence_are_not_tallied_as_deterministic() {
     use camerata_api_types::audit::{
         ConventionObservedKind, FindingKind, NoConventionKind, NotAssessedKind, NotAssessedReason,

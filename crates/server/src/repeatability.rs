@@ -25,13 +25,17 @@ pub fn finding_match_key(f: &Finding) -> String {
     )
 }
 
-/// Which engine produced `f`: `"preview"` (a scan-time tool pass), `"convention"` (a
+/// Which engine produced `f`: `"preview"` (a scan-time external tool pass), `"convention"` (a
 /// convention-observed, no-convention or not-assessed row: they carry no calibration
 /// confidence but cite model-chosen evidence, so they are not the deterministic floor), `"ai"`
-/// (the model tier, [`crate::report_export::is_ai_tier`]) or `"deterministic"` (the floor).
+/// (the model tier, [`crate::report_export::is_ai_tier`]) or `"deterministic"` (the floor,
+/// which includes the native architectural checkers: their rows carry
+/// [`crate::onboard::ARCH_PREVIEW_TOOL`] as their `preview_tool` but are exact by construction).
 pub fn finding_tier(f: &Finding) -> &'static str {
     use camerata_api_types::audit::FindingKind;
-    if f.preview_tool.is_some() {
+    if f.preview_tool.as_deref() == Some(crate::onboard::ARCH_PREVIEW_TOOL) {
+        "deterministic"
+    } else if f.preview_tool.is_some() {
         "preview"
     } else if matches!(
         f.kind,

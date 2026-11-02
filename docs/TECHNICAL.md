@@ -3393,7 +3393,10 @@ fingerprint count, because the model quoted the same defect on a nearby line
 with a different snippet. The `convention` tier holds the convention-observed,
 no-convention and not-assessed rows: they carry no calibration confidence but
 cite model-chosen evidence, so they are not part of the control. The
-`deterministic` tier is the control: its counts never change between runs.
+`deterministic` tier is the control: the content-rule floor plus the native
+architectural checkers (their rows carry the `camerata-arch` preview tool but
+are exact by construction), and its counts never change between runs. The
+`preview` tier holds only the external tool passes.
 
 **The client lock applies.** Like `inspect`, every run is a client engagement
 unless `--internal` is passed: the `cli` backend and non-Anthropic models are
