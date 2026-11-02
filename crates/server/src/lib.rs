@@ -50,6 +50,7 @@ mod corpus_freshness;
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
+pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;
 pub mod draft;
@@ -236,6 +237,9 @@ pub struct AppState {
     /// by [`AppState::get_last_scan`] when the in-memory map is empty (after a restart), and the
     /// ONLY source the exports and the review screen have once client source is deleted.
     inspections: crate::inspections::InspectionStore,
+    /// The reviewer's decisions on sites, one file per project beside the inspections. Never
+    /// part of the sealed report; see [`crate::decisions`].
+    decisions: crate::decisions::DecisionStore,
     /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
     /// Not part of the project export. See [`crate::client_source`].
     source_records: crate::client_source::records::SourceRecordStore,
@@ -362,6 +366,7 @@ impl AppState {
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             inspections: crate::inspections::InspectionStore::new(),
+            decisions: crate::decisions::DecisionStore::new(),
             source_records: crate::client_source::records::SourceRecordStore::new(),
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
@@ -620,6 +625,11 @@ impl AppState {
     /// end-to-end tests read the entry a scan wrote and the one a restart reloads.
     pub fn inspections(&self) -> &crate::inspections::InspectionStore {
         &self.inspections
+    }
+
+    /// The reviewer's decision store. Out-of-crate test seam (mirrors [`Self::inspections`]).
+    pub fn decisions(&self) -> &crate::decisions::DecisionStore {
+        &self.decisions
     }
 
     /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
@@ -1124,6 +1134,9 @@ impl AppState {
         // scan cache this is NOT disposable: it is what exports and the review screen are
         // built from once the client's source has been deleted.
         self.inspections = crate::inspections::InspectionStore::at(dir.join("inspections"));
+        // The reviewer's decisions, one file per project beside the inspections. Not disposable:
+        // a decision is the reviewer's work, and the release gate reads it.
+        self.decisions = crate::decisions::DecisionStore::at(dir.join("decisions"));
         // The proof of what source deletion removed, and when source was fetched back.
         self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
             dir.join("source-records.json"),
@@ -1440,6 +1453,15 @@ pub fn router(state: AppState) -> Router {
         // `/api/runs/:id/plan|resume` paths the first cockpit build called stay as aliases of the
         // same handlers for one release; the cockpit itself now calls /api/inspections.
         .route("/api/inspections", get(list_saved_inspections))
+        .route(
+            "/api/projects/:id/decisions",
+            get(crate::decisions::routes::get_decisions)
+                .post(crate::decisions::routes::post_decisions),
+        )
+        .route(
+            "/api/projects/:id/decisions/:decision_id/revoke",
+            post(crate::decisions::routes::revoke_decision),
+        )
         .route("/api/inspections/:id/plan", get(run_resume_plan))
         .route("/api/inspections/:id/resume", post(run_resume_start))
         .route("/api/runs/:id/plan", get(run_resume_plan))
@@ -18458,9 +18480,10 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
 
 // ── Audit-report (PDF) export ────────────────────────────────────────────────
 
-/// Request body for `POST /api/projects/:id/audit-report`. Dispositions are POSTed by the
-/// client because triage state is client-local until Process (see `crate::report_export`'s
-/// module doc) — there is no server-side disposition store.
+/// Request body for `POST /api/projects/:id/audit-report`. The reviewer's decisions now live in
+/// the server-side [`crate::decisions::DecisionStore`]. `dispositions` is accepted for one more
+/// release so an older client still works: it is used only while the store has no records for
+/// the project, and ignored (with any disagreement logged) once it does.
 #[derive(serde::Deserialize)]
 struct AuditReportReq {
     #[serde(default)]
@@ -18546,9 +18569,15 @@ async fn export_audit_report(
         return run_incomplete_response(&e);
     }
 
+    // The reviewer's decisions are the store's; the request's own copy is read only while the
+    // store is empty (see `crate::decisions::effective_dispositions`).
+    let dispositions =
+        crate::decisions::effective_dispositions(&state.decisions, &id, &req.dispositions);
+    dispositions.log_disagreements(&id);
+
     let json = crate::report_export::build_report_json(
         &report,
-        &req.dispositions,
+        &dispositions.map,
         corpus.as_ref(),
         &req.options,
     );
@@ -18753,9 +18782,14 @@ async fn export_product(
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
     // sample generator.
+    // The reviewer's decisions are the store's; the request's own copy is read only while the
+    // store is empty (see `crate::decisions::effective_dispositions`).
+    let dispositions =
+        crate::decisions::effective_dispositions(&state.decisions, &id, &req.dispositions);
+    dispositions.log_disagreements(&id);
     let package = match crate::release_gate::build_product_package(
         &report,
-        &req.dispositions,
+        &dispositions.map,
         corpus.as_ref(),
         &req.options,
     )
