@@ -165,4 +165,52 @@ mod tests {
             .insert(REVIEW_FLAGS_CAPTURE.to_string(), "not json".to_string());
         assert!(flags_of(&f).is_empty());
     }
+
+    /// M4 fix (b): a fix donated to a row that had none arrives with its Fix-stage flags, and the
+    /// row keeps its own Detail-stage flags.
+    #[test]
+    fn a_donated_fix_arrives_with_its_flags() {
+        let mut donor = Finding {
+            fix_specific: Some("Use `neverInEvidence` here.".to_string()),
+            ..Finding::default()
+        };
+        set_stage_flags(&mut donor, FlagStage::Fix, vec![FIX_UNGROUNDED.into()]);
+        set_stage_flags(
+            &mut donor,
+            FlagStage::Detail,
+            vec![PRECONDITION_ADDED.into()],
+        );
+        let mut primary = Finding::default();
+        set_stage_flags(
+            &mut primary,
+            FlagStage::Detail,
+            vec!["unverified_name:src/a.rs".into()],
+        );
+        crate::ai_audit::inherit_fix(&mut primary, &donor);
+        assert_eq!(
+            flags_of(&primary),
+            vec![
+                FIX_UNGROUNDED.to_string(),
+                "unverified_name:src/a.rs".to_string()
+            ]
+        );
+        // A clean donor clears a stale fix flag the primary carried.
+        let mut stale = Finding::default();
+        set_stage_flags(&mut stale, FlagStage::Fix, vec![CONTRADICTION.into()]);
+        let clean = Finding {
+            fix_specific: Some("Fine.".to_string()),
+            ..Finding::default()
+        };
+        crate::ai_audit::inherit_fix(&mut stale, &clean);
+        assert!(flags_of(&stale).is_empty());
+    }
+
+    /// The review screen reads the capture by a name it cannot import from the server.
+    #[test]
+    fn the_ui_reads_the_same_capture_key() {
+        assert_eq!(
+            camerata_ui_core::triage::REVIEW_FLAGS_CAPTURE,
+            REVIEW_FLAGS_CAPTURE
+        );
+    }
 }

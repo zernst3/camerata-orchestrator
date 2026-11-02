@@ -1247,6 +1247,12 @@ html, body {
   margin: 0 0 8px; padding: 0 0 0 8px; border-left: 3px solid var(--line);
   color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere;
 }
+/* Review flags (M4): what the engine flagged on this row. Quiet chips, text only. */
+.pane-review-flags { margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.review-flag-chip {
+  padding: 1px 8px; border: 1px solid var(--line); border-radius: 10px;
+  color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere;
+}
 /* The progress strip (work order B.7): one line of counts above the table. */
 .progress-strip {
   margin: 0 0 8px; color: var(--ink-soft); font-size: 13px;

@@ -504,7 +504,12 @@ fn release_checked(
     .map_err(|e| ReleaseError::Assembly(e.to_string()))?;
 
     let mut report = audit_zip_with(&bytes, None, allow_incomplete, false);
-    report.record(CheckId::Content, package.undecided_junk_content.clone());
+    // An internal package (the operator's own review, never a client's) may carry rows held for a
+    // reviewer's decision: each is marked held in its workbook. A client package is refused until
+    // every held row has a decision.
+    if !allow_incomplete {
+        report.record(CheckId::Content, package.undecided_junk_content.clone());
+    }
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
@@ -525,7 +530,11 @@ fn release_checked(
     );
     report.record(
         CheckId::EvidenceUnverified,
-        package.undecided_unverified_evidence.clone(),
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.undecided_unverified_evidence.clone()
+        },
     );
     let report = report.sorted();
 
@@ -593,6 +602,9 @@ mod junk_content_tests;
 
 #[cfg(test)]
 mod evidence_tests;
+
+#[cfg(test)]
+mod internal_held_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]

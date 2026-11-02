@@ -10626,9 +10626,16 @@ pub(crate) fn inherit_fix(primary: &mut Finding, donor: &Finding) {
             }
         }
     }
+    // M4: the fix arrives with the review flags the fix stage wrote on it. The primary keeps its
+    // own detail-stage flags; a clean donor clears a stale fix flag.
+    let donated: Vec<String> = crate::review_flags::flags_of(donor)
+        .into_iter()
+        .filter(|flag| crate::review_flags::stage_of(flag) == crate::review_flags::FlagStage::Fix)
+        .collect();
+    crate::review_flags::set_stage_flags(primary, crate::review_flags::FlagStage::Fix, donated);
 }
 
-/// P7 (the codebase-inspection hardening notes): drop any finding whose rule
+/// P7 (the codebase-inspection hardening notes), A10: mark as thrown out (keep, never delete) any finding whose rule
 /// carries a [`camerata_rules::StackException`] that applies to the repo's DETECTED stack +
 /// this finding's own file path — e.g. `ARCH-MONOLITH-FIRST-1` flagging a `supabase/functions/`
 /// directory on a Supabase-stack repo, where a second Edge Functions deployable is the

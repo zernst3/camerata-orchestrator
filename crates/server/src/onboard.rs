@@ -139,6 +139,12 @@ impl BookkeepingCaptures {
         for f in findings {
             let mut taken = Vec::new();
             for key in BOOKKEEPING_CAPTURE_KEYS {
+                // The review flags stay on the row: they are not identity (`object_captures`
+                // excludes every bookkeeping key), and a flag a later stage writes would
+                // otherwise replace the held list on restore and lose the earlier flags.
+                if *key == crate::review_flags::REVIEW_FLAGS_CAPTURE {
+                    continue;
+                }
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
                 }
@@ -4242,6 +4248,34 @@ mod tests {
                 .contains_key(crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE));
             assert!(f.captures.contains_key("history-status"));
         }
+    }
+
+    /// M4 fix (a): a second review flag written after the bookkeeping was held aside does not
+    /// replace the first. The detail flag and the fix flag both survive the take and restore.
+    #[test]
+    fn a_second_review_flag_does_not_overwrite_the_first_through_take_and_restore() {
+        use crate::review_flags::{flags_of, set_stage_flags, FlagStage};
+        let mut f = Finding {
+            repo: "acme/api".to_string(),
+            path: "src/a.ts".to_string(),
+            rule_id: "AI-X-1".to_string(),
+            snippet: "const a = 1;".to_string(),
+            ..Finding::default()
+        };
+        set_stage_flags(&mut f, FlagStage::Detail, vec!["precondition_added".into()]);
+        let mut rows = vec![f];
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut rows);
+        // A stage that runs while the keys are held aside adds the fix flag.
+        set_stage_flags(&mut rows[0], FlagStage::Fix, vec!["fix_ungrounded".into()]);
+        held.restore(&mut rows);
+        assert_eq!(
+            flags_of(&rows[0]),
+            vec![
+                "fix_ungrounded".to_string(),
+                "precondition_added".to_string()
+            ]
+        );
     }
 
     /// req_a8 (the general statement): `semantic_rule_ids_for_repo` applies NO filter other

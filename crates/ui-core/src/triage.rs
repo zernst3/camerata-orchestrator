@@ -169,6 +169,25 @@ impl Default for Disposition {
     }
 }
 
+/// The `captures` key holding a row's review flags (a JSON array of strings), written by the
+/// detail and fix stages when a wording check failed and the best text shipped anyway. The same
+/// string as `camerata_server::review_flags::REVIEW_FLAGS_CAPTURE`; a server test pins that.
+pub const REVIEW_FLAGS_CAPTURE: &str = "review_flags";
+
+/// The review flags on a row, sorted and without repeats, as the review screen shows them
+/// (`precondition_added`, `unverified_name:src/a.rs`, `fix_ungrounded`, ...). Empty when the row
+/// has none or the capture cannot be read.
+pub fn review_flags_of(f: &FindingView) -> Vec<String> {
+    let mut flags: Vec<String> = f
+        .captures
+        .get(REVIEW_FLAGS_CAPTURE)
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
 /// One audit finding, as it deserializes off the BFF scan/audit response. Wide, plain serde
 /// DTO — no transport concern, no rendering concern. Shared by the CSV export, the findings
 /// table, and the triage model.
@@ -4649,5 +4668,30 @@ mod tests {
             "an unmapped emission path must never be described as a defect: {:?}",
             hub.outcome
         );
+    }
+
+    /// M4: the flags of a row are the sorted, repeat-free list in its `review_flags` capture.
+    #[test]
+    fn review_flags_of_reads_the_capture_and_ignores_anything_unreadable() {
+        let mut f: FindingView = serde_json::from_value(serde_json::json!({
+            "path": "a.rs", "line": 1, "rule_id": "R-1", "severity": "low",
+            "snippet": "x", "detail": "d"
+        }))
+        .unwrap();
+        assert!(review_flags_of(&f).is_empty());
+        f.captures.insert(
+            REVIEW_FLAGS_CAPTURE.to_string(),
+            r#"["unverified_name:b.rs","fix_ungrounded","fix_ungrounded"]"#.to_string(),
+        );
+        assert_eq!(
+            review_flags_of(&f),
+            vec![
+                "fix_ungrounded".to_string(),
+                "unverified_name:b.rs".to_string()
+            ]
+        );
+        f.captures
+            .insert(REVIEW_FLAGS_CAPTURE.to_string(), "not json".to_string());
+        assert!(review_flags_of(&f).is_empty());
     }
 }
