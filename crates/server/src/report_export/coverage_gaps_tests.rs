@@ -320,6 +320,7 @@ fn report_from_walk(extracted: crate::onboard::files::ExtractedRepo) -> crate::o
             beyond_cap: extracted.skipped_beyond_cap,
             not_text: extracted.skipped_unreadable,
             sizes: &extracted.skipped_sizes,
+            file_cap: extracted.file_cap,
         },
     );
     let totals = list.totals();
@@ -383,28 +384,29 @@ fn a_repo_over_a_lowered_file_cap_discloses_the_unscanned_count() {
     assert_eq!(extracted.files.len(), 3);
 
     let gaps = coverage_gaps(&report_from_walk(extracted));
-    // The limit is stated for the run, with the number of files not scanned.
+    // The limit is stated for the run, with the number of files not scanned. It is the limit
+    // that was applied (3 here), not the production one.
     assert_eq!(
         gaps.file_limit_notes.len(),
         1,
         "{:?}",
         gaps.file_limit_notes
     );
-    assert!(
-        gaps.file_limit_notes[0].starts_with("owner/repo reached the 20,000-file limit"),
-        "{}",
-        gaps.file_limit_notes[0]
+    assert_eq!(
+        gaps.file_limit_notes[0],
+        "owner/repo reached the 3-file limit, so the scan read the first 3 files in path order. \
+         4 files were not scanned."
     );
-    assert!(gaps.file_limit_notes[0].contains("4 files were not scanned"));
-    // And each of them is named, with its size and reason.
+    // And each of them is named, with its size and the same limit as its reason.
     assert_eq!(gaps.skipped_files.len(), 4);
-    assert!(gaps
-        .skipped_files
-        .iter()
-        .all(|s| s.reason_code == SkipReason::BeyondFileCap && s.size == "10 B"));
+    assert!(gaps.skipped_files.iter().all(|s| {
+        s.reason_code == SkipReason::BeyondFileCap
+            && s.size == "10 B"
+            && s.reason == "beyond the 3-file limit"
+    }));
     assert_eq!(
         gaps.skipped_summary.as_deref(),
-        Some("4 files were not scanned: 4 beyond the 20,000-file limit.")
+        Some("4 files were not scanned: 4 beyond the 3-file limit.")
     );
 }
 
@@ -442,7 +444,7 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
     let data = render_data_json(&json).expect("renders");
     assert!(data.contains("402 KB"), "{data}");
     assert!(data.contains("files were not scanned"), "{data}");
-    assert!(data.contains("reached the 20,000-file limit"), "{data}");
+    assert!(data.contains("reached the 2-file limit"), "{data}");
 
     // findings.json.
     let export = crate::xlsx_export::build_findings_export(
@@ -474,7 +476,7 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
         .join("\n");
     assert!(all.contains("402 KB"), "{all}");
     assert!(all.contains("files were not scanned"), "{all}");
-    assert!(all.contains("reached the 20,000-file limit"), "{all}");
+    assert!(all.contains("reached the 2-file limit"), "{all}");
 }
 
 #[tokio::test]
@@ -497,5 +499,5 @@ async fn the_pdf_prints_the_size_and_the_file_limit() {
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
     assert!(text.contains("402 KB"), "{text}");
-    assert!(text.contains("reached the 20,000-file limit"), "{text}");
+    assert!(text.contains("reached the 1-file limit"), "{text}");
 }

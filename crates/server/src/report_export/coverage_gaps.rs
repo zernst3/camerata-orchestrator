@@ -174,12 +174,41 @@ fn files_noun(n: usize) -> &'static str {
     }
 }
 
+/// The file limit a hit applied: the one it recorded, or the production limit for a ledger
+/// written before it was recorded.
+fn limit_of(hit: &FileCapHit) -> usize {
+    if hit.limit == 0 {
+        crate::onboard::files::HARD_CAP_FILES
+    } else {
+        hit.limit
+    }
+}
+
+/// How a file past the limit of `repo` is described: "beyond the 3-file limit", naming the limit
+/// that was applied. With no record of a hit for the repo (a ledger that predates it) the
+/// production limit is named, which is what [`SkipReason::label`] says.
+fn beyond_limit_label(hits: &[FileCapHit], repo: &str) -> String {
+    match hits.iter().find(|h| h.repo == repo) {
+        Some(hit) => format!("beyond the {}-file limit", group_digits(limit_of(hit))),
+        None => SkipReason::BeyondFileCap.label().to_string(),
+    }
+}
+
 /// The one sentence counting every file the scan did not read, by reason. `None` when none.
-fn skipped_summary_sentence(totals: &SkippedTotals) -> Option<String> {
+fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Option<String> {
     let total = totals.total();
     if total == 0 {
         return None;
     }
+    // The limit named is the one every hit applied; repos that applied different limits are
+    // summed under a plain "beyond the file limit".
+    let beyond = match hits.split_first() {
+        None => SkipReason::BeyondFileCap.label().to_string(),
+        Some((first, rest)) if rest.iter().all(|h| limit_of(h) == limit_of(first)) => {
+            format!("beyond the {}-file limit", group_digits(limit_of(first)))
+        }
+        Some(_) => "beyond the file limit".to_string(),
+    };
     let parts: Vec<String> = [
         SkipReason::Oversize,
         SkipReason::BeyondFileCap,
@@ -187,7 +216,14 @@ fn skipped_summary_sentence(totals: &SkippedTotals) -> Option<String> {
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
-    .map(|r| format!("{} {}", totals.of(r), r.label()))
+    .map(|r| {
+        let label = if r == SkipReason::BeyondFileCap {
+            beyond.as_str()
+        } else {
+            r.label()
+        };
+        format!("{} {label}", totals.of(r))
+    })
     .collect();
     Some(format!(
         "{total} {} not scanned: {}.",
@@ -196,16 +232,16 @@ fn skipped_summary_sentence(totals: &SkippedTotals) -> Option<String> {
     ))
 }
 
-/// One sentence per repo that reached the file limit, with the number of files it did not scan.
+/// One sentence per repo that reached the file limit, naming the limit that was applied and the
+/// number of files not scanned.
 fn file_limit_sentences(hits: &[FileCapHit]) -> Vec<String> {
     hits.iter()
         .map(|h| {
+            let limit = group_digits(limit_of(h));
             format!(
-                "{} reached the {}-file limit, so the scan read the first {} files in path order. \
-                 {} {} not scanned.",
+                "{} reached the {limit}-file limit, so the scan read the first {limit} files in \
+                 path order. {} {} not scanned.",
                 h.repo,
-                group_digits(crate::onboard::files::HARD_CAP_FILES),
-                group_digits(crate::onboard::files::HARD_CAP_FILES),
                 h.not_scanned,
                 files_noun(h.not_scanned),
             )
@@ -270,7 +306,11 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             repo: s.repo.clone(),
             path: s.path.clone(),
             reason_code: s.reason,
-            reason: s.reason.label().to_string(),
+            reason: if s.reason == SkipReason::BeyondFileCap {
+                beyond_limit_label(&input.file_cap_hits, &s.repo)
+            } else {
+                s.reason.label().to_string()
+            },
             size_bytes: s.bytes,
             size: s.bytes.map(format_size).unwrap_or_default(),
         })
@@ -293,7 +333,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
         skipped_files,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
-        skipped_summary: skipped_summary_sentence(&input.skipped_totals),
+        skipped_summary: skipped_summary_sentence(&input.skipped_totals, &input.file_cap_hits),
         file_limit_notes: file_limit_sentences(&input.file_cap_hits),
         scope_limited_note: scope_limited_sentence(&scope_limited_rules),
         scope_limited_rules,

@@ -2311,6 +2311,7 @@ pub async fn audit_repos_with_llm_controlled(
                     skipped_beyond_cap,
                     skipped_unreadable,
                     skipped_sizes,
+                    file_cap,
                     excluded_noise,
                     excluded_noise_paths: _,
                 },
@@ -2335,6 +2336,7 @@ pub async fn audit_repos_with_llm_controlled(
                         beyond_cap: skipped_beyond_cap,
                         not_text: skipped_unreadable,
                         sizes: &skipped_sizes,
+                        file_cap,
                     },
                 );
                 // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as

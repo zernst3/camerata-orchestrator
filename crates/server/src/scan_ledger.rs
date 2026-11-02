@@ -697,6 +697,10 @@ pub struct FileCapHit {
     pub repo: String,
     /// Auditable files past the limit, none of which was read.
     pub not_scanned: usize,
+    /// The file limit that was in effect for this walk. 0 on a ledger written before it was
+    /// recorded, which is read as the production limit.
+    #[serde(default)]
+    pub limit: usize,
 }
 
 /// M5: the tally of the evidence check, which opens each row's file and looks for the quoted
@@ -783,6 +787,8 @@ pub struct RepoSkips<'a> {
     pub not_text: Vec<String>,
     /// The size in bytes of each skipped file the walk could measure, by path.
     pub sizes: &'a std::collections::HashMap<String, u64>,
+    /// The file limit the walk applied.
+    pub file_cap: usize,
 }
 
 impl SkippedFileList {
@@ -828,6 +834,7 @@ impl SkippedFileList {
             self.file_cap_hits.push(FileCapHit {
                 repo: repo.to_string(),
                 not_scanned,
+                limit: skips.file_cap,
             });
         }
     }

@@ -510,6 +510,8 @@ pub struct ExtractedRepo {
     /// The size in bytes of each file named in the three `skipped_*` lists, by path, so Coverage
     /// states how big the file was. Every skipped file the walk could measure is here.
     pub skipped_sizes: std::collections::HashMap<String, u64>,
+    /// The file limit this walk applied: [`HARD_CAP_FILES`] in production.
+    pub file_cap: usize,
     pub excluded_noise: usize,
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
@@ -802,6 +804,7 @@ fn read_local_repo_files_gitignore(
         skipped_beyond_cap: admitted.beyond_cap,
         skipped_unreadable: admitted.unreadable,
         skipped_sizes: admitted.sizes,
+        file_cap: admitted.cap,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }
@@ -901,6 +904,7 @@ fn read_local_repo_files_noise_denylist(
         skipped_beyond_cap: admitted.beyond_cap,
         skipped_unreadable: admitted.unreadable,
         skipped_sizes: admitted.sizes,
+        file_cap: admitted.cap,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }
