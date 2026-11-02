@@ -9275,26 +9275,31 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
 /// evidence check (`onboard::evidence_check`), which applies this correction first and then looks
 /// for the snippet near the corrected line.
 pub(crate) fn resolve_finding_line(f: &mut Finding, content: &str) {
-    let needle = f.snippet.trim();
+    f.line = resolve_line(content, &f.snippet, f.line);
+}
+
+/// The line `snippet` is on in `content`, nearest `line`; `line` itself when the snippet is too
+/// short to locate or is on no single line. The pure form of [`resolve_finding_line`], which the
+/// evidence check also applies to absorbed sites.
+pub(crate) fn resolve_line(content: &str, snippet: &str, line: usize) -> usize {
+    let needle = snippet.trim();
     // Too short to locate reliably (single token / punctuation) — keep the model's line.
     if needle.len() < 4 {
-        return;
+        return line;
     }
     let matches: Vec<usize> = content
         .lines()
         .enumerate()
-        .filter(|(_, line)| line.contains(needle))
+        .filter(|(_, l)| l.contains(needle))
         .map(|(i, _)| i + 1) // 1-based
         .collect();
     // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
     // more than once resolves to the intended site. No match → leave the model's line.
-    if let Some(best) = matches
+    matches
         .iter()
         .copied()
-        .min_by_key(|&ln| ln.abs_diff(f.line))
-    {
-        f.line = best;
-    }
+        .min_by_key(|&ln| ln.abs_diff(line))
+        .unwrap_or(line)
 }
 
 /// Merge findings that sit at the SAME code location into one row, keyed on `(path, line)`
@@ -9685,6 +9690,7 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::ALSO_SEEN_BY_CAPTURE,
     // M5: the sentence that says a row's quoted snippet was not found near its line.
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
+    crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

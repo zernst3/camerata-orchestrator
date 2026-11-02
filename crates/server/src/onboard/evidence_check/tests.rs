@@ -261,3 +261,89 @@ fn a_line_past_the_end_of_the_file_is_unverified() {
     verify_evidence(&mut rows, &files(), None);
     assert!(marked(&rows[0]));
 }
+
+// ── absorbed sites ───────────────────────────────────────────────────────────────────────────
+
+use crate::onboard::MergedLocation;
+
+fn site(path: &str, line: usize, snippet: &str) -> MergedLocation {
+    MergedLocation::site("acme/api", path, line, "AI-RAW-SQL", snippet, false)
+}
+
+fn sites_listed(f: &Finding) -> Option<&str> {
+    f.captures
+        .get(EVIDENCE_UNVERIFIED_SITES_CAPTURE)
+        .map(String::as_str)
+}
+
+#[test]
+fn a_row_whose_primary_verifies_but_whose_absorbed_site_does_not_is_held_and_names_the_site() {
+    let mut f = row(6, REAL);
+    f.also_locations = vec![
+        site("src/app.ts", 6, REAL),
+        site("src/app.ts", 3, "app.destroyEverything(untrusted)"),
+    ];
+    let mut rows = vec![f];
+    let counts = verify_evidence(&mut rows, &files(), None);
+    assert!(marked(&rows[0]), "the row is held: {:?}", rows[0].captures);
+    assert_eq!(sites_listed(&rows[0]), Some("src/app.ts:3"));
+    // The primary itself verified; only the site failed.
+    assert_eq!(
+        (counts.checked, counts.verified, counts.unverified),
+        (1, 0, 1)
+    );
+    assert_eq!(
+        (
+            counts.site_checked,
+            counts.site_verified,
+            counts.site_unverified
+        ),
+        (2, 1, 1)
+    );
+    assert!(counts.reconciles());
+    // Nothing about the row's text or its sites changed.
+    assert_eq!(rows[0].also_locations.len(), 2);
+    assert_eq!(
+        rows[0].also_locations[1].snippet,
+        "app.destroyEverything(untrusted)"
+    );
+}
+
+#[test]
+fn verified_sites_leave_the_row_alone_and_are_counted() {
+    let mut f = row(6, REAL);
+    f.also_locations = vec![site("src/app.ts", 5, REAL)];
+    let mut rows = vec![f];
+    let counts = verify_evidence(&mut rows, &files(), None);
+    assert!(!marked(&rows[0]));
+    assert!(sites_listed(&rows[0]).is_none());
+    assert_eq!((counts.site_checked, counts.site_verified), (1, 1));
+}
+
+#[test]
+fn a_consequence_site_and_a_site_with_no_snippet_are_not_checked() {
+    let mut f = row(6, REAL);
+    let mut consequence = site("src/app.ts", 3, "downstream impact, not code");
+    consequence.consequence = true;
+    f.also_locations = vec![consequence, site("src/app.ts", 3, "  ")];
+    let mut rows = vec![f];
+    let counts = verify_evidence(&mut rows, &files(), None);
+    assert!(!marked(&rows[0]));
+    assert_eq!(counts.site_checked, 0);
+}
+
+#[test]
+fn a_site_mark_from_an_earlier_run_is_cleared_when_every_site_now_verifies() {
+    let mut f = row(6, REAL);
+    f.also_locations = vec![site("src/app.ts", 6, REAL)];
+    f.captures.insert(
+        EVIDENCE_UNVERIFIED_SITES_CAPTURE.to_string(),
+        "old:1".to_string(),
+    );
+    f.captures
+        .insert(EVIDENCE_UNVERIFIED_CAPTURE.to_string(), "old".to_string());
+    let mut rows = vec![f];
+    verify_evidence(&mut rows, &files(), None);
+    assert!(!marked(&rows[0]));
+    assert!(sites_listed(&rows[0]).is_none());
+}

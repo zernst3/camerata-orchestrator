@@ -35,6 +35,11 @@ pub const EVIDENCE_WINDOW_LINES: usize = 3;
 /// the same object.
 pub const EVIDENCE_UNVERIFIED_CAPTURE: &str = "evidence_unverified";
 
+/// The `captures` key that lists which absorbed sites (`Finding::also_locations`) had a snippet
+/// that was not found near their own line, one `path:line` per line of the value. Present exactly
+/// when a site failed; the row also carries [`EVIDENCE_UNVERIFIED_CAPTURE`], which holds it.
+pub const EVIDENCE_UNVERIFIED_SITES_CAPTURE: &str = "evidence_unverified_sites";
+
 /// The largest file the check will open from disk when it was not among the scanned files (for
 /// example a file over the scan's own size cap, or an unchanged file on an incremental run).
 const MAX_EVIDENCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -231,32 +236,45 @@ pub fn verify_evidence(
     let mut sources = Sources::new(files, root);
     let mut counts = EvidenceCheck::default();
     for f in findings.iter_mut() {
-        if exemption(f).is_some() {
+        let row_exempt = exemption(f);
+        let by_kind = matches!(
+            row_exempt,
+            Some(Exempt::Informational | Exempt::DependencyAdvisory)
+        );
+        let failed_sites = if by_kind {
+            Vec::new()
+        } else {
+            verify_sites(f, &mut sources, &mut counts)
+        };
+        let sites_checked = !by_kind
+            && f.also_locations
+                .iter()
+                .any(|s| site_is_checkable(s, &f.repo));
+        // A row exempt for its own snippet (none, or no cited line) is still checked when it
+        // carries absorbed sites that have snippets of their own.
+        if row_exempt.is_some() && !sites_checked {
             counts.exempt += 1;
             continue;
         }
         counts.checked += 1;
-        let why = match sources.file(&f.path) {
-            None => Some(format!(
-                "the file {} was not found in the scanned tree",
-                f.path
-            )),
-            Some(file) => {
-                // A snippet already near the cited line is left exactly where the producer put it
-                // (a detector may cite the line after the one it quotes). Only a snippet that is
-                // not near gets the existing line correction, and is then looked for again.
-                let near = snippet_near_line_indexed(file, &f.snippet, f.line);
-                if !near {
-                    crate::ai_audit::resolve_finding_line(f, &file.text);
-                }
-                (!near && !snippet_near_line_indexed(file, &f.snippet, f.line)).then(|| {
-                    format!(
-                        "the quoted snippet was not found within {EVIDENCE_WINDOW_LINES} lines of line {}",
-                        f.line
-                    )
-                })
-            }
+        let primary_why = if row_exempt.is_some() {
+            None
+        } else {
+            primary_unverified_reason(f, &mut sources)
         };
+        let why = primary_why.or_else(|| {
+            (!failed_sites.is_empty()).then(|| {
+                "an absorbed site's quoted snippet was not found near its own line".to_string()
+            })
+        });
+        if failed_sites.is_empty() {
+            f.captures.remove(EVIDENCE_UNVERIFIED_SITES_CAPTURE);
+        } else {
+            f.captures.insert(
+                EVIDENCE_UNVERIFIED_SITES_CAPTURE.to_string(),
+                failed_sites.join("\n"),
+            );
+        }
         match why {
             Some(why) => {
                 counts.unverified += 1;
@@ -270,6 +288,74 @@ pub fn verify_evidence(
         }
     }
     counts
+}
+
+/// Why the row's own snippet is unverified, or `None` when it is near its line.
+fn primary_unverified_reason(f: &mut Finding, sources: &mut Sources<'_>) -> Option<String> {
+    match sources.file(&f.path) {
+        None => Some(format!(
+            "the file {} was not found in the scanned tree",
+            f.path
+        )),
+        Some(file) => {
+            // A snippet already near the cited line is left exactly where the producer put it
+            // (a detector may cite the line after the one it quotes). Only a snippet that is not
+            // near gets the existing line correction, and is then looked for again.
+            let near = snippet_near_line_indexed(file, &f.snippet, f.line);
+            if !near {
+                crate::ai_audit::resolve_finding_line(f, &file.text);
+            }
+            (!near && !snippet_near_line_indexed(file, &f.snippet, f.line)).then(|| {
+                format!(
+                    "the quoted snippet was not found within {EVIDENCE_WINDOW_LINES} lines of line {}",
+                    f.line
+                )
+            })
+        }
+    }
+}
+
+/// Whether an absorbed site is one the check applies to: it quotes code (a snippet and a line,
+/// and it is not a consequence whose snippet describes an impact) in the row's own repo, whose
+/// files are the ones in hand.
+fn site_is_checkable(site: &crate::onboard::MergedLocation, row_repo: &str) -> bool {
+    !site.consequence && site.line != 0 && !site.snippet.trim().is_empty() && site.repo == row_repo
+}
+
+/// Check every absorbed site of `f` against its own path and line, counting them in `counts`.
+/// Returns `path:line` for each site whose snippet was not found.
+fn verify_sites(
+    f: &mut Finding,
+    sources: &mut Sources<'_>,
+    counts: &mut EvidenceCheck,
+) -> Vec<String> {
+    let mut failed = Vec::new();
+    let row_repo = f.repo.clone();
+    for site in &mut f.also_locations {
+        if !site_is_checkable(site, &row_repo) {
+            continue;
+        }
+        counts.site_checked += 1;
+        let found = match sources.file(&site.path) {
+            None => false,
+            Some(file) => {
+                let near = snippet_near_line_indexed(file, &site.snippet, site.line);
+                if near {
+                    true
+                } else {
+                    site.line = crate::ai_audit::resolve_line(&file.text, &site.snippet, site.line);
+                    snippet_near_line_indexed(file, &site.snippet, site.line)
+                }
+            }
+        };
+        if found {
+            counts.site_verified += 1;
+        } else {
+            counts.site_unverified += 1;
+            failed.push(format!("{}:{}", site.path, site.line));
+        }
+    }
+    failed
 }
 
 /// [`verify_evidence`] over one repo's finished rows, with its counts added to the scan's ledger.

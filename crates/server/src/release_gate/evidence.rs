@@ -16,7 +16,9 @@
 use std::collections::HashMap;
 
 use super::Problem;
-use crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE;
+use crate::onboard::evidence_check::{
+    EVIDENCE_UNVERIFIED_CAPTURE, EVIDENCE_UNVERIFIED_SITES_CAPTURE,
+};
 use crate::onboard::Finding;
 use crate::report_export::DispositionWire;
 
@@ -55,12 +57,19 @@ pub fn unverified_without_decision(
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "the quoted evidence for this finding was not found in the file near the \
-                     cited line ({}), and no reviewer decision is recorded for it. Open it, then \
-                     confirm it, correct it or mark it a false positive",
+                     cited line ({}){}, and no reviewer decision is recorded for it. Open it, \
+                     then confirm it, correct it or mark it a false positive",
                     f.captures
                         .get(EVIDENCE_UNVERIFIED_CAPTURE)
                         .map(String::as_str)
                         .unwrap_or("unverified"),
+                    f.captures
+                        .get(EVIDENCE_UNVERIFIED_SITES_CAPTURE)
+                        .map(|sites| format!(
+                            "; absorbed sites not verified: {}",
+                            sites.replace('\n', ", ")
+                        ))
+                        .unwrap_or_default(),
                 ),
                 Some(f.rule_id.clone()),
             )

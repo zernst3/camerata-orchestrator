@@ -720,6 +720,17 @@ pub struct EvidenceCheck {
     /// Rows the check does not apply to, by kind.
     #[serde(default)]
     pub exempt: usize,
+    /// Absorbed sites (`Finding::also_locations`) whose snippet was looked for in their own file,
+    /// counted apart from the rows. A site that is a consequence of the row's root cause (its
+    /// snippet describes an impact, not a line) is not checked and not counted.
+    #[serde(default)]
+    pub site_checked: usize,
+    /// Checked absorbed sites whose snippet was found near their own line.
+    #[serde(default)]
+    pub site_verified: usize,
+    /// Checked absorbed sites whose snippet was not found. Each holds its row.
+    #[serde(default)]
+    pub site_unverified: usize,
 }
 
 impl EvidenceCheck {
@@ -731,6 +742,7 @@ impl EvidenceCheck {
     /// Whether the counts agree with each other: every checked row is verified or unverified.
     pub fn reconciles(&self) -> bool {
         self.checked == self.verified + self.unverified
+            && self.site_checked == self.site_verified + self.site_unverified
     }
 
     /// Add another tally (a second repo's) to this one.
@@ -739,6 +751,9 @@ impl EvidenceCheck {
         self.verified += other.verified;
         self.unverified += other.unverified;
         self.exempt += other.exempt;
+        self.site_checked += other.site_checked;
+        self.site_verified += other.site_verified;
+        self.site_unverified += other.site_unverified;
     }
 }
 

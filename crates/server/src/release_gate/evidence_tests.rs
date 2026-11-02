@@ -165,3 +165,21 @@ fn the_check_takes_its_decisions_from_any_store() {
     assert!(unverified_without_decision(&rows, &DecidesEverything).is_empty());
     assert_eq!(unverified_without_decision(&rows, &DecidesNothing).len(), 1);
 }
+
+#[test]
+fn the_refusal_names_the_absorbed_sites_that_failed() {
+    let mut row = unverified_row();
+    row.captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE.to_string(),
+        "src/a.ts:3\nsrc/b.ts:9".to_string(),
+    );
+    let problems = unverified_without_decision(&[row], &HashMap::new());
+    assert_eq!(problems.len(), 1);
+    assert!(
+        problems[0]
+            .message
+            .contains("absorbed sites not verified: src/a.ts:3, src/b.ts:9"),
+        "{}",
+        problems[0].message
+    );
+}
