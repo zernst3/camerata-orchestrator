@@ -1977,6 +1977,48 @@ fn write_findings_sheet(
     Ok(())
 }
 
+/// The name of the internal workbook's sheet of rows the engine threw out and kept (A10).
+pub const THROWN_OUT_SHEET: &str = "Thrown out by the engine";
+
+/// The internal "Thrown out by the engine" sheet: one row per thrown-out finding, with the
+/// reason, the rule, the place and the headline.
+fn write_thrown_out_sheet(
+    wb: &mut Workbook,
+    rows: &[crate::onboard::Finding],
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    let mut ws = CappedSheet::new(wb.add_worksheet());
+    ws.set_name(THROWN_OUT_SHEET)?;
+    let _ = ws.set_tab_color(Color::from("#6B7280"));
+    for (c, h) in ["Reason", "Rule", "Place", "Headline"].iter().enumerate() {
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
+    }
+    ws.set_row_height(0, 28)?;
+    for (c, w) in [60.0, 30.0, 40.0, 70.0].iter().enumerate() {
+        ws.set_column_width(c as u16, *w)?;
+    }
+    for (i, f) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        let cell = fmts.cell(None, true, false);
+        ws.write_text_with_format(
+            r,
+            0,
+            crate::engine_discard::reason_of(f).unwrap_or(""),
+            &cell,
+        )?;
+        ws.write_text_with_format(r, 1, &f.rule_id, &cell)?;
+        ws.write_text_with_format(r, 2, format!("{}:{}", f.path, f.line), &cell)?;
+        ws.write_text_with_format(
+            r,
+            3,
+            crate::report_export::defect_headline(&f.detail, &f.rule_id),
+            &cell,
+        )?;
+    }
+    ws.set_freeze_panes(1, 0)?;
+    Ok(())
+}
+
 fn write_dependencies_sheet(
     wb: &mut Workbook,
     name: &str,
@@ -3387,6 +3429,13 @@ pub fn build_workbook(
         &fmts,
     )
     .context("writing the Sites sheet")?;
+
+    // A10: the rows the engine threw out, for the operator. INTERNAL workbook only: a client
+    // package has no such sheet and none of these rows.
+    if opts.internal {
+        write_thrown_out_sheet(&mut wb, &report.discarded, &fmts)
+            .context("writing the Thrown out by the engine sheet")?;
+    }
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,

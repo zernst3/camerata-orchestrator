@@ -2110,20 +2110,24 @@ pub fn parse_ai_findings(
                 .replace(HEADLINE_SEP, " - ");
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
-            if title.is_empty() && detail.is_empty() && code.is_empty() {
-                continue;
-            }
+            // A10: an entry with a place and a rule but no text at all is not a finding, and it is
+            // not deleted either: it is kept below, marked `empty_entry` (adopted rules included).
+            let empty_entry = title.is_empty() && detail.is_empty() && code.is_empty();
             // D1, A10: a row the model filled with placeholder text (title `placeholder`, code
             // and detail `x`, a rule id naming a placeholder) is not a finding. It is KEPT,
             // marked thrown out with the reason, and kept apart from the rows that go on
             // (`audit_repo` parks it; it is never deleted). Counted below.
-            let placeholder_why = crate::junk_finding::parse_gate_reason(
-                !adopted.contains(&rule_id),
-                &rule_id,
-                &title,
-                &code,
-                &detail,
-            );
+            let placeholder_why = if empty_entry {
+                Some(crate::engine_discard::EMPTY_ENTRY)
+            } else {
+                crate::junk_finding::parse_gate_reason(
+                    !adopted.contains(&rule_id),
+                    &rule_id,
+                    &title,
+                    &code,
+                    &detail,
+                )
+            };
             if let Some(why) = placeholder_why {
                 junk_dropped.push(format!(
                     "{rule_id} at {}: {why}",
@@ -2203,10 +2207,14 @@ pub fn parse_ai_findings(
             // before the row exists anywhere else (docs/design/2026-10-23, leak path A8).
             crate::onboard::redact::redact_finding(&mut finding);
             if let Some(why) = placeholder_why {
-                crate::engine_discard::mark(
-                    &mut finding,
-                    &format!("{}: {why}", crate::engine_discard::PLACEHOLDER_ROW),
-                );
+                if empty_entry {
+                    crate::engine_discard::mark(&mut finding, crate::engine_discard::EMPTY_ENTRY);
+                } else {
+                    crate::engine_discard::mark(
+                        &mut finding,
+                        &format!("{}: {why}", crate::engine_discard::PLACEHOLDER_ROW),
+                    );
+                }
             }
             findings.push(finding);
         }

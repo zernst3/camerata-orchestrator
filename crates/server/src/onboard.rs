@@ -1366,6 +1366,9 @@ impl ScanReport {
     pub fn assign_site_keys(&mut self) {
         let before: Vec<String> = self.findings.iter().map(|f| f.site_key.clone()).collect();
         crate::inspections::backfill_site_keys(&mut self.findings);
+        // A10: the rows the engine threw out are addressable too (a later decision, the Engine
+        // Check), so they carry a site key of their own.
+        crate::inspections::backfill_site_keys(&mut self.discarded);
         let moved: std::collections::HashMap<String, String> = before
             .iter()
             .zip(&self.findings)
@@ -1406,6 +1409,29 @@ impl ScanReport {
             );
         }
         self.assign_site_keys();
+    }
+
+    /// Fold a targeted rescan's rows into the stored report. `refreshed` lists, per repo whose
+    /// audit returned Ok, the rule ids that were re-evaluated there; only the old rows (shipped
+    /// and thrown out) of those `(rule, repo)` pairs are replaced. A repo whose rescan failed, or
+    /// that the rule does not apply to, keeps every old row: nothing is lost to a failure, which
+    /// the caller discloses.
+    pub fn fold_rescan_rows(
+        &mut self,
+        refreshed: &[(String, Vec<String>)],
+        rows: Vec<Finding>,
+        discarded: Vec<Finding>,
+    ) {
+        let replaced = |f: &Finding| {
+            refreshed.iter().any(|(repo, ids)| {
+                *repo == f.repo && ids.iter().any(|id| id.eq_ignore_ascii_case(&f.rule_id))
+            })
+        };
+        self.findings.retain(|f| !replaced(f));
+        self.findings.extend(rows);
+        self.discarded.retain(|f| !replaced(f));
+        self.discarded.extend(discarded);
+        self.ledger.set_discarded(&self.discarded);
     }
 
     /// A10: whether the rows the engine threw out and kept ([`Self::discarded`]) are the rows the

@@ -40,6 +40,9 @@ pub const DISCARD_VERDICT: &str = "the model's own text says to discard it";
 pub const PLACEHOLDER_RULE_ID: &str = "its rule id names a placeholder";
 /// The row's headline is a placeholder.
 pub const PLACEHOLDER_HEADLINE: &str = "its headline is a placeholder";
+/// The model's entry named a place and a rule but carried no text at all (no title, no code, no
+/// detail).
+pub const EMPTY_ENTRY: &str = "empty_entry";
 /// The row is placeholder text the model wrote in place of a finding. The scan parser appends why.
 pub const PLACEHOLDER_ROW: &str = "the model wrote placeholder text in place of a finding";
 /// The row's rule was judged not applicable to this codebase.
@@ -124,5 +127,83 @@ mod tests {
         assert!(is_discarded(&a));
         assert_eq!(restore(&mut a).as_deref(), Some(STACK_EXCEPTION));
         assert!(!is_discarded(&a));
+    }
+
+    fn at(repo: &str, rule: &str, snippet: &str) -> Finding {
+        Finding {
+            repo: repo.to_string(),
+            path: "src/a.rs".to_string(),
+            line: 3,
+            rule_id: rule.to_string(),
+            snippet: snippet.to_string(),
+            detail: format!("{snippet} \u{2014} explained"),
+            ..Finding::default()
+        }
+    }
+
+    /// A rescan replaces the old rows of a rule only in the repos whose audit returned Ok. A
+    /// repo whose rescan failed keeps its old rows for the rule (the failure stays disclosed).
+    #[test]
+    fn a_rescan_that_failed_in_one_repo_keeps_that_repos_old_rows() {
+        let mut report = crate::onboard::ScanReport::gated(&[]);
+        report.findings = vec![
+            at("me/ok", "MULTI-RULE-1", "old ok"),
+            at("me/failed", "MULTI-RULE-1", "old failed"),
+            at("me/ok", "OTHER-RULE-1", "other rule"),
+        ];
+        let mut thrown = at("me/ok", "MULTI-RULE-1", "old discarded ok");
+        mark(&mut thrown, NO_CONVENTION);
+        let mut thrown_failed = at("me/failed", "MULTI-RULE-1", "old discarded failed");
+        mark(&mut thrown_failed, NO_CONVENTION);
+        report.discarded = vec![thrown, thrown_failed];
+        report.ledger.set_discarded(&report.discarded);
+
+        let refreshed = vec![("me/ok".to_string(), vec!["MULTI-RULE-1".to_string()])];
+        report.fold_rescan_rows(
+            &refreshed,
+            vec![at("me/ok", "MULTI-RULE-1", "new ok")],
+            Vec::new(),
+        );
+        let snippets: Vec<&str> = report.findings.iter().map(|f| f.snippet.as_str()).collect();
+        assert!(snippets.contains(&"old failed"), "{snippets:?}");
+        assert!(snippets.contains(&"new ok"), "{snippets:?}");
+        assert!(snippets.contains(&"other rule"), "{snippets:?}");
+        assert!(!snippets.contains(&"old ok"), "{snippets:?}");
+        let thrown: Vec<&str> = report
+            .discarded
+            .iter()
+            .map(|f| f.snippet.as_str())
+            .collect();
+        assert_eq!(thrown, ["old discarded failed"]);
+        assert!(report.discarded_reconciles());
+    }
+
+    /// A model entry with a place and a rule but no text is KEPT, marked `empty_entry`, and the
+    /// ledger reconciles once the report is sealed. Adopted rules included.
+    #[test]
+    fn an_entry_with_no_text_is_kept_marked_and_reconciles() {
+        let raw = r#"{"findings":[
+            {"path":"a.rs","line":1,"rule":"made-up-rule"},
+            {"path":"b.rs","line":2,"rule":"SEC-ADOPTED-1","title":"","code":"","detail":""},
+            {"path":"c.rs","line":3,"rule":"made-up-rule","title":"Real","code":"x.y()","detail":"Real text."}
+        ],"proposed_rules":[]}"#;
+        let adopted: std::collections::HashSet<String> =
+            ["SEC-ADOPTED-1".to_string()].into_iter().collect();
+        let (rows, _) = crate::ai_audit::parse_ai_findings("me/api", raw, &adopted);
+        assert_eq!(rows.len(), 3, "no entry is dropped: {rows:?}");
+        let (thrown, kept) = split_discarded(rows.clone());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(thrown.len(), 2, "{thrown:?}");
+        assert!(thrown.iter().all(|f| reason_of(f) == Some(EMPTY_ENTRY)));
+
+        let mut report = crate::onboard::ScanReport::gated(&[]);
+        report.findings = rows;
+        let sealed = report.seal();
+        assert_eq!(sealed.discarded.len(), 2);
+        assert!(
+            sealed.discarded_reconciles(),
+            "{:?}",
+            sealed.ledger.discarded()
+        );
     }
 }

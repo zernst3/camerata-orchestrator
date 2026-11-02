@@ -5136,6 +5136,9 @@ async fn rescan_alternatives_handler(
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     // A10: the rows this rescan's audit threw out, kept apart from the rows that ship.
     let mut all_discarded: Vec<crate::onboard::Finding> = Vec::new();
+    // The repos whose rescan audit returned Ok, each with the rule ids it re-evaluated: the only
+    // (rule, repo) pairs whose old rows the fold may replace.
+    let mut refreshed: Vec<(String, Vec<String>)> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
     // The same picks with the repo each was made for, one per (rule, repo): what the stored
@@ -5209,6 +5212,7 @@ async fn rescan_alternatives_handler(
         .await
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
+                refreshed.push((spec.to_string(), applicable_ids.clone()));
                 // A10: rows the audit threw out come back marked; they are kept apart from the
                 // rows that ship and folded into the stored report's `discarded` below.
                 let (thrown_out, findings) = crate::engine_discard::split_discarded(findings);
@@ -5239,18 +5243,11 @@ async fn rescan_alternatives_handler(
     // Merge into the project's stored last_scan so an immediate accept-alternatives call
     // (or a UI reload) sees the operator's override without any client round-trip.
     if let Some(mut report) = state.get_last_scan(&id) {
-        let rescanned_ids: std::collections::HashSet<String> =
-            alternatives_by_rule.keys().cloned().collect();
-        report
-            .findings
-            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
-        report.findings.extend(all_findings.clone());
-        // A10: a rescan replaces the rescanned rules' rows, thrown-out ones included.
-        report
-            .discarded
-            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
-        report.discarded.extend(std::mem::take(&mut all_discarded));
-        report.ledger.set_discarded(&report.discarded);
+        report.fold_rescan_rows(
+            &refreshed,
+            all_findings.clone(),
+            std::mem::take(&mut all_discarded),
+        );
         report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.

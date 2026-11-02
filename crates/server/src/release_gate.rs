@@ -606,6 +606,9 @@ mod evidence_tests;
 #[cfg(test)]
 mod internal_held_tests;
 
+#[cfg(test)]
+mod discarded_tests;
+
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;
