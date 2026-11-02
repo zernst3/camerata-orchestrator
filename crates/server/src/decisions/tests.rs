@@ -87,6 +87,8 @@ fn node_req(node_id: &str, state: DecisionState, reason: &str) -> NewDecisionReq
         needed_me: None,
         sample_verdict: None,
         except: Vec::new(),
+        run_id: String::new(),
+        decided_at: String::new(),
     }
 }
 
@@ -100,6 +102,8 @@ fn site_req(key: &str, state: DecisionState, reason: &str) -> NewDecisionReq {
         needed_me: None,
         sample_verdict: None,
         except: Vec::new(),
+        run_id: String::new(),
+        decided_at: String::new(),
     }
 }
 
@@ -1478,4 +1482,140 @@ mod bridge {
         assert!(node_record.is_active(), "the group decision itself stands");
         assert!(bridge.pending(&screen).is_empty());
     }
+}
+
+// ── stamps, and a migration with nothing to translate through ──────────────────────────────
+
+#[tokio::test]
+async fn a_change_made_on_run_a_and_flushed_after_run_b_carries_run_a_and_shows_stale_against_b() {
+    let (state, app, pid) = app_with_project();
+    let run_a = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            vec![row("SEC-2", "src/b.rs", 40, "run(user_input)")],
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let old_key = run_a.report.findings[0].site_key.clone();
+    // The site moves in run B (the code beside it was edited).
+    let run_b = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            vec![row(
+                "SEC-2",
+                "src/b.rs",
+                41,
+                "run(sanitize_badly(user_input))",
+            )],
+            "2026-11-03T10:00:00Z",
+        ))
+        .unwrap();
+    let new_key = run_b.report.findings[0].site_key.clone();
+
+    // The reviewer decided on run A; the queue flushes after run B exists.
+    let mut req = site_req(&old_key, DecisionState::Ignored, "behind the gateway");
+    req.run_id = run_a.id.clone();
+    req.decided_at = "2026-11-02T11:00:00Z".to_string();
+    let uri = format!("/api/projects/{pid}/decisions");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(req))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        done.decision.run_id, run_a.id,
+        "stamped with the run it was decided on"
+    );
+    assert_eq!(done.decision.decided_at, "2026-11-02T11:00:00Z");
+
+    let (_, body) = call(&app, "GET", &uri, None).await;
+    let got: DecisionsResp = serde_json::from_value(body).unwrap();
+    assert_eq!(got.latest_run_id, run_b.id);
+    let s = got
+        .standings
+        .iter()
+        .find(|s| s.key == new_key)
+        .expect("the moved site");
+    assert!(s.decision.is_none());
+    assert_eq!(s.stale.as_ref().expect("stale against B").from_key, old_key);
+
+    // A blank stamp still means the latest run, and a decided_at that is not a time is not kept.
+    let mut plain = site_req("k-plain", DecisionState::Confirmed, "");
+    plain.decided_at = "yesterday".to_string();
+    let (_, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(plain))),
+    )
+    .await;
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(done.decision.run_id, run_b.id);
+    assert_ne!(done.decision.decided_at, "yesterday");
+}
+
+#[tokio::test]
+async fn a_migration_with_no_scan_rows_stores_nothing_and_leaves_the_draft_untouched() {
+    let (state, app, pid) = app_with_project();
+    // No inspection: there are no rows to translate the old keys through.
+    let dispositions = serde_json::json!({
+        "acme/app\u{0}SEC-1\u{0}src/a.rs\u{0}10\u{0}x()": {
+            "state": "Ignored", "reason": "fixture", "bucket": "Later"
+        }
+    });
+    let draft = serde_json::json!({ "viewed_repo": "acme/app", "dispositions": dispositions });
+    state.draft.save(&pid, draft.clone());
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions"),
+        Some(serde_json::json!({"migrated_from_draft": true, "dispositions": dispositions})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        serde_json::from_value::<DecisionError>(body).unwrap().code,
+        "no_rows"
+    );
+    assert!(state.decisions.list(&pid).is_empty(), "nothing was stored");
+    assert!(
+        state.decisions.migrated_from_draft_at(&pid).is_none(),
+        "and it is not marked done"
+    );
+    assert_eq!(
+        state.draft.load(&pid).unwrap(),
+        draft,
+        "the draft is untouched"
+    );
+
+    // Once rows exist the same request migrates.
+    state
+        .inspections
+        .append(entry_of(
+            &pid,
+            vec![row("SEC-1", "src/a.rs", 10, "x()")],
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions"),
+        Some(serde_json::json!({"migrated_from_draft": true, "dispositions": dispositions})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let outcome: MigrationOutcome = serde_json::from_value(body).unwrap();
+    assert_eq!(outcome.migrated, 1);
+    assert!(outcome.unmatched.is_empty());
+    assert_eq!(
+        state.draft.load(&pid).unwrap()["dispositions"],
+        serde_json::json!({})
+    );
 }

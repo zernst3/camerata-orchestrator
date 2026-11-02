@@ -10,6 +10,7 @@
 pub mod adopt;
 pub mod backend;
 pub mod decision_memory;
+pub mod decision_sync;
 pub mod decisions;
 pub mod designs;
 pub mod git;

@@ -35,11 +35,14 @@ pub enum CheckId {
     Manifest,
     /// The README's provenance lines equal the manifest's.
     Provenance,
+    /// The review screen holds no change the decision store has not accepted. An undo whose
+    /// revoke has not landed would export the decision the reviewer took back.
+    UnsyncedReviewerChanges,
 }
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 10] = [
+    pub const ALL: [CheckId; 11] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -50,6 +53,7 @@ impl CheckId {
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
+        CheckId::UnsyncedReviewerChanges,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -65,6 +69,7 @@ impl CheckId {
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
+            CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
         }
     }
 }

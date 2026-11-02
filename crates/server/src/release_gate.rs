@@ -21,6 +21,7 @@ mod consistency;
 pub mod evidence;
 mod report;
 mod secrets;
+pub mod unsynced;
 
 use std::collections::HashMap;
 
@@ -68,6 +69,9 @@ pub struct ProductPackage {
     /// request, one problem each. Worked out where the dispositions are in hand (the assembly) and
     /// recorded by [`release`], because the zip holds the rows but not who decided them.
     pub undecided_unverified_evidence: Vec<Problem>,
+    /// Changes the review screen made that the decision store does not hold yet, one problem
+    /// each (from the export request's `unsynced_changes`).
+    pub unsynced_reviewer_changes: Vec<Problem>,
     /// The package is for the operator's own review. Only an internal package may record an
     /// incomplete run, and only [`release_internal`] releases it.
     pub internal: bool,
@@ -189,6 +193,7 @@ pub(crate) fn assemble_package(
             &report.findings,
             dispositions,
         ),
+        unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         internal: options.internal,
     })
 }
@@ -499,6 +504,10 @@ fn release_checked(
         CheckId::EvidenceUnverified,
         package.undecided_unverified_evidence.clone(),
     );
+    report.record(
+        CheckId::UnsyncedReviewerChanges,
+        package.unsynced_reviewer_changes.clone(),
+    );
     let report = report.sorted();
 
     if report.is_clean() {
@@ -530,6 +539,29 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     }
 }
 
+/// The PDF-only route's unsynced-changes gate: that route ships no zip, so it cannot run
+/// [`release`], but a PDF made while the store lacks the reviewer's latest changes is as wrong as
+/// a zip would be.
+pub fn check_unsynced(
+    stem: &str,
+    findings: &[crate::onboard::Finding],
+    changes: &[camerata_api_types::decisions::UnsyncedChange],
+) -> Result<(), GateFailure> {
+    let mut report = GateReport::default();
+    report.record(
+        CheckId::UnsyncedReviewerChanges,
+        unsynced::problems(findings, changes),
+    );
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(GateFailure {
+            stem: stem.to_string(),
+            report,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -538,6 +570,9 @@ mod triage_log_tests;
 
 #[cfg(test)]
 mod run_complete_tests;
+
+#[cfg(test)]
+mod unsynced_tests;
 
 /// A clean report, for other modules' tests.
 #[cfg(test)]

@@ -270,8 +270,14 @@ impl DecisionStore {
                 except: Vec::new(),
                 inherited_from: None,
                 decided_by: decider(&req.decided_by),
-                decided_at: ctx.now.to_string(),
-                run_id: ctx.run_id.to_string(),
+                // A change queued on one run and stored after a newer one still belongs to the
+                // run (and the moment) it was decided on.
+                decided_at: stamp_time(&req.decided_at, ctx.now),
+                run_id: if req.run_id.trim().is_empty() {
+                    ctx.run_id.to_string()
+                } else {
+                    req.run_id.trim().to_string()
+                },
                 engine_version: ctx.engine_version.to_string(),
                 needed_me: req.needed_me,
                 sample_verdict: req.sample_verdict.clone(),
@@ -509,6 +515,16 @@ pub fn held_keys(
             .map(|(k, _)| k.to_string()),
     );
     held
+}
+
+/// The time a queued change was decided at when it is a real RFC3339 time, otherwise `now`.
+fn stamp_time(decided_at: &str, now: &str) -> String {
+    let t = decided_at.trim();
+    if !t.is_empty() && chrono::DateTime::parse_from_rfc3339(t).is_ok() {
+        t.to_string()
+    } else {
+        now.to_string()
+    }
 }
 
 fn decider(by: &str) -> String {

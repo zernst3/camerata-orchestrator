@@ -90,6 +90,11 @@ pub(crate) async fn get_decisions(
         decisions,
         standings,
         migrated_from_draft: state.decisions.migrated_from_draft_at(&id).is_some(),
+        latest_run_id: state
+            .inspections
+            .latest(&id)
+            .map(|e| e.id)
+            .unwrap_or_default(),
     })
     .into_response()
 }
@@ -219,6 +224,16 @@ fn migrate(state: &AppState, id: &str, req: MigrateDraftReq) -> Response {
         .get_last_scan(id)
         .map(|r| r.findings)
         .unwrap_or_default();
+    // With no rows there is nothing to translate the old keys through: every one would be stored
+    // under a key that matches nothing, and the draft would be blanked for nothing. Wait.
+    if rows.is_empty() {
+        return refusal(
+            StatusCode::CONFLICT,
+            "no_rows",
+            "There are no scan rows yet to translate the saved decisions through. They stay in \
+             your saved review and are moved once the project has a scan.",
+        );
+    }
     if rows.iter().any(|f| f.site_key.is_empty()) {
         crate::inspections::backfill_site_keys(&mut rows);
     }

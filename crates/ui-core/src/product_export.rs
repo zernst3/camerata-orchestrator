@@ -20,6 +20,9 @@ pub struct ProductExportOptions {
     /// Also export the triage log: per rule, what the AI pass proposed, what review kept and
     /// threw out, and why. A workbook sheet plus `csv/triage-log.csv`. Off by default.
     pub triage_log: bool,
+    /// Changes the review screen has made that the decision store does not hold yet. The
+    /// server's release gate refuses the export while there are any, naming each site.
+    pub unsynced_changes: Vec<camerata_api_types::decisions::UnsyncedChange>,
 }
 
 /// The JSON body of the export request: the dispositions map and the `options` object.
@@ -35,6 +38,7 @@ pub fn request_body<D: Serialize>(
             "prepared_by": options.prepared_by,
             "executive_summary_override": options.executive_summary_override,
             "triage_log": options.triage_log,
+            "unsynced_changes": options.unsynced_changes,
         },
     })
 }
@@ -53,6 +57,26 @@ mod tests {
     fn the_triage_log_is_off_unless_the_box_is_ticked() {
         let value = body(&ProductExportOptions::default());
         assert_eq!(value["options"]["triage_log"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn unsynced_changes_reach_the_request_so_the_gate_can_refuse() {
+        use camerata_api_types::decisions::{UnsyncedChange, UnsyncedKind};
+        let value = body(&ProductExportOptions {
+            unsynced_changes: vec![UnsyncedChange {
+                key: "k".to_string(),
+                change: UnsyncedKind::Undo,
+            }],
+            ..ProductExportOptions::default()
+        });
+        assert_eq!(
+            value["options"]["unsynced_changes"],
+            serde_json::json!([{ "key": "k", "change": "undo" }])
+        );
+        assert_eq!(
+            body(&ProductExportOptions::default())["options"]["unsynced_changes"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -75,6 +99,7 @@ mod tests {
                 prepared_by: "P".to_string(),
                 executive_summary_override: Some("S".to_string()),
                 triage_log: false,
+                unsynced_changes: Vec::new(),
             },
         );
         assert_eq!(value["dispositions"]["k"], "v");

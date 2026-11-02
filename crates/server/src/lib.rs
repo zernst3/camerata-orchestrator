@@ -18598,6 +18598,11 @@ async fn export_audit_report(
     if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
         return release_blocked_response(&failure);
     }
+    if let Err(failure) =
+        crate::release_gate::check_unsynced(&stem, &report.findings, &req.options.unsynced_changes)
+    {
+        return release_blocked_response(&failure);
+    }
     let pdf_bytes = match crate::report_export::compile_pdf_from_data(&data_json).await {
         Ok(bytes) => bytes,
         Err(e) => {

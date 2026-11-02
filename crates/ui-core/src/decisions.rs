@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use camerata_api_types::decisions::{
     effective_by_key, live_by_key, Decision, DecisionState, DraftDisposition, MigrateDraftReq,
-    MigrationOutcome, NewDecisionReq, Scope,
+    MigrationOutcome, NewDecisionReq, Scope, UnsyncedChange, UnsyncedKind,
 };
 
 use crate::triage::{Disposition, TechDebtBucket, TriageState};
@@ -150,8 +150,74 @@ pub enum BridgeOp {
 struct Synced {
     disposition: Disposition,
     /// Every live site-level record of the site, oldest first (a later ruling does not remove
-    /// the earlier ones, so an undo revokes them all).
+    /// the earlier ones, so an undo revokes them all). Empty when the state is only a snapshot
+    /// from the last time the store was reachable.
     ids: Vec<String>,
+}
+
+/// How far the screen can trust what it shows of the stored decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Availability {
+    /// The store was read this session; the screen shows its decisions.
+    Live,
+    /// The store could not be reached; the screen shows the decisions as of the last time it
+    /// could, with the changes made since over them. Changes are queued.
+    LastKnown,
+    /// The store could not be reached and there is no earlier state to show. The decision state
+    /// is UNKNOWN: it must never be drawn as Unresolved.
+    #[default]
+    Unknown,
+}
+
+/// When and on which inspection a queued change was decided.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stamp {
+    /// The inspection (entry id) the screen was showing; blank when it was not known.
+    pub run_id: String,
+    /// RFC3339 time of the decision.
+    pub at: String,
+}
+
+/// What the draft keeps of the write-through queue: the changes the store does not hold, the
+/// store's state as last read, and when each queued change was decided.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DraftQueue {
+    /// A decided entry is a change to store; an Unresolved entry is an undo to revoke.
+    pub pending: HashMap<String, Disposition>,
+    /// The stored decisions as of the last time the store was read. `None`: never read.
+    pub last_known: Option<HashMap<String, Disposition>>,
+    pub stamps: HashMap<String, Stamp>,
+}
+
+/// A queued change the store refused. Never dropped: it stays pending and is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub key: String,
+    /// The site in words (`path:line`).
+    pub site: String,
+    pub reason: String,
+    /// The refused change was an undo.
+    pub undo: bool,
+}
+
+impl Refusal {
+    /// The error the reviewer reads, naming the site and the reason.
+    pub fn text(&self) -> String {
+        let what = if self.undo { "undo" } else { "decision" };
+        format!(
+            "Your {what} on {} was not stored: {}. It stays in your saved review and is not \
+             included in an export until it is stored.",
+            self.site, self.reason
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RefusedAt {
+    /// The disposition that was refused; `None` for an undo.
+    wanted: Option<Disposition>,
+    site: String,
+    reason: String,
 }
 
 /// Plans the requests that keep the store equal to the review screen's map. See the module docs.
@@ -159,6 +225,12 @@ struct Synced {
 pub struct DecisionBridge {
     synced: HashMap<String, Synced>,
     running: bool,
+    availability: Availability,
+    /// The queue as loaded, kept verbatim while the state is Unknown so the draft never loses it.
+    held: Option<DraftQueue>,
+    stamps: HashMap<String, (Disposition, Stamp)>,
+    refused: HashMap<String, RefusedAt>,
+    run_id: String,
 }
 
 impl DecisionBridge {
@@ -181,12 +253,63 @@ impl DecisionBridge {
             .collect();
         Self {
             synced,
-            running: false,
+            availability: Availability::Live,
+            ..Self::default()
         }
     }
 
-    /// Claim the single run of the sync loop. `false` when one is already running.
+    /// A bridge for a store that could not be reached, over the state it was last read in. The
+    /// queued changes are kept; none can be sent.
+    pub fn from_last_known(last_known: &HashMap<String, Disposition>, queue: &DraftQueue) -> Self {
+        let mut bridge = Self {
+            synced: last_known
+                .iter()
+                .map(|(k, d)| {
+                    (
+                        k.clone(),
+                        Synced {
+                            disposition: d.clone(),
+                            ids: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+            availability: Availability::LastKnown,
+            ..Self::default()
+        };
+        bridge.restore_stamps(&queue.stamps, &queue.pending);
+        bridge
+    }
+
+    /// A bridge for a store that could not be reached with nothing earlier to go on. It holds the
+    /// draft's queue verbatim so saving the draft cannot lose any of it.
+    pub fn unknown(queue: DraftQueue) -> Self {
+        Self {
+            availability: Availability::Unknown,
+            held: Some(queue),
+            ..Self::default()
+        }
+    }
+
+    pub fn availability(&self) -> Availability {
+        self.availability
+    }
+
+    /// The inspection the screen is showing, as the store reported it at load.
+    pub fn set_run_id(&mut self, run_id: &str) {
+        self.run_id = run_id.to_string();
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Claim the single run of the sync loop. `false` when one is already running, or when the
+    /// store is not reachable (nothing can be sent).
     pub fn begin(&mut self) -> bool {
+        if self.availability != Availability::Live {
+            return false;
+        }
         !std::mem::replace(&mut self.running, true)
     }
 
@@ -195,37 +318,103 @@ impl DecisionBridge {
         self.running = false;
     }
 
-    /// The requests that would make the store equal `desired`, in key order.
+    /// Stamp every change that is new or newly different since it was last seen with the run and
+    /// the time it is decided at. Call it whenever the screen's map changes, before planning:
+    /// a change flushed later still carries the moment and the run it was made on.
+    pub fn observe(&mut self, desired: &HashMap<String, Disposition>, run_id: &str, now: &str) {
+        let pending: HashMap<String, Disposition> = self
+            .plan(desired, false)
+            .into_iter()
+            .filter_map(|op| match op {
+                BridgeOp::Post {
+                    key, disposition, ..
+                } => Some((key, disposition)),
+                BridgeOp::Revoke { .. } => None,
+            })
+            .collect();
+        self.stamps.retain(|k, (d, _)| pending.get(k) == Some(d));
+        for (key, d) in pending {
+            self.stamps.entry(key).or_insert_with(|| {
+                (
+                    d,
+                    Stamp {
+                        run_id: run_id.to_string(),
+                        at: now.to_string(),
+                    },
+                )
+            });
+        }
+    }
+
+    /// Put back the stamps a draft carried, for the changes that are still pending.
+    pub fn restore_stamps(
+        &mut self,
+        stamps: &HashMap<String, Stamp>,
+        pending: &HashMap<String, Disposition>,
+    ) {
+        for (key, stamp) in stamps {
+            if let Some(d) = pending.get(key).filter(|d| d.state.is_decided()) {
+                self.stamps.insert(key.clone(), (d.clone(), stamp.clone()));
+            }
+        }
+    }
+
+    /// The requests that would make the store equal `desired`, in key order, leaving out a
+    /// change the store has refused until the screen asks for something different.
     pub fn next_ops(&self, desired: &HashMap<String, Disposition>) -> Vec<BridgeOp> {
+        self.plan(desired, true)
+    }
+
+    fn plan(&self, desired: &HashMap<String, Disposition>, skip_refused: bool) -> Vec<BridgeOp> {
         let mut ops: Vec<BridgeOp> = Vec::new();
         for (key, d) in desired {
             let Some(state) = state_of(d) else {
                 continue;
             };
-            if self.synced.get(key).map(|s| &s.disposition) != Some(d) {
-                ops.push(BridgeOp::Post {
-                    key: key.clone(),
-                    disposition: d.clone(),
-                    request: NewDecisionReq {
-                        scope: Scope::Site,
-                        key: key.clone(),
-                        state,
-                        reason: d.reason.trim().to_string(),
-                        decided_by: String::new(),
-                        needed_me: None,
-                        sample_verdict: None,
-                        except: Vec::new(),
-                    },
-                });
+            if self.synced.get(key).map(|s| &s.disposition) == Some(d) {
+                continue;
             }
+            if skip_refused
+                && self
+                    .refused
+                    .get(key)
+                    .is_some_and(|r| r.wanted.as_ref() == Some(d))
+            {
+                continue;
+            }
+            let stamp = self
+                .stamps
+                .get(key)
+                .filter(|(sd, _)| sd == d)
+                .map(|(_, s)| s);
+            ops.push(BridgeOp::Post {
+                key: key.clone(),
+                disposition: d.clone(),
+                request: NewDecisionReq {
+                    scope: Scope::Site,
+                    key: key.clone(),
+                    state,
+                    reason: d.reason.trim().to_string(),
+                    decided_by: String::new(),
+                    needed_me: None,
+                    sample_verdict: None,
+                    except: Vec::new(),
+                    run_id: stamp.map(|s| s.run_id.clone()).unwrap_or_default(),
+                    decided_at: stamp.map(|s| s.at.clone()).unwrap_or_default(),
+                },
+            });
         }
         for (key, synced) in &self.synced {
-            if !desired.get(key).is_some_and(|d| d.state.is_decided()) {
-                ops.push(BridgeOp::Revoke {
-                    key: key.clone(),
-                    decision_ids: synced.ids.clone(),
-                });
+            if desired.get(key).is_some_and(|d| d.state.is_decided()) {
+                continue;
             }
+            if skip_refused && self.refused.get(key).is_some_and(|r| r.wanted.is_none()) {
+                continue;
+            }
+            ops.push(BridgeOp::Revoke {
+                key: key.clone(),
+                decision_ids: synced.ids.clone(),
+            });
         }
         ops.sort_by(|a, b| op_key(a).cmp(op_key(b)));
         ops
@@ -239,23 +428,111 @@ impl DecisionBridge {
         });
         entry.disposition = disposition;
         entry.ids.push(decision_id);
+        self.stamps.remove(key);
+        self.refused.remove(key);
     }
 
     /// The store revoked the site's records (or had already).
     pub fn ack_revoke(&mut self, key: &str) {
         self.synced.remove(key);
+        self.refused.remove(key);
     }
 
-    /// What the draft must keep: every change the store does not yet hold. A decided entry is a
-    /// change to post; an Unresolved entry is a revert to revoke.
+    /// The store refused the change `op` planned. It stays pending and is remembered, so one
+    /// refusal never blocks another key and is not sent again until the screen changes it.
+    pub fn nack(&mut self, op: &BridgeOp, site: &str, reason: &str) {
+        let (key, wanted) = match op {
+            BridgeOp::Post {
+                key, disposition, ..
+            } => (key, Some(disposition.clone())),
+            BridgeOp::Revoke { key, .. } => (key, None),
+        };
+        self.refused.insert(
+            key.clone(),
+            RefusedAt {
+                wanted,
+                site: site.to_string(),
+                reason: reason.to_string(),
+            },
+        );
+    }
+
+    /// The refusals that still stand: for a change the screen still asks for.
+    pub fn refusals(&self, desired: &HashMap<String, Disposition>) -> Vec<Refusal> {
+        let mut out: Vec<Refusal> = self
+            .refused
+            .iter()
+            .filter(|(key, r)| match &r.wanted {
+                Some(d) => desired.get(*key) == Some(d),
+                None => !desired.get(*key).is_some_and(|d| d.state.is_decided()),
+            })
+            .map(|(key, r)| Refusal {
+                key: key.clone(),
+                site: r.site.clone(),
+                reason: r.reason.clone(),
+                undo: r.wanted.is_none(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        out
+    }
+
+    /// What the draft must keep: every change the store does not yet hold, refused ones
+    /// included. A decided entry is a change to post; an Unresolved entry is an undo to revoke.
     pub fn pending(&self, desired: &HashMap<String, Disposition>) -> HashMap<String, Disposition> {
-        self.next_ops(desired)
+        self.plan(desired, false)
             .into_iter()
             .map(|op| match op {
                 BridgeOp::Post {
                     key, disposition, ..
                 } => (key, disposition),
                 BridgeOp::Revoke { key, .. } => (key, Disposition::default()),
+            })
+            .collect()
+    }
+
+    /// The stored decisions as this bridge last knew them.
+    pub fn snapshot(&self) -> HashMap<String, Disposition> {
+        self.synced
+            .iter()
+            .map(|(k, s)| (k.clone(), s.disposition.clone()))
+            .collect()
+    }
+
+    /// Everything the draft keeps of the queue. While the state is Unknown that is the queue as
+    /// it was loaded, untouched.
+    pub fn draft_queue(&self, desired: &HashMap<String, Disposition>) -> DraftQueue {
+        if self.availability == Availability::Unknown {
+            return self.held.clone().unwrap_or_default();
+        }
+        let pending = self.pending(desired);
+        let stamps = self
+            .stamps
+            .iter()
+            .filter(|(k, (d, _))| pending.get(*k) == Some(d))
+            .map(|(k, (_, s))| (k.clone(), s.clone()))
+            .collect();
+        DraftQueue {
+            pending,
+            last_known: Some(self.snapshot()),
+            stamps,
+        }
+    }
+
+    /// The changes the store does not hold, as the export request lists them. The release gate
+    /// refuses an export while there are any.
+    pub fn unsynced(&self, desired: &HashMap<String, Disposition>) -> Vec<UnsyncedChange> {
+        self.plan(desired, false)
+            .into_iter()
+            .map(|op| match op {
+                BridgeOp::Post { key, .. } => UnsyncedChange {
+                    key,
+                    change: UnsyncedKind::Decision,
+                },
+                BridgeOp::Revoke { key, .. } => UnsyncedChange {
+                    key,
+                    change: UnsyncedKind::Undo,
+                },
             })
             .collect()
     }
@@ -523,7 +800,7 @@ mod tests {
 
     #[test]
     fn only_one_sync_loop_runs_at_a_time() {
-        let mut bridge = DecisionBridge::default();
+        let mut bridge = DecisionBridge::from_decisions(&[]);
         assert!(bridge.begin());
         assert!(!bridge.begin());
         bridge.finish();

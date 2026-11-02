@@ -179,6 +179,15 @@ pub struct NewDecisionReq {
     /// whether or not they are listed.
     #[serde(default)]
     pub except: Vec<String>,
+    /// Site scope: the inspection the reviewer was looking at when they decided. A change queued
+    /// on run A and stored after run B exists still belongs to run A, so a site that moved
+    /// between the two shows the decision as stale. Blank means "the latest run".
+    #[serde(default)]
+    pub run_id: String,
+    /// Site scope: when the reviewer decided (RFC3339), kept through a delayed store. Blank, or
+    /// not a time, means "now".
+    #[serde(default)]
+    pub decided_at: String,
 }
 
 /// One disposition as the UI's onboarding draft held it. The states and buckets are the strings
@@ -293,6 +302,29 @@ pub struct DecisionsResp {
     pub standings: Vec<SiteStanding>,
     /// Whether the draft migration has run for this project.
     pub migrated_from_draft: bool,
+    /// The newest inspection (entry id), or blank when there is none: the run a screen opened
+    /// now is showing.
+    #[serde(default)]
+    pub latest_run_id: String,
+}
+
+/// A change the review screen has made that the decision store does not hold yet. The export
+/// request lists them; the release gate refuses to export while any exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsyncedChange {
+    pub key: String,
+    pub change: UnsyncedKind,
+}
+
+/// What an unsynced change is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsyncedKind {
+    /// A decision (or an edit of one) the store has not accepted.
+    Decision,
+    /// An undo whose revoke the store has not accepted: the store would still export the earlier
+    /// decision.
+    Undo,
 }
 
 /// `POST /api/projects/:id/decisions/:id/revoke`.
@@ -437,6 +469,8 @@ mod tests {
             needed_me: Some(true),
             sample_verdict: Some(SampleVerdict::FalseAlarm),
             except: vec!["k7".into()],
+            run_id: "insp-1".into(),
+            decided_at: "2026-11-02T09:00:00Z".into(),
         };
         assert_eq!(
             serde_json::to_value(&new).unwrap(),
@@ -448,7 +482,9 @@ mod tests {
                 "decided_by": "zach",
                 "needed_me": true,
                 "sample_verdict": "false_alarm",
-                "except": ["k7"]
+                "except": ["k7"],
+                "run_id": "insp-1",
+                "decided_at": "2026-11-02T09:00:00Z"
             })
         );
 
@@ -514,7 +550,8 @@ mod tests {
             serde_json::json!({
                 "decisions": [],
                 "standings": [],
-                "migrated_from_draft": false
+                "migrated_from_draft": false,
+                "latest_run_id": ""
             })
         );
         assert_eq!(
@@ -535,6 +572,14 @@ mod tests {
                 "decided_at": "t0",
                 "inherited_from": "n"
             })
+        );
+        assert_eq!(
+            serde_json::to_value(UnsyncedChange {
+                key: "k".into(),
+                change: UnsyncedKind::Undo,
+            })
+            .unwrap(),
+            serde_json::json!({ "key": "k", "change": "undo" })
         );
         assert_eq!(
             serde_json::to_value(AppliedDecision {

@@ -110,6 +110,12 @@ pub struct ReportOptions {
     /// (a one-off inspection) and only the report's own `repos_not_inspected` is checked.
     #[serde(skip)]
     pub expected_repos: Vec<String>,
+    /// Changes the review screen has made that the decision store does not hold yet. The export
+    /// dialog lists them from the write-through queue; the release gate refuses to export while
+    /// any exist, because the store (what the export reads) would still carry the earlier
+    /// decision. Empty for every other caller.
+    #[serde(default)]
+    pub unsynced_changes: Vec<camerata_api_types::decisions::UnsyncedChange>,
     /// The export is for the operator's own review (the project is not a client engagement, or
     /// `camerata inspect --internal`). Only an internal export may be made from a run that did not
     /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `findings.json`.
