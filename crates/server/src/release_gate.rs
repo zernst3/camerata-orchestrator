@@ -11,12 +11,14 @@
 //! `build_product_zip(` or `compile_pdf_from_data(`.
 //!
 //! The checks, in order: secrets, dataset set, dataset parity, row parity, severity and kind
-//! counts, finding content, confidentiality marking, manifest, provenance
+//! counts, finding content, reviewer decision on unverified evidence, confidentiality marking,
+//! manifest, provenance
 //! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
 //! same functions, so the test and the runtime check cannot drift.
 
 mod archive;
 mod consistency;
+pub mod evidence;
 mod report;
 mod secrets;
 
@@ -62,6 +64,10 @@ pub struct ProductPackage {
     pub readme: String,
     /// The provenance the README and `manifest.json` both render.
     pub provenance: ManifestProvenance,
+    /// M5: the rows marked `evidence_unverified` that carry no reviewer decision in the export
+    /// request, one problem each. Worked out where the dispositions are in hand (the assembly) and
+    /// recorded by [`release`], because the zip holds the rows but not who decided them.
+    pub undecided_unverified_evidence: Vec<Problem>,
     /// The package is for the operator's own review. Only an internal package may record an
     /// incomplete run, and only [`release_internal`] releases it.
     pub internal: bool,
@@ -179,6 +185,10 @@ pub(crate) fn assemble_package(
         datasets,
         readme,
         provenance,
+        undecided_unverified_evidence: evidence::unverified_without_decision(
+            &report.findings,
+            dispositions,
+        ),
         internal: options.internal,
     })
 }
@@ -485,6 +495,10 @@ fn release_checked(
         CheckId::RowParity,
         row_parity(&package.report_json, &package.findings_export),
     );
+    report.record(
+        CheckId::EvidenceUnverified,
+        package.undecided_unverified_evidence.clone(),
+    );
     let report = report.sorted();
 
     if report.is_clean() {
@@ -548,6 +562,9 @@ mod fix_label_tests;
 
 #[cfg(test)]
 mod junk_content_tests;
+
+#[cfg(test)]
+mod evidence_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
