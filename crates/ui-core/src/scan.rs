@@ -188,6 +188,57 @@ const REGEN_SYSTEM_PROMPT_TOKENS: f64 = 450.0;
 /// are assumed, so the term errs high.
 pub const REGEN_SCAN_TOKENS_PER_FINDING: f64 = 300.0;
 
+/// Stage 1 calibration is one structured call per site (the server's
+/// `ai_audit::calibration`). Each call carries the same system prompt and shared prefix (about
+/// 8.7 KB, 2,900 tokens) and the site's own text with its code window (about 1.7 KB, 560
+/// tokens), and writes one verdict. MEASURED on the scripted 12-site fixture of
+/// `calibration_tests::prompt_size_per_site_on_the_scripted_fixture`; a server test pins the
+/// prefix figure to the real prompt so it cannot drift.
+pub const CALIBRATION_PREFIX_TOKENS: f64 = 2_900.0;
+/// See [`CALIBRATION_PREFIX_TOKENS`]: the part of a stage 1 request that is the site's own.
+pub const CALIBRATION_SITE_INPUT_TOKENS: f64 = 560.0;
+/// The verdict one site's reply holds; the server's cap per site is built from the same figure.
+pub const CALIBRATION_OUTPUT_TOKENS_PER_SITE: f64 = 150.0;
+
+/// What stage 1 costs over a number of sites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CalibrationEstimate {
+    /// Model calls: one per site.
+    pub calls: usize,
+    /// Input tokens in full-price equivalents, the shared prefix at its cache price.
+    pub input_tokens: f64,
+    /// Output tokens, before the model's own scale.
+    pub output_tokens: f64,
+}
+
+/// Stage 1 over `sites`: one call each. The prefix is written to the prompt cache once and read
+/// back at the cache price by every later call on the API backend; every CLI call is a fresh
+/// subprocess with no shared cache, so each pays the write.
+pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationEstimate {
+    const CACHE_WRITE_MULT: f64 = 1.25;
+    const CACHE_READ_MULT: f64 = 0.10;
+    let calls = sites.max(0.0) as usize;
+    if calls == 0 {
+        return CalibrationEstimate {
+            calls: 0,
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+        };
+    }
+    let prefix = match backend {
+        ProjectBackend::Cli => CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT * calls as f64,
+        ProjectBackend::Api => {
+            CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT
+                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
+        }
+    };
+    CalibrationEstimate {
+        calls,
+        input_tokens: calls as f64 * CALIBRATION_SITE_INPUT_TOKENS + prefix,
+        output_tokens: calls as f64 * CALIBRATION_OUTPUT_TOKENS_PER_SITE,
+    }
+}
+
 /// The output budget of the scan stage per rule in a rule batch, in tokens. MEASURED, not
 /// guessed: a smoke run of the 152-rule library over a 36-file repository (every efficiency
 /// switch on, terse output) spent 190323 scan output tokens over 20 answered rule batches of at
@@ -292,8 +343,7 @@ pub fn regeneration_estimate(scan_out_tokens: f64) -> RegenerationEstimate {
 /// `selected` rules, returning `(total_tokens, dollars, passes)`. PURE so the readout is
 /// unit-testable without rendering. Pricing is per-million-token model rates; the mode string
 /// selects `sequential` / `parallel` / `batch` pass shaping + cache/batch discounts, and the
-/// `thorough` / `incremental` / `deep` flags scale the calibration, incremental-scope, and
-/// deep-tier passes respectively.
+/// `incremental` / `deep` flags scale the incremental-scope and deep-tier passes respectively.
 ///
 /// `backend` is the project's [`ProjectBackend`] (`docs/design/2026-09-22_per-project-backend.md`)
 /// — it changes how the shared repo digest's prompt-cache cost is modeled (see the "cacheable
@@ -331,7 +381,6 @@ pub fn estimate_audit_cost(
     audit_out: f64,
     calib_in: f64,
     calib_out: f64,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     backend: ProjectBackend,
@@ -346,7 +395,6 @@ pub fn estimate_audit_cost(
         audit_out,
         calib_in,
         calib_out,
-        thorough,
         incremental,
         deep,
         backend,
@@ -378,7 +426,6 @@ pub fn estimate_audit_cost_bounds(
     audit_out: f64,
     calib_in: f64,
     calib_out: f64,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     backend: ProjectBackend,
@@ -394,7 +441,6 @@ pub fn estimate_audit_cost_bounds(
             audit_out,
             calib_in,
             calib_out,
-            thorough,
             incremental,
             deep,
             backend,
@@ -422,7 +468,6 @@ fn estimate_with_regeneration(
     audit_out: f64,
     calib_in: f64,
     calib_out: f64,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     backend: ProjectBackend,
@@ -539,13 +584,19 @@ fn estimate_with_regeneration(
     let scan_out = f64::from(SCAN_OUTPUT_TOKENS_PER_RULE) * selected as f64
         + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
-    // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
-    // re-reads roughly the scan's output (the findings) and RE-EMITS each finding with a
-    // corrected/verified body. So its output rides with the full findings volume, ~1× the
-    // findings volume. Thorough mode (#51) runs ~3× for multi-vote consensus.
-    let cal_passes = if thorough { 3.0 } else { 1.0 };
-    let cal_in = findings_out * cal_passes;
-    let cal_out = findings_out * cal_passes;
+    // ── Calibration: stage 1 is one call per finding (site), priced at the CALIBRATION model,
+    // each with the cached system prefix and the site's own text; see [`calibration_estimate`].
+    // Real time even in batch mode. ──
+    let sites = if selected > 0 {
+        (findings_out / REGEN_SCAN_TOKENS_PER_FINDING)
+            .ceil()
+            .max(0.0)
+    } else {
+        0.0
+    };
+    let calibration = calibration_estimate(sites, backend);
+    let cal_in = calibration.input_tokens;
+    let cal_out = calibration.output_tokens;
 
     // ── Deep tier: three EXTRA whole-repo prose passes at the AUDIT model. Each reads the
     // full code (no per-rule batching, no caching discount — distinct prompts per lens) and
@@ -615,6 +666,8 @@ fn estimate_with_regeneration(
         + regen.input_tokens
         + regen.output_tokens)
         * FUDGE) as u64;
+    // The scan-side model calls; stage 1's one call per site is priced above and counted by the
+    // run estimate ([`estimate_run_cost_bounds`]), which is the figure the readout shows.
     let total_passes = passes + rec_calls + resolution_calls + regen.calls;
     (total_tokens, dollars, total_passes)
 }
@@ -667,7 +720,6 @@ pub fn estimate_audit_cost_by_repo(
     audit_out: f64,
     calib_in: f64,
     calib_out: f64,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     backend: ProjectBackend,
@@ -684,7 +736,6 @@ pub fn estimate_audit_cost_by_repo(
                 audit_out,
                 calib_in,
                 calib_out,
-                thorough,
                 incremental,
                 deep,
                 backend,
@@ -815,10 +866,41 @@ pub struct RunRepoInput {
 /// The flags of the run that shape its cost, as for [`estimate_audit_cost`].
 #[derive(Clone, Copy, Debug)]
 pub struct RunFlags {
-    pub thorough: bool,
     pub deep: bool,
     pub backend: ProjectBackend,
     pub terse_output: bool,
+}
+
+/// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
+/// calls it prices.
+pub fn estimated_sites(repo: &RunRepoInput, mode: &str) -> usize {
+    run_findings(repo, mode).1 as usize
+}
+
+/// The scan's output volume in tokens (before the model's scale) and the findings it implies, for
+/// the run estimate: the arithmetic the scan and calibration terms are sized from.
+fn run_findings(repo: &RunRepoInput, mode: &str) -> (f64, f64) {
+    const CHUNK_DIGEST_CHARS: usize = 350_000;
+    const RULE_BATCH_SIZE: usize = 15;
+    const CHARS_PER_TOKEN: f64 = 4.0;
+    const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
+    const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
+    let chunks = repo.code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
+    let groups = repo.routing_groups.max(1);
+    let batches_per_group = if mode == "sequential" {
+        1
+    } else {
+        repo.selected.div_ceil(groups * RULE_BATCH_SIZE).max(1)
+    };
+    let calls_per_chunk = groups * batches_per_group;
+    let passes = chunks * calls_per_chunk;
+    let code_tokens = repo.code_chars as f64 / CHARS_PER_TOKEN;
+    let findings_out = OUT_TOKENS_PER_PASS * passes as f64
+        + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64;
+    let findings = (findings_out / REGEN_SCAN_TOKENS_PER_FINDING)
+        .ceil()
+        .max(0.0);
+    (findings_out, findings)
 }
 
 /// [`estimate_audit_cost_bounds`] for the run as it is executed: see the section comment above.
@@ -972,10 +1054,13 @@ fn estimate_run_with_regeneration(
         .ceil()
         .max(0.0);
 
-    // ── Calibration: one pass over the findings (thorough: three). ──
-    let cal_passes = if flags.thorough { 3.0 } else { 1.0 };
-    let cal_in = findings_out * cal_passes;
-    let cal_out = findings_out * cal_passes * cal_scale;
+    // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
+    // and the site's own text; see [`calibration_estimate`]. ──
+    // Nothing is scanned without rules, so nothing is calibrated.
+    let sites = if selected > 0 { findings } else { 0.0 };
+    let calibration = calibration_estimate(sites, flags.backend);
+    let cal_in = calibration.input_tokens;
+    let cal_out = calibration.output_tokens * cal_scale;
 
     // ── Alternatives: one call per batch of rules, each re-sending the digest and repo map
     // (never cached) with that batch's option sets. ──
@@ -1077,7 +1162,7 @@ fn estimate_run_with_regeneration(
         + regen.calls
         + fix_calls
         + judge_calls
-        + usize::from(selected > 0 && findings > 0.0);
+        + calibration.calls;
     (total_tokens, dollars, total_passes)
 }
 
@@ -1166,7 +1251,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             false,
         );
@@ -1179,7 +1263,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1217,7 +1300,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             true,
             false,
             ProjectBackend::Api,
@@ -1231,7 +1313,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             true,
             false,
             ProjectBackend::Api,
@@ -1315,7 +1396,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1342,7 +1422,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1362,7 +1441,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1392,7 +1470,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1405,7 +1482,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1428,45 +1504,6 @@ mod tests {
         let _ = (dollars1, dollars_seq); // exercise the values without asserting exact amounts
     }
 
-    /// Thorough mode triples the calibration cost; the estimate should grow accordingly.
-    #[test]
-    fn thorough_mode_costs_more_than_default() {
-        let (_, dollars_default, _) = estimate_audit_cost(
-            200_000,
-            15,
-            "parallel",
-            3.0,
-            15.0,
-            1.0,
-            5.0,
-            false,
-            false,
-            false,
-            ProjectBackend::Api,
-            0,
-            false,
-        );
-        let (_, dollars_thorough, _) = estimate_audit_cost(
-            200_000,
-            15,
-            "parallel",
-            3.0,
-            15.0,
-            1.0,
-            5.0,
-            true,
-            false,
-            false,
-            ProjectBackend::Api,
-            0,
-            false,
-        );
-        assert!(
-            dollars_thorough > dollars_default,
-            "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
-        );
-    }
-
     /// Batch mode applies a flat 50% discount to the SCAN passes vs. parallel on the same
     /// config. Calibration is NOT discounted (it always runs real-time). The pass count
     /// is identical (same chunking + rule-batching).
@@ -1483,7 +1520,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1496,7 +1532,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1535,7 +1570,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1550,7 +1584,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1562,10 +1595,10 @@ mod tests {
     }
 
     /// Deep tier (three extra whole-repo passes) must ADD to the dollar figure, and it must be
-    /// the single priciest option vs. thorough or full-vs-incremental on the same config.
+    /// the single priciest option vs. full-vs-incremental on the same config.
     #[test]
     fn deep_tier_costs_more_and_is_the_priciest_option() {
-        let base = |deep: bool, thorough: bool| {
+        let base = |deep: bool| {
             estimate_audit_cost(
                 350_000,
                 30,
@@ -1574,7 +1607,6 @@ mod tests {
                 15.0,
                 3.0,
                 15.0,
-                thorough,
                 false,
                 deep,
                 ProjectBackend::Api,
@@ -1583,14 +1615,9 @@ mod tests {
             )
             .1
         };
-        let standard = base(false, false);
-        let thorough = base(false, true);
-        let deep = base(true, false);
+        let standard = base(false);
+        let deep = base(true);
         assert!(deep > standard, "deep adds cost: {deep:.4} > {standard:.4}");
-        assert!(
-            deep > thorough,
-            "deep is the priciest option (more than thorough): {deep:.4} > {thorough:.4}"
-        );
     }
 
     /// The incremental flag is plumbed through but, with no changed-file breakdown available
@@ -1608,7 +1635,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1621,7 +1647,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             true,
             false,
             ProjectBackend::Api,
@@ -1649,7 +1674,6 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1681,7 +1705,6 @@ mod tests {
             0.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1706,7 +1729,6 @@ mod tests {
             5.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1719,7 +1741,6 @@ mod tests {
             10.0,
             2.0,
             10.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -1753,7 +1774,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -1779,43 +1799,40 @@ mod tests {
         let sizes: &[usize] = &[50_000, 200_000, 350_000, 351_000, 700_000, 1_400_000];
         for &selected in &[0usize, 1, 15, 30, 60] {
             for &mode in &["sequential", "parallel", "batch"] {
-                for &thorough in &[false, true] {
-                    for &deep in &[false, true] {
-                        let mut prev_toks = 0u64;
-                        let mut prev_dollars = 0.0f64;
-                        for &code_chars in sizes {
-                            let (toks, dollars, _passes) = estimate_audit_cost(
-                                code_chars,
-                                selected,
-                                mode,
-                                3.0,
-                                15.0,
-                                3.0,
-                                15.0,
-                                thorough,
-                                false,
-                                deep,
-                                ProjectBackend::Api,
-                                0,
-                                false,
-                            );
-                            assert!(
-                                toks >= prev_toks,
-                                "tokens must be non-decreasing in code_chars: \
+                for &deep in &[false, true] {
+                    let mut prev_toks = 0u64;
+                    let mut prev_dollars = 0.0f64;
+                    for &code_chars in sizes {
+                        let (toks, dollars, _passes) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                            false,
+                        );
+                        assert!(
+                            toks >= prev_toks,
+                            "tokens must be non-decreasing in code_chars: \
                                  code_chars={code_chars} selected={selected} mode={mode} \
-                                 thorough={thorough} deep={deep} \
+ deep={deep} \
                                  prev_toks={prev_toks} toks={toks}"
-                            );
-                            assert!(
-                                dollars >= prev_dollars,
-                                "dollars must be non-decreasing in code_chars: \
+                        );
+                        assert!(
+                            dollars >= prev_dollars,
+                            "dollars must be non-decreasing in code_chars: \
                                  code_chars={code_chars} selected={selected} mode={mode} \
-                                 thorough={thorough} deep={deep} \
+ deep={deep} \
                                  prev_dollars={prev_dollars:.6} dollars={dollars:.6}"
-                            );
-                            prev_toks = toks;
-                            prev_dollars = dollars;
-                        }
+                        );
+                        prev_toks = toks;
+                        prev_dollars = dollars;
                     }
                 }
             }
@@ -1840,7 +1857,6 @@ mod tests {
                     15.0,
                     3.0,
                     15.0,
-                    false,
                     false,
                     false,
                     ProjectBackend::Api,
@@ -1876,64 +1892,57 @@ mod tests {
     fn prop_batch_cheaper_than_parallel() {
         for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
             for &selected in &[0usize, 1, 15, 30, 60] {
-                for &thorough in &[false, true] {
-                    let (_tp, dp, passes_p) = estimate_audit_cost(
-                        code_chars,
-                        selected,
-                        "parallel",
-                        3.0,
-                        15.0,
-                        3.0,
-                        15.0,
-                        thorough,
-                        false,
-                        false,
-                        ProjectBackend::Api,
-                        0,
-                        false,
-                    );
-                    let (_tb, db, passes_b) = estimate_audit_cost(
-                        code_chars,
-                        selected,
-                        "batch",
-                        3.0,
-                        15.0,
-                        3.0,
-                        15.0,
-                        thorough,
-                        false,
-                        false,
-                        ProjectBackend::Api,
-                        0,
-                        false,
-                    );
-                    assert_eq!(
-                        passes_p, passes_b,
-                        "passes must be equal for parallel vs batch: \
+                let (_tp, dp, passes_p) = estimate_audit_cost(
+                    code_chars,
+                    selected,
+                    "parallel",
+                    3.0,
+                    15.0,
+                    3.0,
+                    15.0,
+                    false,
+                    false,
+                    ProjectBackend::Api,
+                    0,
+                    false,
+                );
+                let (_tb, db, passes_b) = estimate_audit_cost(
+                    code_chars,
+                    selected,
+                    "batch",
+                    3.0,
+                    15.0,
+                    3.0,
+                    15.0,
+                    false,
+                    false,
+                    ProjectBackend::Api,
+                    0,
+                    false,
+                );
+                assert_eq!(
+                    passes_p, passes_b,
+                    "passes must be equal for parallel vs batch: \
                          code_chars={code_chars} selected={selected}"
-                    );
-                    assert!(
-                        db < dp,
-                        "batch must be cheaper than parallel (scan discount): \
-                         code_chars={code_chars} selected={selected} thorough={thorough} \
+                );
+                assert!(
+                    db < dp,
+                    "batch must be cheaper than parallel (scan discount): \
+                         code_chars={code_chars} selected={selected} \
                          batch_dollars={db:.6} parallel_dollars={dp:.6}"
-                    );
-                }
+                );
             }
         }
     }
 
-    /// Property 4 — DEEP IS THE PRICIEST LEVER: deep=true dollars are strictly greater than
-    /// deep=false, and deep=true dollars are >= thorough=true dollars on the same base config.
-    ///
-    /// Both sub-properties are tested together across the sweep so a regression in either
-    /// is caught with the offending inputs in the failure message.
+    /// Property 4 — DEEP ADDS COST: deep=true dollars are strictly greater than deep=false across
+    /// the sweep, with the offending inputs in the failure message.
     #[test]
     fn prop_deep_is_the_priciest_lever() {
         for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &mode in &["sequential", "parallel", "batch"] {
-                    let base = |deep: bool, thorough: bool| {
+                    let base = |deep: bool| {
                         estimate_audit_cost(
                             code_chars,
                             selected,
@@ -1942,7 +1951,6 @@ mod tests {
                             15.0,
                             3.0,
                             15.0,
-                            thorough,
                             false,
                             deep,
                             ProjectBackend::Api,
@@ -1951,70 +1959,14 @@ mod tests {
                         )
                         .1
                     };
-                    let standard = base(false, false);
-                    let with_deep = base(true, false);
-                    let with_thorough = base(false, true);
+                    let standard = base(false);
+                    let with_deep = base(true);
 
                     assert!(
                         with_deep > standard,
                         "deep=true must cost more than deep=false: \
                          code_chars={code_chars} selected={selected} mode={mode} \
                          deep={with_deep:.6} standard={standard:.6}"
-                    );
-                    assert!(
-                        with_deep >= with_thorough,
-                        "deep must be >= thorough on the same config: \
-                         code_chars={code_chars} selected={selected} mode={mode} \
-                         deep={with_deep:.6} thorough={with_thorough:.6}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Property 5 — THOROUGH ADDS COST: thorough=true dollars are strictly greater than
-    /// thorough=false across the sweep (thorough triples calibration, which has non-zero price
-    /// when calib model prices are > 0).
-    #[test]
-    fn prop_thorough_adds_cost() {
-        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
-            for &selected in &[0usize, 1, 15, 30, 60] {
-                for &mode in &["sequential", "parallel", "batch"] {
-                    let (_, dollars_default, _) = estimate_audit_cost(
-                        code_chars,
-                        selected,
-                        mode,
-                        3.0,
-                        15.0,
-                        3.0,
-                        15.0,
-                        false,
-                        false,
-                        false,
-                        ProjectBackend::Api,
-                        0,
-                        false,
-                    );
-                    let (_, dollars_thorough, _) = estimate_audit_cost(
-                        code_chars,
-                        selected,
-                        mode,
-                        3.0,
-                        15.0,
-                        3.0,
-                        15.0,
-                        true,
-                        false,
-                        false,
-                        ProjectBackend::Api,
-                        0,
-                        false,
-                    );
-                    assert!(
-                        dollars_thorough > dollars_default,
-                        "thorough=true must cost more than thorough=false: \
-                         code_chars={code_chars} selected={selected} mode={mode} \
-                         thorough={dollars_thorough:.6} default={dollars_default:.6}"
                     );
                 }
             }
@@ -2029,34 +1981,31 @@ mod tests {
         for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &mode in &["sequential", "parallel", "batch"] {
-                    for &thorough in &[false, true] {
-                        for &incremental in &[false, true] {
-                            for &deep in &[false, true] {
-                                let (toks, dollars, _) = estimate_audit_cost(
-                                    code_chars,
-                                    selected,
-                                    mode,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    thorough,
-                                    incremental,
-                                    deep,
-                                    ProjectBackend::Api,
-                                    0,
-                                    false,
-                                );
-                                assert_eq!(
-                                    dollars, 0.0,
-                                    "all-zero prices must yield $0: \
+                    for &incremental in &[false, true] {
+                        for &deep in &[false, true] {
+                            let (toks, dollars, _) = estimate_audit_cost(
+                                code_chars,
+                                selected,
+                                mode,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                incremental,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
+                                false,
+                            );
+                            assert_eq!(
+                                dollars, 0.0,
+                                "all-zero prices must yield $0: \
                                      code_chars={code_chars} selected={selected} mode={mode} \
-                                     thorough={thorough} incremental={incremental} deep={deep} \
+ incremental={incremental} deep={deep} \
                                      got dollars={dollars}"
-                                );
-                                // Tokens are still computed (non-zero for non-trivial inputs).
-                                let _ = toks;
-                            }
+                            );
+                            // Tokens are still computed (non-zero for non-trivial inputs).
+                            let _ = toks;
                         }
                     }
                 }
@@ -2072,55 +2021,51 @@ mod tests {
         for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &mode in &["sequential", "parallel", "batch"] {
-                    for &thorough in &[false, true] {
-                        for &deep in &[false, true] {
-                            let (_, dollars_base, _) = estimate_audit_cost(
-                                code_chars,
-                                selected,
-                                mode,
-                                3.0,
-                                15.0,
-                                3.0,
-                                15.0,
-                                thorough,
-                                false,
-                                deep,
-                                ProjectBackend::Api,
-                                0,
-                                false,
-                            );
-                            let (_, dollars_double, _) = estimate_audit_cost(
-                                code_chars,
-                                selected,
-                                mode,
-                                6.0,
-                                30.0,
-                                6.0,
-                                30.0,
-                                thorough,
-                                false,
-                                deep,
-                                ProjectBackend::Api,
-                                0,
-                                false,
-                            );
-                            // Doubling all prices must double the dollar figure.
-                            let expected = dollars_base * 2.0;
-                            let rel_err = if expected.abs() > f64::EPSILON {
-                                ((dollars_double - expected) / expected).abs()
-                            } else {
-                                // Both are ~0 (e.g. zero prices); equality is the right check.
-                                (dollars_double - expected).abs()
-                            };
-                            assert!(
-                                rel_err < 1e-9,
-                                "doubling prices must double dollars (relative error < 1e-9): \
+                    for &deep in &[false, true] {
+                        let (_, dollars_base, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                            false,
+                        );
+                        let (_, dollars_double, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            6.0,
+                            30.0,
+                            6.0,
+                            30.0,
+                            false,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                            false,
+                        );
+                        // Doubling all prices must double the dollar figure.
+                        let expected = dollars_base * 2.0;
+                        let rel_err = if expected.abs() > f64::EPSILON {
+                            ((dollars_double - expected) / expected).abs()
+                        } else {
+                            // Both are ~0 (e.g. zero prices); equality is the right check.
+                            (dollars_double - expected).abs()
+                        };
+                        assert!(
+                            rel_err < 1e-9,
+                            "doubling prices must double dollars (relative error < 1e-9): \
                                  code_chars={code_chars} selected={selected} mode={mode} \
-                                 thorough={thorough} deep={deep} \
+ deep={deep} \
                                  base={dollars_base:.10} doubled={dollars_double:.10} \
                                  expected={expected:.10} rel_err={rel_err:.2e}"
-                            );
-                        }
+                        );
                     }
                 }
             }
@@ -2135,51 +2080,44 @@ mod tests {
         for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &mode in &["sequential", "parallel", "batch"] {
-                    for &thorough in &[false, true] {
-                        for &deep in &[false, true] {
-                            let (toks_f, dollars_f, passes_f) = estimate_audit_cost(
-                                code_chars,
-                                selected,
-                                mode,
-                                3.0,
-                                15.0,
-                                3.0,
-                                15.0,
-                                thorough,
-                                false,
-                                deep,
-                                ProjectBackend::Api,
-                                0,
-                                false,
-                            );
-                            let (toks_i, dollars_i, passes_i) = estimate_audit_cost(
-                                code_chars,
-                                selected,
-                                mode,
-                                3.0,
-                                15.0,
-                                3.0,
-                                15.0,
-                                thorough,
-                                true,
-                                deep,
-                                ProjectBackend::Api,
-                                0,
-                                false,
-                            );
-                            assert_eq!(
-                                dollars_f, dollars_i,
-                                "incremental flag must not change dollars: \
+                    for &deep in &[false, true] {
+                        let (toks_f, dollars_f, passes_f) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                            false,
+                        );
+                        let (toks_i, dollars_i, passes_i) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            true,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                            false,
+                        );
+                        assert_eq!(
+                            dollars_f, dollars_i,
+                            "incremental flag must not change dollars: \
                                  code_chars={code_chars} selected={selected} mode={mode} \
-                                 thorough={thorough} deep={deep} \
+ deep={deep} \
                                  non_incremental={dollars_f:.10} incremental={dollars_i:.10}"
-                            );
-                            assert_eq!(toks_f, toks_i, "incremental must not change token count");
-                            assert_eq!(
-                                passes_f, passes_i,
-                                "incremental must not change pass count"
-                            );
-                        }
+                        );
+                        assert_eq!(toks_f, toks_i, "incremental must not change token count");
+                        assert_eq!(passes_f, passes_i, "incremental must not change pass count");
                     }
                 }
             }
@@ -2199,7 +2137,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2223,7 +2160,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -2236,7 +2172,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2261,7 +2196,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -2274,7 +2208,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             true,
             ProjectBackend::Api,
@@ -2309,7 +2242,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Cli,
             0,
             false,
@@ -2322,7 +2254,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2362,7 +2293,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Cli,
             0,
             false,
@@ -2375,7 +2305,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2417,7 +2346,6 @@ mod tests {
                             15.0,
                             false,
                             false,
-                            false,
                             ProjectBackend::Cli,
                             multi_option.min(selected),
                             false,
@@ -2430,7 +2358,6 @@ mod tests {
                             15.0,
                             3.0,
                             15.0,
-                            false,
                             false,
                             false,
                             ProjectBackend::Api,
@@ -2466,7 +2393,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -2479,7 +2405,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2520,7 +2445,6 @@ mod tests {
                 15.0,
                 false,
                 false,
-                false,
                 ProjectBackend::Api,
                 multi_option,
                 false,
@@ -2534,7 +2458,6 @@ mod tests {
                 15.0,
                 3.0,
                 15.0,
-                false,
                 false,
                 false,
                 ProjectBackend::Api,
@@ -2564,7 +2487,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             30,
             false,
@@ -2577,7 +2499,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2609,7 +2530,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -2629,7 +2549,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2657,7 +2576,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             0,
             false,
@@ -2673,7 +2591,6 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2706,15 +2623,16 @@ mod tests {
     /// pre-existing and separately-tracked limitation — see `scan_routing.rs`).
     #[test]
     fn faktura_shaped_cli_estimate_no_longer_3x_under() {
+        // The bill is of a run before stage 1 was one call per site, so the regression pins the
+        // scan side: calibration is left unpriced here and is tested on its own.
         let (_, dollars, _passes) = estimate_audit_cost(
             FAKTURA_CODE_CHARS,
             FAKTURA_SELECTED_RULES,
             "parallel",
             3.0,
             15.0,
-            3.0,
-            15.0,
-            false,
+            0.0,
+            0.0,
             false,
             false,
             ProjectBackend::Cli,
@@ -2752,7 +2670,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Cli,
             FAKTURA_MULTI_OPTION_RULES,
             false,
@@ -2765,7 +2682,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2795,7 +2711,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2953,7 +2868,6 @@ mod tests {
                 15.0,
                 false,
                 false,
-                false,
                 ProjectBackend::Api,
                 0,
                 terse,
@@ -2972,7 +2886,6 @@ mod tests {
             15.0,
             3.0,
             15.0,
-            false,
             false,
             false,
             ProjectBackend::Api,
@@ -2999,7 +2912,6 @@ mod tests {
             15.0,
             false,
             false,
-            false,
             ProjectBackend::Api,
             true,
         );
@@ -3023,7 +2935,6 @@ mod tests {
                 1.0,
                 0.0,
                 0.0,
-                false,
                 false,
                 false,
                 ProjectBackend::Api,
@@ -3053,7 +2964,6 @@ mod tests {
                 1.0,
                 0.0,
                 0.0,
-                false,
                 false,
                 false,
                 ProjectBackend::Api,
@@ -3119,11 +3029,98 @@ mod tests {
 
     fn flags() -> RunFlags {
         RunFlags {
-            thorough: false,
             deep: false,
             backend: ProjectBackend::Api,
             terse_output: true,
         }
+    }
+
+    // ── Stage 1 is one call per site ───────────────────────────────────────────────────────
+
+    #[test]
+    fn calibration_is_priced_as_one_call_per_site_with_a_cached_system_prefix() {
+        let api = calibration_estimate(100.0, ProjectBackend::Api);
+        assert_eq!(api.calls, 100, "one call per site");
+        assert_eq!(
+            api.output_tokens,
+            100.0 * CALIBRATION_OUTPUT_TOKENS_PER_SITE
+        );
+        // The prefix is written once and read 99 times; each site adds its own text.
+        let expected_api = 100.0 * CALIBRATION_SITE_INPUT_TOKENS
+            + CALIBRATION_PREFIX_TOKENS * 1.25
+            + CALIBRATION_PREFIX_TOKENS * 0.10 * 99.0;
+        assert!((api.input_tokens - expected_api).abs() < 1e-6, "{api:?}");
+        // A CLI call is a fresh subprocess: every call pays the cache write.
+        let cli = calibration_estimate(100.0, ProjectBackend::Cli);
+        let expected_cli =
+            100.0 * (CALIBRATION_SITE_INPUT_TOKENS + CALIBRATION_PREFIX_TOKENS * 1.25);
+        assert!((cli.input_tokens - expected_cli).abs() < 1e-6, "{cli:?}");
+        assert!(cli.input_tokens > api.input_tokens);
+        // No sites, no calls, no cost.
+        let none = calibration_estimate(0.0, ProjectBackend::Api);
+        assert_eq!(
+            (none.calls, none.input_tokens, none.output_tokens),
+            (0, 0.0, 0.0)
+        );
+        // Each further site adds its own text and a cached read of the prefix, not a batch.
+        let one = calibration_estimate(1.0, ProjectBackend::Api);
+        let ten = calibration_estimate(10.0, ProjectBackend::Api);
+        let per_site = CALIBRATION_SITE_INPUT_TOKENS + CALIBRATION_PREFIX_TOKENS * 0.10;
+        assert!((ten.input_tokens - one.input_tokens - 9.0 * per_site).abs() < 1e-6);
+    }
+
+    /// The run estimate prices the calibration of exactly the findings it assumes, one call each:
+    /// with only the calibration model priced, the dollars are the calibration estimate of that
+    /// many sites, and the calls include them.
+    #[test]
+    fn the_run_estimate_prices_one_calibration_call_per_estimated_site() {
+        let sites = estimated_sites(&fixture(), "parallel");
+        assert!(sites > 10, "the fixture reports findings: {sites}");
+        let free = PricedModel {
+            id: "unmeasured-model",
+            price_in: 0.0,
+            price_out: 0.0,
+        };
+        let cal = PricedModel {
+            id: "unmeasured-model",
+            price_in: 1.0,
+            price_out: 1.0,
+        };
+        let models = |calibration| RunModels {
+            scan: free,
+            calibration,
+            fix: None,
+            clone_judge: None,
+        };
+        let with = estimate_run_cost_bounds(&fixture(), "parallel", &models(cal), flags());
+        let without = estimate_run_cost_bounds(&fixture(), "parallel", &models(free), flags());
+        let est = calibration_estimate(sites as f64, ProjectBackend::Api);
+        let dollars = with.expected.1 - without.expected.1;
+        assert!(
+            (dollars * 1_000_000.0 - (est.input_tokens + est.output_tokens)).abs() < 1.0,
+            "{dollars} vs {est:?}"
+        );
+        assert_eq!(
+            with.expected.2, without.expected.2,
+            "same calls whatever the price"
+        );
+        // The calls include one per site: a one-rule repo with nothing else switched on makes
+        // one scan pass, one resolution pass and one stage 1 call per site.
+        let small = RunRepoInput {
+            repo: "small".into(),
+            code_chars: 2_000,
+            selected: 1,
+            multi_option_selected: 0,
+            routing_groups: 1,
+        };
+        let no_regen = RunFlags {
+            terse_output: false,
+            ..flags()
+        };
+        let small_sites = estimated_sites(&small, "parallel");
+        assert!(small_sites > 0);
+        let small_run = estimate_run_cost_bounds(&small, "parallel", &models(cal), no_regen);
+        assert_eq!(small_run.expected.2, 2 + small_sites);
     }
 
     fn within(estimate: f64, actual: f64, share: f64) -> bool {
@@ -3179,7 +3176,12 @@ mod tests {
         // The calls: the recorded Sonnet run made 119 (22 scan, 2 alternatives, 3 calibration,
         // 30 detail, 60 fix, 2 judge), most of them the repeats retry fixes F1 removed; a clean
         // run makes far fewer, and the estimate counts the stages, not the repeats.
-        assert!(sonnet_calls > 30 && sonnet_calls < 119, "{sonnet_calls}");
+        // One stage 1 call per site replaces the 3 calibration calls of the recorded run.
+        let sites = estimated_sites(&fixture(), "parallel");
+        assert!(
+            sonnet_calls > 30 && sonnet_calls < 119 - 3 + sites,
+            "{sonnet_calls}"
+        );
         assert!(haiku_calls > 30, "{haiku_calls}");
     }
 
@@ -3276,11 +3278,11 @@ mod tests {
         assert!(usd("claude-opus-5-5") > usd("claude-sonnet-5-5"));
     }
 
-    /// Batch mode halves the scan passes' price, thorough mode triples calibration, the CLI
+    /// Batch mode halves the scan passes' price, the CLI
     /// backend pays the cache write on every call: the run estimate keeps all three behaviours
     /// of the older one.
     #[test]
-    fn batch_thorough_and_the_cli_backend_still_move_the_estimate() {
+    fn batch_and_the_cli_backend_still_move_the_estimate() {
         let m = RunModels {
             scan: SONNET,
             calibration: SONNET,
@@ -3290,11 +3292,6 @@ mod tests {
         let usd =
             |mode: &str, f: RunFlags| estimate_run_cost_bounds(&fixture(), mode, &m, f).expected.1;
         assert!(usd("batch", flags()) < usd("parallel", flags()));
-        let thorough = RunFlags {
-            thorough: true,
-            ..flags()
-        };
-        assert!(usd("parallel", thorough) > usd("parallel", flags()));
         let cli = RunFlags {
             backend: ProjectBackend::Cli,
             ..flags()

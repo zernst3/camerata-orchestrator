@@ -933,3 +933,58 @@ async fn every_site_request_marks_the_shared_prefix_for_the_prompt_cache() {
         assert_eq!(r.system, reqs[0].system, "and the same system prompt");
     }
 }
+
+// ── The client's explanation carries no engine bookkeeping ─────────────────────────────────
+
+/// A calibrated site's client `detail` is exactly the text it had before calibration: no
+/// `[calibrated: ...]` and no `[needs review: ...]`, whatever the verdict. The reason lives in the
+/// row's stage 1 record and nowhere in client text.
+#[test]
+fn a_calibrated_sites_client_detail_is_exactly_its_pre_calibration_text() {
+    for (real, reason) in [
+        ("yes", "reachable without a check"),
+        ("unclear", "the caller is not shown"),
+        ("no", "the guard is two lines up"),
+    ] {
+        let before = site("a.rs", 1);
+        let raw = format!(
+            r#"{{"verdicts":[{{"index":0,"severity":"high","real":"{real}","effort":"low","reason":"{reason}"}}]}}"#
+        );
+        let out = apply(&raw, vec![before.clone()]).remove(0);
+        assert_eq!(out.detail, before.detail, "real: {real}");
+        assert!(!out.detail.contains("[calibrated"));
+        assert!(!out.detail.contains("[needs review"));
+        assert_eq!(stage1_of(&out).expect("kept on the row").reason, reason);
+    }
+}
+
+// ── The estimator's figures are the engine's ───────────────────────────────────────────────
+
+/// The pre-flight prices stage 1 from constants in ui-core. They must be the engine's own: the
+/// reply budget per site is the one the request cap is built from, and the shared prefix (system
+/// prompt plus shared opening) is the size the real prompt is, within a fifth.
+#[test]
+fn the_estimator_prices_stage_one_from_the_engines_own_figures() {
+    use camerata_ui_core::scan::{CALIBRATION_OUTPUT_TOKENS_PER_SITE, CALIBRATION_PREFIX_TOKENS};
+    assert_eq!(
+        CALIBRATION_OUTPUT_TOKENS_PER_SITE,
+        f64::from(VERIFY_TOKENS_PER_FINDING)
+    );
+    let items = Stage1Items::build(
+        "acme/app",
+        &[site("a.rs", 1)],
+        None,
+        &Stage1Inputs::new("This is a Next.js repo with 3 code files."),
+    );
+    let prefix_bytes = items.system_len() + items.shared_prefix().len();
+    let tokens = prefix_bytes.div_ceil(CHARS_PER_TOKEN_ESTIMATE) as f64;
+    // The estimate is made with 4 characters a token, as the rest of the estimator is, so compare
+    // on the same footing.
+    let tokens_at_four = prefix_bytes as f64 / 4.0;
+    assert!(
+        (tokens_at_four - CALIBRATION_PREFIX_TOKENS).abs() < 0.2 * CALIBRATION_PREFIX_TOKENS
+            || (tokens - CALIBRATION_PREFIX_TOKENS).abs() < 0.2 * CALIBRATION_PREFIX_TOKENS,
+        "the prefix is {prefix_bytes} bytes ({tokens_at_four} tokens at 4 a token) against the \
+         estimator's {CALIBRATION_PREFIX_TOKENS}"
+    );
+}

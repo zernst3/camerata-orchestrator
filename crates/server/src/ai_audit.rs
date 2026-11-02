@@ -1117,7 +1117,6 @@ fn batch_estimate_usd(
             clone_judge: None,
         },
         RunFlags {
-            thorough: false,
             deep: false,
             backend: crate::llm::ProjectBackend::Api,
             terse_output,

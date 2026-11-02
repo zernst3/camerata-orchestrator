@@ -170,7 +170,7 @@ fn grouped_rows_are_redacted_when_a_member_was_not() {
 }
 
 #[test]
-fn needs_review_reason_appended_to_detail_is_redacted() {
+fn the_stage1_reason_kept_on_the_row_is_redacted_and_never_reaches_the_detail() {
     let p = secret();
     let findings = vec![Finding {
         detail: "A finding.".to_string(),
@@ -183,12 +183,7 @@ fn needs_review_reason_appended_to_detail_is_redacted() {
     .to_string();
     let out = apply_verdicts(&raw, findings);
     assert_eq!(out.len(), 1);
-    assert!(out[0].detail.contains("[calibrated:"), "{}", out[0].detail);
-    assert!(
-        !out[0].detail.contains("[needs review"),
-        "{}",
-        out[0].detail
-    );
+    assert_eq!(out[0].detail, "A finding.", "the client text is untouched");
     assert!(!out[0].detail.contains(&p.value));
     assert!(detect_secrets(&out[0].detail).is_empty());
     // The reason kept on the row for the group reviewer is redacted too.

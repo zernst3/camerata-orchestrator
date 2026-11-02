@@ -999,7 +999,6 @@ fn the_batch_fallback_estimate_is_the_run_estimate() {
                 clone_judge: None,
             },
             RunFlags {
-                thorough: false,
                 deep: false,
                 backend: crate::llm::ProjectBackend::Api,
                 terse_output: terse,

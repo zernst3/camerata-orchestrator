@@ -1349,6 +1349,36 @@ pub(super) fn audit_rules_json(rules: &[SelectedAuditRule]) -> Vec<serde_json::V
         .collect()
 }
 
+/// The body of an audit request, shared by the synchronous and the background-job routes. The
+/// retired `thorough` option is not part of it: calibration runs one pass per site whatever a
+/// client sends, so nothing in the request can change that.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn audit_request_json(
+    repos: &[String],
+    rules: &[SelectedAuditRule],
+    model: &str,
+    calibration_model: &str,
+    mode: &str,
+    incremental: bool,
+    deep: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    max_cost_usd: Option<f64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "repos": repos,
+        "rules": audit_rules_json(rules),
+        "model": model,
+        "calibration_model": calibration_model,
+        "mode": mode,
+        "incremental": incremental,
+        "deep": deep,
+        "run_ai_review": run_ai_review,
+        "run_deterministic": run_deterministic,
+        "max_cost_usd": max_cost_usd,
+    })
+}
+
 /// Phase 2 — audit the repos against the selected rules (each carrying its repo binding).
 /// When `deep` is true, the server also runs the three deep-tier lenses (SOC-2 gap,
 /// deep security, threat model) and attaches the results to `report.deep`.
@@ -1359,7 +1389,6 @@ pub(super) async fn audit_against(
     model: &str,
     calibration_model: &str,
     mode: &str,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     run_ai_review: bool,
@@ -1368,22 +1397,21 @@ pub(super) async fn audit_against(
 ) -> Option<ScanReportView> {
     // Loading guard: the Bombe machine runs for the full audit round-trip.
     let _guard = crate::loading::LoadingGuard::new();
-    let rule_json = audit_rules_json(rules);
+    let body = audit_request_json(
+        repos,
+        rules,
+        model,
+        calibration_model,
+        mode,
+        incremental,
+        deep,
+        run_ai_review,
+        run_deterministic,
+        max_cost_usd,
+    );
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::bff_base()))
-        .json(&serde_json::json!({
-            "repos": repos,
-            "rules": rule_json,
-            "model": model,
-            "calibration_model": calibration_model,
-            "mode": mode,
-            "thorough": thorough,
-            "incremental": incremental,
-            "deep": deep,
-            "run_ai_review": run_ai_review,
-            "run_deterministic": run_deterministic,
-            "max_cost_usd": max_cost_usd,
-        }))
+        .json(&body)
         .send()
         .await
         .ok()?
@@ -1899,29 +1927,27 @@ pub(super) async fn audit_job_start(
     model: &str,
     calibration_model: &str,
     exec_mode: &str,
-    thorough: bool,
     incremental: bool,
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
     max_cost_usd: Option<f64>,
 ) -> Option<String> {
-    let rule_json = audit_rules_json(rules);
+    let body = audit_request_json(
+        repos,
+        rules,
+        model,
+        calibration_model,
+        exec_mode,
+        incremental,
+        deep,
+        run_ai_review,
+        run_deterministic,
+        max_cost_usd,
+    );
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::bff_base()))
-        .json(&serde_json::json!({
-            "repos": repos,
-            "rules": rule_json,
-            "model": model,
-            "calibration_model": calibration_model,
-            "mode": exec_mode,
-            "thorough": thorough,
-            "incremental": incremental,
-            "deep": deep,
-            "run_ai_review": run_ai_review,
-            "run_deterministic": run_deterministic,
-            "max_cost_usd": max_cost_usd,
-        }))
+        .json(&body)
         .send()
         .await
         .ok()?
@@ -7965,7 +7991,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let recommended_mode = recommend_scan_mode(&report);
     let mut audit_mode = use_signal(|| recommended_mode.clone());
     // Thorough calibration (#51): opt-in, costs more AI. Off by default.
-    let mut audit_thorough = use_signal(|| false);
     // Full scan: when ON, ignore the incremental cache and re-audit every file. Off by default
     // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
     // project is full regardless (no cache yet).
@@ -8968,7 +8993,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             let model = audit_model();
                             let calib = calibration_model();
                             let mode = audit_mode();
-                            let thorough = audit_thorough();
                             let deep = audit_deep();
                             // Scan-type selector: both default true; if a user somehow unticks
                             // both, send both true (the server also coerces — never a no-op).
@@ -9027,7 +9051,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", thorough, incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -9053,7 +9077,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det, max_cost).await;
+                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, incremental, deep, ai, det, max_cost).await;
                                     if result.is_none() {
                                         // The sync request itself failed (network error, server
                                         // unreachable) — the server-side crash path already
@@ -9202,22 +9226,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                     span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
-                // Thorough calibration (#51) — opt-in, costs more AI.
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "Thorough calibration" }
-                    label { class: "audit-thorough-toggle",
-                        input {
-                            r#type: "checkbox",
-                            checked: audit_thorough(),
-                            disabled: auditing(),
-                            onchange: move |e| audit_thorough.set(e.checked()),
-                        }
-                        span { "Cross-check the calibration (uses more AI)" }
-                    }
-                    span { class: "audit-model-hint",
-                        "Calibration is the step AFTER the scan that recalibrates each finding's severity and flags debatable ones for review — it never drops a finding. Thorough mode runs that pass ~3× and keeps the conservative consensus (so one over-confident pass can't push a debatable architectural preference to HIGH), and judges findings proportionally to the repo's size. Noticeably more AI calls. Optional — the standard single-pass calibration is on by default."
-                    }
-                }
                 // Incremental scan — on by default; re-scans only pay AI for changed files.
                 // The checkbox forces a full re-scan over every file.
                 div { class: "audit-model-row",
@@ -9354,7 +9362,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             camerata_ui_core::scan::PricedModel { id, price_in, price_out }
                         }
                         let flags = camerata_ui_core::scan::RunFlags {
-                            thorough: audit_thorough(),
                             deep,
                             backend,
                             terse_output: true,
@@ -11488,6 +11495,27 @@ mod tests {
         assert_eq!(json[0]["repos"][0], "owner/repo");
     }
 
+    // ── The retired thorough option ────────────────────────────────────────────────────────
+
+    /// The thorough toggle is gone: no input the panel has can put `thorough` in a request, so the
+    /// body carries no such key, and two requests that differ only in the old toggle's value are
+    /// the same request.
+    #[test]
+    fn the_audit_request_carries_no_thorough_option() {
+        let rules = vec![super::SelectedAuditRule {
+            id: "ARCH-1".to_string(),
+            directive: "d".to_string(),
+            repos: vec!["owner/repo".to_string()],
+        }];
+        let repos = vec!["owner/repo".to_string()];
+        let body = super::audit_request_json(
+            &repos, &rules, "m", "c", "auto", true, false, true, true, None,
+        );
+        assert!(body.get("thorough").is_none(), "{body}");
+        assert_eq!(body["calibration_model"], "c");
+        assert_eq!(body["rules"][0]["id"], "ARCH-1");
+    }
+
     // ── resolve_gf_directive ──────────────────────────────────────────────────
 
     fn proposed_rule(json: serde_json::Value) -> crate::cockpit::rules::ProposedRuleView {
@@ -11808,7 +11836,6 @@ mod tests {
                 "model": "claude-opus-5",
                 "calibration_model": "claude-sonnet-4",
                 "mode": "parallel",
-                "thorough": false,
                 "incremental": true,
                 "deep": false,
                 "run_ai_review": true,
@@ -11835,7 +11862,6 @@ mod tests {
             "claude-opus-5",
             "claude-sonnet-4",
             "parallel",
-            false,
             true,
             false,
             true,
@@ -11906,7 +11932,6 @@ mod tests {
                 "model": "m",
                 "calibration_model": "c",
                 "mode": "job",
-                "thorough": false,
                 "incremental": false,
                 "deep": false,
                 "run_ai_review": true,
@@ -11934,7 +11959,6 @@ mod tests {
             "m",
             "c",
             "job",
-            false,
             false,
             false,
             true,

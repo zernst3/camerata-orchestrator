@@ -489,10 +489,10 @@ pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
 /// * `needs_review` is derived: set when stage 1 said `unclear` or the site is test code, cleared
 ///   otherwise (a stale `true` from an earlier pass does not stick). It escalates nothing by
 ///   itself.
-/// * The one-line reason is kept on the row (for the group reviewer) and, for a site rated real
-///   or unclear, appended to the detail as `[calibrated: reason]` as before. No
-///   `[needs review: ...]` suffix is written, and a `real: no` verdict writes nothing discard-shaped
-///   anywhere: it never removes a site, which only the architect does.
+/// * The one-line reason is kept on the row (for the group reviewer) in its `stage1_verdict`
+///   capture and only there: the client's `detail` is left exactly as it was, with no
+///   `[calibrated: ...]` and no `[needs review: ...]` suffix. A `real: no` verdict writes nothing
+///   discard-shaped anywhere: it never removes a site, which only the architect does.
 fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
     let mut outlier_reasons = Vec::new();
     let raw_reason = verdict.reason.as_str();
@@ -554,16 +554,11 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
         STAGE1_CAPTURE.to_string(),
         serde_json::json!({ "real": verdict.real.as_str(), "reason": reason }).to_string(),
     );
-    // A verdict of `real: no` never throws a site out, and nothing it writes may be read as saying
-    // so: the junk detection that removes a model-invented row reads its explanation for "discard
-    // this finding". So the reason reaches the explanation only for a site rated real or unclear,
-    // and never when it carries a discard verdict; it stays in full on the row's stage 1 record.
-    let writes_to_detail = verdict.real != Real::No
-        && !reason.is_empty()
-        && !crate::junk_finding::carries_discard_verdict(&reason);
-    if writes_to_detail {
-        f.detail = format!("{} [calibrated: {reason}]", f.detail);
-    }
+    // The reason stays in the row's stage 1 record and goes nowhere else. The client's explanation
+    // is left exactly as it was before calibration: no `[calibrated: ...]` and no
+    // `[needs review: ...]`, which would put engine bookkeeping in the client's text. In particular
+    // a `real: no` verdict never writes anything the junk detection could read as "discard this
+    // finding": it never removes a site, which only the architect does.
     f
 }
 
@@ -724,6 +719,12 @@ impl<'a> Stage1Items<'a> {
         }
     }
 
+    /// Bytes of the system prompt every request of the run carries.
+    #[cfg(test)]
+    pub(super) fn system_len(&self) -> usize {
+        self.system.len()
+    }
+
     pub(super) fn len(&self) -> usize {
         self.findings.len()
     }
@@ -749,7 +750,7 @@ impl<'a> Stage1Items<'a> {
 
     /// The part of every site's prompt that is the same for all of them: the repository line and
     /// the proportionality paragraph. The system prompt and this text are the cacheable prefix.
-    fn shared_prefix(&self) -> String {
+    pub(super) fn shared_prefix(&self) -> String {
         let mut prompt = format!("Repository: {}\n", self.repo);
         // Proportionality signal: a small or young codebase must not be held to the architecture
         // of a large one.
