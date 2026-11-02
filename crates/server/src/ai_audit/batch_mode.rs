@@ -335,22 +335,38 @@ pub(crate) fn plan_sub_batches(
     ctx: &RoundContext<'_>,
     work: &[&BatchWork],
 ) -> Vec<std::ops::Range<usize>> {
+    plan_item_ranges(
+        work.iter().map(|w| (w.custom_id.as_str(), &w.req)),
+        ctx.model,
+        ctx.max_body_bytes,
+    )
+}
+
+/// [`plan_sub_batches`] for any list of `(custom id, request)` pairs: the shared batch runner
+/// plans every post-scan stage with it. The same items always split at the same places.
+pub(crate) fn plan_item_ranges<'a>(
+    items: impl Iterator<Item = (&'a str, &'a LlmRequest)>,
+    model: &str,
+    max_body_bytes: usize,
+) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0usize;
     let mut bytes = 0usize;
-    for (i, w) in work.iter().enumerate() {
-        let item = crate::llm::build_batch_item(&w.custom_id, &w.req, ctx.model, CacheTtl::OneHour);
+    let mut len = 0usize;
+    for (i, (custom_id, req)) in items.enumerate() {
+        len = i + 1;
+        let item = crate::llm::build_batch_item(custom_id, req, model, CacheTtl::OneHour);
         // The item plus the comma that joins it to the next.
         let size = serde_json::to_vec(&item).map_or(0, |b| b.len()) + 1;
-        if i > start && (i - start >= BATCH_CAP || bytes + size > ctx.max_body_bytes) {
+        if i > start && (i - start >= BATCH_CAP || bytes + size > max_body_bytes) {
             ranges.push(start..i);
             start = i;
             bytes = 0;
         }
         bytes += size;
     }
-    if start < work.len() {
-        ranges.push(start..work.len());
+    if start < len {
+        ranges.push(start..len);
     }
     ranges
 }
@@ -550,16 +566,16 @@ pub(crate) async fn submit_round(
 }
 
 /// Why a sub-batch yielded no rows, and whether the API had accepted it by then.
-struct SubBatchFailure {
+pub(crate) struct SubBatchFailure {
     /// The id of the accepted batch, or `None` when the submit itself failed (nothing accepted).
-    batch_id: Option<String>,
-    error: anyhow::Error,
+    pub batch_id: Option<String>,
+    pub error: anyhow::Error,
 }
 
 /// Tell the run's outage counter how a Message Batches call went (submit, poll or fetch, after
 /// the transport's own retries): a success starts the streak over, a failure adds to it. A
 /// provider outage during batch mode therefore stops the run like one in real-time mode.
-fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Result<T>) {
+pub(crate) fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Result<T>) {
     let Some(m) = meter else { return };
     match result {
         Ok(_) => m.health().note_success(),
@@ -567,6 +583,88 @@ fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Result<T>) {
             .health()
             .note_failure(classify_pass_error(e), &e.to_string()),
     }
+}
+
+/// After this many polls in a row fail, the job is no longer touched, so its idle time grows and
+/// the cockpit's stall warning can fire. One or two failed polls are a blip: the batch is still
+/// running server-side and the job is alive (design 6.3).
+pub(crate) const STALL_AFTER_FAILED_POLLS: u32 = 3;
+
+/// Where a poll loop reports its progress on the job: which stage, how many of its items had
+/// already ended in earlier batches, and how many it submitted in all (`None`: just this batch).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PollProgress {
+    pub stage: Stage,
+    pub done_before: usize,
+    pub total: Option<usize>,
+}
+
+/// Counts every poll tick of one batch for the job: a successful poll (and a failed one while the
+/// streak is short) touches the job's activity, and each successful poll sets the stage's
+/// progress from the provider's own counts.
+pub(crate) struct PollTicker<'a> {
+    job: Option<(&'a crate::jobs::JobStore, &'a str)>,
+    progress: Option<PollProgress>,
+    failures: std::sync::atomic::AtomicU32,
+}
+
+impl<'a> PollTicker<'a> {
+    pub(crate) fn new(
+        job: Option<(&'a crate::jobs::JobStore, &'a str)>,
+        progress: Option<PollProgress>,
+    ) -> Self {
+        Self {
+            job,
+            progress,
+            failures: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// A poll answered: the streak starts over, the job is touched and its progress set.
+    pub(crate) fn ok(&self, status: &BatchStatus) {
+        self.failures.store(0, std::sync::atomic::Ordering::SeqCst);
+        let Some((jobs, id)) = self.job else { return };
+        jobs.touch_activity(id);
+        if let Some(p) = self.progress {
+            let c = &status.request_counts;
+            let ended = (c.succeeded + c.errored + c.canceled + c.expired) as usize;
+            let in_batch = ended + c.processing as usize;
+            jobs.set_stage_progress(
+                id,
+                p.stage,
+                p.done_before + ended,
+                p.total.unwrap_or(p.done_before + in_batch),
+            );
+        }
+    }
+
+    /// A poll failed. The job is touched while fewer than [`STALL_AFTER_FAILED_POLLS`] polls in a
+    /// row have failed; from the third it is left to go idle. Returns `true` once it is stalled.
+    pub(crate) fn failed(&self) -> bool {
+        let n = self
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if n < STALL_AFTER_FAILED_POLLS {
+            if let Some((jobs, id)) = self.job {
+                jobs.touch_activity(id);
+            }
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// The poll interval: the Anthropic spec recommends at least a second between polls and 10s is
+/// gentle. `CAMERATA_BATCH_POLL_SECS` overrides.
+pub(crate) fn batch_poll_interval() -> std::time::Duration {
+    let poll_secs = std::env::var("CAMERATA_BATCH_POLL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10);
+    std::time::Duration::from_secs(poll_secs)
 }
 
 /// Submit one sub-batch, poll it until it has ended, and fetch its rows. A failed submit is
@@ -596,19 +694,40 @@ async fn submit_poll_fetch(
     if let Some((jstore, jid)) = ctx.job {
         jstore.set_batch_id(jid, &batch_id);
     }
-    // The Anthropic spec recommends >= 1s between polls; 10s is gentle.
-    // `CAMERATA_BATCH_POLL_SECS` overrides.
-    let poll_secs = std::env::var("CAMERATA_BATCH_POLL_SECS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(10);
-    let interval = std::time::Duration::from_secs(poll_secs);
-    let attempts = if ctx.fatal_errors {
+    let progress = PollProgress {
+        stage: Stage::ScanPass,
+        done_before: 0,
+        total: Some(n_items),
+    };
+    poll_and_fetch(
+        ctx,
+        &batch_id,
+        ttl,
+        batch_poll_interval(),
+        Some(progress),
+        ctx.fatal_errors,
+    )
+    .await
+}
+
+/// Poll a batch that was accepted until it has ended and fetch its rows, attempted up to
+/// [`POST_SUBMIT_ATTEMPTS`] times (once when `fatal_errors`). Every poll tick touches the job and
+/// sets the stage's progress ([`PollTicker`]). Also how a resume picks up a batch an earlier
+/// process submitted: it polls and fetches by id, never submits.
+pub(crate) async fn poll_and_fetch(
+    ctx: &RoundContext<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    interval: std::time::Duration,
+    progress: Option<PollProgress>,
+    fatal_errors: bool,
+) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    let attempts = if fatal_errors {
         1
     } else {
         POST_SUBMIT_ATTEMPTS
     };
+    let ticker = PollTicker::new(ctx.job, progress);
     let mut last_error = None;
     for attempt in 0..attempts {
         if attempt > 0 {
@@ -620,8 +739,14 @@ async fn submit_poll_fetch(
         }
         let polled = poll_batch_until_ended(
             || async {
-                let polled = ctx.api.poll(&batch_id).await;
+                let polled = ctx.api.poll(batch_id).await;
                 note_batch_call(ctx.meter, &polled);
+                match &polled {
+                    Ok(status) => ticker.ok(status),
+                    Err(_) => {
+                        ticker.failed();
+                    }
+                }
                 polled
             },
             interval,
@@ -641,7 +766,7 @@ async fn submit_poll_fetch(
         .await;
         let fetched = match polled {
             Ok(()) => {
-                let fetched = ctx.api.fetch(&batch_id, ttl).await;
+                let fetched = ctx.api.fetch(batch_id, ttl).await;
                 note_batch_call(ctx.meter, &fetched);
                 fetched
             }
@@ -653,7 +778,7 @@ async fn submit_poll_fetch(
         }
     }
     Err(SubBatchFailure {
-        batch_id: Some(batch_id),
+        batch_id: Some(batch_id.to_string()),
         error: last_error.unwrap_or_else(|| anyhow::anyhow!("no attempt was made")),
     })
 }
