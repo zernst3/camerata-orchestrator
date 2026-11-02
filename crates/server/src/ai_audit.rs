@@ -13552,6 +13552,9 @@ use detail_regen::regenerate_full_details;
 mod detail_regen_tests;
 
 mod batch_mode;
+pub mod stage_batch;
+#[cfg(test)]
+mod stage_batch_tests;
 pub use batch_mode::{
     resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
 };

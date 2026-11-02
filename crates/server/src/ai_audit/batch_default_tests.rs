@@ -239,7 +239,7 @@ impl BatchApi for FakeBatch {
     async fn poll(&self, _batch_id: &str) -> anyhow::Result<BatchStatus> {
         self.polls.fetch_add(1, Ordering::SeqCst);
         if self.poll_fails {
-            anyhow::bail!("Message Batches API HTTP 503: {{\"error\":{{\"type\":\"overloaded_error\",\"message\":\"try later\"}}}}");
+            anyhow::bail!("Message Batches API HTTP 503: {{\"error\":{{\"type\":\"api_error\",\"message\":\"service unavailable, try later\"}}}}");
         }
         Ok(BatchStatus {
             processing_status: "ended".to_string(),
@@ -753,7 +753,8 @@ async fn a_failed_poll_after_a_successful_submit_is_never_resubmitted() {
         assert!(f.error.contains("not resubmitted"), "{}", f.error);
         assert!(!f.error.contains("{"), "never a response body: {}", f.error);
         assert!(
-            f.error.contains("overloaded_error: try later"),
+            f.error
+                .contains("api_error: service unavailable, try later"),
             "{}",
             f.error
         );

@@ -11,6 +11,8 @@
 //! * a transport failure (after the transport's own retries) adds to the streak, and the run
 //!   stops at [`OUTAGE_STREAK`] in a row;
 //! * an auth or billing failure stops the run at once (waiting does not fix a key or a balance);
+//! * a rate limit (a 429 that outlasted the transport's retries) neither counts nor resets: it
+//!   is a pause, and the batch runner waits it out under its own deadline;
 //! * a content failure (a cut-off or malformed reply) neither counts nor resets: the provider
 //!   answered, so it is not an outage, and it is not proof the provider is healthy either.
 //!
@@ -74,8 +76,11 @@ impl RunHealth {
                 FailureClass::AuthOrBilling,
                 format!("the provider refused the credentials or the account (last: {detail})"),
             ),
-            // The provider answered: not an outage, and not proof of health either.
+            // The provider answered: not an outage, and not proof of health either. A rate limit
+            // is the provider asking for a slower pace, so a streak of them is a pause that the
+            // batch runner waits out under its own wall-clock deadline, never an outage stop.
             FailureClass::Content
+            | FailureClass::RateLimited
             | FailureClass::SpendLimit
             | FailureClass::OutageStop
             | FailureClass::Io => {}
@@ -162,6 +167,66 @@ mod tests {
         h.note_failure(FailureClass::Transport, "c");
         assert!(h.is_stopped());
         assert_eq!(h.trigger().unwrap().class, FailureClass::Transport);
+    }
+
+    /// Zach 2026-11-02 (design 6.1): a 429 streak is a pause, not an outage. Rate-limited failures
+    /// neither count toward the streak nor reset it, however many arrive.
+    #[test]
+    fn rate_limited_streak_does_not_trip_the_outage_stop() {
+        let h = RunHealth::default();
+        for _ in 0..50 {
+            h.note_failure(FailureClass::RateLimited, "HTTP 429");
+        }
+        assert!(!h.is_stopped(), "fifty 429s in a row are a pause");
+        assert_eq!(h.streak(), 0, "and they add nothing to the streak");
+        // They do not reset a transport streak either: two transport failures, then 429s, then a
+        // third transport failure is still an outage.
+        h.note_failure(FailureClass::Transport, "a");
+        h.note_failure(FailureClass::Transport, "b");
+        h.note_failure(FailureClass::RateLimited, "HTTP 429");
+        assert_eq!(h.streak(), 2);
+        h.note_failure(FailureClass::Transport, "c");
+        assert!(h.is_stopped());
+    }
+
+    /// Fable wave 3: an overload (529, `overloaded_error`) is the provider being busy, a pause like
+    /// a 429. Real errors, classified by the transport's own rules, never reach the streak; a
+    /// connection failure, a timeout and a 500 to 504 still do.
+    #[test]
+    fn three_overloads_in_a_row_do_not_trip_the_outage_stop_but_connection_failures_still_do() {
+        use camerata_llm::failure::{classify_error, classify_http, LlmCallFailure};
+        let typed = |status: u16, etype: Option<&str>| {
+            let (class, _) = classify_http(status, etype, "x");
+            anyhow::Error::new(LlmCallFailure::new(class, format!("HTTP {status}")))
+        };
+        let overloads = [
+            typed(529, Some("overloaded_error")),
+            typed(529, None),
+            anyhow::anyhow!("API Error: 529 overloaded_error"),
+            typed(200, Some("overloaded_error")),
+        ];
+        let h = RunHealth::default();
+        for e in &overloads {
+            h.note_failure(classify_error(e), &e.to_string());
+        }
+        assert!(!h.is_stopped(), "four overloads in a row are a pause");
+        assert_eq!(h.streak(), 0);
+
+        for outage in [
+            typed(500, None),
+            typed(502, None),
+            typed(503, None),
+            typed(504, None),
+            typed(408, None),
+            anyhow::anyhow!("connection reset by peer"),
+            anyhow::anyhow!("request timed out"),
+        ] {
+            let h = RunHealth::default();
+            for _ in 0..OUTAGE_STREAK {
+                h.note_failure(classify_error(&outage), &outage.to_string());
+            }
+            assert!(h.is_stopped(), "{outage} three times is an outage");
+        }
     }
 
     #[test]
