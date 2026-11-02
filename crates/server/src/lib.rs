@@ -5894,7 +5894,6 @@ async fn onboard_scan(
     // (`onboard_audit`) already do this; without it here, a floor-only `/api/onboard/scan`
     // leaves `last_scan` empty and the chat shows "no scan results yet". Fail-soft, keyed by
     // the active project (the same id `active_project_context` reads).
-    report.assign_site_keys();
     if let Some(id) = state.projects.active().map(|p| p.id) {
         state.set_last_scan(id, report.clone());
     }
@@ -19541,6 +19540,9 @@ mod lib_multirepo_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod site_key_paths_tests;
 
 #[cfg(test)]
 mod tests {
