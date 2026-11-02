@@ -303,20 +303,16 @@ async fn a_failed_fix_stage_does_not_set_aside_the_replies_that_were_accepted() 
 }
 
 /// The give-up carries the same reasons per finding into the failed part's attempts, and from
-/// there into failures.json and failures.md.
+/// there into failures.json and failures.md. (A fix that fails a wording check is no longer a
+/// give-up, M4: it ships flagged after one re-ask. The give-up here is a reply that holds no fix
+/// for the finding in any round.)
 #[tokio::test]
 async fn a_fix_give_up_records_the_reason_per_finding_in_its_attempts_and_in_failures_json() {
-    struct AlwaysInvents;
+    struct AlwaysEmpty;
     #[async_trait::async_trait]
-    impl LlmPort for AlwaysInvents {
-        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
-            Ok(response(
-                &super::reply_schemas::check::address_by_id(
-                    &req.prompt,
-                    r#"{"fixes":[{"index":0,"fix":"Call `neverInEvidence` first."}]}"#,
-                ),
-                false,
-            ))
+    impl LlmPort for AlwaysEmpty {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            Ok(response(r#"{"fixes":[]}"#, false))
         }
         async fn complete_streaming(
             &self,
@@ -332,7 +328,7 @@ async fn a_fix_give_up_records_the_reason_per_finding_in_its_attempts_and_in_fai
     let (findings, files) = two_fix_findings();
     let findings = vec![findings[0].clone()];
     let (_out, failed) =
-        generate_fix_specifics(&AlwaysInvents, "o/r", findings, &files, None, None, None).await;
+        generate_fix_specifics(&AlwaysEmpty, "o/r", findings, &files, None, None, None).await;
     assert_eq!(failed.len(), 1);
     let with_reasons: Vec<&camerata_llm::failure::AttemptRecord> = failed[0]
         .attempts
@@ -342,14 +338,14 @@ async fn a_fix_give_up_records_the_reason_per_finding_in_its_attempts_and_in_fai
     assert_eq!(with_reasons.len(), 1, "{:?}", failed[0].attempts);
     let reason = &with_reasons[0].rejections[0];
     assert!(reason.contains("src/db.ts:2"), "{reason}");
-    assert!(reason.contains("neverInEvidence"), "{reason}");
+    assert!(reason.contains("did not return a fix"), "{reason}");
 
     let mut report = crate::release_gate::test_scan_report();
     report.failed_passes = failed;
     let built = crate::failure_report::build(&report);
     let json = serde_json::to_string(&built).unwrap();
     assert!(json.contains("\"rejections\""), "{json}");
-    assert!(json.contains("neverInEvidence"), "{json}");
+    assert!(json.contains("did not return a fix"), "{json}");
     assert!(built.render_md().contains("turned down:"), "md lists them");
 }
 

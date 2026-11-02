@@ -28,13 +28,24 @@
 //! statement stays borderline. An entry that fails is simply not written, exactly like one the
 //! model left out.
 //!
+//! # One attempt, then a flag
+//!
+//! The checks of [`accept_entry`] judge wording, and a reviewer reads every row, so a reply that
+//! fails one gets exactly ONE re-ask (with the check's feedback line). If the second reply fails
+//! too, the better of the two ships and the failure is recorded on the row as a review flag
+//! (`precondition_added`, `unverified_name:<token>`; see [`crate::review_flags`]). A reply that
+//! adds an exploit precondition is never the text that ships (it would silently stop
+//! calibration raising a severity on a claim nobody made): when no reply is free of one, the
+//! scan's own statement plus the checked fix direction ships. Never a third round for wording,
+//! never a held run.
+//!
 //! # Never short, never dropped
 //!
-//! A finding the regeneration could not rewrite (the call failed, the spend limit stopped the
-//! stage, the model left it out or failed a check twice) stays in the result with its short
-//! detail and a visible [`DETAIL_INCOMPLETE_MARKER`], and the run reports a `FailedPass`, the same
-//! path every other degraded stage uses. So the export can hold a short detail only with the
-//! marker beside it.
+//! A finding the regeneration could not rewrite for a reason that is not wording (the call
+//! failed, the spend limit stopped the stage, the model left it out) stays in the result with its
+//! short detail and a visible [`DETAIL_INCOMPLETE_MARKER`], and the run reports a `FailedPass`,
+//! the same path every other degraded stage uses. So the export can hold a short detail only with
+//! the marker beside it.
 
 use super::*;
 use crate::stage_telemetry::DetailRejections;
@@ -640,6 +651,16 @@ pub(super) enum Reject {
 }
 
 impl Reject {
+    /// The review flag this failure leaves on a row that ships despite it.
+    pub(super) fn flag(&self) -> String {
+        match self {
+            Self::DropsNamedToken(token) => {
+                format!("{}:{token}", crate::review_flags::UNVERIFIED_NAME)
+            }
+            Self::InventedPrecondition => crate::review_flags::PRECONDITION_ADDED.to_string(),
+        }
+    }
+
     /// The reason in words, for the saved reply and the failure report.
     pub(super) fn reason(&self) -> String {
         match self {
@@ -961,26 +982,28 @@ pub(super) fn names_to_keep(f: &Finding, files: &[(String, String)]) -> Vec<Stri
 /// The checks one entry must pass to be written (the id match is done by the caller, which
 /// knows the batch; the entry carries no location, because Camerata attaches the finding's).
 /// Returns the text to write: the model's, with `Borderline: ` put back at the
-/// front when the statement was borderline and the text lost it. `files` is the file set a
-/// named path is looked up in (see [`named_tokens`]).
-pub(super) fn accept_entry(
+/// front when the statement was borderline and the text lost it, and EVERY check the text
+/// failed, in the order the checks run (dropped names, then an invented precondition).
+/// `files` is the file set a named path is looked up in (see [`named_tokens`]).
+pub(super) fn check_entry(
     f: &Finding,
     entry: &Entry,
     code_shown: &str,
     files: &[(String, String)],
-) -> Result<String, Reject> {
+) -> Checked {
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
+    let mut failures: Vec<Reject> = Vec::new();
     // Every path or identifier the statement named stays; a compound name stays as its parts.
     // The list is the one the prompt printed under `Names to keep:` ([`names_to_keep`]). Both
     // sides go through the same secret redaction: the text is what would be written, and a
     // name the redactor rewrites in the statement is rewritten the same way in the text, so a
     // kept secret-shaped name is not mistaken for a dropped one.
-    if let Some(missing) = names_to_keep(f, files)
+    for missing in names_to_keep(f, files)
         .into_iter()
-        .find(|name| !text.contains(name.as_str()))
+        .filter(|name| !text.contains(name.as_str()))
     {
-        return Err(Reject::DropsNamedToken(missing));
+        failures.push(Reject::DropsNamedToken(missing));
     }
     // No new exploit precondition. The same phrase list as calibration's raise-block and the D5
     // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would
@@ -998,26 +1021,96 @@ pub(super) fn accept_entry(
         && !mentions_exploit_precondition(short)
         && !mentions_exploit_precondition(code_shown)
     {
-        return Err(Reject::InventedPrecondition);
+        failures.push(Reject::InventedPrecondition);
     }
     // A borderline statement stays borderline, deterministically.
-    if is_borderline(short) && !is_borderline(&text) {
-        return Ok(format!("Borderline: {text}"));
-    }
-    Ok(text)
+    let text = if is_borderline(short) && !is_borderline(&text) {
+        format!("Borderline: {text}")
+    } else {
+        text
+    };
+    Checked { text, failures }
 }
 
-/// What the rounds learned about findings turned down for inventing an exploit precondition (the
-/// fallback of [`regenerate_full_details`]).
+/// What [`check_entry`] found: the text that would be written and the checks it failed (none: it
+/// passes).
+pub(super) struct Checked {
+    pub text: String,
+    pub failures: Vec<Reject>,
+}
+
+/// [`check_entry`] as a pass or fail: the text to write, or the FIRST check the text failed.
+#[cfg(test)]
+pub(super) fn accept_entry(
+    f: &Finding,
+    entry: &Entry,
+    code_shown: &str,
+    files: &[(String, String)],
+) -> Result<String, Reject> {
+    let checked = check_entry(f, entry, code_shown, files);
+    match checked.failures.into_iter().next() {
+        Some(reject) => Err(reject),
+        None => Ok(checked.text),
+    }
+}
+
+/// One reply that failed a wording check, kept until the finding is settled: the text that would
+/// have been written, the checks it failed and, for a split reply, the fix direction when that
+/// direction passed the same precondition check (the part of an engine fallback that may ship).
+#[derive(Debug, Clone)]
+struct FailedReply {
+    text: String,
+    failures: Vec<Reject>,
+    direction: Option<String>,
+}
+
+impl FailedReply {
+    /// Whether this reply may ship: it adds no exploit precondition.
+    fn shippable(&self) -> bool {
+        !self.failures.contains(&Reject::InventedPrecondition)
+    }
+
+    fn reasons(&self) -> String {
+        self.failures
+            .iter()
+            .map(Reject::reason)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// The replies that failed a wording check, by finding. A finding is in here from its first
+/// failed reply until it is written (a later reply passed) or settled ([`settle_wording`]). Its
+/// presence in a call's batch is what makes that call the finding's one re-ask.
 #[derive(Debug, Default)]
-struct InventionLedger {
-    /// Findings whose LATEST attempt was answered with a reply that failed only the
-    /// invented-precondition check, with the reply's fix direction when it was a split reply
-    /// (`why` and `fix_direction`) and the direction passed the same check.
-    invented: std::collections::HashMap<usize, Option<String>>,
-    /// Findings an attempt turned down for any other check (a dropped name) or got no usable
-    /// answer for (left out, cut off, a stray or duplicated id): not eligible for the fallback.
-    other_check: std::collections::HashSet<usize>,
+struct WordingLedger {
+    replies: std::collections::HashMap<usize, Vec<FailedReply>>,
+}
+
+/// Decide what a finding whose replies all failed a wording check ships, write it onto `f` and
+/// return the review flags that record the failure. No reply ever blocks the run.
+///
+/// * The best reply that adds no exploit precondition ships: the one that dropped the fewest
+///   names, the later one on a tie. Its flags are `unverified_name:<token>` for each dropped name.
+/// * When every reply added a precondition, none ships: the scan's own statement plus the latest
+///   checked fix direction does (the engine's existing text), marked as the scan's statement for
+///   the operator report. The flag is `precondition_added`.
+fn settle_wording(f: &mut Finding, replies: &[FailedReply]) -> Vec<String> {
+    let best = replies
+        .iter()
+        .rev()
+        .filter(|r| r.shippable())
+        .min_by_key(|r| r.failures.len());
+    if let Some(best) = best {
+        f.detail = compose_detail(&f.detail, &best.text);
+        return best.failures.iter().map(Reject::flag).collect();
+    }
+    if let Some(direction) = replies.iter().rev().find_map(|r| r.direction.as_deref()) {
+        f.detail = format!("{} {direction}", f.detail.trim_end());
+    }
+    let reason = replies.last().map(FailedReply::reasons).unwrap_or_default();
+    crate::report_export::mark_scan_detail(f, &reason);
+    vec![Reject::InventedPrecondition.flag()]
 }
 
 /// The reply's fix direction, when it is one the fallback may ship: non-empty, secrets redacted,
@@ -1078,16 +1171,11 @@ async fn run_detail_round(
     trail: &mut super::StageTrail,
     transport_failed: &mut std::collections::HashSet<usize>,
     why: &mut std::collections::HashMap<usize, String>,
-    invention: &mut InventionLedger,
+    wording: &mut WordingLedger,
     second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     for batch in pending.chunks(batch_size.max(1)) {
-        // The latest attempt decides whether a finding was last turned down for inventing a
-        // precondition: a batch the spend limit refused, or a call that failed, is not one.
-        for idx in batch {
-            invention.invented.remove(idx);
-        }
         // SPEND CAP, between batches: a refused batch stays pending (it ends up marked
         // incomplete, never dropped) and the stage is recorded as stopped part way.
         let _permit = match admit_stage(meter, repo, STAGE_DETAIL).await {
@@ -1101,6 +1189,12 @@ async fn run_detail_round(
         for idx in batch {
             transport_failed.remove(idx);
         }
+        // A finding that already has a reply turned down for its wording is asked again in this
+        // call: this is its one re-ask, and whatever comes back settles it.
+        let reasking: Vec<bool> = batch
+            .iter()
+            .map(|idx| wording.replies.contains_key(idx))
+            .collect();
         let mut ids: Vec<String> = Vec::with_capacity(batch.len());
         let mut blocks: Vec<Block> = Vec::with_capacity(batch.len());
         for &idx in batch {
@@ -1189,39 +1283,43 @@ async fn run_detail_round(
                 continue;
             }
             let idx = batch[pos];
-            match accept_entry(&findings[idx], entry, &blocks[pos].code_shown, files) {
-                Ok(text) => {
-                    findings[idx].detail = compose_detail(&findings[idx].detail, &text);
+            let checked = check_entry(&findings[idx], entry, &blocks[pos].code_shown, files);
+            match checked.failures.first() {
+                None => {
+                    findings[idx].detail = compose_detail(&findings[idx].detail, &checked.text);
                     written[pos] = true;
                     why.remove(&idx);
-                }
-                Err(reject) => {
-                    match &reject {
-                        Reject::DropsNamedToken(_) => {
-                            rejections.drops_named_token += 1;
-                            invention.other_check.insert(idx);
-                        }
-                        Reject::InventedPrecondition => {
-                            rejections.invented_precondition += 1;
-                            // Only a split reply (`why` and `fix_direction`) has a fix direction
-                            // to ship apart from the rejected explanation; a single `detail`
-                            // reply falls back to the scan statement alone.
-                            invention
-                                .invented
-                                .insert(idx, checked_fix_direction(entry, &blocks[pos].code_shown));
-                        }
+                    wording.replies.remove(&idx);
+                    // A row that passes carries no detail flag from an earlier attempt or run.
+                    if !crate::review_flags::flags_of(&findings[idx]).is_empty() {
+                        crate::review_flags::set_stage_flags(
+                            &mut findings[idx],
+                            crate::review_flags::FlagStage::Detail,
+                            Vec::new(),
+                        );
                     }
-                    turned_down.push((idx, reject.reason()));
+                }
+                Some(first) => {
+                    // One count per entry, under the first check it failed.
+                    match first {
+                        Reject::DropsNamedToken(_) => rejections.drops_named_token += 1,
+                        Reject::InventedPrecondition => rejections.invented_precondition += 1,
+                    }
+                    // Only a split reply (`why` and `fix_direction`) has a fix direction to ship
+                    // apart from the rejected explanation; a single `detail` reply falls back to
+                    // the scan statement alone.
+                    let reply = FailedReply {
+                        text: checked.text.clone(),
+                        failures: checked.failures.clone(),
+                        direction: checked_fix_direction(entry, &blocks[pos].code_shown),
+                    };
+                    turned_down.push((idx, reply.reasons()));
+                    wording.replies.entry(idx).or_default().push(reply);
                 }
             }
         }
         for (pos, &idx) in batch.iter().enumerate() {
             if !written[pos] {
-                // A finding with no usable answer this attempt (left out, cut off, a stray or
-                // duplicated id) did not get an answer in every round: not fallback-eligible.
-                if ambiguous[pos] || !answered[pos] {
-                    invention.other_check.insert(idx);
-                }
                 // One count per finding per attempt. An entry that failed a check was counted
                 // above under its reason; the rest are counted here.
                 if ambiguous[pos] {
@@ -1243,7 +1341,12 @@ async fn run_detail_round(
                         turned_down.push((idx, "the reply left this finding out".to_string()));
                     }
                 }
-                still_pending.push(idx);
+                // A finding that failed a wording check and has now had its one re-ask is settled
+                // from the replies it has, whatever this call returned for it; it is not asked a
+                // third time. Everything else is asked again in the next round.
+                if !(reasking[pos] && wording.replies.contains_key(&idx)) {
+                    still_pending.push(idx);
+                }
             }
         }
         // The share of this reply that bought nothing: the findings of the batch with no
@@ -1351,7 +1454,7 @@ pub(crate) async fn regenerate_full_details(
     let mut transport_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // Why each finding's latest reply was turned down, for the failed part's record.
     let mut why: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    let mut invention = InventionLedger::default();
+    let mut wording = WordingLedger::default();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -1379,7 +1482,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut trail,
                 &mut transport_failed,
                 &mut why,
-                &mut invention,
+                &mut wording,
                 false,
             )
             .await;
@@ -1390,11 +1493,17 @@ pub(crate) async fn regenerate_full_details(
         // down is not sent again: the rounds already changed the request (a smaller batch) for
         // it, and the same request a third time pays twice for the same answer. A stopped run
         // sends nothing.
-        if !pending.is_empty() {
+        // A finding with a reply turned down for its wording is settled below, not unusable.
+        let unsettled: Vec<usize> = pending
+            .iter()
+            .copied()
+            .filter(|i| !wording.replies.contains_key(i))
+            .collect();
+        if !unsettled.is_empty() {
             trail.note_unusable(
                 "no usable explanation was written after the stage's own rounds",
                 false,
-                detail_rejections(&findings, &pending, &why, &transport_failed),
+                detail_rejections(&findings, &unsettled, &why, &transport_failed),
             );
         }
         let retry: Vec<usize> = pending
@@ -1425,7 +1534,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut trail,
                 &mut transport_failed,
                 &mut why,
-                &mut invention,
+                &mut wording,
                 true,
             )
             .await;
@@ -1446,38 +1555,40 @@ pub(crate) async fn regenerate_full_details(
             m.record_detail_rejections(rejections);
         }
     }
-    // RUN TO COMPLETION (R1-1): a finding the model ANSWERED in every attempt and whose reply
-    // failed only the invented-precondition check (its other checks passed) is not an incomplete
-    // part: the stage ran. It ships the scan's own statement, which is already its detail, plus
-    // the reply's fix direction when that passed the same check. Only text that passed the checks
-    // ships; the rejected explanation never does. Work that never ran (the last call failed in
-    // transport, the spend limit or an outage stopped it, an attempt was turned down for another
-    // reason) stays pending: incomplete and resumable.
-    let fallback: Vec<usize> = pending
-        .iter()
-        .copied()
-        .filter(|i| {
-            invention.invented.contains_key(i)
-                && !invention.other_check.contains(i)
-                && !transport_failed.contains(i)
-        })
-        .collect();
-    for &idx in &fallback {
-        let reason = why.get(&idx).cloned().unwrap_or_default();
-        if let Some(Some(direction)) = invention.invented.get(&idx) {
-            let f = &mut findings[idx];
-            f.detail = format!("{} {direction}", f.detail.trim_end());
+    // WORDING NEVER BLOCKS (M4). A finding with a reply that failed a wording check is settled
+    // from the replies it has: the best one ships, or the scan's own statement when every reply
+    // added an exploit precondition, and the failure is recorded on the row as a review flag.
+    // That holds whether its one re-ask was answered, left out, refused by the spend limit or lost
+    // to transport: the stage did run on it, and a reviewer reads the flag. Only work that never
+    // produced a reply stays pending: incomplete and resumable.
+    let mut to_settle: Vec<usize> = wording.replies.keys().copied().collect();
+    to_settle.sort_unstable();
+    let mut engine_text = 0usize;
+    for idx in to_settle {
+        let Some(replies) = wording.replies.remove(&idx) else {
+            continue;
+        };
+        let flags = settle_wording(&mut findings[idx], &replies);
+        if !replies.iter().any(FailedReply::shippable) {
+            engine_text += 1;
         }
-        crate::report_export::mark_scan_detail(&mut findings[idx], &reason);
-    }
-    if !fallback.is_empty() {
-        eprintln!(
-            "[camerata-server] detail regeneration: {} finding(s) in {repo} had no explanation \
-             pass the exploit-precondition check in any round; each ships the scan's own \
-             statement plus the accepted fix direction as its detail. The run is complete.",
-            fallback.len()
+        let recorded = crate::review_flags::set_stage_flags(
+            &mut findings[idx],
+            crate::review_flags::FlagStage::Detail,
+            flags,
         );
-        pending.retain(|i| !fallback.contains(i));
+        if let Some(m) = meter {
+            m.record_review_flags(crate::review_flags::FlagStage::Detail, &recorded);
+        }
+        pending.retain(|i| *i != idx);
+    }
+    if engine_text > 0 {
+        eprintln!(
+            "[camerata-server] detail regeneration: {engine_text} finding(s) in {repo} had no \
+             explanation pass the exploit-precondition check in either attempt; each ships the \
+             scan's own statement plus the accepted fix direction as its detail, flagged \
+             `precondition_added`. The run is complete."
+        );
     }
     let mut failed_passes = Vec::new();
     if !pending.is_empty() {

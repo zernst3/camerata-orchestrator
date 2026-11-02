@@ -177,25 +177,24 @@ async fn the_fix_stage_accepts_a_repository_name_and_turns_down_an_invented_one(
     let llm = NamingLlm::new("billing_accounts_user_id_fkey");
     let (out, failed) =
         generate_fix_specifics(&llm, "o/r", vec![f], &repo_files(), None, None, None).await;
-    assert_eq!(failed.len(), 1, "an invented name is a give-up");
-    assert!(out[0].fix_specific.is_none());
+    // M4: an invented name is a wording flag, not a give-up: one re-ask, then the reply ships
+    // flagged and the run is complete.
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(out[0]
+        .fix_specific
+        .as_deref()
+        .unwrap()
+        .contains("billing_accounts_user_id_fkey"));
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["fix_ungrounded".to_string()]
+    );
+    assert_eq!(llm.prompts().len(), 2, "one attempt and one re-ask");
     assert!(
         llm.prompts()
             .iter()
             .any(|p| p.contains("billing_accounts_user_id_fkey")
                 && p.contains("nor anywhere in the repository")),
         "the retry tells the model the name is nowhere in the repository"
-    );
-    let reasons = failed[0]
-        .attempts
-        .iter()
-        .flat_map(|a| a.rejections.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        reasons.contains("billing_accounts_user_id_fkey")
-            && reasons.contains("anywhere in the repository"),
-        "{reasons}"
     );
 }

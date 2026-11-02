@@ -179,6 +179,16 @@ pub struct FindingRow {
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
+    /// M4: the review flags the engine left on the row, comma separated. Written ONLY to the
+    /// "Review flags" column of an INTERNAL workbook (A2b: engine notes are never client output),
+    /// so it is not serialized into `findings.json` or any dataset.
+    #[serde(skip)]
+    review_flags: String,
+    /// M4: why the row is held for a reviewer's decision (evidence not found, junk text), or
+    /// empty. Internal workbook only, like [`Self::review_flags`]: an internal export may carry
+    /// held rows, each marked here.
+    #[serde(skip)]
+    held: String,
     /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
     /// (`Finding::also_locations`, verbatim). Before W7 this field reached NO artifact, so a
     /// row representing three detected sites exported as one line at one `path:line` — an
@@ -567,6 +577,8 @@ fn partition_rows(
             fix,
             is_fp,
             fp_reason,
+            review_flags: crate::review_flags::flags_of(f).join(", "),
+            held: held_reasons(f),
             also_locations: f.also_locations.clone(),
             flagged_by: f.flagged_by.clone(),
             place: f.place(),
@@ -1730,6 +1742,29 @@ const WIDTHS: [f64; 29] = [
 /// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
 const FP_REASON_COL: u16 = HEADERS.len() as u16;
 
+/// M4: the "Held" column of an INTERNAL workbook, after [`REVIEW_FLAGS_COL`].
+const HELD_COL: u16 = REVIEW_FLAGS_COL + 1;
+
+/// Why a row waits for a reviewer's decision before a client may receive it: the M5 evidence
+/// mark and the M4 junk mark. Empty for a row neither holds.
+fn held_reasons(f: &crate::onboard::Finding) -> String {
+    let mut reasons: Vec<String> = Vec::new();
+    if let Some(why) = f
+        .captures
+        .get(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+    {
+        reasons.push(format!("evidence not verified: {why}"));
+    }
+    if let Some(why) = f.captures.get(crate::junk_finding::JUNK_CONTENT_CAPTURE) {
+        reasons.push(format!("junk text: {why}"));
+    }
+    reasons.join("; ")
+}
+
+/// M4: the "Review flags" column of an INTERNAL workbook, after the False Positives reason column
+/// so no client-schema column moves. A client workbook has no such column.
+const REVIEW_FLAGS_COL: u16 = FP_REASON_COL + 1;
+
 /// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
 /// Recommended-Fix columns at the end, and W7's "Also found at" site list).
 const WRAP_COLS: [u16; 9] = [1, 8, 15, 16, 20, 21, 22, 25, 26];
@@ -1854,6 +1889,7 @@ fn write_findings_sheet(
     fmts: &Formats,
     fp_reason_col: bool,
     tab_color: Option<&str>,
+    internal: bool,
 ) -> Result<(), XlsxError> {
     let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
@@ -1867,6 +1903,10 @@ fn write_findings_sheet(
     if fp_reason_col {
         ws.write_text_with_format(0, FP_REASON_COL, "FP Reason", &fmts.header)?;
     }
+    if internal {
+        ws.write_text_with_format(0, REVIEW_FLAGS_COL, "Review flags", &fmts.header)?;
+        ws.write_text_with_format(0, HELD_COL, "Held", &fmts.header)?;
+    }
     ws.set_row_height(0, 28)?;
 
     for (c, w) in WIDTHS.iter().enumerate() {
@@ -1874,6 +1914,10 @@ fn write_findings_sheet(
     }
     if fp_reason_col {
         ws.set_column_width(FP_REASON_COL, 40.0)?;
+    }
+    if internal {
+        ws.set_column_width(REVIEW_FLAGS_COL, 36.0)?;
+        ws.set_column_width(HELD_COL, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -1895,10 +1939,21 @@ fn write_findings_sheet(
                 &fmts.cell(bg, true, false),
             )?;
         }
+        if internal {
+            ws.write_text_with_format(
+                r,
+                REVIEW_FLAGS_COL,
+                &row.review_flags,
+                &fmts.cell(None, true, false),
+            )?;
+            ws.write_text_with_format(r, HELD_COL, &row.held, &fmts.cell(None, true, false))?;
+        }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col {
+    let last_col: u16 = if internal {
+        HELD_COL
+    } else if fp_reason_col {
         FP_REASON_COL
     } else {
         FP_REASON_COL - 1
@@ -1919,6 +1974,48 @@ fn write_findings_sheet(
     // to wrap its own cells is still caught by the regression test iterating this constant).
     let _ = WRAP_COLS;
 
+    Ok(())
+}
+
+/// The name of the internal workbook's sheet of rows the engine threw out and kept (A10).
+pub const THROWN_OUT_SHEET: &str = "Thrown out by the engine";
+
+/// The internal "Thrown out by the engine" sheet: one row per thrown-out finding, with the
+/// reason, the rule, the place and the headline.
+fn write_thrown_out_sheet(
+    wb: &mut Workbook,
+    rows: &[crate::onboard::Finding],
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    let mut ws = CappedSheet::new(wb.add_worksheet());
+    ws.set_name(THROWN_OUT_SHEET)?;
+    let _ = ws.set_tab_color(Color::from("#6B7280"));
+    for (c, h) in ["Reason", "Rule", "Place", "Headline"].iter().enumerate() {
+        ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
+    }
+    ws.set_row_height(0, 28)?;
+    for (c, w) in [60.0, 30.0, 40.0, 70.0].iter().enumerate() {
+        ws.set_column_width(c as u16, *w)?;
+    }
+    for (i, f) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        let cell = fmts.cell(None, true, false);
+        ws.write_text_with_format(
+            r,
+            0,
+            crate::engine_discard::reason_of(f).unwrap_or(""),
+            &cell,
+        )?;
+        ws.write_text_with_format(r, 1, &f.rule_id, &cell)?;
+        ws.write_text_with_format(r, 2, format!("{}:{}", f.path, f.line), &cell)?;
+        ws.write_text_with_format(
+            r,
+            3,
+            crate::report_export::defect_headline(&f.detail, &f.rule_id),
+            &cell,
+        )?;
+    }
+    ws.set_freeze_panes(1, 0)?;
     Ok(())
 }
 
@@ -3251,6 +3348,7 @@ pub fn build_workbook(
         &fmts,
         false,
         None,
+        opts.internal,
     )
     .context("writing the All Findings sheet")?;
     write_deviations_sheet(&mut wb, &deviations_name, &deviation_groups, &fmts)
@@ -3265,13 +3363,22 @@ pub fn build_workbook(
             &fmts,
             false,
             Some(color.as_str()),
+            opts.internal,
         )
         .context("writing a category sheet")?;
     }
     write_dependencies_sheet(&mut wb, &dep_name, &dep_rows, &dep_coverage_notes, &fmts)
         .context("writing the Dependencies sheet")?;
-    write_findings_sheet(&mut wb, &fp_name, &fp_rows, &fmts, true, Some("#6B7280"))
-        .context("writing the False Positives sheet")?;
+    write_findings_sheet(
+        &mut wb,
+        &fp_name,
+        &fp_rows,
+        &fmts,
+        true,
+        Some("#6B7280"),
+        opts.internal,
+    )
+    .context("writing the False Positives sheet")?;
     let rules_applied_rows = build_rules_applied_rows(report, corpus);
     // W7 (G1/G3): the same concise per-tool coverage lines the PDF/JSON disclose through
     // `failed_passes` — never the notes' raw internal diagnostics.
@@ -3322,6 +3429,13 @@ pub fn build_workbook(
         &fmts,
     )
     .context("writing the Sites sheet")?;
+
+    // A10: the rows the engine threw out, for the operator. INTERNAL workbook only: a client
+    // package has no such sheet and none of these rows.
+    if opts.internal {
+        write_thrown_out_sheet(&mut wb, &report.discarded, &fmts)
+            .context("writing the Thrown out by the engine sheet")?;
+    }
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
@@ -3610,6 +3724,7 @@ mod tests {
         ScanReport {
             run_id: None,
             tree: None,
+            discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

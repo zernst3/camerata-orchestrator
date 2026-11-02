@@ -423,6 +423,82 @@ impl DetailRejections {
     }
 }
 
+/// M4: how many review flags each stage recorded on rows, and of which kind. A flag is the
+/// record of a wording problem the stage did not turn into a failure
+/// ([`crate::review_flags`]). Counted where the flag is written, so the figures can be
+/// reconciled against the flags the rows carry ([`Self::reconciles`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFlagCounts {
+    /// Flags the detail stage wrote.
+    #[serde(default)]
+    pub detail: u64,
+    /// Flags the fix stage wrote.
+    #[serde(default)]
+    pub fix: u64,
+    /// The same flags by kind (`precondition_added`, `unverified_name`, ...), the argument after
+    /// a colon left off.
+    #[serde(default)]
+    pub by_kind: BTreeMap<String, u64>,
+}
+
+impl ReviewFlagCounts {
+    /// Every flag recorded.
+    pub fn total(&self) -> u64 {
+        self.detail + self.fix
+    }
+
+    /// Whether the per-stage figures and the per-kind figures count the same flags.
+    pub fn reconciles(&self) -> bool {
+        self.total() == self.by_kind.values().sum::<u64>()
+    }
+
+    /// Count `flags` written by `stage`.
+    pub fn record(&mut self, stage: crate::review_flags::FlagStage, flags: &[String]) {
+        for flag in flags {
+            match stage {
+                crate::review_flags::FlagStage::Detail => self.detail += 1,
+                crate::review_flags::FlagStage::Fix => self.fix += 1,
+                // Counted on the scan ledger at seal, not by a model stage.
+                crate::review_flags::FlagStage::Content => continue,
+            }
+            *self
+                .by_kind
+                .entry(crate::review_flags::kind_of(flag).to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Add another tally to this one.
+    pub fn add(&mut self, other: &Self) {
+        self.detail += other.detail;
+        self.fix += other.fix;
+        for (kind, n) in &other.by_kind {
+            *self.by_kind.entry(kind.clone()).or_insert(0) += n;
+        }
+    }
+
+    /// The one operator-table line.
+    fn render(&self) -> String {
+        let kinds = self
+            .by_kind
+            .iter()
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "review flags recorded: {} ({} detail, {} fix){}",
+            self.total(),
+            self.detail,
+            self.fix,
+            if kinds.is_empty() {
+                String::new()
+            } else {
+                format!(": {kinds}")
+            }
+        )
+    }
+}
+
 /// Thread-safe per-stage accumulator (scan passes run concurrently).
 #[derive(Default)]
 pub struct StageMeter {
@@ -432,6 +508,7 @@ pub struct StageMeter {
     routing: Mutex<Option<RoutingTelemetry>>,
     candidates: Mutex<Option<CandidateTelemetry>>,
     detail_rejections: Mutex<Option<DetailRejections>>,
+    review_flags: Mutex<Option<ReviewFlagCounts>>,
     repo_maps: Mutex<Option<RepoMapTelemetry>>,
 }
 
@@ -482,6 +559,18 @@ impl StageMeter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert_with(DetailRejections::default)
             .add(&rejections);
+    }
+
+    /// Add the review flags a stage wrote on rows to the run's tally.
+    pub fn record_review_flags(&self, stage: crate::review_flags::FlagStage, flags: &[String]) {
+        if flags.is_empty() {
+            return;
+        }
+        self.review_flags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(ReviewFlagCounts::default)
+            .record(stage, flags);
     }
 
     /// Add one (chunk, rule) decision of the candidate prefilter to the run's total.
@@ -579,8 +668,14 @@ impl StageMeter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let review_flags = self
+            .review_flags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let stages = self.lock();
         StageTelemetry {
+            review_flags,
             counted_lines,
             repo_maps,
             efficiency: None,
@@ -652,6 +747,10 @@ pub struct StageTelemetry {
     /// never ran (or for a record written before this existed).
     #[serde(default)]
     pub detail_rejections: Option<DetailRejections>,
+    /// M4: how many review flags the detail and fix stages recorded on rows, by stage and kind.
+    /// `None` when no stage recorded one (or for a record written before this existed).
+    #[serde(default)]
+    pub review_flags: Option<ReviewFlagCounts>,
     /// What each call's repo map held and every fallback of the file tree to an outline. `None`
     /// when no scan call ran (or for a record written before this existed).
     #[serde(default)]
@@ -752,6 +851,9 @@ impl StageTelemetry {
         }
         if let Some(rejections) = &self.detail_rejections {
             writeln!(out, "  {}", rejections.render()).ok();
+        }
+        if let Some(flags) = &self.review_flags {
+            writeln!(out, "  {}", flags.render()).ok();
         }
         if let Some(fix) = &self.fix_outcome {
             let rate = fix
