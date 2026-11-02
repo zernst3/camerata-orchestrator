@@ -76,6 +76,22 @@ pub struct DetProgress {
     pub total: usize,
 }
 
+/// Where one post-scan stage stands inside a batch, for the cockpit's status line ("Calibration:
+/// batch msgbatch_x, 12,400 of 30,000 ended, 41 min"). Set by the shared batch runner on every
+/// poll tick from the provider's own counts.
+#[derive(Clone, Debug, Serialize, Default, PartialEq, Eq)]
+pub struct StageProgress {
+    /// The stage's short name (`calibration`, `fix`, ...).
+    pub stage: String,
+    /// Items that have ended (succeeded, errored, cancelled or expired) so far.
+    pub done: usize,
+    /// Items the stage submitted in all.
+    pub total: usize,
+    /// Epoch-ms at which this stage first reported progress, so the cockpit can show how long it
+    /// has been running.
+    pub since_ms: u128,
+}
+
 /// A live audit job's state, as the UI polls it.
 #[derive(Clone, Debug, Serialize, Default)]
 pub struct JobState {
@@ -107,6 +123,10 @@ pub struct JobState {
     /// msgbatch_01AbCd"). `None` for parallel/sequential mode jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// Where the stage currently waiting on a batch stands (see [`StageProgress`]). `None` before
+    /// any stage reports and after the job ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_progress: Option<StageProgress>,
     /// ROUTES-5: the project this job scanned, captured at creation from the active
     /// project. `latest_deep_report(project_id)` filters on this so a project's
     /// deep-report export returns ITS OWN latest deep report, not an arbitrary one.
@@ -349,6 +369,85 @@ impl JobStore {
         self.with(id, |j| j.batch_id = Some(batch_id.into()));
     }
 
+    /// Report how far `stage` has got inside its batch: `done` of `total` items ended. Called on
+    /// every poll tick by the shared batch runner. It also counts as activity on the job, so a
+    /// batch that runs for hours never reads as stalled while its polls succeed, and it labels the
+    /// liveness tracker so the stall warning can say what the job is waiting for.
+    pub fn set_stage_progress(
+        &self,
+        id: &str,
+        stage: crate::stage_telemetry::Stage,
+        done: usize,
+        total: usize,
+    ) {
+        let label = stage.label();
+        let now = now_epoch_ms();
+        self.with(id, |j| {
+            let since_ms = match &j.stage_progress {
+                Some(p) if p.stage == label => p.since_ms,
+                _ => now,
+            };
+            j.stage_progress = Some(StageProgress {
+                stage: label.to_string(),
+                done,
+                total,
+                since_ms,
+            });
+        });
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.tracker
+                .record_progress(format!("{label}: {done} of {total} ended"));
+        }
+    }
+
+    /// Make the job look as if nothing had happened on it for a long time, so a test can see
+    /// that a later call touched it.
+    #[cfg(test)]
+    pub(crate) fn age_activity_for_test(&self, id: &str) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(id)
+        {
+            meta.tracker = LivenessTracker::with_initial_ms(1);
+        }
+    }
+
+    /// The stage is paused waiting out a rate limit or an overload: count it as activity and say
+    /// so on the liveness label, so a long `retry-after` never reads as a stalled job.
+    pub fn note_paused(&self, id: &str) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.tracker.record_progress("paused: rate limited");
+        }
+    }
+
+    /// The label the job's liveness tracker last recorded (`calibration: 6 of 6 ended`), which
+    /// outlives the stage's progress line.
+    #[cfg(test)]
+    pub(crate) fn last_progress_label(&self, id: &str) -> Option<String> {
+        self.job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(|m| m.tracker.last_label())
+    }
+
+    /// The stage is no longer waiting on a batch: drop its progress line.
+    pub fn clear_stage_progress(&self, id: &str) {
+        self.with(id, |j| j.stage_progress = None);
+    }
+
     /// Request cancellation of a job by setting its cancel flag. The background worker is
     /// expected to check `is_cancel_requested` periodically and stop early.
     pub fn request_cancel(&self, id: &str) {
@@ -409,8 +508,9 @@ impl JobStore {
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
-                               // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
-                               // deep report within a project deterministically (not by HashMap order).
+            j.stage_progress = None;
+            // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
+            // deep report within a project deterministically (not by HashMap order).
             j.completed_at_ms = Some(now_ms);
         });
         self.release_preview_corpus(id);

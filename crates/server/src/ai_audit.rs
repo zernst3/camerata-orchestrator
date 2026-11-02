@@ -1183,6 +1183,11 @@ impl UsageMeter {
         self.stages.record_detail_rejections(rejections);
     }
 
+    /// Add the review flags a stage wrote on rows to the run's tally (operator telemetry only).
+    pub fn record_review_flags(&self, stage: crate::review_flags::FlagStage, flags: &[String]) {
+        self.stages.record_review_flags(stage, flags);
+    }
+
     /// Record how many (chunk, rule) pairs the rule router skipped for one repo.
     pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
         self.stages.record_routing(pairs_total, pairs_skipped);
@@ -2104,23 +2109,29 @@ pub fn parse_ai_findings(
                 .replace(HEADLINE_SEP, " - ");
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
-            if title.is_empty() && detail.is_empty() && code.is_empty() {
-                continue;
-            }
-            // D1: a row the model filled with placeholder text (title `placeholder`, code and
-            // detail `x`, a rule id naming a placeholder) never becomes a finding. Counted below.
-            if let Some(why) = crate::junk_finding::parse_gate_reason(
-                !adopted.contains(&rule_id),
-                &rule_id,
-                &title,
-                &code,
-                &detail,
-            ) {
+            // A10: an entry with a place and a rule but no text at all is not a finding, and it is
+            // not deleted either: it is kept below, marked `empty_entry` (adopted rules included).
+            let empty_entry = title.is_empty() && detail.is_empty() && code.is_empty();
+            // D1, A10: a row the model filled with placeholder text (title `placeholder`, code
+            // and detail `x`, a rule id naming a placeholder) is not a finding. It is KEPT,
+            // marked thrown out with the reason, and kept apart from the rows that go on
+            // (`audit_repo` parks it; it is never deleted). Counted below.
+            let placeholder_why = if empty_entry {
+                Some(crate::engine_discard::EMPTY_ENTRY)
+            } else {
+                crate::junk_finding::parse_gate_reason(
+                    !adopted.contains(&rule_id),
+                    &rule_id,
+                    &title,
+                    &code,
+                    &detail,
+                )
+            };
+            if let Some(why) = placeholder_why {
                 junk_dropped.push(format!(
                     "{rule_id} at {}: {why}",
                     f["path"].as_str().unwrap_or("(repo)")
                 ));
-                continue;
             }
             // `snippet` holds the VERBATIM offending line when the model gave one (matches the
             // deterministic floor, and lets the line-resolution post-step grep for it). Fall
@@ -2194,6 +2205,16 @@ pub fn parse_ai_findings(
             // The model's `code` is its verbatim quote and its prose can repeat a value: redact
             // before the row exists anywhere else (docs/design/2026-10-23, leak path A8).
             crate::onboard::redact::redact_finding(&mut finding);
+            if let Some(why) = placeholder_why {
+                if empty_entry {
+                    crate::engine_discard::mark(&mut finding, crate::engine_discard::EMPTY_ENTRY);
+                } else {
+                    crate::engine_discard::mark(
+                        &mut finding,
+                        &format!("{}: {why}", crate::engine_discard::PLACEHOLDER_ROW),
+                    );
+                }
+            }
             findings.push(finding);
         }
     }
@@ -2201,7 +2222,7 @@ pub fn parse_ai_findings(
         // Operator side only: the client report never mentions a row the model should not have
         // written.
         eprintln!(
-            "[camerata-server] {repo}: dropped {} junk finding(s) at scan parsing: {}",
+            "[camerata-server] {repo}: threw out {} junk finding(s) at scan parsing (kept, marked): {}",
             junk_dropped.len(),
             junk_dropped.join("; ")
         );
@@ -5125,6 +5146,152 @@ fn fix_rejections(
         .collect()
 }
 
+/// One check a model-written fix failed. A fix is wording a reviewer reads, so a failure is a
+/// review flag on the row ([`crate::review_flags`]) after one re-ask, never a held run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FixFailure {
+    /// The fix names an identifier found neither in the evidence nor in the repository.
+    Ungrounded(String),
+    /// The fix tells the client to do what the finding's detail says is already done (the reason
+    /// is the check's own sentence).
+    Contradiction(String),
+    /// The fix describes how the finding was detected (the phrase it used).
+    MethodologyLeak(String),
+}
+
+impl FixFailure {
+    fn flag(&self) -> &'static str {
+        match self {
+            Self::Ungrounded(_) => crate::review_flags::FIX_UNGROUNDED,
+            Self::Contradiction(_) => crate::review_flags::CONTRADICTION,
+            Self::MethodologyLeak(_) => crate::review_flags::METHODOLOGY_LEAK,
+        }
+    }
+
+    /// The reason in words, for the saved reply and the failure report.
+    fn reason(&self) -> String {
+        match self {
+            Self::Ungrounded(bad) => format!(
+                "named `{bad}`, which is not in the finding's evidence or anywhere in the \
+                 repository"
+            ),
+            Self::Contradiction(reason) => reason.clone(),
+            Self::MethodologyLeak(leak) => {
+                format!("described detection methodology (\"{leak}\")")
+            }
+        }
+    }
+
+    /// The one-line correction the re-ask carries.
+    fn feedback(&self) -> String {
+        match self {
+            Self::Ungrounded(bad) => format!(
+                "you named `{bad}`, which appears neither in this finding's evidence \
+                 nor anywhere in the repository; keep your fix and its code snippet, \
+                 but use only names that exist, or describe a new name in plain words"
+            ),
+            Self::Contradiction(reason) => reason.clone(),
+            Self::MethodologyLeak(leak) => format!(
+                "you described detection methodology (\"{leak}\") \u{2014} describe only \
+                 the fix, never how it was found"
+            ),
+        }
+    }
+}
+
+/// Every check `text` fails, in the order the checks run (grounding, contradiction, methodology).
+fn fix_failures(
+    text: &str,
+    finding: &Finding,
+    evidence: &str,
+    repo_names: &RepoNames<'_>,
+) -> Vec<FixFailure> {
+    let mut out = Vec::new();
+    if let Some(bad) = find_ungrounded_identifier_in(text, evidence, Some(repo_names)) {
+        out.push(FixFailure::Ungrounded(bad));
+    }
+    if let Some(reason) = fix_contradicts_detail(text, &finding.detail) {
+        out.push(FixFailure::Contradiction(reason));
+    }
+    if let Some(leak) = fix_leaks_methodology(text) {
+        out.push(FixFailure::MethodologyLeak(leak));
+    }
+    out
+}
+
+/// A fix reply that failed at least one check, kept until the finding is settled.
+#[derive(Debug, Clone)]
+struct FixReply {
+    /// The redacted fix text.
+    text: String,
+    failures: Vec<FixFailure>,
+}
+
+impl FixReply {
+    /// Whether this reply is worse than the rule's own authored fix: it tells the client to redo
+    /// what is done, or it describes how the finding was detected. An unverified name is not: the
+    /// replay of 40 such rejections found no real error among them.
+    fn worse_than_authored(&self) -> bool {
+        self.failures.iter().any(|f| {
+            matches!(
+                f,
+                FixFailure::Contradiction(_) | FixFailure::MethodologyLeak(_)
+            )
+        })
+    }
+
+    fn reasons(&self) -> String {
+        self.failures
+            .iter()
+            .map(FixFailure::reason)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// The fix replies that failed a check, by finding. A finding is in here from its first failed
+/// reply until a later reply passes or it is settled ([`settle_fix_wording`]). Its presence in a
+/// call's batch is what makes that call the finding's one re-ask.
+#[derive(Debug, Default)]
+struct FixWording {
+    replies: std::collections::HashMap<usize, Vec<FixReply>>,
+}
+
+/// Decide what a finding whose fix replies all failed a check ships, write it onto `findings[idx]`
+/// and return the review flags that record the failure. Never blocks the run.
+///
+/// The better reply ships: one that is not worse than the authored fix beats one that is, then
+/// the one that failed fewer checks, then the later (it had the correction). When the best reply
+/// is still worse than the authored fix ([`FixReply::worse_than_authored`]) and the rule has one,
+/// the authored fix ships instead, marked as a standard fix. A reply with only an unverified name
+/// ships as it is: it is the tailored text, and a reviewer reads the flag.
+fn settle_fix_wording(
+    findings: &mut [Finding],
+    idx: usize,
+    replies: &[FixReply],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    let Some(best) = replies
+        .iter()
+        .rev()
+        .min_by_key(|r| (r.worse_than_authored(), r.failures.len()))
+    else {
+        return Vec::new();
+    };
+    let flags: Vec<String> = best.failures.iter().map(|f| f.flag().to_string()).collect();
+    if best.worse_than_authored() {
+        if let Some(authored) =
+            crate::report_export::resolve_fix(&findings[idx].rule_id, corpus, &findings[idx], None)
+        {
+            findings[idx].fix_specific = Some(camerata_secrets::redact_str(&authored).into_owned());
+            crate::report_export::mark_standard_fix(&mut findings[idx], &best.reasons());
+            return flags;
+        }
+    }
+    findings[idx].fix_specific = Some(best.text.clone());
+    flags
+}
+
 /// Why a finding never got a response from the fix model on its last attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FixMiss {
@@ -5235,6 +5402,7 @@ async fn run_fix_specifics_round(
     repo_names: &RepoNames<'_>,
     findings: &mut [Finding],
     feedback: &mut std::collections::HashMap<usize, String>,
+    wording: &mut FixWording,
     pending: &[usize],
     batch_size: usize,
     ledger: &mut FixLedger,
@@ -5259,6 +5427,12 @@ async fn run_fix_specifics_round(
             }
             Ok(permit) => permit,
         };
+        // A finding that already has a fix turned down by a check is asked again in this call:
+        // its one re-ask, whose answer (or silence) settles it.
+        let reasking: Vec<bool> = batch
+            .iter()
+            .map(|i| wording.replies.contains_key(i))
+            .collect();
         // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
         let mut ids: Vec<String> = Vec::with_capacity(batch.len());
         for &i in batch {
@@ -5315,12 +5489,14 @@ async fn run_fix_specifics_round(
             m.record_stage(Stage::FixGeneration, &resp);
         }
         let parsed = parse_fix_specifics(&resp.text);
-        let rejected_before = still_pending.len();
         // Why each fix of THIS reply was turned down, named by place; the reply carries them.
         let mut turned_down: Vec<String> = Vec::new();
         let place = |f: &Finding, why: &str| format!("{}:{} {}: {why}", f.path, f.line, f.rule_id);
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
+            // A finding that failed a check and has now had its one re-ask is settled from the
+            // replies it has; everything else is asked again next round.
+            let settles_here = reasking[pos] && wording.replies.contains_key(&orig_idx);
             let Some(text) = parsed.get(&ids[pos]) else {
                 feedback
                     .entry(orig_idx)
@@ -5329,55 +5505,39 @@ async fn run_fix_specifics_round(
                     &findings[orig_idx],
                     "the reply held no fix for this finding",
                 ));
-                still_pending.push(orig_idx);
+                if !settles_here {
+                    still_pending.push(orig_idx);
+                }
                 continue;
             };
             // The model's fix text is client-visible and often repeats the offending value:
             // redact it BEFORE the self-check, so grounding compares redacted to redacted.
             let redacted_text = camerata_secrets::redact_str(text).into_owned();
-            let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
-            if let Some(bad) = find_ungrounded_identifier_in(text, &evidence, Some(repo_names)) {
-                turned_down.push(place(
-                    &findings[orig_idx],
-                    &format!(
-                        "named `{bad}`, which is not in the finding's evidence or anywhere in \
-                         the repository"
-                    ),
-                ));
-                feedback.insert(
-                    orig_idx,
-                    format!(
-                        "you named `{bad}`, which appears neither in this finding's evidence \
-                         nor anywhere in the repository; keep your fix and its code snippet, \
-                         but use only names that exist, or describe a new name in plain words"
-                    ),
-                );
-                still_pending.push(orig_idx);
+            let failures = fix_failures(&redacted_text, &findings[orig_idx], &evidence, repo_names);
+            if failures.is_empty() {
+                findings[orig_idx].fix_specific = Some(redacted_text);
+                wording.replies.remove(&orig_idx);
+                // A fix that passes carries no fix flag from an earlier attempt or run.
+                if !crate::review_flags::flags_of(&findings[orig_idx]).is_empty() {
+                    crate::review_flags::set_stage_flags(
+                        &mut findings[orig_idx],
+                        crate::review_flags::FlagStage::Fix,
+                        Vec::new(),
+                    );
+                }
                 continue;
             }
-            if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
-                turned_down.push(place(&findings[orig_idx], &reason));
-                feedback.insert(orig_idx, reason);
+            let reply = FixReply {
+                text: redacted_text,
+                failures,
+            };
+            turned_down.push(place(&findings[orig_idx], &reply.reasons()));
+            feedback.insert(orig_idx, reply.failures[0].feedback());
+            wording.replies.entry(orig_idx).or_default().push(reply);
+            if !settles_here {
                 still_pending.push(orig_idx);
-                continue;
             }
-            if let Some(leak) = fix_leaks_methodology(text) {
-                turned_down.push(place(
-                    &findings[orig_idx],
-                    &format!("described detection methodology (\"{leak}\")"),
-                ));
-                feedback.insert(
-                    orig_idx,
-                    format!(
-                        "you described detection methodology (\"{leak}\") — describe only \
-                         the fix, never how it was found"
-                    ),
-                );
-                still_pending.push(orig_idx);
-                continue;
-            }
-            findings[orig_idx].fix_specific = Some(text.clone());
         }
         // The reply records the reasons, and only this reply. It is set aside only when EVERY
         // fix in it was turned down: a reply with an accepted fix stays good, so a resume
@@ -5394,7 +5554,7 @@ async fn run_fix_specifics_round(
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
         // for a batch that was only partly rejected.
-        let rejected = still_pending.len() - rejected_before;
+        let rejected = turned_down.len();
         if rejected > 0 {
             if let Some(m) = meter {
                 m.record_wasted_share(
@@ -5565,6 +5725,7 @@ pub async fn generate_fix_specifics(
     // back into the NEXT round's prompt for that finding only.
     let mut pending = indices;
     let mut feedback: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut wording = FixWording::default();
 
     for _attempt in 0..=MAX_FIX_REGENERATIONS {
         if pending.is_empty() {
@@ -5582,6 +5743,7 @@ pub async fn generate_fix_specifics(
             &repo_names,
             &mut findings,
             &mut feedback,
+            &mut wording,
             &pending,
             FIX_BATCH_SIZE,
             &mut ledger,
@@ -5607,6 +5769,7 @@ pub async fn generate_fix_specifics(
             &repo_names,
             &mut findings,
             &mut feedback,
+            &mut wording,
             &pending,
             1,
             &mut ledger,
@@ -5623,11 +5786,17 @@ pub async fn generate_fix_specifics(
     // (a feedback line, then a batch of one), and the same solo request a second time pays twice
     // for the same answer. A run that has stopped sends nothing. Only a part that is still
     // without a fix after this is a give-up (and so a failed part, which locks a client export).
-    if !pending.is_empty() {
+    // A finding with a fix turned down by a check is settled below, not unusable.
+    let unsettled: Vec<usize> = pending
+        .iter()
+        .copied()
+        .filter(|i| !wording.replies.contains_key(i))
+        .collect();
+    if !unsettled.is_empty() {
         trail.note_unusable(
             "no usable fix was returned after the stage's own rounds",
             false,
-            fix_rejections(&findings, &pending, &feedback, &ledger),
+            fix_rejections(&findings, &unsettled, &feedback, &ledger),
         );
     }
     let (retry, left_alone) = ledger.split_for_second_try(&pending);
@@ -5644,6 +5813,7 @@ pub async fn generate_fix_specifics(
             &repo_names,
             &mut findings,
             &mut feedback,
+            &mut wording,
             &retry,
             1,
             &mut ledger,
@@ -5671,6 +5841,28 @@ pub async fn generate_fix_specifics(
     // one. A finding whose rule carries no authored remediation at all keeps `fix_specific`
     // as `None`; `report_export::is_action_row_missing_a_fix` is what re-routes THAT case to
     // `"held"` rather than shipping an action-bucket row with no fix text anywhere.
+    // WORDING NEVER BLOCKS (M4). A finding with a fix that failed a check is settled from the
+    // replies it has: the better one ships and the failure is recorded on the row as a review
+    // flag. That holds whether its one re-ask was answered, left out, refused by the spend limit
+    // or lost to transport: the stage ran on it, and a reviewer reads the flag. Only a finding
+    // that never got a reply stays pending, to the authored fix or a failed part as before.
+    let mut to_settle: Vec<usize> = wording.replies.keys().copied().collect();
+    to_settle.sort_unstable();
+    for idx in to_settle {
+        let Some(replies) = wording.replies.remove(&idx) else {
+            continue;
+        };
+        let flags = settle_fix_wording(&mut findings, idx, &replies, corpus);
+        let recorded = crate::review_flags::set_stage_flags(
+            &mut findings[idx],
+            crate::review_flags::FlagStage::Fix,
+            flags,
+        );
+        if let Some(m) = meter {
+            m.record_review_flags(crate::review_flags::FlagStage::Fix, &recorded);
+        }
+        pending.retain(|i| *i != idx);
+    }
     if let Some(m) = meter {
         m.record_fix_outcome(ledger.outcome(&pending, authored_directly));
     }
@@ -8187,34 +8379,41 @@ pub(crate) const MIN_CONTAINED_SNIPPET: usize = 12;
 /// problem (two things one rule found at line 0 of a file, or at one unresolved line
 /// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
 /// any repeat carried. Order is preserved.
-/// D1: remove, after the detail and calibration steps, every row the model INVENTED (rule id
-/// prefixed `AI-`) whose own text says to throw it away ("discard this finding", "placeholder
-/// finding"), or whose rule id or headline is a placeholder. Calibration itself never drops a
-/// row; the verdict it and the detail step write into the row's explanation is what is acted on
-/// here, and only for a row no adopted rule backs. Operator side, each removal is logged with its
-/// rule and place; the client report never mentions it. Returns how many rows were removed.
-fn drop_discarded_invented_rows(repo: &str, findings: &mut Vec<Finding>) -> usize {
-    let mut removed = Vec::new();
-    findings.retain(|f| {
-        let junk = f.rule_id.starts_with("AI-")
-            && crate::junk_finding::is_junk_invented_row(
-                &f.rule_id,
-                &finding_headline(f),
-                &f.detail,
-            );
-        if junk {
-            removed.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+/// D1, A10: after the detail and calibration steps, throw out every row the model INVENTED (rule
+/// id prefixed `AI-`) whose own text says to discard it ("discard this finding"), or whose rule
+/// id or headline is a placeholder. Calibration itself never drops a row; the verdict it and the
+/// detail step write into the row's explanation is what is acted on here, and only for a row no
+/// adopted rule backs. The row is KEPT and marked [`crate::engine_discard`] with the reason, never
+/// deleted. Operator side, each is logged with its rule and place; the client report never
+/// mentions it. Returns how many rows were marked.
+fn mark_discarded_invented_rows(repo: &str, findings: &mut [Finding]) -> usize {
+    let mut marked = Vec::new();
+    for f in findings.iter_mut() {
+        if crate::engine_discard::is_discarded(f) || !f.rule_id.starts_with("AI-") {
+            continue;
         }
-        !junk
-    });
-    if !removed.is_empty() {
+        let headline = finding_headline(f);
+        if !crate::junk_finding::is_junk_invented_row(&f.rule_id, &headline, &f.detail) {
+            continue;
+        }
+        let reason = if crate::junk_finding::is_placeholder_rule_id(&f.rule_id) {
+            crate::engine_discard::PLACEHOLDER_RULE_ID
+        } else if !headline.trim().is_empty() && crate::junk_finding::is_filler(&headline) {
+            crate::engine_discard::PLACEHOLDER_HEADLINE
+        } else {
+            crate::engine_discard::DISCARD_VERDICT
+        };
+        crate::engine_discard::mark(f, reason);
+        marked.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+    }
+    if !marked.is_empty() {
         eprintln!(
-            "[camerata-server] {repo}: dropped {} finding(s) the model's own text said to discard: {}",
-            removed.len(),
-            removed.join("; ")
+            "[camerata-server] {repo}: threw out {} finding(s) the model's own text said to discard (kept, marked): {}",
+            marked.len(),
+            marked.join("; ")
         );
     }
-    removed.len()
+    marked.len()
 }
 
 fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
@@ -8620,6 +8819,14 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // M5: the sentence that says a row's quoted snippet was not found near its line.
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
     crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE,
+    // M4: the list of review flags the detail and fix stages wrote on the row (a wording problem
+    // that shipped with a flag). The same flag on two rows says the same check fired, not that
+    // the rows are about the same object.
+    crate::review_flags::REVIEW_FLAGS_CAPTURE,
+    // M4: the mark that says a row's text is real junk and holds it (see `junk_finding`).
+    crate::junk_finding::JUNK_CONTENT_CAPTURE,
+    // A10: the mark that says the engine threw the row out (the reason is the value).
+    crate::engine_discard::ENGINE_DISCARDED_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -9366,9 +9573,16 @@ pub(crate) fn inherit_fix(primary: &mut Finding, donor: &Finding) {
             }
         }
     }
+    // M4: the fix arrives with the review flags the fix stage wrote on it. The primary keeps its
+    // own detail-stage flags; a clean donor clears a stale fix flag.
+    let donated: Vec<String> = crate::review_flags::flags_of(donor)
+        .into_iter()
+        .filter(|flag| crate::review_flags::stage_of(flag) == crate::review_flags::FlagStage::Fix)
+        .collect();
+    crate::review_flags::set_stage_flags(primary, crate::review_flags::FlagStage::Fix, donated);
 }
 
-/// P7 (the codebase-inspection hardening notes): drop any finding whose rule
+/// P7 (the codebase-inspection hardening notes), A10: mark as thrown out (keep, never delete) any finding whose rule
 /// carries a [`camerata_rules::StackException`] that applies to the repo's DETECTED stack +
 /// this finding's own file path — e.g. `ARCH-MONOLITH-FIRST-1` flagging a `supabase/functions/`
 /// directory on a Supabase-stack repo, where a second Edge Functions deployable is the
@@ -9388,16 +9602,21 @@ pub fn apply_stack_exceptions(
     }
     findings
         .into_iter()
-        .filter(|f| {
+        .map(|mut f| {
             let rule = corpus
                 .get_by_id(&f.rule_id)
                 .or_else(|| corpus.get_by_id(f.rule_id.trim_start_matches("AI-")));
-            match rule {
+            let excepted = match rule {
                 Some(rule) => rule
                     .stack_exception_for(detected_frameworks, &f.path)
-                    .is_none(),
-                None => true,
+                    .is_some(),
+                None => false,
+            };
+            if excepted {
+                // A10: kept, marked thrown out, and left out of what ships.
+                crate::engine_discard::mark(&mut f, crate::engine_discard::STACK_EXCEPTION);
             }
+            f
         })
         .collect()
 }
@@ -10961,6 +11180,15 @@ pub async fn audit_repo(
     // collapsed: it stays its own row and the grouping pass links it. This is N-in / M-out
     // (M <= N) with every dropped row accounted for, not the calibration pass's N-in/N-out
     // scoring.
+    // A10: rows the scan parser marked thrown out (placeholder text) are kept apart from the rows
+    // that go through the merges, calibration and the fix stage, and rejoin the result at the end.
+    let mut parked: Vec<Finding> = Vec::new();
+    {
+        let (thrown_out, kept) =
+            crate::engine_discard::split_discarded(std::mem::take(&mut all_findings));
+        all_findings = kept;
+        parked.extend(thrown_out);
+    }
     {
         let rows_in = all_findings.len();
         dedup_findings_keep_max_severity(&mut all_findings);
@@ -11088,12 +11316,13 @@ pub async fn audit_repo(
             .map(|r| r.rule_id.to_ascii_uppercase())
             .collect();
         if !not_applicable.is_empty() {
-            let before = verified.len();
-            verified.retain(|f| {
+            for f in verified.iter_mut() {
                 let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
-                !not_applicable.contains(&bare)
-            });
-            dropped_not_applicable = before.saturating_sub(verified.len());
+                if not_applicable.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+                    crate::engine_discard::mark(f, crate::engine_discard::RULE_NOT_APPLICABLE);
+                    dropped_not_applicable += 1;
+                }
+            }
         }
         // Pass-1 W3 (A5.3): the no-convention twin of the P7 filter above, with its own
         // accounting label. Dropping the rule from `effective_selected` upstream stops the
@@ -11107,17 +11336,26 @@ pub async fn audit_repo(
             .map(|r| r.rule_id.to_ascii_uppercase())
             .collect();
         if !no_convention.is_empty() {
-            let before = verified.len();
-            verified.retain(|f| {
+            for f in verified.iter_mut() {
                 let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
-                !no_convention.contains(&bare)
-            });
-            dropped_no_convention = before.saturating_sub(verified.len());
+                if no_convention.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+                    crate::engine_discard::mark(f, crate::engine_discard::NO_CONVENTION);
+                    dropped_no_convention += 1;
+                }
+            }
         }
     }
     // D1: the detail and calibration steps write "discard this finding" into a placeholder row's
     // explanation; act on it for the rows the model invented, and account for the removal below.
-    let dropped_discarded = drop_discarded_invented_rows(repo, &mut verified);
+    let dropped_discarded = mark_discarded_invented_rows(repo, &mut verified);
+    // A10: the rows thrown out above are KEPT, but apart from the rows that go on: the stages
+    // below (the option splice, kind assignment, the convention emissions) must not see them. The
+    // calibration stage accounts for them as leaving it (`other` below); they rejoin the returned
+    // set at the end, still marked, and the caller keeps them apart from the rows that ship.
+    let (thrown_out, kept_after_calibration) =
+        crate::engine_discard::split_discarded(std::mem::take(&mut verified));
+    verified = kept_after_calibration;
+    parked.extend(thrown_out);
     // W1: calibration itself never drops a row (see this block's own doc comment above); the
     // ONLY row-count reductions between `pre_calibration_len` and here are the P7
     // not-applicable filter, the A5.3 no-convention filter and the D1 discard filter just
@@ -11232,6 +11470,8 @@ pub async fn audit_repo(
             model: None,
         });
     }
+    // A10: the rows thrown out along the way come back marked, after the rows that ship.
+    verified.extend(parked);
     Ok((
         verified,
         all_proposed,
@@ -12255,6 +12495,9 @@ mod batch_mode;
 mod calibration;
 #[cfg(test)]
 mod calibration_tests;
+pub mod stage_batch;
+#[cfg(test)]
+mod stage_batch_tests;
 pub use batch_mode::{
     resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
 };
@@ -12560,13 +12803,16 @@ mod tests {
         let frameworks = vec!["Supabase".to_string()];
         let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &corpus);
 
+        // A10: the excepted finding is kept and marked thrown out, not deleted.
+        assert_eq!(out.len(), 2, "no row is deleted: {out:?}");
+        let (thrown, shipped) = crate::engine_discard::split_discarded(out);
+        assert_eq!(thrown.len(), 1, "the Edge Functions finding is thrown out");
         assert_eq!(
-            out.len(),
-            1,
-            "the Edge Functions finding must be suppressed: {out:?}"
+            crate::engine_discard::reason_of(&thrown[0]),
+            Some(crate::engine_discard::STACK_EXCEPTION)
         );
         assert_eq!(
-            out[0].path, "src/server.rs",
+            shipped[0].path, "src/server.rs",
             "a monolith-first violation OUTSIDE supabase/functions/ must still fire"
         );
     }
@@ -12614,12 +12860,15 @@ mod tests {
         let frameworks = vec!["Next.js".to_string()];
         let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &set);
 
+        // A10: kept and marked thrown out, not deleted.
+        assert_eq!(out.len(), 2, "no row is deleted: {out:?}");
+        let (thrown, shipped) = crate::engine_discard::split_discarded(out);
         assert_eq!(
-            out.len(),
+            thrown.len(),
             1,
-            "the app-router-idiomatic path must be suppressed: {out:?}"
+            "the app-router-idiomatic path must be thrown out: {thrown:?}"
         );
-        assert_eq!(out[0].path, "pages/api/users.ts");
+        assert_eq!(shipped[0].path, "pages/api/users.ts");
     }
 
     /// A rule with NO `stack_exceptions` declared (the overwhelming majority of the corpus)
@@ -13268,10 +13517,11 @@ mod tests {
         assert_eq!(findings[1].severity, "medium");
     }
 
-    /// D1: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
+    /// D1, A10: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
     /// (title `placeholder`, code and detail `x`) is not a finding; the real row beside it is.
+    /// The placeholder row is KEPT, marked thrown out with the reason; the real row is unmarked.
     #[test]
-    fn parse_ai_findings_drops_a_placeholder_row_and_keeps_the_real_one() {
+    fn parse_ai_findings_marks_a_placeholder_row_and_keeps_the_real_one() {
         let raw = r#"{"findings":[
             {"path":"lib/supabase/admin.ts","line":8,"severity":"low",
              "rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER","title":"placeholder","code":"x","detail":"x"},
@@ -13282,8 +13532,15 @@ mod tests {
         ],"proposed_rules":[]}"#;
         let none = std::collections::HashSet::new();
         let (findings, _) = parse_ai_findings("me/api", raw, &none);
-        assert_eq!(findings.len(), 1, "{findings:#?}");
-        assert_eq!(findings[0].line, 12);
+        assert_eq!(findings.len(), 2, "no row is deleted: {findings:#?}");
+        let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+        assert_eq!(kept.len(), 1, "{kept:#?}");
+        assert_eq!(kept[0].line, 12);
+        assert_eq!(thrown.len(), 1, "{thrown:#?}");
+        assert_eq!(thrown[0].line, 8);
+        assert!(crate::engine_discard::reason_of(&thrown[0])
+            .unwrap()
+            .starts_with(crate::engine_discard::PLACEHOLDER_ROW));
     }
 
     /// R1B-5: a bare table name and its schema-qualified form are the same object, so they do
@@ -13369,7 +13626,8 @@ mod tests {
         }
     }
 
-    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still drops it.
+    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still throws it out
+    /// (A10: kept and marked, not deleted).
     #[test]
     fn parse_ai_findings_does_not_canonicalise_a_placeholder_id_onto_an_adopted_rule() {
         let adopted: std::collections::HashSet<String> =
@@ -13380,10 +13638,12 @@ mod tests {
             "title":"A real title","code":"user!.id","detail":"A real explanation."}],
             "proposed_rules":[]}"#;
         let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
-        assert!(findings.is_empty(), "{findings:#?}");
+        let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+        assert!(kept.is_empty(), "{kept:#?}");
+        assert_eq!(thrown.len(), 1, "{thrown:#?}");
     }
 
-    /// D1: each junk shape is refused on its own (an empty reply for code and detail, a
+    /// D1, A10: each junk shape is thrown out on its own, kept and marked (an empty reply for code and detail, a
     /// placeholder title over real text, a placeholder rule id over real text).
     #[test]
     fn parse_ai_findings_refuses_each_junk_shape_for_an_invented_rule() {
@@ -13396,7 +13656,10 @@ mod tests {
         ] {
             let raw = format!(r#"{{"findings":[{row}],"proposed_rules":[]}}"#);
             let (findings, _) = parse_ai_findings("me/api", &raw, &none);
-            assert!(findings.is_empty(), "{row} produced {findings:#?}");
+            // A10: the row is kept, marked thrown out; none of it goes on as a finding.
+            let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+            assert!(kept.is_empty(), "{row} produced {kept:#?}");
+            assert_eq!(thrown.len(), 1, "{row} was deleted");
         }
     }
 
@@ -13413,21 +13676,32 @@ mod tests {
         assert_eq!(findings.len(), 1);
     }
 
-    /// D1: after the detail and calibration steps, a model-invented row whose explanation says
-    /// to discard it is removed; a row under an adopted rule is never removed by its prose.
+    /// D1, A10: after the detail and calibration steps, a model-invented row whose explanation
+    /// says to discard it is KEPT and marked thrown out (with its reason); a row under an adopted
+    /// rule is never marked by its prose. No row is removed.
     #[test]
-    fn drop_discarded_invented_rows_acts_on_the_discard_verdict() {
-        let mut discarded = finding("AI-JAVASCRIPT-PLACEHOLDER-NOTE", "low");
+    fn mark_discarded_invented_rows_acts_on_the_discard_verdict() {
+        let mut discarded = finding("AI-NOTE-ONLY", "low");
         discarded.detail = "This finding contains only a placeholder statement with the code 'x'. Discard this finding.".into();
         let mut kept_ai = finding("AI-REAL-ONE", "high");
         kept_ai.detail = "Real title — The handler trusts the caller.".into();
         let mut adopted = finding("SEC-NO-RAW-SQL-CONCAT-1", "high");
         adopted.detail = "Raw SQL — a note that says discard this finding".into();
         let mut rows = vec![discarded, kept_ai, adopted];
-        let removed = drop_discarded_invented_rows("me/api", &mut rows);
-        assert_eq!(removed, 1);
+        let marked = mark_discarded_invented_rows("me/api", &mut rows);
+        assert_eq!(marked, 1);
         let ids: Vec<&str> = rows.iter().map(|f| f.rule_id.as_str()).collect();
-        assert_eq!(ids, vec!["AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"]);
+        assert_eq!(
+            ids,
+            vec!["AI-NOTE-ONLY", "AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"],
+            "no row is removed"
+        );
+        assert_eq!(
+            crate::engine_discard::reason_of(&rows[0]),
+            Some(crate::engine_discard::DISCARD_VERDICT)
+        );
+        assert!(!crate::engine_discard::is_discarded(&rows[1]));
+        assert!(!crate::engine_discard::is_discarded(&rows[2]));
     }
 
     #[test]
@@ -17796,10 +18070,18 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         assert!(!recs[0].applicable);
+        // A10: the stray the model cited anyway is KEPT, marked thrown out, and apart from every
+        // row that ships: it is never a finding of the report.
+        let (thrown, shipped) = crate::engine_discard::split_discarded(findings);
         assert!(
-            findings.iter().all(|f| f.rule_id != "MULTI-RULE-1"),
+            shipped.iter().all(|f| f.rule_id != "MULTI-RULE-1"),
             "a not-applicable rule must emit ZERO findings, even one the model cited anyway: \
-             {findings:?}"
+             {shipped:?}"
+        );
+        assert_eq!(thrown.len(), 1, "{thrown:?}");
+        assert_eq!(
+            crate::engine_discard::reason_of(&thrown[0]),
+            Some(crate::engine_discard::RULE_NOT_APPLICABLE)
         );
     }
 
@@ -18795,6 +19077,9 @@ mod tests {
         .expect("stub completer never errors");
 
         assert!(recs.iter().any(|r| r.no_convention));
+        // A10: the two strays are kept, marked thrown out, apart from the rows that ship.
+        let (thrown, findings) = crate::engine_discard::split_discarded(findings);
+        assert_eq!(thrown.len(), 2, "{thrown:?}");
         let under_rule: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.rule_id == "MULTI-RULE-1")
@@ -18821,6 +19106,120 @@ mod tests {
         assert!(stage_samples
             .iter()
             .any(|s| s.stage == "no-convention-emission"));
+    }
+
+    /// A10 (`no_engine_path_deletes_a_finding`): every judgment path that used to delete a row
+    /// keeps it, marked with its reason. One scripted run feeds `audit_repo` six model entries:
+    /// a stray under a not-applicable rule, two strays under a no-convention rule, a row whose
+    /// own text says to discard it, a row filled with placeholder text and one real defect. Every
+    /// entry comes back as a row; only the real one is unmarked.
+    #[tokio::test]
+    async fn no_engine_path_deletes_a_finding() {
+        use crate::engine_discard::{
+            reason_of, DISCARD_VERDICT, NO_CONVENTION, PLACEHOLDER_ROW, RULE_NOT_APPLICABLE,
+        };
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "NA-RULE-1", "applicable": false,
+                 "recommendation_reasoning": "no evidence of pagination anywhere in this codebase"},
+                {"rule_id": "MULTI-RULE-1", "applicable": true, "no_convention": true,
+                 "observed_options": [{"option_id": "opt-a", "sites": 3},
+                                       {"option_id": "opt-b", "sites": 2}],
+                 "evidence": "src/lib.rs:1 — both patterns in one file",
+                 "recommendation_reasoning": "three sites do A, two do B — no majority"}
+            ],
+            "findings": [
+                {"rule": "NA-RULE-1", "severity": "medium", "title": "stray under na rule",
+                 "path": "src/na.rs", "line": 1, "code": "fn na() { old(); }", "detail": "stray"},
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the B way",
+                 "path": "src/lib.rs", "line": 1, "code": "fn handler() { b_way(); }",
+                 "detail": "stray per-site claim"},
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the A way",
+                 "path": "src/other.rs", "line": 2, "code": "fn other() { a_way(); }",
+                 "detail": "second stray per-site claim"},
+                {"rule": "AI-NOTE-ONLY", "severity": "low", "title": "a note",
+                 "path": "src/note.rs", "line": 3, "code": "fn note() { keep(); }",
+                 "detail": "Nothing to act on. Discard this finding."},
+                {"rule": "AI-FILLER", "severity": "low", "title": "placeholder",
+                 "path": "src/filler.rs", "line": 4, "code": "x", "detail": "x"},
+                {"rule": "AI-REAL-DEFECT", "severity": "high", "title": "unchecked owner",
+                 "path": "src/real.rs", "line": 5, "code": "fn real() { delete(id); }",
+                 "detail": "The handler deletes by id without checking the owner."}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
+        let files = vec![
+            ("src/na.rs".to_string(), "fn na() { old(); }\n".to_string()),
+            (
+                "src/lib.rs".to_string(),
+                "fn handler() { b_way(); }\n".to_string(),
+            ),
+            (
+                "src/other.rs".to_string(),
+                "fn other() { a_way(); }\n".to_string(),
+            ),
+            (
+                "src/note.rs".to_string(),
+                "fn note() { keep(); }\n".to_string(),
+            ),
+            ("src/filler.rs".to_string(), "x\n".to_string()),
+            (
+                "src/real.rs".to_string(),
+                "fn real() { delete(id); }\n".to_string(),
+            ),
+        ];
+        let selected = vec![
+            ("NA-RULE-1".to_string(), "Paginate lists.".to_string()),
+            ("MULTI-RULE-1".to_string(), "Do it the A way.".to_string()),
+        ];
+        let alternatives = vec![
+            two_option_alternatives("NA-RULE-1", Some("opt-a")),
+            two_option_alternatives("MULTI-RULE-1", Some("opt-a")),
+        ];
+        let (findings, _proposed, _recs, _failed, stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &crate::scan_routing::rules_from_pairs(&selected),
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        let at = |path: &str| {
+            findings
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("the row at {path} was deleted: {findings:?}"))
+        };
+        assert_eq!(reason_of(at("src/na.rs")), Some(RULE_NOT_APPLICABLE));
+        assert_eq!(reason_of(at("src/lib.rs")), Some(NO_CONVENTION));
+        assert_eq!(reason_of(at("src/other.rs")), Some(NO_CONVENTION));
+        assert_eq!(reason_of(at("src/note.rs")), Some(DISCARD_VERDICT));
+        assert!(
+            reason_of(at("src/filler.rs")).is_some_and(|r| r.starts_with(PLACEHOLDER_ROW)),
+            "{:?}",
+            at("src/filler.rs")
+        );
+        assert_eq!(reason_of(at("src/real.rs")), None);
+        // The ledger still reconciles: the rows that left the calibration stage are accounted
+        // for by their labels, and the rows kept apart are counted by reason.
+        assert!(stage_samples.iter().all(|s| {
+            s.rows_in + s.accounting.added_total()
+                >= s.rows_out + s.accounting.accounted().min(s.rows_in)
+        }));
     }
 
     /// req A5.5 END-TO-END through `audit_repo`: a decided convention with zero violations
@@ -21515,42 +21914,71 @@ mod tests {
         );
     }
 
+    /// M4 (was: gave up after every batched retry plus a solo retry, left `fix_specific` empty
+    /// and made a failed part). A fix that fails the grounding check gets ONE re-ask; if the
+    /// second reply fails too, the better one ships with the `fix_ungrounded` flag, the run is
+    /// complete, and the two calls are both folded into the meter.
     #[tokio::test]
-    async fn generate_fix_specifics_gives_up_after_max_regenerations_and_folds_usage_every_round() {
+    async fn generate_fix_specifics_ships_a_twice_ungrounded_fix_flagged_after_two_calls() {
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
-        // Always returns an ungrounded fix — every round is rejected, so after
-        // MAX_FIX_REGENERATIONS batched retries PLUS the one C6-B3.4 single-finding retry,
-        // the finding falls through with `fix_specific` still `None` — no corpus is passed
-        // in, so the C6-B3 instantiated fallback has no authored remediation to fall back to
-        // either (never hedged — see the total/transport-failure tests above), and every
-        // round's call must still have folded into the meter (spend isn't lost just because
-        // the content was rejected).
-        let completer = StubCompleter {
-            text: r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#.to_string(),
-        };
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+        ]);
         let meter = UsageMeter::default();
         let (out, failed_passes) =
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
-        assert_eq!(out[0].fix_specific, None);
-        assert!(!out[0].needs_review);
-        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4). A rejected
-        // fix is a content failure and gets no end-of-run second try.
-        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
         assert_eq!(
-            failed_passes.len(),
-            1,
-            "a give-up must be disclosed exactly once: {failed_passes:?}"
+            out[0].fix_specific.as_deref(),
+            Some("Use `neverInEvidence` here.")
         );
-        assert_eq!(failed_passes[0].pass, "fix-specific generation");
+        assert!(!out[0].needs_review);
+        assert_eq!(
+            crate::review_flags::flags_of(&out[0]),
+            vec!["fix_ungrounded".to_string()]
+        );
+        // One attempt and one re-ask: where there were MAX_FIX_REGENERATIONS + 2 calls.
+        assert_eq!(meter.snapshot().calls, 2);
+        assert!(
+            failed_passes.is_empty(),
+            "wording never makes a failed part: {failed_passes:?}"
+        );
+    }
+
+    /// The better of two failing fix replies ships: the one that failed fewer checks, in either
+    /// order. Here the first fails grounding only and the second fails grounding and leaks the
+    /// tool's name, so the first ships and the flags name only what it failed.
+    #[tokio::test]
+    async fn generate_fix_specifics_ships_the_better_of_two_failing_fixes() {
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+            r#"{"fixes":[{"index":0,"fix":"Camerata says use `alsoNeverInEvidence` here."}]}"#,
+        ]);
+        let (out, failed_passes) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        assert!(failed_passes.is_empty(), "{failed_passes:?}");
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Use `neverInEvidence` here.")
+        );
+        assert_eq!(
+            crate::review_flags::flags_of(&out[0]),
+            vec!["fix_ungrounded".to_string()]
+        );
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
     }
 
     // ── D8: a fix rejected in every round is a standard fix, not an incomplete run ─────
 
-    /// A finding the model ANSWERED in every round and the checks turned down every time ships
-    /// the rule's own authored fix as a standard fix, and the part is NOT a failed part (so the
-    /// run is complete). The reasons are kept for the operator.
+    /// M4 (was: a fix turned down in every round shipped the rule's authored fix as a standard fix).
+    /// A fix that is twice ungrounded now ships as the model wrote it with the `fix_ungrounded`
+    /// flag: the replay of 40 such rejections found no real error among them, and a reviewer reads
+    /// the flag. The part is not a failed part, so the run is complete.
     #[tokio::test]
-    async fn d8_a_fix_rejected_in_every_round_ships_the_authored_fix_and_is_not_a_failed_part() {
+    async fn d8_a_fix_turned_down_for_grounding_twice_ships_flagged_and_is_not_a_failed_part() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         let mut f = fx(
@@ -21582,28 +22010,147 @@ mod tests {
         .await;
         assert!(
             failed_passes.is_empty(),
-            "a fix rejected in every round must not be a failed part: {failed_passes:?}"
+            "a fix turned down for wording must not be a failed part: {failed_passes:?}"
         );
-        let fix = out[0]
-            .fix_specific
-            .as_deref()
-            .expect("the authored fix ships");
-        assert!(fix.contains("profiles"), "{fix}");
         assert_eq!(
-            out[0]
-                .captures
-                .get(crate::report_export::FIX_SOURCE_CAPTURE)
-                .map(String::as_str),
-            Some(crate::report_export::STANDARD_FIX)
+            out[0].fix_specific.as_deref(),
+            Some("Use `neverInEvidence` here.")
         );
-        let why = out[0]
+        assert!(!out[0]
             .captures
-            .get(crate::report_export::FIX_REJECTION_CAPTURE)
-            .expect("the reasons are kept for the operator");
-        assert!(why.contains("neverInEvidence"), "{why}");
+            .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
+        assert_eq!(
+            crate::review_flags::flags_of(&out[0]),
+            vec!["fix_ungrounded".to_string()]
+        );
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
         let mut report = crate::onboard::ScanReport::gated(&[]);
         report.failed_passes = failed_passes;
         assert!(report.incomplete_reasons().is_empty());
+    }
+
+    /// A fix that tells the client to redo what the detail says is done, or that describes the
+    /// tool, is worse than the rule's own authored fix: when the second reply is still that, the
+    /// authored fix ships as a standard fix, and the flag records what the model wrote.
+    #[tokio::test]
+    async fn a_contradicting_or_leaking_fix_twice_ships_the_authored_fix_flagged() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        for (detail, reply, flag) in [
+            (
+                "Row-level security is already enabled on the profiles table, but no policy \
+                 restricts SELECT to the owning user.",
+                r#"{"fixes":[{"index":0,"fix":"Enable row-level security on the profiles table."}]}"#,
+                "contradiction",
+            ),
+            (
+                "no RLS evidence for `profiles`",
+                r#"{"fixes":[{"index":0,"fix":"Camerata detected this; enable RLS on profiles."}]}"#,
+                "methodology_leak",
+            ),
+        ] {
+            let mut f = fx(
+                "SUPABASE-RLS-ENABLED-1",
+                "supabase/migrations/1.sql",
+                1,
+                detail,
+                "CREATE TABLE profiles (...)",
+            );
+            f.captures
+                .insert("table".to_string(), "profiles".to_string());
+            let files = vec![(
+                "supabase/migrations/1.sql".to_string(),
+                "CREATE TABLE profiles (id int);\n".to_string(),
+            )];
+            let completer = SequencedCompleter::new(&[reply]);
+            let (out, failed_passes) = generate_fix_specifics(
+                &completer,
+                "o/r",
+                vec![f],
+                &files,
+                None,
+                None,
+                Some(&corpus),
+            )
+            .await;
+            assert!(failed_passes.is_empty(), "{flag}: {failed_passes:?}");
+            assert_eq!(
+                completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "{flag}"
+            );
+            let fix = out[0]
+                .fix_specific
+                .as_deref()
+                .expect("the authored fix ships");
+            assert!(fix.contains("profiles"), "{flag}: {fix}");
+            assert!(!fix.contains("Camerata"), "{flag}: {fix}");
+            assert_eq!(
+                out[0]
+                    .captures
+                    .get(crate::report_export::FIX_SOURCE_CAPTURE)
+                    .map(String::as_str),
+                Some(crate::report_export::STANDARD_FIX),
+                "{flag}"
+            );
+            assert_eq!(
+                crate::review_flags::flags_of(&out[0]),
+                vec![flag.to_string()]
+            );
+        }
+    }
+
+    /// The ledger's fix flag counts reconcile with the flags on the rows.
+    #[tokio::test]
+    async fn the_fix_flag_counts_reconcile_with_the_flags_on_the_rows() {
+        let files = vec![(
+            "a.rs".to_string(),
+            "fn a() { delete_order(id) }\nfn b() { other(id) }\n".to_string(),
+        )];
+        let flagged = fx(
+            "ARCH-1",
+            "a.rs",
+            1,
+            "no ownership check",
+            "delete_order(id)",
+        );
+        let clean = fx("ARCH-2", "a.rs", 2, "no validation", "other(id)");
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."},{"index":1,"fix":"Validate `id` before other(id)."}]}"#,
+            r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
+        ]);
+        let meter = UsageMeter::default();
+        let (out, failed_passes) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![flagged, clean],
+            &files,
+            None,
+            Some(&meter),
+            None,
+        )
+        .await;
+        assert!(failed_passes.is_empty(), "{failed_passes:?}");
+        assert_eq!(
+            crate::review_flags::flags_of(&out[0]),
+            vec!["fix_ungrounded".to_string()]
+        );
+        assert!(crate::review_flags::flags_of(&out[1]).is_empty());
+        let flags = meter
+            .stage_telemetry(0)
+            .review_flags
+            .expect("a flag was recorded");
+        assert_eq!((flags.detail, flags.fix), (0, 1), "{flags:?}");
+        assert!(flags.reconciles(), "{flags:?}");
+        let on_rows = crate::review_flags::count_on_rows(&out);
+        assert_eq!(
+            on_rows.get(&crate::review_flags::FlagStage::Fix),
+            Some(&flags.fix)
+        );
+        assert_eq!(on_rows.len(), 1);
     }
 
     /// The mirror: fix work that never ran (every call failed in transport) is still a failed
@@ -21718,11 +22265,12 @@ mod tests {
         }
     }
 
-    /// D8 review 3: "rejected every round" means the LAST attempt was answered and turned down. A
-    /// finding answered and rejected in round one and then lost to transport in the later rounds
-    /// did not get all its rounds, so it is a failed part, not a Standard fix.
+    /// M4 (was D8 review 3: a finding answered and rejected once and then lost to transport was a
+    /// failed part, not a Standard fix). The stage did run on the finding and the model answered;
+    /// only the wording re-ask was lost. It settles from the reply it has, flagged, and is not a
+    /// failed part: wording never holds a run. The mirror above (every call lost) still is one.
     #[tokio::test]
-    async fn d8_a_fix_answered_once_then_lost_to_transport_is_a_failed_part_not_a_standard_fix() {
+    async fn d8_a_fix_answered_once_then_lost_to_transport_ships_the_reply_flagged() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, _errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         let mut f = fx(
@@ -21751,11 +22299,18 @@ mod tests {
             Some(&corpus),
         )
         .await;
-        assert_eq!(failed_passes.len(), 1, "{failed_passes:?}");
+        assert!(failed_passes.is_empty(), "{failed_passes:?}");
         assert!(!out[0]
             .captures
             .contains_key(crate::report_export::FIX_SOURCE_CAPTURE));
-        assert_eq!(out[0].fix_specific, None);
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Use `neverInEvidence` here.")
+        );
+        assert_eq!(
+            crate::review_flags::flags_of(&out[0]),
+            vec!["fix_ungrounded".to_string()]
+        );
     }
 
     // ── C6-B3: instantiated authored-remediation fallback on give-up ───────────────────

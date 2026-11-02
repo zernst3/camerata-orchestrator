@@ -19,6 +19,7 @@
 mod archive;
 mod consistency;
 pub mod evidence;
+pub mod junk;
 mod report;
 mod secrets;
 
@@ -68,6 +69,10 @@ pub struct ProductPackage {
     /// request, one problem each. Worked out where the dispositions are in hand (the assembly) and
     /// recorded by [`release`], because the zip holds the rows but not who decided them.
     pub undecided_unverified_evidence: Vec<Problem>,
+    /// M4: the rows marked as junk (`junk_finding::JUNK_CONTENT_CAPTURE`) that carry no reviewer
+    /// decision in the export request, one problem each. Worked out beside the evidence check, for
+    /// the same reason, and recorded by [`release`] under the content check.
+    pub undecided_junk_content: Vec<Problem>,
     /// The package is for the operator's own review. Only an internal package may record an
     /// incomplete run, and only [`release_internal`] releases it.
     pub internal: bool,
@@ -189,6 +194,7 @@ pub(crate) fn assemble_package(
             &report.findings,
             dispositions,
         ),
+        undecided_junk_content: junk::junk_without_decision(&report.findings, dispositions),
         internal: options.internal,
     })
 }
@@ -265,12 +271,22 @@ pub fn gate_failure_of(error: &anyhow::Error) -> Option<&GateFailure> {
 /// cannot run row parity (that needs the in-memory rows), so that check is absent from the
 /// report.
 pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
-    audit_zip_with(zip_bytes, pdf_text, false)
+    audit_zip_with(zip_bytes, pdf_text, false, true)
 }
 
 /// [`audit_zip`], optionally letting a package that records an incomplete run through (the
 /// internal export of such a run; nothing else passes it).
-fn audit_zip_with(zip_bytes: &[u8], pdf_text: Option<&str>, allow_incomplete: bool) -> GateReport {
+///
+/// `archive_content` is whether the junk-content check reads the archive's `findings.json`. A
+/// standalone audit has no reviewer decisions, so every junk row is a problem there. [`release`]
+/// holds the rows and checks their decisions itself ([`junk::junk_without_decision`]) and passes
+/// `false`, so a junk row a reviewer has decided is not refused a second time.
+fn audit_zip_with(
+    zip_bytes: &[u8],
+    pdf_text: Option<&str>,
+    allow_incomplete: bool,
+    archive_content: bool,
+) -> GateReport {
     let mut report = GateReport::default();
     let entries = match read_zip_entries(zip_bytes) {
         Ok(entries) => entries,
@@ -289,7 +305,14 @@ fn audit_zip_with(zip_bytes: &[u8], pdf_text: Option<&str>, allow_incomplete: bo
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
-    report.record(CheckId::Content, content_problems(&entries));
+    report.record(
+        CheckId::Content,
+        if archive_content {
+            content_problems(&entries)
+        } else {
+            Vec::new()
+        },
+    );
     report.record(CheckId::Marking, marking_problems(&entries));
     let mut manifest_problems = verify_manifest(&entries);
     if !allow_incomplete {
@@ -381,11 +404,15 @@ fn archive_secret_problems(
     problems
 }
 
-/// The content check (D1): no row the model invented (rule id prefixed `AI-`) in `findings.json`
-/// is junk. A placeholder title or rule id, a row with no evidence and no explanation, or an
-/// explanation that is itself the verdict "discard this finding" makes the package unfit to
-/// ship. The same test ([`crate::junk_finding::row_problem`]) removes such a row at scan
-/// parsing and after calibration, so this check only fires if a row got past both.
+/// The content check (D1) over an archive alone: no row in `findings.json` is real junk
+/// ([`crate::junk_finding::JunkReason`]). A placeholder title or rule id, a row with no evidence
+/// and no explanation, an empty explanation, the model's own refusal or chat reply, an
+/// untranslated JSON fragment, or the verdict "discard this finding" makes the package unfit to
+/// ship. Wording judgments are not problems. The same test removes such a row at scan parsing
+/// and after calibration, so this check only fires if a row got past both.
+///
+/// Used by a standalone audit of a zip ([`audit_zip`]), which has no reviewer decisions. The
+/// release path holds junk rows by decision instead ([`junk::junk_without_decision`]).
 fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
     let Some(bytes) = entries.get("findings.json") else {
         // The dataset-set check reports the missing file.
@@ -476,7 +503,13 @@ fn release_checked(
     )
     .map_err(|e| ReleaseError::Assembly(e.to_string()))?;
 
-    let mut report = audit_zip_with(&bytes, None, allow_incomplete);
+    let mut report = audit_zip_with(&bytes, None, allow_incomplete, false);
+    // An internal package (the operator's own review, never a client's) may carry rows held for a
+    // reviewer's decision: each is marked held in its workbook. A client package is refused until
+    // every held row has a decision.
+    if !allow_incomplete {
+        report.record(CheckId::Content, package.undecided_junk_content.clone());
+    }
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
@@ -497,7 +530,11 @@ fn release_checked(
     );
     report.record(
         CheckId::EvidenceUnverified,
-        package.undecided_unverified_evidence.clone(),
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.undecided_unverified_evidence.clone()
+        },
     );
     let report = report.sorted();
 
@@ -565,6 +602,12 @@ mod junk_content_tests;
 
 #[cfg(test)]
 mod evidence_tests;
+
+#[cfg(test)]
+mod internal_held_tests;
+
+#[cfg(test)]
+mod discarded_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]

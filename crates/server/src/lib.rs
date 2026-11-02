@@ -131,6 +131,9 @@ pub use camerata_app_core::schedule;
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
+/// A10: a finding the engine throws out is kept, marked and left out of the client export, never
+/// deleted. See the module doc comment.
+pub mod engine_discard;
 /// D3: the standard JavaScript, Web and Node API names and the ESLint rule names a fix may use
 /// without them being in the finding's evidence.
 pub(crate) mod fix_standard_names;
@@ -151,6 +154,9 @@ pub mod model_tier;
 pub mod provider_policy;
 pub mod rate_limit;
 pub mod release_gate;
+/// M4: wording problems recorded as review flags on the row (one list in one capture), never as a
+/// failure that locks a run or an export. See the module doc comment.
+pub mod review_flags;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as
 /// "verified clean" and a row that vanishes between pipeline stages can never go
@@ -5128,6 +5134,11 @@ async fn rescan_alternatives_handler(
     let rescan_meter =
         crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::from_env());
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
+    // A10: the rows this rescan's audit threw out, kept apart from the rows that ship.
+    let mut all_discarded: Vec<crate::onboard::Finding> = Vec::new();
+    // The repos whose rescan audit returned Ok, each with the rule ids it re-evaluated: the only
+    // (rule, repo) pairs whose old rows the fold may replace.
+    let mut refreshed: Vec<(String, Vec<String>)> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
     // The same picks with the repo each was made for, one per (rule, repo): what the stored
@@ -5201,6 +5212,11 @@ async fn rescan_alternatives_handler(
         .await
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
+                refreshed.push((spec.to_string(), applicable_ids.clone()));
+                // A10: rows the audit threw out come back marked; they are kept apart from the
+                // rows that ship and folded into the stored report's `discarded` below.
+                let (thrown_out, findings) = crate::engine_discard::split_discarded(findings);
+                all_discarded.extend(thrown_out);
                 all_findings.extend(findings);
                 for mut r in recs {
                     r.repo = spec.to_string();
@@ -5227,12 +5243,11 @@ async fn rescan_alternatives_handler(
     // Merge into the project's stored last_scan so an immediate accept-alternatives call
     // (or a UI reload) sees the operator's override without any client round-trip.
     if let Some(mut report) = state.get_last_scan(&id) {
-        let rescanned_ids: std::collections::HashSet<String> =
-            alternatives_by_rule.keys().cloned().collect();
-        report
-            .findings
-            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
-        report.findings.extend(all_findings.clone());
+        report.fold_rescan_rows(
+            &refreshed,
+            all_findings.clone(),
+            std::mem::take(&mut all_discarded),
+        );
         report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
@@ -28733,6 +28748,7 @@ mod tests {
         crate::onboard::ScanReport {
             run_id: None,
             tree: None,
+            discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

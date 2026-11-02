@@ -1612,7 +1612,8 @@ async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
+    // One attempt and one re-ask (M4): two counts where there were three rounds.
+    assert_eq!((r.invented_precondition, r.total()), (2, 2), "{r:?}");
 
     // An id that is not the batch's is a missing id, charged to the finding the entry was meant
     // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 are
@@ -1723,7 +1724,7 @@ async fn a_dropped_named_token_is_counted_under_its_own_reason() {
         }
     }
     let meter = meter_with(EfficiencyConfig::default());
-    let (_, failed) = regenerate_full_details(
+    let (out, failed) = regenerate_full_details(
         &Drops,
         REPO,
         n_findings(1),
@@ -1735,9 +1736,33 @@ async fn a_dropped_named_token_is_counted_under_its_own_reason() {
     )
     .await;
     let r = rejections(&meter);
-    assert_eq!((r.drops_named_token, r.total()), (3, 3), "{r:?}");
-    // The failed pass (which can reach a client) carries the total in plain words and none of
-    // the breakdown.
+    // One attempt and one re-ask (M4): two counts where there were three rounds, and the finding
+    // ships flagged with the names it dropped, so there is no failed part.
+    assert_eq!((r.drops_named_token, r.total()), (2, 2), "{r:?}");
+    assert!(
+        failed.is_empty(),
+        "wording never makes a failed part: {failed:?}"
+    );
+    assert!(crate::review_flags::flags_of(&out[0])
+        .iter()
+        .any(|flag| flag.starts_with("unverified_name:")));
+
+    // The failed pass (which can reach a client) still carries only the total in plain words and
+    // none of the breakdown. Wording no longer makes one, so a model that leaves the finding out
+    // of every round does.
+    let llm = RoleLlm::new("{}", Regen::DropsLast);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (_, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
     let reason = &failed[0].reason;
     assert!(reason.contains("fell short 3 times"), "{reason}");
     assert!(
@@ -2400,16 +2425,12 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
     .await;
 }
 
-/// The failed part's last attempt lists, per finding, why its latest reply was turned down.
+/// The failed part's last attempt lists, per finding, why its latest reply was turned down. (A
+/// reply that fails a wording check is no longer a failed part, M4, so the reason listed here is
+/// a mechanical one: the reply left the finding out.)
 #[tokio::test]
 async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
-    // A reply that drops the name the statement made fails a check that is not the fallback's.
-    let llm = SplitLlm::new(|_| {
-        SplitReply::Entry(
-            "The handler is wrong.".to_string(),
-            GOOD_DIRECTION.to_string(),
-        )
-    });
+    let llm = SplitLlm::new(|_| SplitReply::LeftOut);
     let (_out, failed) = regen_one(&llm).await;
     assert_eq!(failed.len(), 1);
     let listed: Vec<&String> = failed[0]
@@ -2418,7 +2439,7 @@ async fn a_failed_detail_part_lists_the_reason_per_finding_in_its_attempts() {
         .flat_map(|a| a.rejections.iter())
         .collect();
     assert_eq!(listed.len(), 1, "{:?}", failed[0].attempts);
-    assert!(listed[0].contains("dropped"), "{}", listed[0]);
+    assert!(listed[0].contains("left this finding out"), "{}", listed[0]);
 }
 
 // ── P7: a detail reply counts as wasted by the share of its entries rejected ────────────────
@@ -2600,15 +2621,16 @@ async fn regen_one(llm: &SplitLlm) -> (Vec<Finding>, Vec<FailedPass>) {
     .await
 }
 
-/// R1-1 (b): a retry is not an identical prompt. Round one carries no reason; rounds two and
-/// three carry the reason the previous answer was turned down.
+/// R1-1 (b): a retry is not an identical prompt. Round one carries no reason; the one re-ask
+/// carries the reason the previous answer was turned down. M4: a wording failure gets that one
+/// re-ask and no more, so there are two calls where there were three.
 #[tokio::test]
 async fn a_second_round_block_carries_the_prior_rejection() {
     let llm =
         SplitLlm::new(|_| SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string()));
     let _ = regen_one(&llm).await;
     let prompts = llm.prompts();
-    assert_eq!(prompts.len(), 3, "three rounds: {prompts:?}");
+    assert_eq!(prompts.len(), 2, "one attempt and one re-ask: {prompts:?}");
     let line = "Your previous answer was turned down because: added an exploit precondition";
     assert!(!prompts[0].contains("turned down"), "{}", prompts[0]);
     for later in &prompts[1..] {
@@ -2668,18 +2690,13 @@ async fn a_fallback_never_ships_a_fix_direction_that_makes_a_precondition() {
     assert!(!out[0].detail.contains("logged in"));
 }
 
-/// R1-1 (c): work that never ran stays incomplete. A last attempt that failed in transport, or a
-/// round turned down for another reason, is not the fallback.
+/// R1-1 (c): work that never ran stays incomplete. A finding the model never answered (every call
+/// failed in transport, the second try included) is not wording: it keeps the marker and the
+/// failed part. M4: a finding whose replies failed a wording check is NOT this case any more (see
+/// the tests below): it ships flagged, whatever else happened to its re-ask.
 #[tokio::test]
-async fn detail_work_that_never_ran_or_failed_another_check_stays_incomplete() {
-    // The last call fails in transport (the second try fails too).
-    let llm = SplitLlm::new(|call| {
-        if call < 2 {
-            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
-        } else {
-            SplitReply::Down
-        }
-    });
+async fn detail_work_that_never_ran_stays_incomplete() {
+    let llm = SplitLlm::new(|_| SplitReply::Down);
     let (out, failed) = regen_one(&llm).await;
     assert!(
         out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
@@ -2690,25 +2707,7 @@ async fn detail_work_that_never_ran_or_failed_another_check_stays_incomplete() {
     assert!(!out[0]
         .captures
         .contains_key(crate::report_export::DETAIL_SOURCE_CAPTURE));
-
-    // One round dropped a name the statement made: that is a different check.
-    let llm = SplitLlm::new(|call| {
-        if call == 1 {
-            SplitReply::Entry(
-                "The handler is wrong.".to_string(),
-                GOOD_DIRECTION.to_string(),
-            )
-        } else {
-            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
-        }
-    });
-    let (out, failed) = regen_one(&llm).await;
-    assert!(
-        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
-        "{}",
-        out[0].detail
-    );
-    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
+    assert!(crate::review_flags::flags_of(&out[0]).is_empty());
 }
 
 /// Review of R1-1 (c): one policy for the fallback. A single `detail` reply (no split) rejected
@@ -2744,11 +2743,11 @@ async fn a_single_detail_reply_rejected_only_for_a_precondition_ships_the_scan_s
     );
 }
 
-/// Review of R1-1 (c): "answered in every attempt". A finding the model left out in round one
-/// and invented a precondition for in rounds two and three did not get an answer every round,
-/// so it stays incomplete.
+/// M4 (was: "answered in every attempt", which kept such a finding incomplete). A finding the
+/// model left out in the first call and answered twice with an invented precondition has had its
+/// wording checked twice: it ships the scan's statement flagged, not the incomplete marker.
 #[tokio::test]
-async fn a_finding_left_out_in_an_earlier_round_is_not_fallback_eligible() {
+async fn a_finding_left_out_once_and_then_failing_the_check_twice_ships_flagged() {
     let llm = SplitLlm::new(|call| {
         if call == 0 {
             SplitReply::LeftOut
@@ -2757,12 +2756,18 @@ async fn a_finding_left_out_in_an_earlier_round_is_not_fallback_eligible() {
         }
     });
     let (out, failed) = regen_one(&llm).await;
+    assert!(failed.is_empty(), "{failed:?}");
     assert!(
-        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        !out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
         "{}",
         out[0].detail
     );
-    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
+    assert!(out[0].detail.contains(SHORT), "{}", out[0].detail);
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["precondition_added".to_string()]
+    );
+    assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
 
 /// R1-1: a retry that answers cleanly (the reason in the prompt did its job) is written
@@ -2782,4 +2787,213 @@ async fn a_retry_that_answers_cleanly_is_written_and_not_marked() {
     assert!(!out[0]
         .captures
         .contains_key(crate::report_export::DETAIL_SOURCE_CAPTURE));
+}
+
+// ── M4: one attempt, then a flag ────────────────────────────────────────────────────────────
+
+fn calls_made(llm: &SplitLlm) -> usize {
+    llm.calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// M4 (item 4a): a detail reply failing the precondition check twice makes exactly 2 model calls
+/// and ships the best text, the scan's own statement plus the checked fix direction, with the
+/// `precondition_added` flag on the row. No third round, no failed part, no marker.
+#[tokio::test]
+async fn a_detail_reply_failing_the_precondition_check_twice_ships_flagged_after_two_calls() {
+    let llm =
+        SplitLlm::new(|_| SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string()));
+    let (out, failed) = regen_one(&llm).await;
+    assert_eq!(calls_made(&llm), 2, "one attempt and one re-ask");
+    assert!(
+        failed.is_empty(),
+        "wording never makes a failed part: {failed:?}"
+    );
+    let detail = &out[0].detail;
+    assert!(detail.contains(SHORT), "{detail}");
+    assert!(detail.contains(GOOD_DIRECTION), "{detail}");
+    assert!(!detail.contains(DETAIL_INCOMPLETE_MARKER), "{detail}");
+    assert!(!detail.contains("valid session"), "{detail}");
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["precondition_added".to_string()]
+    );
+    assert_eq!(
+        out[0]
+            .captures
+            .get(crate::report_export::DETAIL_SOURCE_CAPTURE)
+            .map(String::as_str),
+        Some(crate::report_export::SCAN_DETAIL)
+    );
+}
+
+/// The better of two failing replies ships. Both drop names; the one that drops fewer wins, in
+/// either order, and its flags name only what IT dropped.
+#[tokio::test]
+async fn the_better_of_two_replies_ships_with_the_names_it_dropped() {
+    let drops_both = "The handler is wrong.";
+    let drops_one = "The handler reads REQUIRE_WEBHOOK_SIGNATURE and refunds with no check.";
+    // The second reply is better.
+    let llm = SplitLlm::new(move |call| {
+        let why = if call == 0 { drops_both } else { drops_one };
+        SplitReply::Entry(why.to_string(), GOOD_DIRECTION.to_string())
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert_eq!(calls_made(&llm), 2);
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(out[0].detail.contains(drops_one), "{}", out[0].detail);
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["unverified_name:src/config.rs".to_string()]
+    );
+    // The first reply is better: it ships even though the re-ask came later.
+    let llm = SplitLlm::new(move |call| {
+        let why = if call == 0 { drops_one } else { drops_both };
+        SplitReply::Entry(why.to_string(), GOOD_DIRECTION.to_string())
+    });
+    let (out, _) = regen_one(&llm).await;
+    assert_eq!(calls_made(&llm), 2);
+    assert!(out[0].detail.contains(drops_one), "{}", out[0].detail);
+    assert!(!out[0].detail.contains(drops_both), "{}", out[0].detail);
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["unverified_name:src/config.rs".to_string()]
+    );
+    // A reply that drops a name beats one that invents a precondition, whichever came first.
+    let llm = SplitLlm::new(move |call| {
+        let why = if call == 0 { INVENTED_WHY } else { drops_both };
+        SplitReply::Entry(why.to_string(), GOOD_DIRECTION.to_string())
+    });
+    let (out, _) = regen_one(&llm).await;
+    assert!(out[0].detail.contains(drops_both), "{}", out[0].detail);
+    assert!(
+        !out[0].detail.contains("valid session"),
+        "{}",
+        out[0].detail
+    );
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec![
+            "unverified_name:REQUIRE_WEBHOOK_SIGNATURE".to_string(),
+            "unverified_name:src/config.rs".to_string()
+        ]
+    );
+}
+
+/// A reply that passes on the re-ask is written clean: no flag, no mark.
+#[tokio::test]
+async fn a_reply_that_passes_on_the_re_ask_carries_no_flag() {
+    let llm = SplitLlm::new(|call| {
+        if call == 0 {
+            SplitReply::Entry(INVENTED_WHY.to_string(), GOOD_DIRECTION.to_string())
+        } else {
+            SplitReply::Entry(GOOD_WHY.to_string(), GOOD_DIRECTION.to_string())
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert_eq!(calls_made(&llm), 2);
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(crate::review_flags::flags_of(&out[0]).is_empty());
+    assert!(!out[0]
+        .captures
+        .contains_key(crate::review_flags::REVIEW_FLAGS_CAPTURE));
+}
+
+/// A re-ask the transport loses settles from the reply the finding has, flagged. The stage ran on
+/// the finding; a lost second call is not a reason to hold the run over wording.
+#[tokio::test]
+async fn a_re_ask_lost_to_transport_settles_from_the_first_reply_flagged() {
+    let llm = SplitLlm::new(|call| {
+        if call == 0 {
+            SplitReply::Entry(
+                "The handler reads REQUIRE_WEBHOOK_SIGNATURE and refunds with no check."
+                    .to_string(),
+                GOOD_DIRECTION.to_string(),
+            )
+        } else {
+            SplitReply::Down
+        }
+    });
+    let (out, failed) = regen_one(&llm).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(
+        !out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        "{}",
+        out[0].detail
+    );
+    assert_eq!(
+        crate::review_flags::flags_of(&out[0]),
+        vec!["unverified_name:src/config.rs".to_string()]
+    );
+}
+
+/// The ledger's flag counts reconcile with the flags on the rows: per stage, per kind, and in
+/// total, across findings with different outcomes in one run.
+#[tokio::test]
+async fn the_ledger_flag_counts_reconcile_with_the_flags_on_the_rows() {
+    // The finding on line 1 fails twice with an invented precondition; line 2 drops a name twice;
+    // line 3 passes. One scripted model answers by line, so each finding gets its own behaviour.
+    struct ByLine;
+    #[async_trait::async_trait]
+    impl LlmPort for ByLine {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let entries: serde_json::Map<String, serde_json::Value> = asked(&req.prompt)
+                .into_iter()
+                .map(|(id, _, line)| {
+                    let why = match line {
+                        1 => INVENTED_WHY,
+                        2 => {
+                            "The handler reads REQUIRE_WEBHOOK_SIGNATURE and refunds with no check."
+                        }
+                        _ => GOOD_WHY,
+                    };
+                    (
+                        id,
+                        serde_json::json!({"why": why, "fix_direction": GOOD_DIRECTION}),
+                    )
+                })
+                .collect();
+            Ok(stub_response(
+                serde_json::json!({ "details": entries }).to_string(),
+            ))
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    let meter = UsageMeter::default();
+    let (out, failed) = regenerate_full_details(
+        &ByLine,
+        REPO,
+        n_findings(3),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let flags = meter
+        .stage_telemetry(0)
+        .review_flags
+        .expect("flags were recorded");
+    assert_eq!(flags.detail, 2, "{flags:?}");
+    assert_eq!(flags.fix, 0);
+    assert!(flags.reconciles(), "{flags:?}");
+    assert_eq!(flags.by_kind.get("precondition_added"), Some(&1));
+    assert_eq!(flags.by_kind.get("unverified_name"), Some(&1));
+    // The rows carry exactly the flags the ledger counted.
+    let on_rows = crate::review_flags::count_on_rows(&out);
+    assert_eq!(
+        on_rows.get(&crate::review_flags::FlagStage::Detail),
+        Some(&flags.detail)
+    );
+    assert_eq!(on_rows.len(), 1);
 }

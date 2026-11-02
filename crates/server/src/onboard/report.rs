@@ -15,6 +15,7 @@ pub fn build_report(
     ScanReport {
         run_id: None,
         tree: None,
+        discarded: Vec::new(),
         repos,
         stacks,
         files_scanned,

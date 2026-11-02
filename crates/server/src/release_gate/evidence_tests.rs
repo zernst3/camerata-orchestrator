@@ -136,6 +136,25 @@ fn a_decision_about_another_row_does_not_cover_this_one() {
     assert!(matches!(release(package), Err(ReleaseError::Blocked(_))));
 }
 
+/// The positive counterpart: the site key is line-independent (WO1), so a decision about the same
+/// site (same repo, file, rule and code) at another line covers the row.
+#[test]
+fn a_same_site_row_at_another_line_is_covered_by_the_decision() {
+    let mut same_site = unverified_row();
+    same_site.line = 99;
+    let dispositions = HashMap::from([(
+        finding_key(&same_site),
+        DispositionWire {
+            state: "Confirmed".to_string(),
+            ..DispositionWire::default()
+        },
+    )]);
+    let package = package_with(report_with(unverified_row()), &dispositions);
+    assert!(package.undecided_unverified_evidence.is_empty());
+    let released = release(package);
+    assert!(released.is_ok(), "{:?}", released.err());
+}
+
 #[test]
 fn a_verified_row_is_never_affected() {
     let mut verified = unverified_row();

@@ -2722,6 +2722,31 @@ impl Llm {
         })
     }
 
+    /// Ask the provider to cancel a batch (`POST /v1/messages/batches/{id}/cancel`). The batch
+    /// moves to `canceling` and then `ended`: items that already finished keep their results (and
+    /// their cost), the rest end as `canceled`. Retried like every other batch call.
+    pub async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cancelling a batch requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
+        })?;
+        let make_request = || {
+            shared_http_client()
+                .post(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}/cancel"
+                ))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch cancel", out));
+        }
+        Ok(())
+    }
+
     /// Stream the results of a completed batch from the Anthropic results URL. Each line
     /// of the JSONL response is one `BatchResultRow` keyed by `custom_id`. Callers MUST
     /// call this only after [`poll_batch_status`] reports `processing_status == "ended"`.
@@ -6340,6 +6365,28 @@ exit 1"#,
         assert!(refusal_error(&serde_json::json!({})).is_none());
     }
 
+    /// A 429 that outlasts the retries is a typed rate-limit failure whose last attempt keeps the
+    /// `retry-after` the provider sent, so a caller that waits knows how long.
+    #[test]
+    fn a_429_that_outlasts_the_retries_is_rate_limited_and_keeps_its_retry_after() {
+        let mut last = crate::failure::AttemptRecord::new("api", "m");
+        last.http_status = Some(429);
+        last.retry_after_secs = Some(37);
+        let out = crate::retry::ApiOutcome {
+            status: 429,
+            body: r#"{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#.to_string(),
+            attempts: vec![last],
+        };
+        let err = http_failure("Anthropic API", out);
+        let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::RateLimited);
+        assert!(failure.retryable);
+        assert_eq!(
+            crate::failure::retry_after_of(&err),
+            Some(std::time::Duration::from_secs(37))
+        );
+    }
+
     /// A batch submit, poll or fetch that ends on an HTTP error is a typed failure that keeps
     /// every attempt (status, provider message, request id, wait), exactly like a real-time call,
     /// and the message keeps the wording callers have always seen.
@@ -6362,7 +6409,7 @@ exit 1"#,
             "{err}"
         );
         let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
-        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.class, crate::failure::FailureClass::RateLimited);
         assert_eq!(failure.attempts.len(), 2);
         assert_eq!(failure.attempts[0].request_id.as_deref(), Some("req_1"));
     }

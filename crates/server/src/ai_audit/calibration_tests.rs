@@ -892,10 +892,21 @@ fn a_real_no_verdict_keeps_the_row_with_no_discard_mark_or_discard_shaped_text()
         .expect("kept")
         .reason
         .contains("Discard"));
-    // The step that removes model-invented rows the model's text says to discard keeps both.
-    let removed = drop_discarded_invented_rows("acme/app", &mut rows);
-    assert_eq!(removed, 0, "a real: no verdict removes nothing");
+    // The step that marks model-invented rows the model's own text says to discard reads the
+    // row's explanation and headline only, never the stage 1 record, so it marks neither.
+    let marked = mark_discarded_invented_rows("acme/app", &mut rows);
+    assert_eq!(marked, 0, "a real: no verdict throws nothing out");
     assert_eq!(rows.len(), 2, "both sites stay in findings");
+    assert!(
+        rows.iter().all(|f| !crate::engine_discard::is_discarded(f)),
+        "no engine_discarded mark on either site"
+    );
+    // The stage 1 record rides beside M4's captures as bookkeeping, not as an object name.
+    for key in [STAGE1_CAPTURE, OUTLIER_REASONS_CAPTURE] {
+        assert!(BOOKKEEPING_CAPTURE_KEYS.contains(&key), "{key}");
+    }
+    assert!(BOOKKEEPING_CAPTURE_KEYS.contains(&crate::review_flags::REVIEW_FLAGS_CAPTURE));
+    assert!(BOOKKEEPING_CAPTURE_KEYS.contains(&crate::junk_finding::JUNK_CONTENT_CAPTURE));
 }
 
 // ── One call per site must not re-pay for the instructions ─────────────────────────────────

@@ -163,6 +163,7 @@ fn minimal_report(
     ScanReport {
         run_id: None,
         tree: None,
+        discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
