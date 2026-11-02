@@ -34,10 +34,27 @@ def note(what):
 note("start")
 time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
 labels = re.findall(r'^<<<UNTRUSTED \S+ "([^"]*)">>>$', prompt, re.M)
+# The engine checks that quoted evidence exists, so each finding quotes the real first line of the
+# file the request frames: a file is `<<<UNTRUSTED token "path">>>`, then lines as `   N| text`.
+first = {}
+current = None
+for l in prompt.splitlines():
+    m = re.match(r'^<<<UNTRUSTED \S+ "([^"]*)">>>$', l)
+    if m:
+        current = m.group(1)
+        continue
+    if l.startswith("<<<END UNTRUSTED"):
+        current = None
+        continue
+    if current is not None and current not in first:
+        m = re.match(r'^\s*(\d+)\| (.*)$', l)
+        if m and m.group(2).strip():
+            first[current] = (int(m.group(1)), m.group(2).strip())
 if "CONFORMANCE audit" in system:
     findings = [
-        {"path": p, "line": 1, "severity": "medium", "rule": "unchecked-input",
-         "title": "Input is not checked in " + p, "code": "// FIXTURE",
+        {"path": p, "line": first.get(p, (1, ""))[0], "severity": "medium",
+         "rule": "unchecked-input",
+         "title": "Input is not checked in " + p, "code": first.get(p, (1, "// FIXTURE"))[1],
          "detail": p + " passes input on without checking it."}
         for p in labels if p != "repo map"
     ]

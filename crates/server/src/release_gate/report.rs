@@ -25,6 +25,9 @@ pub enum CheckId {
     /// No finding the model invented is junk: a placeholder title or rule id, no evidence, or an
     /// explanation that says to discard it (D1).
     Content,
+    /// Every row whose quoted evidence was not found in the file carries a reviewer decision
+    /// (M5). Runs over the in-memory rows, so a standalone audit of a zip cannot run it.
+    EvidenceUnverified,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -36,13 +39,14 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 9] = [
+    pub const ALL: [CheckId; 10] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
         CheckId::RowParity,
         CheckId::Counts,
         CheckId::Content,
+        CheckId::EvidenceUnverified,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -57,6 +61,7 @@ impl CheckId {
             CheckId::RowParity => "row parity",
             CheckId::Counts => "severity and kind counts",
             CheckId::Content => "finding content",
+            CheckId::EvidenceUnverified => "reviewer decision on unverified evidence",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",

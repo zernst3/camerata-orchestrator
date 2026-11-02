@@ -21,6 +21,7 @@ pub mod audit;
 pub mod clone_advisory;
 pub mod count;
 pub mod credential_cross_ref;
+pub mod evidence_check;
 pub mod files;
 pub mod finding_context;
 pub mod finding_context_batch;
@@ -2327,6 +2328,8 @@ pub async fn audit_repos_with_llm_controlled(
                     skipped_oversize,
                     skipped_beyond_cap,
                     skipped_unreadable,
+                    skipped_sizes,
+                    file_cap,
                     excluded_noise,
                     excluded_noise_paths: _,
                 },
@@ -2344,19 +2347,16 @@ pub async fn audit_repos_with_llm_controlled(
                 files_excluded_total += excluded_noise;
                 excluded_noise_lines_total += noise_lines;
                 any_repo_read = true;
-                for (paths, reason) in [
-                    (skipped_oversize, crate::scan_ledger::SkipReason::Oversize),
-                    (
-                        skipped_beyond_cap,
-                        crate::scan_ledger::SkipReason::BeyondFileCap,
-                    ),
-                    (skipped_unreadable, crate::scan_ledger::SkipReason::NotText),
-                ] {
-                    let repo_name = spec.to_string();
-                    for path in paths {
-                        skipped_files_total.push(&repo_name, path, reason);
-                    }
-                }
+                skipped_files_total.record_repo(
+                    spec,
+                    crate::scan_ledger::RepoSkips {
+                        oversize: skipped_oversize,
+                        beyond_cap: skipped_beyond_cap,
+                        not_text: skipped_unreadable,
+                        sizes: &skipped_sizes,
+                        file_cap,
+                    },
+                );
                 // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
                 // source — the 2026-10-16 defect. Fed to the integrity gate below.
                 engine_artifacts_total += files
@@ -3354,6 +3354,15 @@ pub async fn audit_repos_with_llm_controlled(
                     // is never silent.
                     all_failed_passes.extend(fix_failed_passes);
                 }
+                // M5: open each row's file and look for the quoted snippet near its line. A row
+                // where it is not found is marked and held, never dropped or reworded; the counts
+                // go to the ledger. The last step on a repo's rows before they join the report.
+                evidence_check::verify_and_record(
+                    &mut pipeline_ledger,
+                    &mut repo_findings,
+                    &files,
+                    Some(&repo_root_for_history),
+                );
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -3575,6 +3584,8 @@ pub async fn audit_repos_with_llm_controlled(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
+    let skipped_totals = skipped_files_total.totals();
+    let file_cap_hits = skipped_files_total.file_cap_hits();
     let (skipped_files, skipped_beyond_cap_total) = skipped_files_total.finish();
     report
         .ledger
@@ -3589,6 +3600,8 @@ pub async fn audit_repos_with_llm_controlled(
             audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
             skipped_files,
             skipped_beyond_cap_total,
+            skipped_totals,
+            file_cap_hits,
         });
     // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
     // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero

@@ -510,6 +510,10 @@ pub struct ScanLedger {
     /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
     #[serde(default)]
     path_hygiene: PathHygiene,
+    /// M5: how many rows had their quoted evidence opened and checked against the scanned file.
+    /// See [`EvidenceCheck`].
+    #[serde(default)]
+    evidence: EvidenceCheck,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -640,6 +644,133 @@ pub struct ScanInputFacts {
     /// more", so a bounded list never reads as the whole list. `serde(default)` for older ledgers.
     #[serde(default)]
     pub skipped_beyond_cap_total: usize,
+    /// How many files were skipped for each reason, over ALL of them: the named list is bounded,
+    /// these counts are not. The Coverage summary prints them. `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub skipped_totals: SkippedTotals,
+    /// Each repo that reached the file limit, with how many of its files the scan did not read.
+    /// `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub file_cap_hits: Vec<FileCapHit>,
+}
+
+/// Files skipped, counted per [`SkipReason`] over every file, named or not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedTotals {
+    #[serde(default)]
+    pub oversize: usize,
+    #[serde(default)]
+    pub beyond_file_cap: usize,
+    #[serde(default)]
+    pub not_text: usize,
+}
+
+impl SkippedTotals {
+    /// Files skipped for `reason`.
+    pub fn of(&self, reason: SkipReason) -> usize {
+        match reason {
+            SkipReason::Oversize => self.oversize,
+            SkipReason::BeyondFileCap => self.beyond_file_cap,
+            SkipReason::NotText => self.not_text,
+        }
+    }
+
+    /// Files skipped for any reason.
+    pub fn total(&self) -> usize {
+        self.oversize + self.beyond_file_cap + self.not_text
+    }
+
+    fn add(&mut self, reason: SkipReason) {
+        match reason {
+            SkipReason::Oversize => self.oversize += 1,
+            SkipReason::BeyondFileCap => self.beyond_file_cap += 1,
+            SkipReason::NotText => self.not_text += 1,
+        }
+    }
+}
+
+/// A repo whose walk reached the file limit (`onboard::files::HARD_CAP_FILES`): the scan read the
+/// first files in path order and did not read `not_scanned` more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileCapHit {
+    /// The repo (`owner/repo`).
+    pub repo: String,
+    /// Auditable files past the limit, none of which was read.
+    pub not_scanned: usize,
+    /// The file limit that was in effect for this walk. 0 on a ledger written before it was
+    /// recorded, which is read as the production limit.
+    #[serde(default)]
+    pub limit: usize,
+}
+
+/// M5: the tally of the evidence check, which opens each row's file and looks for the quoted
+/// snippet near the cited line (`onboard::evidence_check`).
+///
+/// Every row is in exactly one bucket: `exempt` (the check does not apply to its kind, see
+/// `evidence_check::Exempt`), or checked, and a checked row is either `verified` or
+/// `unverified`. So `checked == verified + unverified` and `checked + exempt` is the number of
+/// rows the check saw ([`Self::reconciles`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceCheck {
+    /// Rows whose snippet was looked for in the file.
+    #[serde(default)]
+    pub checked: usize,
+    /// Checked rows whose snippet was found within the window around the cited line.
+    #[serde(default)]
+    pub verified: usize,
+    /// Checked rows whose snippet was not found there. Each is held for review.
+    #[serde(default)]
+    pub unverified: usize,
+    /// Rows the check does not apply to, by kind.
+    #[serde(default)]
+    pub exempt: usize,
+    /// Absorbed sites (`Finding::also_locations`) whose snippet was looked for in their own file,
+    /// counted apart from the rows. A site that is a consequence of the row's root cause (its
+    /// snippet describes an impact, not a line) is not checked and not counted.
+    #[serde(default)]
+    pub site_checked: usize,
+    /// Absorbed sites the check does not apply to: a consequence of the row's root cause (its
+    /// snippet describes an impact), a site in another repository, a site with no snippet or no
+    /// line, and every site of a row exempt by kind. `site_checked + site_exempt` is every
+    /// absorbed site the check saw.
+    #[serde(default)]
+    pub site_exempt: usize,
+    /// Checked absorbed sites whose snippet was found near their own line.
+    #[serde(default)]
+    pub site_verified: usize,
+    /// Checked absorbed sites whose snippet was not found. Each holds its row.
+    #[serde(default)]
+    pub site_unverified: usize,
+}
+
+impl EvidenceCheck {
+    /// Every absorbed site the check saw.
+    pub fn sites_seen(&self) -> usize {
+        self.site_checked + self.site_exempt
+    }
+
+    /// Every row the check saw.
+    pub fn rows_seen(&self) -> usize {
+        self.checked + self.exempt
+    }
+
+    /// Whether the counts agree with each other: every checked row is verified or unverified.
+    pub fn reconciles(&self) -> bool {
+        self.checked == self.verified + self.unverified
+            && self.site_checked == self.site_verified + self.site_unverified
+    }
+
+    /// Add another tally (a second repo's) to this one.
+    pub fn add(&mut self, other: EvidenceCheck) {
+        self.checked += other.checked;
+        self.verified += other.verified;
+        self.unverified += other.unverified;
+        self.exempt += other.exempt;
+        self.site_checked += other.site_checked;
+        self.site_exempt += other.site_exempt;
+        self.site_verified += other.site_verified;
+        self.site_unverified += other.site_unverified;
+    }
 }
 
 /// How many skipped paths are named per reason. A huge repository can have tens of thousands of
@@ -654,11 +785,35 @@ pub struct SkippedFileList {
     listed: Vec<SkippedFile>,
     listed_per_reason: std::collections::HashMap<SkipReason, usize>,
     beyond_cap_total: usize,
+    totals: SkippedTotals,
+    file_cap_hits: Vec<FileCapHit>,
+}
+
+/// What one repo's walk skipped, as the walk reports it (`onboard::files::ExtractedRepo`).
+pub struct RepoSkips<'a> {
+    /// Files over `onboard::files::MAX_FILE_BYTES`.
+    pub oversize: Vec<String>,
+    /// Files past `onboard::files::HARD_CAP_FILES`.
+    pub beyond_cap: Vec<String>,
+    /// Files that are not text this scan can decode.
+    pub not_text: Vec<String>,
+    /// The size in bytes of each skipped file the walk could measure, by path.
+    pub sizes: &'a std::collections::HashMap<String, u64>,
+    /// The file limit the walk applied.
+    pub file_cap: usize,
 }
 
 impl SkippedFileList {
-    /// Record one skipped file: named while its reason is under the bound, counted after.
+    /// Record one skipped file of unknown size: named while its reason is under the bound,
+    /// counted after.
     pub fn push(&mut self, repo: &str, path: String, reason: SkipReason) {
+        self.push_sized(repo, path, reason, None);
+    }
+
+    /// [`Self::push`] with the file's size in bytes, when known. Every file is counted in the
+    /// per-reason totals, named or not.
+    pub fn push_sized(&mut self, repo: &str, path: String, reason: SkipReason, bytes: Option<u64>) {
+        self.totals.add(reason);
         let seen = self.listed_per_reason.entry(reason).or_insert(0);
         if *seen < SKIPPED_FILES_LISTED_PER_REASON {
             *seen += 1;
@@ -666,10 +821,44 @@ impl SkippedFileList {
                 repo: repo.to_string(),
                 path,
                 reason,
+                bytes,
             });
         } else {
             self.beyond_cap_total += 1;
         }
+    }
+
+    /// Record everything one repo's walk skipped, with sizes, and note the repo if it reached the
+    /// file limit. The one call the scan makes per repo.
+    pub fn record_repo(&mut self, repo: &str, skips: RepoSkips<'_>) {
+        let not_scanned = skips.beyond_cap.len();
+        for (paths, reason) in [
+            (skips.oversize, SkipReason::Oversize),
+            (skips.beyond_cap, SkipReason::BeyondFileCap),
+            (skips.not_text, SkipReason::NotText),
+        ] {
+            for path in paths {
+                let bytes = skips.sizes.get(&path).copied();
+                self.push_sized(repo, path, reason, bytes);
+            }
+        }
+        if not_scanned > 0 {
+            self.file_cap_hits.push(FileCapHit {
+                repo: repo.to_string(),
+                not_scanned,
+                limit: skips.file_cap,
+            });
+        }
+    }
+
+    /// The count of every skipped file per reason. Read before [`Self::finish`].
+    pub fn totals(&self) -> SkippedTotals {
+        self.totals
+    }
+
+    /// The repos that reached the file limit. Read before [`Self::finish`].
+    pub fn file_cap_hits(&self) -> Vec<FileCapHit> {
+        self.file_cap_hits.clone()
     }
 
     /// The named files and the count of those not named.
@@ -686,6 +875,10 @@ pub struct SkippedFile {
     /// Repo-relative, forward-slashed path.
     pub path: String,
     pub reason: SkipReason,
+    /// The file's size in bytes, when the walk could measure it. `serde(default)` so an older
+    /// ledger still loads.
+    #[serde(default)]
+    pub bytes: Option<u64>,
 }
 
 /// Why a file was not read.
@@ -975,6 +1168,17 @@ impl ScanLedger {
     /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
     pub fn path_hygiene(&self) -> &PathHygiene {
         &self.path_hygiene
+    }
+
+    /// M5: add one repo's evidence-check counts to the scan's total. Adds rather than
+    /// overwrites, because a multi-repo scan checks each repo separately.
+    pub fn record_evidence_check(&mut self, counts: EvidenceCheck) {
+        self.evidence.add(counts);
+    }
+
+    /// M5: the scan's evidence-check counts. See [`EvidenceCheck`].
+    pub fn evidence_check(&self) -> &EvidenceCheck {
+        &self.evidence
     }
 
     /// Queue the honest "config-gated, reviewed semantically instead" disclosure for

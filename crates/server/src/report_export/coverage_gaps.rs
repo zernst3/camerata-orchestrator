@@ -12,7 +12,7 @@
 
 use serde::Serialize;
 
-use crate::scan_ledger::{SkipReason, SKIPPED_FILES_LISTED_PER_REASON};
+use crate::scan_ledger::{FileCapHit, SkipReason, SkippedTotals, SKIPPED_FILES_LISTED_PER_REASON};
 
 /// The pass name a whole-repo AI review failure is recorded under (the intake side writes it,
 /// every exporter reads it). Stable: a persisted report carries it.
@@ -73,6 +73,18 @@ pub struct CoverageGapsJson {
     pub skipped_files: Vec<SkippedFileJson>,
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
+    /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
+    /// were not scanned: 3 over the 400 KB file size limit, 9 beyond the 20,000-file limit.").
+    /// `None` when every auditable file was read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_summary: Option<String>,
+    /// One sentence per repo that reached the file limit, with how many of its files were not
+    /// scanned. The limit is a coverage limit on the run, not only a list of paths.
+    pub file_limit_notes: Vec<String>,
+    /// One sentence saying how many absorbed sites were not checked against their files (M5), and
+    /// why. `None` when every absorbed site was checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_note: Option<String>,
     /// The sentence every renderer prints for them ("and K more skipped files ..."); `None`
     /// when the list is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +145,130 @@ pub fn skipped_beyond_cap_sentence(omitted: usize) -> Option<String> {
     })
 }
 
+/// A file size as Coverage prints it: bytes under a kilobyte, whole kilobytes (1,000 bytes) under
+/// a megabyte, then megabytes to one decimal. Decimal units, like the "400 KB" file limit.
+pub fn format_size(bytes: u64) -> String {
+    if bytes < 1_000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{} KB", (bytes + 500) / 1_000)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
+}
+
+/// `n` with a comma between each group of three digits ("20,000").
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn files_noun(n: usize) -> &'static str {
+    if n == 1 {
+        "file was"
+    } else {
+        "files were"
+    }
+}
+
+/// The sentence for `exempt` absorbed sites the evidence check did not apply to. `None` when none.
+fn evidence_note_sentence(exempt: usize) -> Option<String> {
+    (exempt > 0).then(|| {
+        let (noun, pronoun) = if exempt == 1 {
+            ("site was", "its file")
+        } else {
+            ("sites were", "their files")
+        };
+        format!(
+            "{exempt} absorbed {noun} not checked against {pronoun}: they describe an impact \
+             rather than quote code, belong to a summary row, sit in another repository or cite \
+             no line."
+        )
+    })
+}
+
+/// The file limit a hit applied: the one it recorded, or the production limit for a ledger
+/// written before it was recorded.
+fn limit_of(hit: &FileCapHit) -> usize {
+    if hit.limit == 0 {
+        crate::onboard::files::HARD_CAP_FILES
+    } else {
+        hit.limit
+    }
+}
+
+/// How a file past the limit of `repo` is described: "beyond the 3-file limit", naming the limit
+/// that was applied. With no record of a hit for the repo (a ledger that predates it) the
+/// production limit is named, which is what [`SkipReason::label`] says.
+fn beyond_limit_label(hits: &[FileCapHit], repo: &str) -> String {
+    match hits.iter().find(|h| h.repo == repo) {
+        Some(hit) => format!("beyond the {}-file limit", group_digits(limit_of(hit))),
+        None => SkipReason::BeyondFileCap.label().to_string(),
+    }
+}
+
+/// The one sentence counting every file the scan did not read, by reason. `None` when none.
+fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Option<String> {
+    let total = totals.total();
+    if total == 0 {
+        return None;
+    }
+    // The limit named is the one every hit applied; repos that applied different limits are
+    // summed under a plain "beyond the file limit".
+    let beyond = match hits.split_first() {
+        None => SkipReason::BeyondFileCap.label().to_string(),
+        Some((first, rest)) if rest.iter().all(|h| limit_of(h) == limit_of(first)) => {
+            format!("beyond the {}-file limit", group_digits(limit_of(first)))
+        }
+        Some(_) => "beyond the file limit".to_string(),
+    };
+    let parts: Vec<String> = [
+        SkipReason::Oversize,
+        SkipReason::BeyondFileCap,
+        SkipReason::NotText,
+    ]
+    .into_iter()
+    .filter(|r| totals.of(*r) > 0)
+    .map(|r| {
+        let label = if r == SkipReason::BeyondFileCap {
+            beyond.as_str()
+        } else {
+            r.label()
+        };
+        format!("{} {label}", totals.of(r))
+    })
+    .collect();
+    Some(format!(
+        "{total} {} not scanned: {}.",
+        files_noun(total),
+        parts.join(", ")
+    ))
+}
+
+/// One sentence per repo that reached the file limit, naming the limit that was applied and the
+/// number of files not scanned.
+fn file_limit_sentences(hits: &[FileCapHit]) -> Vec<String> {
+    hits.iter()
+        .map(|h| {
+            let limit = group_digits(limit_of(h));
+            format!(
+                "{} reached the {limit}-file limit, so the scan read the first {limit} files in \
+                 path order. {} {} not scanned.",
+                h.repo,
+                h.not_scanned,
+                files_noun(h.not_scanned),
+            )
+        })
+        .collect()
+}
+
 /// One file the scan did not read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkippedFileJson {
@@ -142,6 +278,10 @@ pub struct SkippedFileJson {
     pub reason_code: SkipReason,
     /// The client-facing reason, as the Coverage section states it.
     pub reason: String,
+    /// The file's size in bytes, when the walk could measure it.
+    pub size_bytes: Option<u64>,
+    /// The size as the Coverage section prints it ("612 KB"); empty when unknown.
+    pub size: String,
 }
 
 impl CoverageGapsJson {
@@ -150,6 +290,9 @@ impl CoverageGapsJson {
             && self.dependency_gaps.is_empty()
             && self.skipped_files.is_empty()
             && self.skipped_beyond_cap_total == 0
+            && self.skipped_summary.is_none()
+            && self.file_limit_notes.is_empty()
+            && self.evidence_note.is_none()
             && self.scope_limited_rules.is_empty()
     }
 }
@@ -184,7 +327,13 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             repo: s.repo.clone(),
             path: s.path.clone(),
             reason_code: s.reason,
-            reason: s.reason.label().to_string(),
+            reason: if s.reason == SkipReason::BeyondFileCap {
+                beyond_limit_label(&input.file_cap_hits, &s.repo)
+            } else {
+                s.reason.label().to_string()
+            },
+            size_bytes: s.bytes,
+            size: s.bytes.map(format_size).unwrap_or_default(),
         })
         .collect();
     let scope_limited_rules: Vec<ScopeLimitedRuleJson> = report
@@ -205,6 +354,9 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
         skipped_files,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
+        skipped_summary: skipped_summary_sentence(&input.skipped_totals, &input.file_cap_hits),
+        file_limit_notes: file_limit_sentences(&input.file_cap_hits),
+        evidence_note: evidence_note_sentence(report.ledger.evidence_check().site_exempt),
         scope_limited_note: scope_limited_sentence(&scope_limited_rules),
         scope_limited_rules,
     }

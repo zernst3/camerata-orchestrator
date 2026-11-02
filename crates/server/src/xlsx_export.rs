@@ -2536,7 +2536,14 @@ fn write_coverage_sheet(
     if !gaps.is_empty() {
         ws.write_text_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
         next_r += 1;
-        for line in gaps.failed_ai_passes.iter().chain(&gaps.dependency_gaps) {
+        for line in gaps
+            .failed_ai_passes
+            .iter()
+            .chain(&gaps.dependency_gaps)
+            .chain(&gaps.file_limit_notes)
+            .chain(gaps.skipped_summary.iter())
+            .chain(gaps.evidence_note.iter())
+        {
             ws.write_text_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
@@ -2582,7 +2589,10 @@ fn write_coverage_sheet(
             next_r += 1;
         }
         if !gaps.skipped_files.is_empty() || gaps.skipped_beyond_cap_total > 0 {
-            for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
+            for (c, h) in ["Repo", "File", "Why it was not read", "Size"]
+                .iter()
+                .enumerate()
+            {
                 ws.write_text_with_format(next_r, c as u16, *h, &fmts.header)?;
             }
             next_r += 1;
@@ -2598,6 +2608,12 @@ fn write_coverage_sheet(
                     next_r,
                     2,
                     &skipped.reason,
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_text_with_format(
+                    next_r,
+                    3,
+                    &skipped.size,
                     &fmts.cell(None, false, false),
                 )?;
                 next_r += 1;

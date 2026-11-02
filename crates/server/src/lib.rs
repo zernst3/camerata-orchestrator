@@ -7304,9 +7304,9 @@ pub async fn merge_scan_preview(
                 // Derive the language set present in this repo so stack-gating can omit
                 // tools whose language is absent (e.g. no eslint on a Rust-only repo).
                 let dir_clone = dir.clone();
-                let present_languages = tokio::task::spawn_blocking(move || {
+                let (present_languages, repo_files) = tokio::task::spawn_blocking(move || {
                     crate::onboard::files::read_local_repo_files(&dir_clone)
-                        .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                        .map(|ex| (crate::scan_tools::languages_from_files(&ex.files), ex.files))
                         .unwrap_or_default()
                 })
                 .await
@@ -7330,9 +7330,7 @@ pub async fn merge_scan_preview(
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
                 // and the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
-                let deduped =
-                    dedup_scan_previews_with(&mut report.findings, previews, Some(&selectors));
-                report.findings.extend(deduped);
+                join_repo_previews(report, previews, Some(&selectors), &repo_files, Some(dir));
                 report.coverage_notes.append(&mut notes);
             }
         }
@@ -7357,6 +7355,27 @@ pub async fn merge_scan_preview(
     // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
     // comment for why this correction can't happen earlier.
     reconcile_external_tool_ledger(report, &tools_attempted, corpus);
+}
+
+/// Join one repo's external-tool preview rows to the report: collapse those that overlap rows
+/// already there ([`dedup_scan_previews_with`]), then append the rest. The rows are tool output
+/// and carry snippets that reach the client, so they get the same evidence check the audit's own
+/// rows get (`onboard::evidence_check`), with the counts added to the same ledger tally.
+pub(crate) fn join_repo_previews(
+    report: &mut crate::onboard::ScanReport,
+    previews: Vec<crate::onboard::Finding>,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+    files: &[(String, String)],
+    root: Option<&std::path::Path>,
+) {
+    let mut deduped = dedup_scan_previews_with(&mut report.findings, previews, selectors);
+    crate::onboard::evidence_check::verify_and_record(
+        &mut report.ledger,
+        &mut deduped,
+        files,
+        root,
+    );
+    report.findings.extend(deduped);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time
@@ -19537,6 +19556,9 @@ impl From<anyhow::Error> for AppError {
 
 #[cfg(test)]
 mod lib_multirepo_tests;
+
+#[cfg(test)]
+mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;

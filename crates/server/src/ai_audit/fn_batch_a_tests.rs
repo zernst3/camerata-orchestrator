@@ -1207,7 +1207,7 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 11] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 13] = [
     "severity_adjustments",
     "carried_from",
     "history-status",
@@ -1219,6 +1219,8 @@ const BOOKKEEPING_KEY_NAMES: [&str; 11] = [
     "detail_source",
     "detail_rejection",
     "also_seen_by",
+    "evidence_unverified",
+    "evidence_unverified_sites",
 ];
 
 /// A value that would read as identity if it were counted: three or more characters, and shaped
