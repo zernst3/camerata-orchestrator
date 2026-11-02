@@ -341,13 +341,14 @@ mod tests {
     use std::collections::HashMap;
 
     fn finding(rule: &str, line: usize, snippet: &str) -> FindingView {
-        serde_json::from_value(serde_json::json!({
+        let row: FindingView = serde_json::from_value(serde_json::json!({
             "repo": "me/api", "path": "src/a.rs", "line": line, "rule_id": rule,
             "severity": "high", "snippet": snippet, "detail": "d", "status": "active",
             "kind": "deviation", "deviating_sites": 3, "assessed_sites": 40,
             "convention_label": "URI versioning"
         }))
-        .expect("fixture")
+        .expect("fixture");
+        row.keyed_by_line()
     }
 
     fn decided(
@@ -652,7 +653,7 @@ mod tests {
         let mut f = finding(rule, line, snippet);
         f.repo = repo.into();
         f.path = "src/index.ts".into();
-        f
+        f.keyed_by_line()
     }
 
     /// M9: a secret finding's snippet is redacted to a placeholder, so "false positive: fixture

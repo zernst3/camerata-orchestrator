@@ -49,6 +49,9 @@
 //!   reviewed record, the stats) as a deny-list the export tests check every client artifact
 //!   against. Names only, no shapes: the shapes live in `camerata-ui-core`.
 //!
+//! - [`site_key`]: the stable name of one finding row across reruns (repo, path, fingerprint and an
+//!   ordinal, never the line), shared by the server, the export code and the review UI.
+//!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
@@ -64,6 +67,7 @@ pub mod model_registry;
 pub mod project;
 pub mod review_timing;
 pub mod run;
+pub mod site_key;
 pub mod snippet;
 pub mod stories;
 pub mod symbol;

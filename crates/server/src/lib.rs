@@ -103,6 +103,9 @@ pub mod remediation_plan;
 pub mod repeatability;
 pub mod report_export;
 pub mod review_agent;
+/// The review tree's cross-run site matching (`match_runs`); the stable site key it matches on is
+/// `camerata_api_types::site_key`.
+pub mod review_tree;
 pub mod routine;
 pub mod run;
 pub mod run_health;
@@ -914,6 +917,7 @@ impl AppState {
     ) {
         let mut report = report;
         report.refresh_patterns_across_services();
+        report.assign_site_keys();
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
@@ -6605,6 +6609,7 @@ async fn onboard_audit(
         // ── Write last_scan (synchronous path) ───────────────────────────────────────
         // Store the completed report immediately so chat grounding can read it regardless
         // of whether the UI has round-tripped the draft back yet (timing race fixed).
+        report.assign_site_keys();
         if let Some(id) = &project_id {
             state.set_last_scan(id.clone(), report.clone());
         }
@@ -8518,6 +8523,7 @@ pub(crate) async fn start_audit_job(
             // Also update the project-agnostic `recent_scan` fallback so the active-project
             // context can surface this scan even if the active project changed since the
             // scan was submitted (or no project was active at submission time).
+            report.assign_site_keys();
             match (&project_id, &delta) {
                 // A delta retest is recorded as its own kind of inspection, naming the
                 // inspection it was computed from and the two commits between.
@@ -19536,6 +19542,9 @@ mod lib_multirepo_tests;
 mod cockpit_resume_tests;
 
 #[cfg(test)]
+mod site_key_paths_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -28698,6 +28707,7 @@ mod tests {
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/main.rs".to_string(),

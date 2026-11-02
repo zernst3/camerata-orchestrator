@@ -137,59 +137,98 @@ impl RunDiff {
     }
 }
 
-/// Compare two runs' findings. See the module docs.
-pub fn diff_runs(first: &[Finding], second: &[Finding]) -> RunDiff {
-    // Group each run by match key, keeping run order inside a key so the unmatched copies
-    // reported are always the later ones.
-    let mut groups: BTreeMap<String, (Vec<&Finding>, Vec<&Finding>)> = BTreeMap::new();
-    for f in first {
-        groups.entry(finding_match_key(f)).or_default().0.push(f);
+/// How two runs' findings pair up, as indices into the two slices given to [`pair_runs`]. The
+/// one pairing both [`diff_runs`] (which counts it) and `review_tree::match_runs` (which names
+/// the pairs) are built on, so "the same finding" means one thing in both.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RunPairing {
+    /// Pairs the fingerprint pass matched: same repo, path and [`finding_match_key`].
+    pub exact: Vec<(usize, usize)>,
+    /// Pairs the second pass matched by site: same repo, path and rule id, within
+    /// [`crate::ai_audit::SEMANTIC_MERGE_WINDOW`] lines.
+    pub by_site: Vec<(usize, usize)>,
+    /// Indices into the first slice that nothing in the second matched, ordered by
+    /// (repo, path, line).
+    pub only_first: Vec<usize>,
+    /// Indices into the second slice that nothing in the first matched, ordered by
+    /// (repo, path, line).
+    pub only_second: Vec<usize>,
+}
+
+/// Pair the findings of two runs. Inside one match key, rows pair in the order they appear in
+/// the slices, so the unmatched copies are always the later ones; a caller that needs the pairs
+/// to follow line order (the site key's ordinals do) passes slices already in line order.
+pub(crate) fn pair_runs(first: &[&Finding], second: &[&Finding]) -> RunPairing {
+    // Group each run by match key, keeping run order inside a key.
+    let mut groups: BTreeMap<String, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
+    for (i, f) in first.iter().enumerate() {
+        groups.entry(finding_match_key(f)).or_default().0.push(i);
     }
-    for f in second {
-        groups.entry(finding_match_key(f)).or_default().1.push(f);
+    for (i, f) in second.iter().enumerate() {
+        groups.entry(finding_match_key(f)).or_default().1.push(i);
     }
-    let mut matched = 0;
-    let mut left_first: Vec<&Finding> = Vec::new();
-    let mut left_second: Vec<&Finding> = Vec::new();
+    let mut pairing = RunPairing::default();
+    let mut left_first: Vec<usize> = Vec::new();
+    let mut left_second: Vec<usize> = Vec::new();
     for (a, b) in groups.values() {
         let pairs = a.len().min(b.len());
-        matched += pairs;
-        left_first.extend(a[pairs..].iter().copied());
-        left_second.extend(b[pairs..].iter().copied());
+        pairing
+            .exact
+            .extend(a.iter().copied().zip(b.iter().copied()));
+        left_first.extend_from_slice(&a[pairs..]);
+        left_second.extend_from_slice(&b[pairs..]);
     }
-    left_first.sort_by_key(|f| (&f.repo, &f.path, f.line));
-    left_second.sort_by_key(|f| (&f.repo, &f.path, f.line));
+    left_first.sort_by_key(|&i| (&first[i].repo, &first[i].path, first[i].line));
+    left_second.sort_by_key(|&i| (&second[i].repo, &second[i].path, second[i].line));
     // Second pass: pair leftovers by site (repo, path, rule id, nearest line within the
     // window). Each leftover pairs at most once; the closest line wins, the earlier one on a tie.
-    let mut matched_by_site = 0;
     let mut second_used = vec![false; left_second.len()];
-    let mut only_in_first = Vec::new();
-    for f in &left_first {
+    for &fi in &left_first {
+        let f = first[fi];
         let best = left_second
             .iter()
             .enumerate()
-            .filter(|(i, g)| {
-                !second_used[*i]
+            .filter(|(k, &si)| {
+                let g = second[si];
+                !second_used[*k]
                     && g.repo == f.repo
                     && g.path == f.path
                     && g.rule_id == f.rule_id
                     && g.line.abs_diff(f.line) <= crate::ai_audit::SEMANTIC_MERGE_WINDOW
             })
-            .min_by_key(|(_, g)| g.line.abs_diff(f.line))
-            .map(|(i, _)| i);
+            .min_by_key(|(_, &si)| second[si].line.abs_diff(f.line))
+            .map(|(k, _)| k);
         match best {
-            Some(i) => {
-                second_used[i] = true;
-                matched_by_site += 1;
+            Some(k) => {
+                second_used[k] = true;
+                pairing.by_site.push((fi, left_second[k]));
             }
-            None => only_in_first.push(unmatched(f)),
+            None => pairing.only_first.push(fi),
         }
     }
-    let mut only_in_second: Vec<UnmatchedFinding> = left_second
+    pairing.only_second = left_second
         .iter()
         .zip(&second_used)
         .filter(|(_, used)| !**used)
-        .map(|(f, _)| unmatched(f))
+        .map(|(&si, _)| si)
+        .collect();
+    pairing
+}
+
+/// Compare two runs' findings. See the module docs.
+pub fn diff_runs(first: &[Finding], second: &[Finding]) -> RunDiff {
+    let first_refs: Vec<&Finding> = first.iter().collect();
+    let second_refs: Vec<&Finding> = second.iter().collect();
+    let pairing = pair_runs(&first_refs, &second_refs);
+    let mut only_in_first: Vec<UnmatchedFinding> = pairing
+        .only_first
+        .iter()
+        .map(|&i| unmatched(first_refs[i]))
+        .collect();
+    let mut only_in_second: Vec<UnmatchedFinding> = pairing
+        .only_second
+        .iter()
+        .map(|&i| unmatched(second_refs[i]))
         .collect();
     let order = |x: &UnmatchedFinding, y: &UnmatchedFinding| {
         (&x.repo, &x.path, x.line, &x.rule_id).cmp(&(&y.repo, &y.path, y.line, &y.rule_id))
@@ -199,8 +238,8 @@ pub fn diff_runs(first: &[Finding], second: &[Finding]) -> RunDiff {
     RunDiff {
         first_total: first.len(),
         second_total: second.len(),
-        matched,
-        matched_by_site,
+        matched: pairing.exact.len(),
+        matched_by_site: pairing.by_site.len(),
         by_tier: count_rows(first, second, |f| finding_tier(f).to_string()),
         by_rule: count_rows(first, second, |f| f.rule_id.clone()),
         by_severity: count_rows(first, second, |f| f.severity.to_ascii_lowercase()),

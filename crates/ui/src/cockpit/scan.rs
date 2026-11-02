@@ -15073,6 +15073,14 @@ mod render_tests {
         dev_a.line = 12;
         let mut dev_b = dev_a.clone();
         dev_b.line = 40;
+        // Two sites of one snippet: the server keeps them apart with an ordinal.
+        dev_b.site_key = camerata_api_types::site_key::site_key(
+            &dev_b.repo,
+            &dev_b.path,
+            &dev_b.rule_id,
+            &dev_b.snippet,
+            1,
+        );
         let mut defect = kinded_finding(
             "SQL-INJECTION-1",
             "critical",
