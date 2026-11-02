@@ -344,11 +344,23 @@ pub struct RepoTreeFallback {
     pub budget: usize,
 }
 
+/// How many chunks a run had to split to keep a request inside the model's context window
+/// (M1): the chunks split, the parts that added, and the files split by line ranges.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSplits {
+    pub chunks_split: u64,
+    pub parts_added: u64,
+    pub files_split_by_lines: u64,
+}
+
 /// The repo-map telemetry of a run: one record per call, and every tree fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoMapTelemetry {
     pub calls: Vec<RepoMapCall>,
     pub fallbacks: Vec<RepoTreeFallback>,
+    /// Chunks split to fit the model's window. Zero when none was.
+    #[serde(default)]
+    pub splits: RequestSplits,
 }
 
 /// Why the detail-regeneration stage (rank 4) did not write a finding's full explanation on an
@@ -507,6 +519,15 @@ impl StageMeter {
     /// Record what one call's repo map held.
     pub fn record_repo_map(&self, call: RepoMapCall) {
         self.with_repo_maps(|m| m.calls.push(call));
+    }
+
+    /// Add one call's request splits to the run's total.
+    pub fn record_request_splits(&self, splits: RequestSplits) {
+        self.with_repo_maps(|m| {
+            m.splits.chunks_split += splits.chunks_split;
+            m.splits.parts_added += splits.parts_added;
+            m.splits.files_split_by_lines += splits.files_split_by_lines;
+        });
     }
 
     /// Record that a repo's file tree fell back to an outline.
@@ -768,6 +789,15 @@ fn render_repo_maps(out: &mut String, maps: &RepoMapTelemetry) {
             "  repo map: {n} call(s); {} file(s) with symbols per call on average; {outlined} \
              call(s) carried an outline instead of the full file tree",
             with / n
+        )
+        .ok();
+    }
+    if maps.splits.parts_added > 0 {
+        writeln!(
+            out,
+            "  window splits: {} chunk(s) were over the model's context window and became {} more \
+             request(s); {} file(s) were split by line ranges",
+            maps.splits.chunks_split, maps.splits.parts_added, maps.splits.files_split_by_lines
         )
         .ok();
     }

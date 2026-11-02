@@ -1203,6 +1203,11 @@ impl UsageMeter {
         self.stages.record_repo_map(call);
     }
 
+    /// Add one call's request splits to the run's total (M1).
+    pub fn record_request_splits(&self, splits: crate::stage_telemetry::RequestSplits) {
+        self.stages.record_request_splits(splits);
+    }
+
     /// Record that a repo's file tree fell back to a directory outline (M1).
     pub fn record_tree_fallback(&self, fallback: crate::stage_telemetry::RepoTreeFallback) {
         self.stages.record_tree_fallback(fallback);
@@ -1440,22 +1445,6 @@ fn number_lines_from<'a>(lines: impl Iterator<Item = &'a str>, first: usize) -> 
     s
 }
 
-/// The digests a pass call sends: `digests_override` when a candidate pass set supplies them
-/// (rank 8), else each chunk's whole-file [`build_digest`].
-fn pass_digests(
-    chunks: &[&[(String, String)]],
-    digests_override: Option<&[String]>,
-    nonce: &crate::prompt_frame::FrameNonce,
-) -> Vec<String> {
-    match digests_override {
-        Some(d) => {
-            debug_assert_eq!(d.len(), chunks.len(), "one candidate digest per chunk");
-            d.to_vec()
-        }
-        None => chunks.iter().map(|c| build_digest(c, nonce)).collect(),
-    }
-}
-
 /// The segment that follows the cached repo-map prefix: the chunk's symbols section (empty when
 /// the whole map is the prefix, which already carries every symbol) and then its digest. Both
 /// differ per chunk, so both sit after the cache breakpoint.
@@ -1485,6 +1474,67 @@ fn note_map_use(
             outlined_files: s.outlined_files,
         });
     }
+}
+
+/// Plan the inputs of one scan call so that no request of it is over the model's context window:
+/// each chunk is one part when its digest fits what the window leaves after the fixed parts of the
+/// request, else several parts that together cover every line ([`request_budget::fit_chunks`]).
+/// Returns the planned chunks (a part's files), their digests and what was split. The ONE
+/// planner for the real-time and the batch scan, so the two cannot disagree.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn plan_scan_inputs<'a>(
+    repo: &str,
+    repo_map: &RepoMap,
+    chunks: &[&'a [(String, String)]],
+    digests_override: Option<&[String]>,
+    batches: &[&[(String, String)]],
+    nonce: &crate::prompt_frame::FrameNonce,
+    audit_model: Option<&str>,
+    label: &str,
+    meter: Option<&UsageMeter>,
+) -> (
+    Vec<&'a [(String, String)]>,
+    Vec<String>,
+    request_budget::FitReport,
+) {
+    let model = resolve_audit_model(audit_model);
+    let system = crate::prompt_frame::with_untrusted_clause(
+        audit_system_prompt_with(terse_output_of(meter)),
+        nonce,
+    );
+    let schema_len = reply_schemas::scan_reply_schema().to_string().len();
+    let rules_len = batches
+        .iter()
+        .map(|b| build_rules_block(b).len())
+        .max()
+        .unwrap_or(0);
+    let max_rules = batches.iter().map(|b| b.len()).max().unwrap_or(0);
+    let fixed = system.len()
+        + schema_len
+        + repo.len()
+        + 16
+        + repo_map.prefix().len()
+        + repo_map.symbols_reserve_bytes()
+        + rules_len;
+    let budget = request_budget::digest_budget_tokens(&model, scan_max_tokens(max_rules), fixed);
+    let (parts, report) = request_budget::fit_chunks(chunks, digests_override, nonce, budget);
+    if report.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} {label}: {} chunk(s) were over the model's context window \
+             and were split into {} more part(s) ({} file(s) split by line ranges)",
+            report.chunks_split, report.parts_added, report.files_split_by_lines
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: report.chunks_split as u64,
+                parts_added: report.parts_added as u64,
+                files_split_by_lines: report.files_split_by_lines as u64,
+            });
+        }
+    }
+    let planned = parts.iter().map(|p| p.files).collect();
+    let digests = parts.into_iter().map(|p| p.digest).collect();
+    (planned, digests, report)
 }
 
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
@@ -4847,22 +4897,64 @@ async fn recommend_alternatives(
     // further chunk, because the code that makes it applicable may sit in any of them. Rules
     // already judged applicable (or with no convention) are not asked again, so the common case
     // is still ONE call per rule batch. A rule is "not applicable" only when EVERY chunk says so.
-    let total_chunks = file_chunks.len().max(1);
+    //
+    // A chunk over the model's window is split (M1) into parts that each fit; the digests read are
+    // the first `ALTERNATIVES_MAX_FILE_CHUNKS` of those parts, and the "judged over N of M"
+    // disclosure counts parts.
+    let read_chunks = &file_chunks[..file_chunks.len().min(ALTERNATIVES_MAX_FILE_CHUNKS)];
+    let fixed_bytes = {
+        let system =
+            crate::prompt_frame::with_untrusted_clause(alternatives_system_prompt(), nonce);
+        let schema_len = reply_schemas::alternatives_reply_schema().to_string().len();
+        let block_len = alternatives
+            .chunks(ALTERNATIVES_BATCH_SIZE)
+            .map(|c| build_alternatives_block(c).len())
+            .max()
+            .unwrap_or(0);
+        system.len()
+            + schema_len
+            + repo.len()
+            + 16
+            + repo_map.prefix().len()
+            + repo_map.symbols_reserve_bytes()
+            + block_len
+    };
+    let digest_budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        alternatives_max_tokens(ALTERNATIVES_BATCH_SIZE.min(alternatives.len())),
+        fixed_bytes,
+    );
+    let (parts, fit) = request_budget::fit_chunks(read_chunks, None, nonce, digest_budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} alternatives: {} chunk(s) were over the model's context \
+             window and were split into {} more part(s)",
+            fit.chunks_split, fit.parts_added
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let total_chunks = (file_chunks.len() + fit.parts_added).max(1);
     // Per digest, the symbols of its chunk's files and their neighbours; they sit with the digest,
     // after the cached repo-map prefix.
-    let symbols: Vec<repo_map::SymbolsSection> = file_chunks
+    let symbols: Vec<repo_map::SymbolsSection> = parts
         .iter()
         .take(ALTERNATIVES_MAX_FILE_CHUNKS)
-        .map(|c| repo_map.symbols_for(c, nonce))
+        .map(|p| repo_map.symbols_for(p.files, nonce))
         .collect();
-    let digests: Vec<String> = if file_chunks.is_empty() {
+    let digests: Vec<String> = if parts.is_empty() {
         vec![String::new()]
     } else {
-        file_chunks
+        parts
             .iter()
             .zip(&symbols)
             .take(ALTERNATIVES_MAX_FILE_CHUNKS)
-            .map(|(c, sy)| chunk_segment(&sy.text, &build_digest(c, nonce)).into_owned())
+            .map(|(p, sy)| chunk_segment(&sy.text, &p.digest).into_owned())
             .collect()
     };
     let chunks_read = digests.len();
@@ -5226,6 +5318,8 @@ impl AlternativesAsk<'_> {
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
+        // Never send what the model's window cannot take (M1).
+        request_budget::ensure_request_fits(&req)?;
         note_request(meter, &req);
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
@@ -7515,6 +7609,8 @@ async fn send_audit_request(
     session: &str,
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<crate::llm::LlmResponse> {
+    // Never send what the model's window cannot take (M1).
+    request_budget::ensure_request_fits(&req)?;
     // What this request could cost joins the spend limit's reserve before it is sent.
     note_request(meter, &req);
     if let Some((store, key)) = feedback {
@@ -7731,7 +7827,24 @@ async fn run_passes(
     meter: Option<&UsageMeter>,
     advisory_disabled: bool,
 ) -> PassesOut {
-    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
+    // Chunks over the model's window become several parts that are all sent (M1).
+    let (planned_chunks, digests, fit) = plan_scan_inputs(
+        repo,
+        repo_map,
+        chunks,
+        digests_override,
+        batches,
+        nonce,
+        audit_model,
+        label,
+        meter,
+    );
+    let chunks: &[&[(String, String)]] = &planned_chunks;
+    if fit.parts_added > 0 {
+        if let Some((jstore, jid)) = job {
+            jstore.add_total(jid, fit.parts_added * batches.len());
+        }
+    }
     // Per chunk, the symbols of its files and their neighbours (after the cache breakpoint).
     let symbols: Vec<repo_map::SymbolsSection> = chunks
         .iter()
@@ -8127,7 +8240,18 @@ async fn run_passes_batch(
 
     let model = resolve_audit_model(audit_model);
 
-    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
+    let (planned_chunks, digests, _fit) = plan_scan_inputs(
+        repo,
+        repo_map,
+        chunks,
+        digests_override,
+        batches,
+        nonce,
+        audit_model,
+        label,
+        meter,
+    );
+    let chunks: &[&[(String, String)]] = &planned_chunks;
     let symbols: Vec<repo_map::SymbolsSection> = chunks
         .iter()
         .map(|c| repo_map.symbols_for(c, nonce))
@@ -8176,6 +8300,8 @@ async fn run_passes_batch(
                     .with_temperature(AUDIT_TEMPERATURE),
                 Stage::ScanPass,
             );
+            // Never submit what the model's window cannot take (M1).
+            request_budget::ensure_request_fits(&req)?;
             work.push(BatchWork {
                 custom_id: format!("c{ci}-b{bi}"),
                 ci,
@@ -13725,6 +13851,9 @@ mod candidate_prefilter_tests;
 
 #[cfg(test)]
 mod repo_map_tests;
+
+#[cfg(test)]
+mod request_budget_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;

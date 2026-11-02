@@ -210,6 +210,16 @@ impl RepoMap {
         &self.prefix
     }
 
+    /// The most bytes a call's symbols section can take: reserved when the request size is
+    /// planned. Zero when the whole map is the prefix (it has no separate symbols section).
+    pub(crate) fn symbols_reserve_bytes(&self) -> usize {
+        if self.shape == MapShape::Whole {
+            0
+        } else {
+            SYMBOLS_TOKEN_BUDGET * CHARS_PER_TOKEN_ESTIMATE
+        }
+    }
+
     /// Set when the tree fell back to an outline: the run must record and disclose it.
     pub(crate) fn tree_fallback(&self) -> Option<&TreeFallback> {
         self.fallback.as_ref()

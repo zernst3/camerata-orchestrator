@@ -2671,6 +2671,20 @@ mod tests {
     }
 
     #[test]
+    fn the_context_window_is_the_registrys_figure_and_unknown_models_have_none() {
+        assert_eq!(context_window_for("claude-sonnet-5-5"), Some(1_000_000));
+        assert_eq!(
+            context_window_for("claude-sonnet-5-5-20261001"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_window_for("claude-haiku-4-5-20251001"),
+            Some(200_000)
+        );
+        assert_eq!(context_window_for("claude-unheard-of-9"), None);
+    }
+
+    #[test]
     fn weights_follow_the_tier_and_price_ordering() {
         let w = |id: &str| registry_entry_for(id).unwrap().weight;
         assert!(w("claude-fable-5-1") >= w("claude-fable-5"));
