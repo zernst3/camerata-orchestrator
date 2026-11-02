@@ -3235,6 +3235,26 @@ against a runaway bill, not a saving, so it fails loudly:
   the export button; the job progress counts refused passes as NOT RUN, not done; and
   the server adds an "INCOMPLETE" note to the report message.
 
+**Review flags (M4): wording is a flag, never a lock.** The detail and fix stages check the
+model's prose with string tests (a name the statement made is missing, an exploit precondition
+nobody made, an identifier the evidence does not hold, a fix that contradicts its detail or
+describes the tool). A reviewer reads every row, so these checks no longer re-ask three or four
+times, hold a run or refuse an export. A reply that fails one gets exactly one re-ask, carrying the
+check's feedback line. If the second reply fails too, the better one ships and the failure is
+recorded on the row as a review flag: `precondition_added`, `unverified_name:<token>` (detail),
+`fix_ungrounded`, `contradiction`, `methodology_leak` (fix). The flags of a row are one sorted JSON
+list in the `review_flags` capture (`crate::review_flags`), a bookkeeping key like
+`evidence_unverified`. "Better" means: for the detail, a reply that adds no precondition and drops
+fewer names (when every reply adds one, the scan's own statement plus the checked fix direction
+ships, the engine's existing text); for the fix, a reply that is not worse than the rule's authored
+fix (a fix that contradicts its detail or describes the tool is worse; if the rule has an authored
+fix it ships as a standard fix), then the one that failed fewer checks, then the later one. A
+finding is never held for wording, even when its re-ask is lost to transport or the spend limit.
+The stage telemetry in the ledger counts the flags per stage and kind
+(`StageTelemetry::review_flags`), and `review_flags::count_on_rows` reconciles the figures with
+the rows. The calibration raise-hold and the D5 floor cap are not part of this: they still use
+`mentions_exploit_precondition` and stay as they are.
+
 **Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
 
 1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the

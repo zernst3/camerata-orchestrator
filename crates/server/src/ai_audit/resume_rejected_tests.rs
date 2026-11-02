@@ -102,8 +102,10 @@ fn blocks_of(prompt: &str) -> Vec<(String, usize, String)> {
 }
 
 /// Answers a fix prompt that carries a rejection note with a good fix, any other with a fix
-/// naming something that is nowhere in the repository (turned down). `always_invents` turns the
-/// good answer off.
+/// naming something that is nowhere in the repository (turned down, then asked once more).
+/// `always_invents` turns the good answer off and makes every reply hold NO fix at all: since M4 a
+/// fix that only fails a wording check ships flagged after one re-ask, so the give-up these tests
+/// resume has to be a reply that holds nothing.
 struct FixModel {
     always_invents: bool,
     calls: AtomicUsize,
@@ -133,7 +135,11 @@ impl LlmPort for FixModel {
         } else {
             "Call `neverInEvidence` first."
         };
-        let text = serde_json::json!({"fixes": [{"index": 0, "fix": fix}]}).to_string();
+        let text = if self.always_invents {
+            serde_json::json!({"fixes": []}).to_string()
+        } else {
+            serde_json::json!({"fixes": [{"index": 0, "fix": fix}]}).to_string()
+        };
         Ok(response(
             &address_by_id(&req.prompt, &text),
             "api",
@@ -275,17 +281,16 @@ impl LlmPort for TwoFixModel {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.prompts.lock().unwrap().push(req.prompt.clone());
+        // The failing finding gets no fix at all (since M4 a fix that only fails a wording check
+        // ships flagged after one re-ask, so a part that fails on content has to be one the model
+        // does not answer) until its block carries a rejection note and `fixes_with_reason` is set.
         let fixes: Vec<serde_json::Value> = blocks_of(&req.prompt)
             .iter()
-            .map(|(id, line, block)| {
-                let fix = if *line == FAILING_LINE
-                    && !(self.fixes_with_reason && block.contains("was rejected"))
-                {
-                    "Call `neverInEvidence` first."
-                } else {
-                    "Validate the input before it reaches the query."
-                };
-                serde_json::json!({"id": id, "fix": fix})
+            .filter(|(_, line, block)| {
+                *line != FAILING_LINE || (self.fixes_with_reason && block.contains("was rejected"))
+            })
+            .map(|(id, _, _)| {
+                serde_json::json!({"id": id, "fix": "Validate the input before it reaches the query."})
             })
             .collect();
         Ok(response(
@@ -398,8 +403,8 @@ async fn a_resume_of_a_content_failed_fix_part_asks_the_failing_finding_again_an
 }
 
 /// Answers a detail prompt with entries that keep the statement's named token only when the
-/// batch is a single finding, so the full-batch reply is turned down whole and the smaller
-/// rounds earn the explanation.
+/// prompt carries the reason a previous answer was turned down (the one re-ask), so the first
+/// reply is turned down whole and the re-ask earns the explanation.
 struct DetailModel {
     calls: AtomicUsize,
 }
@@ -409,10 +414,13 @@ impl LlmPort for DetailModel {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let ids = prompt_ids(&req.prompt);
-        let why = if ids.len() > 1 {
-            "The handler skips the check."
-        } else {
+        let why = if req
+            .prompt
+            .contains("Your previous answer was turned down because")
+        {
             "The handler skips the check on run_work."
+        } else {
+            "The handler skips the check."
         };
         let entries: Vec<serde_json::Value> = ids
             .iter()
@@ -451,7 +459,7 @@ fn two_statements() -> Vec<Finding> {
         .collect()
 }
 
-/// The detail stage: the full-batch reply was turned down whole, the later rounds earned the
+/// The detail stage: the first reply was turned down whole, the one re-ask earned the
 /// explanations; a resume asks the rejected requests again (never more than the live run sent)
 /// and replays the good ones, and the details come out the same.
 #[tokio::test]
@@ -525,9 +533,10 @@ async fn a_resume_asks_a_wholly_rejected_detail_reply_again_and_replays_the_good
 }
 
 /// A detail model that writes a good explanation for every finding, except the one at
-/// [`FAILING_LINE`]: that one drops the name its statement made (a check that is not the
-/// invented-precondition one, so no fallback) unless its block carries a reason for a previous
-/// rejection and `fixes_with_reason` is set.
+/// [`FAILING_LINE`]: that one is left out of the reply (since M4 a reply that only fails a wording
+/// check ships flagged after one re-ask, so a part that fails on content has to be one the model
+/// does not answer) unless its block carries a reason for a previous rejection and
+/// `fixes_with_reason` is set.
 struct FailingLineDetailModel {
     fixes_with_reason: bool,
     calls: AtomicUsize,
@@ -551,14 +560,16 @@ impl LlmPort for FailingLineDetailModel {
         self.prompts.lock().unwrap().push(req.prompt.clone());
         let entries: Vec<serde_json::Value> = blocks_of(&req.prompt)
             .iter()
-            .map(|(id, line, block)| {
+            .filter(|(_, line, block)| {
                 let reasoned = block.contains("Your previous answer was turned down because");
-                let why = if *line == FAILING_LINE && !(self.fixes_with_reason && reasoned) {
-                    "The handler skips the check."
-                } else {
-                    "The handler skips the check on run_work."
-                };
-                serde_json::json!({"id": id, "why": why, "fix_direction": "Add the check."})
+                *line != FAILING_LINE || (self.fixes_with_reason && reasoned)
+            })
+            .map(|(id, _, _)| {
+                serde_json::json!({
+                    "id": id,
+                    "why": "The handler skips the check on run_work.",
+                    "fix_direction": "Add the check."
+                })
             })
             .collect();
         Ok(response(
@@ -660,9 +671,9 @@ async fn a_resume_of_a_content_failed_detail_part_asks_the_failing_finding_again
         assert_eq!(blocks.len(), 1, "only the failing finding is sent");
         assert_eq!(blocks[0].1, FAILING_LINE);
         assert!(
-            blocks[0]
-                .2
-                .contains("Your previous answer was turned down because: dropped `run_work`"),
+            blocks[0].2.contains(
+                "Your previous answer was turned down because: the reply left this finding out"
+            ),
             "{}",
             blocks[0].2
         );
