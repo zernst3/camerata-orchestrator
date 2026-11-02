@@ -11,6 +11,8 @@
 //! * a transport failure (after the transport's own retries) adds to the streak, and the run
 //!   stops at [`OUTAGE_STREAK`] in a row;
 //! * an auth or billing failure stops the run at once (waiting does not fix a key or a balance);
+//! * a rate limit (a 429 that outlasted the transport's retries) neither counts nor resets: it
+//!   is a pause, and the batch runner waits it out under its own deadline;
 //! * a content failure (a cut-off or malformed reply) neither counts nor resets: the provider
 //!   answered, so it is not an outage, and it is not proof the provider is healthy either.
 //!
@@ -74,8 +76,11 @@ impl RunHealth {
                 FailureClass::AuthOrBilling,
                 format!("the provider refused the credentials or the account (last: {detail})"),
             ),
-            // The provider answered: not an outage, and not proof of health either.
+            // The provider answered: not an outage, and not proof of health either. A rate limit
+            // is the provider asking for a slower pace, so a streak of them is a pause that the
+            // batch runner waits out under its own wall-clock deadline, never an outage stop.
             FailureClass::Content
+            | FailureClass::RateLimited
             | FailureClass::SpendLimit
             | FailureClass::OutageStop
             | FailureClass::Io => {}
@@ -162,6 +167,26 @@ mod tests {
         h.note_failure(FailureClass::Transport, "c");
         assert!(h.is_stopped());
         assert_eq!(h.trigger().unwrap().class, FailureClass::Transport);
+    }
+
+    /// Zach 2026-11-02 (design 6.1): a 429 streak is a pause, not an outage. Rate-limited failures
+    /// neither count toward the streak nor reset it, however many arrive.
+    #[test]
+    fn rate_limited_streak_does_not_trip_the_outage_stop() {
+        let h = RunHealth::default();
+        for _ in 0..50 {
+            h.note_failure(FailureClass::RateLimited, "HTTP 429");
+        }
+        assert!(!h.is_stopped(), "fifty 429s in a row are a pause");
+        assert_eq!(h.streak(), 0, "and they add nothing to the streak");
+        // They do not reset a transport streak either: two transport failures, then 429s, then a
+        // third transport failure is still an outage.
+        h.note_failure(FailureClass::Transport, "a");
+        h.note_failure(FailureClass::Transport, "b");
+        h.note_failure(FailureClass::RateLimited, "HTTP 429");
+        assert_eq!(h.streak(), 2);
+        h.note_failure(FailureClass::Transport, "c");
+        assert!(h.is_stopped());
     }
 
     #[test]
