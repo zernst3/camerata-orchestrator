@@ -7686,6 +7686,7 @@ fn extract_public_symbols(content: &str) -> Vec<String> {
 /// not in this pass. The map gives every chunk that architecture without every file body,
 /// so chunking doesn't reintroduce cross-file misses. (Bodies still only appear in their
 /// own chunk — a rule needing the full body of a type in another chunk is the known limit.)
+#[cfg(test)]
 fn build_repo_map(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
     let listing: String = files
         .iter()
@@ -13367,15 +13368,112 @@ async fn run_prose_lens(
     llm: &dyn LlmPort,
     lens: DeepLens,
     repo: &str,
-    repo_map: &str,
-    digest: &str,
+    repo_map: &RepoMap,
+    files: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
     system: String,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
 ) -> DeepLensResult {
+    // The lens reads the whole repo. When that is more than the model's window takes it is read
+    // in parts, split by files and then by line ranges (M1), each part its own request, and the
+    // results are merged; nothing is cut off silently.
+    let budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        DEEP_LENS_MAX_TOKENS,
+        system.len() + repo.len() + 16 + repo_map.prefix().len() + lens.title().len() + 200,
+    );
+    let (parts, fit) = request_budget::fit_chunks(&[files], None, nonce, budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} {}: the repository is over the model's context window and \
+             is read in {} parts",
+            lens.title(),
+            parts.len()
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let n = parts.len();
+    let mut merged = DeepLensResult::empty(lens);
+    let mut errors: Vec<String> = Vec::new();
+    let mut summaries: Vec<String> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let r = run_prose_part(
+            llm,
+            lens,
+            repo,
+            repo_map.prefix(),
+            &part.digest,
+            &system,
+            (i, n),
+            audit_model,
+            feedback,
+            meter,
+        )
+        .await;
+        merged.soc2_gaps.extend(r.soc2_gaps);
+        merged.threats.extend(r.threats);
+        if !r.summary.trim().is_empty() {
+            summaries.push(r.summary);
+        }
+        if let Some(e) = r.error {
+            errors.push(if n > 1 {
+                format!("part {} of {n}: {e}", i + 1)
+            } else {
+                e
+            });
+        }
+    }
+    merged.summary = summaries.join("\n\n");
+    if n > 1 {
+        let note = format!(
+            "The repository is larger than the model's context window, so this lens read it in \
+             {n} parts and the results are merged; a pattern that spans parts may be incomplete."
+        );
+        merged.summary = if merged.summary.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", merged.summary)
+        };
+    }
+    if !errors.is_empty() {
+        merged.error = Some(errors.join("; "));
+    }
+    merged
+}
+
+/// The reply ceiling of one deep-tier lens request.
+const DEEP_LENS_MAX_TOKENS: u32 = 8192;
+
+/// One request of a prose lens over `digest`: part `part.0` of `part.1` (a lens that fits is part
+/// 0 of 1, and its prompt is exactly what it always was).
+#[allow(clippy::too_many_arguments)]
+async fn run_prose_part(
+    llm: &dyn LlmPort,
+    lens: DeepLens,
+    repo: &str,
+    repo_map: &str,
+    digest: &str,
+    system: &str,
+    part: (usize, usize),
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> DeepLensResult {
+    let part_label = if part.1 > 1 {
+        format!(" (part {}/{})", part.0 + 1, part.1)
+    } else {
+        String::new()
+    };
     let prompt = format!(
-        "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
+        "Repository: {repo}{part_label}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
     // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
@@ -13389,7 +13487,11 @@ async fn run_prose_lens(
         }
         Ok(permit) => permit,
     };
-    let session = format!("deep-{}-{repo}", lens.id());
+    let session = if part.1 > 1 {
+        format!("deep-{}-{repo}-p{}", lens.id(), part.0)
+    } else {
+        format!("deep-{}-{repo}", lens.id())
+    };
     if let Some((store, key)) = feedback {
         store.register(
             key,
@@ -13403,10 +13505,19 @@ async fn run_prose_lens(
         );
     }
     let req = LlmRequest::new(prompt)
-        .with_system(system)
+        .with_system(system.to_string())
         // Whole-repo structured output can be sizable (many controls / many threats).
-        .with_max_tokens(8192)
+        .with_max_tokens(DEEP_LENS_MAX_TOKENS)
         .with_model(stage_model(audit_model));
+    // Never send what the model's window cannot take (M1): refused here, disclosed on the lens.
+    if let Err(e) = request_budget::ensure_request_fits(&req) {
+        let mut result = DeepLensResult::empty(lens);
+        result.error = Some(e.to_string());
+        if let Some((store, key)) = feedback {
+            store.set_status(key, &session, "blocked");
+        }
+        return result;
+    }
     // What this request may cost joins the spend limit's reserve, as for every other stage.
     note_request(meter, &req);
     let resp = if let Some((store, key)) = feedback {
@@ -13468,7 +13579,7 @@ async fn run_security_lens(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     audit_model: Option<&str>,
     mode: ScanMode,
@@ -13549,7 +13660,7 @@ async fn run_security_lens(
 async fn run_security_passes(
     llm: &dyn LlmPort,
     repo: &str,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -13560,7 +13671,42 @@ async fn run_security_passes(
     meter: Option<&UsageMeter>,
 ) -> PassesOut {
     use futures::stream::StreamExt;
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
+    // Chunks over the model's window are read in parts (M1), each its own request.
+    let budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        DEEP_LENS_MAX_TOKENS,
+        crate::prompt_frame::with_untrusted_clause(
+            deep_security_system_prompt_with(terse_output_of(meter)),
+            nonce,
+        )
+        .len()
+            + repo.len()
+            + 32
+            + repo_map.prefix().len()
+            + repo_map.symbols_reserve_bytes()
+            + 400,
+    );
+    let (parts, fit) = request_budget::fit_chunks(chunks, None, nonce, budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} deep security: {} chunk(s) were over the model's context \
+             window and were split into {} more part(s)",
+            fit.chunks_split, fit.parts_added
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let chunk_slices: Vec<&[(String, String)]> = parts.iter().map(|p| p.files).collect();
+    let chunks: &[&[(String, String)]] = &chunk_slices;
+    let symbols: Vec<repo_map::SymbolsSection> = chunks
+        .iter()
+        .map(|c| repo_map.symbols_for(c, nonce))
+        .collect();
     let n_c = chunks.len();
     let n_b = batches.len().max(1);
     let work: Vec<usize> = (0..n_c).collect();
@@ -13570,7 +13716,8 @@ async fn run_security_passes(
     );
     let results: Vec<PassOut> = futures::stream::iter(work)
         .map(|ci| {
-            let digest = &digests[ci];
+            let digest = chunk_segment(&symbols[ci].text, &parts[ci].digest);
+            let repo_map = repo_map.prefix();
             async move {
                 // SPEND CAP: each deep-security pass is admitted like a scan pass.
                 let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
@@ -13608,12 +13755,14 @@ async fn run_security_passes(
                         deep_security_system_prompt_with(terse_output_of(meter)),
                         nonce,
                     ))
-                    .with_max_tokens(8192)
+                    .with_max_tokens(DEEP_LENS_MAX_TOKENS)
                     .with_temperature(AUDIT_TEMPERATURE)
                     .with_model(stage_model(audit_model));
-                // What this request may cost joins the spend limit's reserve.
-                note_request(meter, &req);
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
+                    // Never send what the model's window cannot take (M1).
+                    request_budget::ensure_request_fits(&req)?;
+                    // What this request may cost joins the spend limit's reserve.
+                    note_request(meter, &req);
                     let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
                         llm.complete_streaming(req, &mut on_delta).await
@@ -13728,21 +13877,26 @@ pub async fn run_deep_tier(
     let files = model_files.as_slice();
     // One delimiter token for all three lenses (see `crate::prompt_frame`).
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[files]);
-    let repo_map = build_repo_map(files, &nonce);
-    // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
-    let digest = build_digest(files, &nonce);
-
     // Resolve the model the same way the standard audit does: explicit pick wins, else the
     // built-in default (the transport has no default of its own: see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
     // passes that through `audit_model`.
     let model = Some(resolve_audit_model(audit_model));
+    // The same map as the standard audit's: the complete file tree, with symbols per call.
+    let repo_map = RepoMap::new(
+        files,
+        &nonce,
+        repo_map::tree_budget_for_window(request_budget::context_window_tokens(
+            model.as_deref().unwrap_or_default(),
+        )),
+    );
 
     let threat = run_prose_lens(
         llm,
         DeepLens::ThreatModel,
         repo,
         &repo_map,
-        &digest,
+        files,
+        &nonce,
         crate::prompt_frame::with_untrusted_clause(threat_model_system_prompt(), &nonce),
         model.as_deref(),
         feedback,
@@ -13767,7 +13921,8 @@ pub async fn run_deep_tier(
             DeepLens::Soc2Gap,
             repo,
             &repo_map,
-            &digest,
+            files,
+            &nonce,
             crate::prompt_frame::with_untrusted_clause(soc2_gap_system_prompt(), &nonce),
             model.as_deref(),
             feedback,
@@ -13861,6 +14016,9 @@ mod batch_split_tests;
 
 #[cfg(test)]
 mod scale_tests;
+
+#[cfg(test)]
+mod deep_tier_budget_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;
