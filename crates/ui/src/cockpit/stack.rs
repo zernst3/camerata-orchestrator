@@ -1674,7 +1674,11 @@ mod tests {
             rest[k..k + rest[k..].find('"').unwrap()].to_string()
         };
         let before = focused_card(&html(&vdom));
-        assert!(before.contains("|3|"), "J J is the third card: {before}");
+        assert_eq!(
+            before,
+            dom_key(&finding_key(&deviation(3))),
+            "J J is the third card"
+        );
 
         key(&vdom, panel, "Enter");
         settle(&mut vdom, &mut seen).await;
@@ -2567,17 +2571,26 @@ mod tests {
     const CHIP: &str = "Previously on this shape";
 
     /// A defect on `line` whose offending snippet is `snippet`, under one rule.
+    /// Fixture rows that differ only by line must stay distinct rows, as the server's ordinal
+    /// keeps repeats of one snippet apart: the line stands in for the ordinal.
+    fn keyed_by_line(mut f: FindingView) -> FindingView {
+        f.site_key = camerata_api_types::site_key::site_key(
+            &f.repo, &f.path, &f.rule_id, &f.snippet, f.line,
+        );
+        f
+    }
+
     fn shaped(line: usize, snippet: &str) -> FindingView {
         let mut f = defect(line);
         f.snippet = snippet.to_string();
-        f
+        keyed_by_line(f)
     }
 
     /// The same, as a deviation (so a bulk-bar group and a stack exist for it).
     fn shaped_deviation(line: usize, snippet: &str) -> FindingView {
         let mut f = deviation(line);
         f.snippet = snippet.to_string();
-        f
+        keyed_by_line(f)
     }
 
     fn seeded(

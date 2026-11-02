@@ -20,8 +20,13 @@ fn two_advisories_one_package() -> &'static str {
       ]}]}]}"#
 }
 
+/// The rows as the pipeline hands them on: keyed, so the two advisories (one snippet, one
+/// file) are told apart by the ordinal in their site key, in advisory-id order.
 fn dep_rows() -> Vec<crate::onboard::Finding> {
-    parse_osv_json("acme/api", Path::new("/w"), two_advisories_one_package()).unwrap()
+    let mut rows =
+        parse_osv_json("acme/api", Path::new("/w"), two_advisories_one_package()).unwrap();
+    crate::inspections::backfill_site_keys(&mut rows);
+    rows
 }
 
 fn false_positive() -> DispositionWire {
@@ -57,12 +62,8 @@ fn two_advisories_on_one_package_version_have_different_keys() {
 }
 
 #[test]
-fn the_key_of_every_other_row_is_unchanged() {
+fn a_row_that_is_not_a_dependency_advisory_ignores_a_capture_of_the_same_name() {
     let f = finding("RULE-X", "src/a.rs", 7, "high");
-    assert_eq!(
-        finding_key(&f),
-        "owner/repo\u{0}RULE-X\u{0}src/a.rs\u{0}7\u{0}snippet-7"
-    );
     // A non-dependency row with an unrelated capture of the same name keeps its key.
     let mut g = f.clone();
     g.captures.insert("advisory".to_string(), "X".to_string());

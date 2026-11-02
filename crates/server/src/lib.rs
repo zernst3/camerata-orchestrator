@@ -917,6 +917,7 @@ impl AppState {
     ) {
         let mut report = report;
         report.refresh_patterns_across_services();
+        report.assign_site_keys();
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
@@ -5893,6 +5894,7 @@ async fn onboard_scan(
     // (`onboard_audit`) already do this; without it here, a floor-only `/api/onboard/scan`
     // leaves `last_scan` empty and the chat shows "no scan results yet". Fail-soft, keyed by
     // the active project (the same id `active_project_context` reads).
+    report.assign_site_keys();
     if let Some(id) = state.projects.active().map(|p| p.id) {
         state.set_last_scan(id, report.clone());
     }
@@ -6608,6 +6610,7 @@ async fn onboard_audit(
         // ── Write last_scan (synchronous path) ───────────────────────────────────────
         // Store the completed report immediately so chat grounding can read it regardless
         // of whether the UI has round-tripped the draft back yet (timing race fixed).
+        report.assign_site_keys();
         if let Some(id) = &project_id {
             state.set_last_scan(id.clone(), report.clone());
         }
@@ -8521,6 +8524,7 @@ pub(crate) async fn start_audit_job(
             // Also update the project-agnostic `recent_scan` fallback so the active-project
             // context can surface this scan even if the active project changed since the
             // scan was submitted (or no project was active at submission time).
+            report.assign_site_keys();
             match (&project_id, &delta) {
                 // A delta retest is recorded as its own kind of inspection, naming the
                 // inspection it was computed from and the two commits between.

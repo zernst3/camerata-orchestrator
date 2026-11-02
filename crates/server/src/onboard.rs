@@ -1357,6 +1357,13 @@ impl ScanReport {
         }
     }
 
+    /// Give every finding its stable site key ([`Finding::site_key`]). Call it wherever a report
+    /// becomes final and is handed out (the sealed export report, the report an audit job
+    /// returns, the one stored as the last scan), so no consumer ever sees an unkeyed row.
+    pub fn assign_site_keys(&mut self) {
+        crate::inspections::backfill_site_keys(&mut self.findings);
+    }
+
     /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
     /// [`Self::seal`] and wherever a report is stored for the cockpit, after the last change to
     /// either. The themes a model grouped the rows into are kept only while the rows they cite
@@ -1401,6 +1408,8 @@ impl ScanReport {
         let hygiene =
             crate::scan_ledger::PathHygiene::audit(self.findings.iter().map(|f| f.path.as_str()));
         self.ledger.record_path_hygiene(hygiene);
+        // After the secret sweep, so a key is made from the text the report ships.
+        self.assign_site_keys();
         SealedReport(self)
     }
 }

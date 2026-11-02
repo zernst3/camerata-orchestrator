@@ -6385,6 +6385,26 @@ mod tests {
         );
     }
 
+    /// Every consumer of a final report sees keyed rows, so two sites that differ only by an
+    /// ordinal (a repeated line) are two keys in the export, never one buried under the other.
+    #[test]
+    fn sealing_a_report_keys_every_row_and_tells_repeats_apart() {
+        let mut a = finding("RULE-X", "src/a.rs", 7, "high");
+        let mut b = a.clone();
+        a.snippet = "same()".to_string();
+        b.snippet = "same()".to_string();
+        b.line = 90;
+        let report = report_with(vec![b.clone(), a.clone()], vec!["RULE-X"]);
+        let sealed = report.seal();
+        let keys: Vec<String> = sealed.findings.iter().map(finding_key).collect();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1]);
+        assert!(sealed.findings.iter().all(|f| !f.site_key.is_empty()));
+        // Line order decides the ordinal: the later line is ordinal 1.
+        let later = sealed.findings.iter().find(|f| f.line == 90).unwrap();
+        assert!(finding_key(later).ends_with("\u{0}1"));
+    }
+
     // ── C4-R3 defect 3: zero-width/BOM code points never survive into JSON/xlsx fields ──
 
     #[test]
