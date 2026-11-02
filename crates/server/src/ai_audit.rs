@@ -12227,7 +12227,7 @@ pub async fn audit_repo(
         }
         failed_passes.push(FailedPass {
             repo: repo.to_string(),
-            pass: "repository file list".to_string(),
+            pass: "full file list in model calls".to_string(),
             reason: fallback.disclosure(),
             files_not_reviewed: 0,
             class: crate::ai_audit::FailureClass::Content,

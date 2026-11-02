@@ -78,14 +78,14 @@ pub(crate) struct TreeFallback {
 }
 
 impl TreeFallback {
-    /// The Coverage sentence the report carries.
+    /// The Coverage sentence the report carries (client wording: no dashes).
     pub(crate) fn disclosure(&self) -> String {
         format!(
-            "the repository has {} files, and the list of every file path (about {} tokens) is \
-             larger than the {} tokens a model call carries, so each call saw a per-directory \
-             outline with file counts instead of every path. A pass could name only the files it \
-             was given and their neighbours when it asked for another file, so a defect that \
-             spans files far apart may not have been found.",
+            "reduced to a per-directory outline: the repository has {} files, and the list of \
+             every file path (about {} tokens) is larger than the {} tokens a model call carries, \
+             so each call saw an outline with file counts instead of every path. A pass could \
+             name only the files it was given and their neighbours when it asked for another \
+             file, so a defect that spans files far apart may not have been found.",
             self.files, self.tree_tokens, self.budget
         )
     }
