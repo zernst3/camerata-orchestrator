@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::CellText;
+use super::CappedSheet;
 use serde::Serialize;
 
 use crate::onboard::Finding;
@@ -245,7 +245,7 @@ pub(super) fn write_triage_log_sheet(
     deduped: usize,
     fmts: &super::Formats,
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(TRIAGE_LOG_SHEET)?;
     ws.write_text_with_format(0, 0, TRIAGE_LOG_SHEET, &fmts.section_title)?;
     ws.write_text(

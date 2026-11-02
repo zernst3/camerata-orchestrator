@@ -649,42 +649,147 @@ fn fit_cell(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Every string this module writes goes through here, so an oversized value is cut with a
-/// pointer rather than failing the workbook.
-trait CellText {
-    fn write_text(
-        &mut self,
-        row: u32,
-        col: u16,
-        text: impl AsRef<str>,
-    ) -> Result<&mut Worksheet, XlsxError>;
-    fn write_text_with_format(
-        &mut self,
-        row: u32,
-        col: u16,
-        text: impl AsRef<str>,
-        format: &Format,
-    ) -> Result<&mut Worksheet, XlsxError>;
-}
+/// A worksheet whose text can only be written through [`fit_cell`]. Every sheet-writing function
+/// in this module takes this, never a raw `rust_xlsxwriter::Worksheet`, and the raw string
+/// writers (which abort the whole export on a cell over Excel's limit) are called only inside
+/// this `impl`. A new sheet therefore cannot skip the cap; a source-scan test
+/// (`no_raw_string_writer_outside_capped_sheet`) fails if a raw call appears anywhere else.
+pub(crate) use capped_sheet::CappedSheet;
 
-impl CellText for Worksheet {
-    fn write_text(
-        &mut self,
-        row: u32,
-        col: u16,
-        text: impl AsRef<str>,
-    ) -> Result<&mut Worksheet, XlsxError> {
-        self.write_string(row, col, fit_cell(text.as_ref()).into_owned())
-    }
+/// Its own module so the wrapped worksheet is private to it: no other code in the crate can
+/// reach the raw writers through the field.
+mod capped_sheet {
+    use super::{fit_cell, Color, ConditionalFormatText, Format, Worksheet, XlsxError};
 
-    fn write_text_with_format(
-        &mut self,
-        row: u32,
-        col: u16,
-        text: impl AsRef<str>,
-        format: &Format,
-    ) -> Result<&mut Worksheet, XlsxError> {
-        self.write_string_with_format(row, col, fit_cell(text.as_ref()).into_owned(), format)
+    pub(crate) struct CappedSheet<'a>(&'a mut Worksheet);
+
+    impl<'a> CappedSheet<'a> {
+        pub(crate) fn new(ws: &'a mut Worksheet) -> Self {
+            Self(ws)
+        }
+
+        pub(crate) fn write_text(
+            &mut self,
+            row: u32,
+            col: u16,
+            text: impl AsRef<str>,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0
+                .write_string(row, col, fit_cell(text.as_ref()).into_owned())?;
+            Ok(self)
+        }
+
+        pub(crate) fn write_text_with_format(
+            &mut self,
+            row: u32,
+            col: u16,
+            text: impl AsRef<str>,
+            format: &Format,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.write_string_with_format(
+                row,
+                col,
+                fit_cell(text.as_ref()).into_owned(),
+                format,
+            )?;
+            Ok(self)
+        }
+
+        pub(crate) fn write_number(
+            &mut self,
+            row: u32,
+            col: u16,
+            number: f64,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.write_number(row, col, number)?;
+            Ok(self)
+        }
+
+        pub(crate) fn write_number_with_format(
+            &mut self,
+            row: u32,
+            col: u16,
+            number: f64,
+            format: &Format,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.write_number_with_format(row, col, number, format)?;
+            Ok(self)
+        }
+
+        /// An internal-link cell. The link text is fixed sheet names, so it is not capped.
+        pub(crate) fn write_url_with_text(
+            &mut self,
+            row: u32,
+            col: u16,
+            link: &str,
+            text: &str,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0
+                .write_url_with_text(row, col, link, fit_cell(text).as_ref())?;
+            Ok(self)
+        }
+
+        pub(crate) fn set_name(&mut self, name: &str) -> Result<&mut Self, XlsxError> {
+            self.0.set_name(name)?;
+            Ok(self)
+        }
+
+        pub(crate) fn set_tab_color(&mut self, color: Color) -> &mut Self {
+            self.0.set_tab_color(color);
+            self
+        }
+
+        pub(crate) fn set_column_width(
+            &mut self,
+            col: u16,
+            width: f64,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.set_column_width(col, width)?;
+            Ok(self)
+        }
+
+        pub(crate) fn set_row_height(
+            &mut self,
+            row: u32,
+            height: impl Into<f64>,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.set_row_height(row, height)?;
+            Ok(self)
+        }
+
+        pub(crate) fn set_freeze_panes(
+            &mut self,
+            row: u32,
+            col: u16,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0.set_freeze_panes(row, col)?;
+            Ok(self)
+        }
+
+        pub(crate) fn autofilter(
+            &mut self,
+            first_row: u32,
+            first_col: u16,
+            last_row: u32,
+            last_col: u16,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0
+                .autofilter(first_row, first_col, last_row, last_col)?;
+            Ok(self)
+        }
+
+        pub(crate) fn add_conditional_format(
+            &mut self,
+            first_row: u32,
+            first_col: u16,
+            last_row: u32,
+            last_col: u16,
+            format: &ConditionalFormatText,
+        ) -> Result<&mut Self, XlsxError> {
+            self.0
+                .add_conditional_format(first_row, first_col, last_row, last_col, format)?;
+            Ok(self)
+        }
     }
 }
 
@@ -846,7 +951,7 @@ fn write_sites_sheets(
         sites.chunks(chunk).collect()
     };
     for (page, name) in pages.iter().zip(names) {
-        let ws = wb.add_worksheet();
+        let mut ws = CappedSheet::new(wb.add_worksheet());
         ws.set_name(name)?;
         let _ = ws.set_tab_color(Color::from("#6B7280"));
         for (c, h) in HEADERS.iter().enumerate() {
@@ -1616,7 +1721,7 @@ const SNIPPET_COL: u16 = 19;
 const NEEDS_REVIEW_COL: u16 = 12;
 
 fn write_finding_row(
-    ws: &mut Worksheet,
+    ws: &mut CappedSheet,
     r: u32,
     row: &FindingRow,
     fmts: &Formats,
@@ -1734,7 +1839,7 @@ fn write_findings_sheet(
     fp_reason_col: bool,
     tab_color: Option<&str>,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     if let Some(color) = tab_color {
         let _ = ws.set_tab_color(Color::from(color));
@@ -1758,7 +1863,7 @@ fn write_findings_sheet(
     for (i, row) in rows.iter().enumerate() {
         let r = (i + 1) as u32;
         let zebra_on = i % 2 == 1;
-        write_finding_row(ws, r, row, fmts, zebra_on)?;
+        write_finding_row(&mut ws, r, row, fmts, zebra_on)?;
         if fp_reason_col {
             let bg: Option<&str> = if row.severity == "critical" {
                 Some("#FEF2F2")
@@ -1808,7 +1913,7 @@ fn write_dependencies_sheet(
     coverage_notes: &[String],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
@@ -1890,7 +1995,7 @@ fn write_deviations_sheet(
     groups: &[DeviationGroupRow],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#E0B400"));
 
@@ -1985,7 +2090,7 @@ fn write_conventions_sheet(
     rows: &[ConventionRow],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#27AE60"));
 
@@ -2067,7 +2172,7 @@ fn write_patterns_sheet(
     patterns: &crate::report_export::PatternsAcrossServicesJson,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
@@ -2199,7 +2304,7 @@ fn write_coverage_sheet(
     multi_repo: bool,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
@@ -2519,7 +2624,7 @@ fn write_index_sheet(
     corpus: Option<&camerata_rules::RuleSet>,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    let ws = wb.add_worksheet();
+    let mut ws = CappedSheet::new(wb.add_worksheet());
     ws.set_name("Index")?;
     let _ = ws.set_tab_color(Color::from("#111827"));
     ws.set_column_width(0, 34.0)?;

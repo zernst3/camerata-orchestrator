@@ -307,3 +307,62 @@ async fn a_report_of_30000_rows_across_100_rules_exports_to_xlsx_and_pdf() {
         assert!(pdf.is_some());
     }
 }
+
+// ── M8-1: the cap is enforced by type, and this scan keeps it that way ──────────────────
+
+/// Every sheet-writing function takes a [`CappedSheet`], whose text writers cut an oversized
+/// cell with a pointer. The raw `rust_xlsxwriter` writers that take text abort the whole export
+/// at 32,767 characters, so they may be named only inside `mod capped_sheet`. A later change
+/// that reaches for one (or takes a raw `Worksheet`) fails here instead of failing a client's
+/// export.
+#[test]
+fn no_raw_string_writer_outside_capped_sheet() {
+    const RAW_TEXT_WRITERS: [&str; 7] = [
+        "write_string",
+        "write_rich_string",
+        "write_formula",
+        "write_url_with_format",
+        ".write(",
+        ".write_with_format(",
+        "add_note",
+    ];
+    let main = include_str!("../../xlsx_export.rs");
+    let production = main
+        .split("\n#[cfg(test)]\nmod tests {")
+        .next()
+        .expect("the production half of xlsx_export.rs");
+    let impl_start = production
+        .find("mod capped_sheet {")
+        .expect("the capped_sheet module");
+    let impl_end = impl_start
+        + production[impl_start..]
+            .find("\n}\n")
+            .expect("the end of the capped_sheet module");
+    let outside_wrapper = format!("{}{}", &production[..impl_start], &production[impl_end..]);
+    let sources = [
+        ("xlsx_export.rs", outside_wrapper.as_str()),
+        (
+            "xlsx_export/triage_log.rs",
+            include_str!("../triage_log.rs"),
+        ),
+    ];
+    for (file, text) in sources {
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for writer in RAW_TEXT_WRITERS {
+                assert!(
+                    !code.contains(writer),
+                    "{file}:{} calls a raw text writer ({writer}) outside CappedSheet: {line}\n\
+                     Write text through CappedSheet::write_text so an oversized cell is cut \
+                     with a pointer instead of aborting the export.",
+                    n + 1
+                );
+            }
+        }
+    }
+    assert!(
+        !outside_wrapper.contains("&mut Worksheet")
+            || outside_wrapper.matches("&mut Worksheet").count() == 0,
+        "sheet code must take a CappedSheet, not a raw Worksheet"
+    );
+}
