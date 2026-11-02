@@ -1235,6 +1235,10 @@ pub(super) struct OnboardingDraft {
     // so they survive reload; written to the project's ruleset.custom on apply/complete.
     #[serde(default)]
     pub custom: Vec<CustomRuleView>,
+    /// OLD DRAFTS ONLY. The reviewer's decisions live on the server now (the decision store). A
+    /// draft saved before that holds them here; the first load after the upgrade migrates them
+    /// to the store and the draft is saved blank from then on (it is written empty, never with
+    /// the live dispositions, except when the migration failed and they must not be lost).
     #[serde(default)]
     pub dispositions: std::collections::HashMap<String, Disposition>,
     #[serde(default)]
@@ -1267,6 +1271,52 @@ pub(super) async fn load_onboarding_draft() -> Option<OnboardingDraft> {
         .await
         .ok()
         .flatten()
+}
+
+/// Hand the dispositions an old draft held to the server's decision store, once. The server
+/// translates the old line-based keys to site keys, writes the records and blanks the draft's
+/// copy; an `Err` means nothing was migrated and the draft must keep its dispositions.
+async fn migrate_draft_dispositions(
+    project_id: &str,
+    req: &camerata_api_types::decisions::MigrateDraftReq,
+) -> Result<camerata_api_types::decisions::MigrationOutcome, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/decisions",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("the server answered {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// The project's decisions from the server, as the triage table's `key -> Disposition` map.
+/// `None` when the server could not be asked.
+async fn fetch_stored_dispositions(
+    project_id: &str,
+) -> Option<std::collections::HashMap<String, Disposition>> {
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/api/projects/{}/decisions",
+            crate::bff_base(),
+            project_id
+        ))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let got: camerata_api_types::decisions::DecisionsResp = resp.json().await.ok()?;
+    Some(camerata_ui_core::decisions::dispositions_from_decisions(
+        &got.decisions,
+    ))
 }
 
 /// Persist the current onboarding draft (best-effort; failure is non-fatal).
@@ -8318,6 +8368,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut custom_rules_w = custom_rules;
     let mut order_preset_w = order_preset;
     let mut draft_loaded = use_signal(|| false);
+    // Set when the old draft's dispositions could not be handed to the decision store: the draft
+    // then keeps carrying them, so a failed migration can never lose a decision.
+    let migration_failed = use_signal(|| false);
+    let mut migration_failed_w = migration_failed;
     use_context_provider(|| draft_loaded);
     {
         let report_repos = report.repos.clone();
@@ -8351,8 +8405,44 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         if !d.custom.is_empty() {
                             custom_rules_w.set(d.custom);
                         }
-                        if !d.dispositions.is_empty() {
-                            dispositions_w.set(d.dispositions);
+                        // The decisions live on the server. An old draft's dispositions are
+                        // migrated to the store once (the server blanks them in the draft), then
+                        // the table shows what the store holds.
+                        let pid = fetch_active_project()
+                            .await
+                            .map(|p| p.id)
+                            .unwrap_or_default();
+                        let mut migrated = true;
+                        if let Some(req) =
+                            camerata_ui_core::decisions::migration_request(&d.dispositions)
+                        {
+                            match migrate_draft_dispositions(&pid, &req).await {
+                                Ok(outcome) => dispositions_w.set(
+                                    camerata_ui_core::decisions::dispositions_from_migration(
+                                        &outcome,
+                                    ),
+                                ),
+                                Err(e) => {
+                                    // Nothing was migrated: keep them in the session and in the
+                                    // draft so no decision is lost, and try again next load.
+                                    migrated = false;
+                                    migration_failed_w.set(true);
+                                    dispositions_w.set(d.dispositions.clone());
+                                    eprintln!("[camerata-ui] could not migrate the draft's dispositions to the decision store: {e}");
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Your triage decisions could not be moved to the server's decision store. They are kept in your saved review and will be moved the next time it loads.",
+                                    );
+                                }
+                            }
+                        }
+                        if migrated && !pid.is_empty() {
+                            if let Some(stored) = fetch_stored_dispositions(&pid).await {
+                                if !stored.is_empty() {
+                                    dispositions_w.set(stored);
+                                }
+                            }
                         }
                         if !d.viewed_repo.is_empty() {
                             viewed_repo.set(d.viewed_repo);
@@ -8409,7 +8499,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 repo_selection: sel,
                 chosen: cho,
                 custom: cust,
-                dispositions: disp,
+                // The decisions are the server's; the draft is saved blank (see the field).
+                dispositions: if migration_failed() {
+                    disp
+                } else {
+                    std::collections::HashMap::new()
+                },
                 viewed_repo: vr,
                 triage_view: tv,
                 order_preset: op,
@@ -8951,6 +9046,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 all_rules.extend(all_customs);
                 let mut visible_rules = report.proposed_rules.clone();
                 visible_rules.extend(visible_customs);
+                let project_id_audit = project_id.clone();
                 rsx! {
                     ProposedRulesTable {
                         // Key on the viewed repo + custom signature so switching repos OR adding/
@@ -9002,7 +9098,22 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // repo_selection / chosen / custom_rules are NOT reset: those are
                             // the architect's persistent rule choices that survive a re-audit.
                             audit.set(None);
+                            // Decisions are the server's and carry across a re-audit by site key
+                            // (an exact match keeps its decision; a moved or new site stays
+                            // Unresolved). Clear the old run's table, then show what the store
+                            // holds rather than nothing.
                             dispositions.set(std::collections::HashMap::new());
+                            {
+                                let pid = project_id_audit.clone();
+                                spawn(async move {
+                                    if pid.is_empty() {
+                                        return;
+                                    }
+                                    if let Some(stored) = fetch_stored_dispositions(&pid).await {
+                                        dispositions.set(stored);
+                                    }
+                                });
+                            }
                             triage_view.set(TriageState::Unresolved);
                             detail_finding.set(None);
                             job_progress.set(None);
