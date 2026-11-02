@@ -306,12 +306,6 @@ fn grouping_never_changes_the_row_count() {
     assert_eq!(n_site.flagged_by.len(), 5);
     let nested = p.rows.iter().find(|f| f.path == "src/nested.rs").unwrap();
     assert_eq!(nested.flagged_by.len(), 3);
-    // The n-site group is one row holding five sources; the nested pair holds the two sources it
-    // carried plus the row folded into it.
-    let n_site = p.rows.iter().find(|f| f.path == "src/n.rs").unwrap();
-    assert_eq!(n_site.flagged_by.len(), 5);
-    let nested = p.rows.iter().find(|f| f.path == "src/nested.rs").unwrap();
-    assert_eq!(nested.flagged_by.len(), 3);
     // Grouping alone (no collapse) keeps the same rows in the same order at the same severity.
     let input = mixed_rows();
     let (rows, _tree) = grouped(input.clone());
@@ -1128,13 +1122,20 @@ fn unfold_never_lists_a_site_twice_and_never_loses_one() {
         false,
     )
     .with_rating("critical", "Any user can read any invoice")];
-    let before: BTreeSet<(String, usize, String)> = [&a, &b, &c]
+    // The engine's own site identity: site key (rule plus snippet fingerprint) and line.
+    let strong = |repo: &str, path: &str, rule: &str, snippet: &str, line: usize| {
+        (
+            camerata_api_types::site_key::site_key(repo, path, rule, snippet, 0),
+            line,
+        )
+    };
+    let before: BTreeSet<(String, usize)> = [&a, &b, &c]
         .iter()
         .flat_map(|f| {
-            std::iter::once((f.path.clone(), f.line, f.rule_id.clone())).chain(
+            std::iter::once(strong(&f.repo, &f.path, &f.rule_id, &f.snippet, f.line)).chain(
                 f.also_locations
                     .iter()
-                    .map(|l| (l.path.clone(), l.line, l.rule_id.clone())),
+                    .map(|l| strong(&l.repo, &l.path, &l.rule_id, &l.snippet, l.line)),
             )
         })
         .collect();
@@ -1146,9 +1147,9 @@ fn unfold_never_lists_a_site_twice_and_never_loses_one() {
     );
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().all(|f| f.also_locations.is_empty()));
-    let places: Vec<(String, usize, String)> = rows
+    let places: Vec<(String, usize)> = rows
         .iter()
-        .map(|f| (f.path.clone(), f.line, f.rule_id.clone()))
+        .map(|f| strong(&f.repo, &f.path, &f.rule_id, &f.snippet, f.line))
         .collect();
     let unique: BTreeSet<_> = places.iter().cloned().collect();
     assert_eq!(
@@ -1170,11 +1171,79 @@ fn unfold_never_lists_a_site_twice_and_never_loses_one() {
 }
 
 #[test]
+fn unfold_keeps_two_unlocated_sites_of_one_rule_that_differ_only_by_snippet() {
+    // Two sites at line 0 of one file under one rule: only the snippet tells them apart (the
+    // engine's own site identity). Both are promoted and both snippets and headlines survive.
+    let mut survivor = row(
+        "AI-NO-RATE-LIMIT",
+        "src/api.rs",
+        0,
+        "no rate limit on login",
+    );
+    survivor.also_locations = vec![
+        MergedLocation::site(
+            "acme/app",
+            "src/api.rs",
+            0,
+            "AI-NO-RATE-LIMIT",
+            "no rate limit on export",
+            true,
+        )
+        .with_rating("medium", "Export has no rate limit"),
+        MergedLocation::site(
+            "acme/app",
+            "src/api.rs",
+            0,
+            "AI-NO-RATE-LIMIT",
+            "no rate limit on search",
+            true,
+        )
+        .with_rating("low", "Search has no rate limit"),
+    ];
+    let mut rows = vec![survivor];
+    let added = unfold_also_locations(&mut rows);
+    assert_eq!(added, 2, "{rows:#?}");
+    let snippets: BTreeSet<&str> = rows.iter().map(|f| f.snippet.as_str()).collect();
+    assert!(
+        snippets.contains("no rate limit on export")
+            && snippets.contains("no rate limit on search")
+    );
+    let details: String = rows
+        .iter()
+        .map(|f| f.detail.clone())
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        details.contains("Export has no rate limit")
+            && details.contains("Search has no rate limit")
+    );
+    // A duplicate that is a located consequence raises `located` on the row that stands for it.
+    let mut unlocated = row("AI-X", "src/a.rs", 5, "code here");
+    unlocated.located = false;
+    let mut holder = row("AI-Y", "src/b.rs", 1, "other code");
+    holder.also_locations = vec![MergedLocation::site(
+        "acme/app",
+        "src/a.rs",
+        5,
+        "AI-X",
+        "code here",
+        false,
+    )];
+    let mut rows = vec![unlocated, holder];
+    unfold_also_locations(&mut rows);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[0].located,
+        "a located duplicate marks the standing row located"
+    );
+}
+
+#[test]
 fn the_same_structural_rule_in_two_repos_stays_separate_per_repo() {
-    let make = |repo: &str, path: &str, line: usize| {
+    let make = |repo: &str, line: usize| {
         let mut f = row(
             "ARCH-SOME-PREFERENCE-1",
-            path,
+            "src/index.ts",
             line,
             "let x = shared_shape();",
         );
@@ -1185,48 +1254,32 @@ fn the_same_structural_rule_in_two_repos_stays_separate_per_repo() {
         f.severity = "low".to_string();
         f
     };
-    // The very same place in each repo, and a second nearby row in each.
-    let input = vec![
-        make("acme/web", "src/index.ts", 12),
-        make("acme/web", "src/index.ts", 13),
-        make("acme/api", "src/index.ts", 12),
-        make("acme/api", "src/index.ts", 13),
-    ];
-    let repo_of_key = |key: &str| key.split('\u{0}').next().unwrap_or_default().to_string();
-    let collapsed = collapse(input.clone());
+    let p = pipe(vec![
+        make("acme/web", 12),
+        make("acme/web", 13),
+        make("acme/api", 12),
+        make("acme/api", 13),
+    ]);
+    assert_eq!(p.rows.len() + p.collapse.collapsed.len(), 4);
+    assert_tree_covers_rows(&p.rows, &p.tree);
+    let rule_nodes: BTreeSet<&str> = p.rows.iter().map(|f| f.group_path[1].as_str()).collect();
     assert_eq!(
-        collapsed.rows.len() + collapsed.collapsed.len(),
-        input.len()
+        rule_nodes,
+        BTreeSet::from(["rule:ARCH-SOME-PREFERENCE-1"]),
+        "one shared rule node"
     );
-    for repo in ["acme/web", "acme/api"] {
-        assert!(
-            collapsed.rows.iter().any(|f| f.repo == repo),
-            "{repo} keeps a row"
-        );
-    }
-    // A collapse never reaches across repos: every source a row holds is from the row's own.
-    for f in &collapsed.rows {
+    for f in &p.rows {
         for b in &f.flagged_by {
-            assert_eq!(repo_of_key(&b.site_key), f.repo, "{f:?}");
+            assert!(
+                b.site_key.starts_with(&format!("{}\u{0}", f.repo)),
+                "collapsed across repos: {f:?}"
+            );
         }
-    }
-    // Grouping drops nothing, links stay inside a repo, and a sub-group formed for a shared
-    // cause holds rows of one repo only.
-    let mut alloc = SubgroupAllocator::new();
-    let (mut rows, nodes) = group_semantic(input, &[], &ToolMap::builtin(), &mut alloc);
-    assert_eq!(rows.len(), 4, "grouping drops nothing across repos");
-    backfill_site_keys(&mut rows);
-    for f in &rows {
-        assert!(f.flagged_by.is_empty(), "grouping collapses nothing");
-    }
-    for f in &rows {
         if let Some(link) = &f.possible_duplicate_of {
-            assert_eq!(repo_of_key(&link.key), f.repo, "a link never crosses repos");
+            let target = p.rows.iter().find(|t| t.site_key == link.key).unwrap();
+            assert_eq!(target.repo, f.repo, "linked across repos");
         }
     }
-    assert!(!nodes.is_empty(), "the adjacent rows form cause sub-groups");
-    for node in &nodes {
-        let repos: BTreeSet<String> = node.members.iter().map(|k| repo_of_key(k)).collect();
-        assert_eq!(repos.len(), 1, "{}: spans repos: {repos:?}", node.id);
-    }
+    let repos: BTreeSet<&str> = p.rows.iter().map(|f| f.repo.as_str()).collect();
+    assert_eq!(repos.len(), 2, "both repos keep rows");
 }

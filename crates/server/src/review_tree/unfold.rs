@@ -38,15 +38,23 @@ fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
     row
 }
 
-/// The identity of a site for "is this the same site": repo, path, line and rule id.
-type SiteIdentity = (String, String, usize, String);
+/// The identity of a site for "is this the same site": the engine's own site key (repo, path and
+/// the fingerprint of rule id plus snippet, so two unlocated sites of one rule in one file are
+/// told apart by their snippets) and the line.
+type SiteIdentity = (String, usize);
 
 fn identity_of_row(f: &Finding) -> SiteIdentity {
-    (f.repo.clone(), f.path.clone(), f.line, f.rule_id.clone())
+    (
+        camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0),
+        f.line,
+    )
 }
 
 fn identity_of_site(l: &MergedLocation) -> SiteIdentity {
-    (l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone())
+    (
+        camerata_api_types::site_key::site_key(&l.repo, &l.path, &l.rule_id, &l.snippet, 0),
+        l.line,
+    )
 }
 
 /// Promote every absorbed site to a row. Returns how many rows were added. The survivor keeps its
@@ -100,6 +108,8 @@ pub fn unfold_also_locations(findings: &mut Vec<Finding>) -> usize {
             Stands::Original(i) => &mut originals[i],
             Stands::Promoted(i, j) => &mut promoted[i][j],
         };
+        // A located duplicate makes the row that stands for the place a located one.
+        row.located |= !site.consequence;
         if !site.severity.is_empty()
             && crate::ai_audit::severity_rank(&site.severity)
                 > crate::ai_audit::severity_rank(&row.severity)
