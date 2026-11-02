@@ -49,7 +49,7 @@ use tokio::time::Instant;
 
 use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
-    plan_item_ranges, poll_and_fetch, BatchApi, PollProgress, RoundContext,
+    plan_item_ranges, poll_and_fetch, BatchApi, JobCancelled, PollProgress, RoundContext,
 };
 use super::request_budget::ensure_request_fits;
 use super::*;
@@ -234,12 +234,27 @@ pub struct StageOutcome<Id> {
     /// Items with no result, each with its reason.
     pub failed: Vec<FailedItem<Id>>,
     pub pacing: PacingReport,
+    /// Set when the job was cancelled before the stage finished. A cancelled stage is neither
+    /// failed nor an outage: its unsent items are listed here and are sent by a later run.
+    pub cancelled: Option<StageCancelled<Id>>,
+}
+
+/// What a cancel left undone.
+#[derive(Debug, Clone)]
+pub struct StageCancelled<Id> {
+    /// Items that were neither absorbed nor failed: never sent, or sent in a batch that was
+    /// cancelled. A resume sends them (a cancelled batch is polled first, so what it finished
+    /// is absorbed and not paid for twice).
+    pub not_sent: Vec<Id>,
+    /// Provider batches the runner asked to cancel.
+    pub batches_cancelled: Vec<String>,
 }
 
 impl<Id> StageOutcome<Id> {
-    /// True when every item is absorbed or resumed: the stage has nothing left to report.
+    /// True when every item is absorbed or resumed and the stage was not cancelled: the stage
+    /// has nothing left to report.
     pub fn is_complete(&self) -> bool {
-        self.failed.is_empty()
+        self.failed.is_empty() && self.cancelled.is_none()
     }
 }
 
@@ -272,6 +287,12 @@ struct Book<Id> {
     /// Attempt records gathered for an item so far.
     trails: BTreeMap<Id, Vec<AttemptRecord>>,
     pacing: PacingReport,
+    /// The job was cancelled: nothing more is dispatched.
+    cancelled: bool,
+    /// Provider batches the runner asked to cancel.
+    batches_cancelled: Vec<String>,
+    /// Items neither absorbed nor failed when the stage ended cancelled.
+    not_sent: Vec<Id>,
 }
 
 /// The most attempt records one failed part keeps (a long rate limit would otherwise grow it for
@@ -290,6 +311,9 @@ impl<Id: Clone + Ord> Book<Id> {
             resent: BTreeSet::new(),
             trails: BTreeMap::new(),
             pacing: PacingReport::default(),
+            cancelled: false,
+            batches_cancelled: Vec::new(),
+            not_sent: Vec::new(),
         }
     }
 
@@ -330,6 +354,10 @@ impl<Id: Clone + Ord> Book<Id> {
             resumed: self.resumed,
             failed: self.failed.into_values().collect(),
             pacing: self.pacing,
+            cancelled: self.cancelled.then_some(StageCancelled {
+                not_sent: self.not_sent,
+                batches_cancelled: self.batches_cancelled,
+            }),
         }
     }
 }
@@ -378,8 +406,13 @@ where
     }
     report_progress(ctx, stage, &book);
 
+    // A job cancelled before the stage starts sends nothing. What an earlier process absorbed
+    // was replayed above and stays absorbed.
+    if cancel_requested(ctx) {
+        book.cancelled = true;
+    }
     let mut follow: BTreeMap<S::Id, Work<S::Id>> = BTreeMap::new();
-    if ctx.batch.is_some() {
+    if !book.cancelled && ctx.batch.is_some() {
         follow = resume_batches(stage, s, ctx, &mut book, &by_key, &reqs).await;
     }
     let pending: Vec<Work<S::Id>> = reqs
@@ -393,7 +426,7 @@ where
         })
         .collect();
 
-    if !pending.is_empty() {
+    if !pending.is_empty() && !book.cancelled {
         match (mode, ctx.batch) {
             (StageMode::Batch, Some(api)) => {
                 run_batch(stage, s, ctx, api, &mut book, pending).await;
@@ -417,6 +450,13 @@ where
             }
         }
     }
+    if book.cancelled {
+        book.not_sent = reqs
+            .keys()
+            .filter(|id| !book.done.contains(*id))
+            .cloned()
+            .collect();
+    }
     if let Some((jobs, id)) = ctx.job {
         jobs.clear_stage_progress(id);
     }
@@ -430,6 +470,54 @@ fn report_progress<Id: Clone + Ord>(ctx: &StageCtx<'_>, stage: Stage, book: &Boo
     if let Some((jobs, id)) = ctx.job {
         jobs.touch_activity(id);
         jobs.set_stage_progress(id, stage, book.finished(), book.total);
+    }
+}
+
+// ── cancel ──────────────────────────────────────────────────────────────────────────────────────
+
+/// True once the job this stage runs for has been cancelled. A run with no job is never cancelled.
+fn cancel_requested(ctx: &StageCtx<'_>) -> bool {
+    ctx.job
+        .is_some_and(|(jobs, id)| jobs.is_cancel_requested(id))
+}
+
+/// Wait `dur`, looking at the cancel flag at least once per poll interval. Returns `true` as soon
+/// as the job is cancelled, so a long `retry-after` never holds a cancelled job.
+async fn sleep_or_cancel(ctx: &StageCtx<'_>, dur: Duration) -> bool {
+    let end = Instant::now() + dur;
+    loop {
+        if cancel_requested(ctx) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= end {
+            return false;
+        }
+        tokio::time::sleep((end - now).min(ctx.settings.poll_interval)).await;
+    }
+}
+
+/// Ask the provider to cancel a batch the job no longer wants, so it stops spending. The batch
+/// stays on the checkpoint's list unsettled: whatever it finished before the cancel is fetched
+/// and absorbed by the next run, never paid for twice.
+async fn cancel_live_batch<Id>(
+    ctx: &StageCtx<'_>,
+    api: &dyn BatchApi,
+    book: &mut Book<Id>,
+    batch_id: &str,
+) {
+    book.cancelled = true;
+    book.batches_cancelled.push(batch_id.to_string());
+    if let Err(e) = api.cancel_batch(batch_id).await {
+        let note = format!(
+            "The job was cancelled but batch {batch_id} could not be cancelled at the provider \
+             ({}); it may still run and be billed. Cancel it in the Anthropic console.",
+            disclosable_error(&format!("{e:#}"))
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
     }
 }
 
@@ -800,10 +888,15 @@ async fn run_parallel<S>(
     let label = stage.label();
 
     loop {
+        // A cancelled job dispatches nothing more; requests already in flight finish and are
+        // absorbed, and everything still queued is reported as not sent.
+        if !book.cancelled && cancel_requested(ctx) {
+            book.cancelled = true;
+        }
         // Launch as many as the permits allow, unless the provider asked us to hold.
         loop {
             let now = Instant::now();
-            if in_flight.len() >= aimd.limit() || aimd.held_until(now).is_some() {
+            if book.cancelled || in_flight.len() >= aimd.limit() || aimd.held_until(now).is_some() {
                 break;
             }
             let Some(work) = queue.pop_front() else { break };
@@ -854,10 +947,14 @@ async fn run_parallel<S>(
         }
 
         if in_flight.is_empty() {
+            if book.cancelled {
+                break;
+            }
             if !queue.is_empty() {
-                // Held with nothing in flight: wait the hold out.
-                if let Some(until) = aimd.held_until(Instant::now()) {
-                    tokio::time::sleep_until(until).await;
+                // Held with nothing in flight: wait the hold out, unless the job is cancelled.
+                let now = Instant::now();
+                if let Some(until) = aimd.held_until(now) {
+                    sleep_or_cancel(ctx, until.saturating_duration_since(now)).await;
                 }
                 continue;
             }
@@ -1095,6 +1192,10 @@ where
         if records[i].settled {
             continue;
         }
+        if cancel_requested(ctx) {
+            book.cancelled = true;
+            break;
+        }
         let record = records[i].clone();
         let members: Vec<(String, Work<S::Id>)> = record
             .items
@@ -1134,6 +1235,7 @@ where
             ctx.settings.poll_interval,
             Some(progress),
             false,
+            true,
         )
         .await
         {
@@ -1142,6 +1244,10 @@ where
                     out.insert(work.id.clone(), work);
                 }
                 records[i].settled = true;
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_live_batch(ctx, api, book, &record.batch_id).await;
+                break;
             }
             Err(failed) => {
                 let error = disclosable_error(&format!("{:#}", failed.error));
@@ -1180,7 +1286,7 @@ async fn run_batch<S>(
 {
     let mut clock = RateClock::new(ctx.settings.rate_limit_deadline);
     let mut work = pending;
-    while !work.is_empty() {
+    while !work.is_empty() && !book.cancelled {
         work = batch_round(stage, s, ctx, api, book, work, &mut clock).await;
     }
 }
@@ -1224,6 +1330,11 @@ where
         let sub = &work[range.clone()];
         let sub_cids = &cids[range];
 
+        // Nothing more is submitted once the job is cancelled.
+        if book.cancelled || cancel_requested(ctx) {
+            book.cancelled = true;
+            break;
+        }
         // Nothing more is submitted after an outage stop or past the spend limit.
         if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
             let (class, why) = refusal_class(ctx);
@@ -1275,7 +1386,9 @@ where
                     if let Some((jobs, id)) = ctx.job {
                         jobs.touch_activity(id);
                     }
-                    tokio::time::sleep(wait).await;
+                    if sleep_or_cancel(ctx, wait).await {
+                        break Err(anyhow::Error::new(JobCancelled));
+                    }
                 }
                 Err(e) => break Err(e),
             }
@@ -1283,6 +1396,10 @@ where
 
         let batch_id = match submitted {
             Ok(id) => id,
+            Err(e) if e.is::<JobCancelled>() => {
+                book.cancelled = true;
+                break;
+            }
             Err(e) => {
                 // Nothing was accepted, so nothing can be running: safe to send again.
                 let class = classify_pass_error(&e);
@@ -1345,6 +1462,7 @@ where
             ctx.settings.poll_interval,
             Some(progress),
             false,
+            true,
         )
         .await
         {
@@ -1361,6 +1479,10 @@ where
                         checkpoint_trouble(ctx, "batch list", &e);
                     }
                 }
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_live_batch(ctx, api, book, &batch_id).await;
+                break;
             }
             Err(failed) => {
                 // The batch was accepted and is running or finished server-side. It is NOT

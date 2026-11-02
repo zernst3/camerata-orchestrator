@@ -419,6 +419,17 @@ impl JobStore {
         }
     }
 
+    /// The label the job's liveness tracker last recorded (`calibration: 6 of 6 ended`), which
+    /// outlives the stage's progress line.
+    #[cfg(test)]
+    pub(crate) fn last_progress_label(&self, id: &str) -> Option<String> {
+        self.job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(|m| m.tracker.last_label())
+    }
+
     /// The stage is no longer waiting on a batch: drop its progress line.
     pub fn clear_stage_progress(&self, id: &str) {
         self.with(id, |j| j.stage_progress = None);

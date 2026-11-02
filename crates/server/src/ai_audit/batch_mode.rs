@@ -113,6 +113,12 @@ pub trait BatchApi: Send + Sync {
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String>;
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus>;
     async fn fetch(&self, batch_id: &str, ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>>;
+    /// Ask the provider to cancel a batch it accepted, so a cancelled job stops spending. Items
+    /// that already finished keep their results. The default says it cannot: an implementation
+    /// that has a batch endpoint must override it.
+    async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this batch API cannot cancel batch {batch_id}")
+    }
 }
 
 /// A model seam that carries a [`BatchApi`] as well as the real-time calls, so a test can drive
@@ -179,6 +185,9 @@ impl BatchApi for Llm {
     }
     async fn fetch(&self, batch_id: &str, ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
         self.fetch_batch_results(batch_id, ttl).await
+    }
+    async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        Llm::cancel_batch(self, batch_id).await
     }
 }
 
@@ -590,6 +599,29 @@ pub(crate) fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Re
 /// running server-side and the job is alive (design 6.3).
 pub(crate) const STALL_AFTER_FAILED_POLLS: u32 = 3;
 
+/// The error a cancellable poll returns when the job was cancelled while it waited. The batch
+/// itself is still running at the provider: the caller cancels it there.
+#[derive(Debug)]
+pub(crate) struct JobCancelled;
+
+impl std::fmt::Display for JobCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the job was cancelled")
+    }
+}
+
+impl std::error::Error for JobCancelled {}
+
+/// Returns once the job is cancelled, looking at the flag once per `interval`.
+async fn watch_for_cancel(jobs: &crate::jobs::JobStore, id: &str, interval: std::time::Duration) {
+    loop {
+        if jobs.is_cancel_requested(id) {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// Where a poll loop reports its progress on the job: which stage, how many of its items had
 /// already ended in earlier batches, and how many it submitted in all (`None`: just this batch).
 #[derive(Debug, Clone, Copy)]
@@ -706,6 +738,7 @@ async fn submit_poll_fetch(
         batch_poll_interval(),
         Some(progress),
         ctx.fatal_errors,
+        false,
     )
     .await
 }
@@ -714,6 +747,9 @@ async fn submit_poll_fetch(
 /// [`POST_SUBMIT_ATTEMPTS`] times (once when `fatal_errors`). Every poll tick touches the job and
 /// sets the stage's progress ([`PollTicker`]). Also how a resume picks up a batch an earlier
 /// process submitted: it polls and fetches by id, never submits.
+///
+/// With `cancellable` the job's cancel flag is looked at once per poll interval (and before each
+/// attempt); a cancel ends the wait at once with a [`JobCancelled`] error carrying the batch id.
 pub(crate) async fn poll_and_fetch(
     ctx: &RoundContext<'_>,
     batch_id: &str,
@@ -721,7 +757,12 @@ pub(crate) async fn poll_and_fetch(
     interval: std::time::Duration,
     progress: Option<PollProgress>,
     fatal_errors: bool,
+    cancellable: bool,
 ) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    let cancelled = || SubBatchFailure {
+        batch_id: Some(batch_id.to_string()),
+        error: anyhow::Error::new(JobCancelled),
+    };
     let attempts = if fatal_errors {
         1
     } else {
@@ -730,6 +771,13 @@ pub(crate) async fn poll_and_fetch(
     let ticker = PollTicker::new(ctx.job, progress);
     let mut last_error = None;
     for attempt in 0..attempts {
+        if cancellable
+            && ctx
+                .job
+                .is_some_and(|(jobs, id)| jobs.is_cancel_requested(id))
+        {
+            return Err(cancelled());
+        }
         if attempt > 0 {
             eprintln!(
                 "[camerata-server] batch {batch_id}: retrieving results again (attempt {}/{attempts})",
@@ -737,7 +785,7 @@ pub(crate) async fn poll_and_fetch(
             );
             tokio::time::sleep(interval).await;
         }
-        let polled = poll_batch_until_ended(
+        let poll = poll_batch_until_ended(
             || async {
                 let polled = ctx.api.poll(batch_id).await;
                 note_batch_call(ctx.meter, &polled);
@@ -762,8 +810,17 @@ pub(crate) async fn poll_and_fetch(
                     status.request_counts.expired,
                 );
             },
-        )
-        .await;
+        );
+        let polled = match ctx.job {
+            Some((jobs, id)) if cancellable => {
+                tokio::select! {
+                    biased;
+                    () = watch_for_cancel(jobs, id, interval) => return Err(cancelled()),
+                    r = poll => r,
+                }
+            }
+            _ => poll.await,
+        };
         let fetched = match polled {
             Ok(()) => {
                 let fetched = ctx.api.fetch(batch_id, ttl).await;

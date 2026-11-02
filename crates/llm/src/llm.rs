@@ -2722,6 +2722,31 @@ impl Llm {
         })
     }
 
+    /// Ask the provider to cancel a batch (`POST /v1/messages/batches/{id}/cancel`). The batch
+    /// moves to `canceling` and then `ended`: items that already finished keep their results (and
+    /// their cost), the rest end as `canceled`. Retried like every other batch call.
+    pub async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cancelling a batch requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
+        })?;
+        let make_request = || {
+            shared_http_client()
+                .post(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}/cancel"
+                ))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch cancel", out));
+        }
+        Ok(())
+    }
+
     /// Stream the results of a completed batch from the Anthropic results URL. Each line
     /// of the JSONL response is one `BatchResultRow` keyed by `custom_id`. Callers MUST
     /// call this only after [`poll_batch_status`] reports `processing_status == "ended"`.

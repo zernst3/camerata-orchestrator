@@ -290,6 +290,7 @@ struct Api {
     fetch_fails: bool,
     probe: Option<Box<PollProbe>>,
     submit_times: Mutex<Vec<Instant>>,
+    cancel_calls: Mutex<Vec<String>>,
 }
 
 impl Api {
@@ -307,6 +308,7 @@ impl Api {
             fetch_fails: false,
             probe: None,
             submit_times: Mutex::new(Vec::new()),
+            cancel_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -421,6 +423,10 @@ impl BatchApi for Api {
                 request_counts: BatchRequestCounts::default(),
             }),
         }
+    }
+    async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        self.cancel_calls.lock().unwrap().push(batch_id.to_string());
+        Ok(())
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
         if self.fetch_fails {
@@ -1224,4 +1230,252 @@ async fn every_runner_item_is_checked_against_the_window_before_send() {
             "{label}"
         );
     }
+}
+
+// ── per-item progress ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_run_of_n_items_moves_the_stage_progress_from_0_to_n_and_touches_activity_per_item() {
+    let store = Arc::new(JobStore::new());
+    let id = store.create("audit", None);
+    // What the job showed when each request started: its progress and how long it had been idle.
+    type Look = (Option<(usize, usize)>, u128);
+    let seen: Arc<Mutex<Vec<Look>>> = Arc::new(Mutex::new(Vec::new()));
+    let (s2, i2, seen2) = (store.clone(), id.clone(), seen.clone());
+    let rt = Realtime::new(move |item, _| {
+        let progress = s2
+            .get(&i2)
+            .unwrap()
+            .stage_progress
+            .map(|p| (p.done, p.total));
+        seen2.lock().unwrap().push((progress, idle_ms(&s2, &i2)));
+        // Age the job, so the next look shows whether absorbing an item touched it again.
+        s2.age_activity_for_test(&i2);
+        (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+    });
+    let mut stage = Scripted::numbered(6);
+    let mut c = ctx(&rt, None);
+    c.job = Some((&store, &id));
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 1 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(out.absorbed.len(), 6);
+    let seen = seen.lock().unwrap().clone();
+    let progress: Vec<Option<(usize, usize)>> = seen.iter().map(|s| s.0).collect();
+    assert_eq!(
+        progress,
+        (0..6).map(|done| Some((done, 6))).collect::<Vec<_>>(),
+        "progress moves up by one for each absorbed item"
+    );
+    for (i, (_, idle)) in seen.iter().enumerate() {
+        assert!(
+            *idle < 5_000,
+            "absorbing item {i} touched the job (idle {idle} ms)"
+        );
+    }
+    assert_eq!(
+        store.last_progress_label(&id).as_deref(),
+        Some("calibration: 6 of 6 ended"),
+        "the last item brought it to N of N"
+    );
+    assert!(store.get(&id).unwrap().stage_progress.is_none());
+}
+
+// ── cancel ──────────────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_mid_stage_stops_new_requests_within_one_tick_and_keeps_what_was_absorbed() {
+    let store = Arc::new(JobStore::new());
+    let id = store.create("audit", None);
+    let cancelled_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let (s2, i2, at) = (store.clone(), id.clone(), cancelled_at.clone());
+    let rt = Realtime::new(move |item, nth| {
+        if item == "item-010" && nth == 0 {
+            *at.lock().unwrap() = Some(Instant::now());
+            s2.cancel(&i2);
+        }
+        (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let meter = UsageMeter::default();
+    let mut stage = Scripted::numbered(40);
+    let mut c = ctx(&rt, None);
+    c.job = Some((&store, &id));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    let t = cancelled_at
+        .lock()
+        .unwrap()
+        .expect("the script cancelled the job");
+    assert!(
+        rt.calls().iter().all(|call| call.started <= t),
+        "no request was dispatched after the cancel"
+    );
+    let cancelled = out.cancelled.as_ref().expect("the stage is cancelled");
+    assert!(
+        out.failed.is_empty(),
+        "a cancel is not a failure: {:?}",
+        out.failed
+    );
+    assert!(!out.is_complete());
+    assert!(!meter.outage_stopped(), "and not an outage");
+    assert!(!cancelled.not_sent.is_empty());
+    assert!(cancelled.batches_cancelled.is_empty());
+    assert!(
+        out.absorbed.len() >= 10,
+        "what was in flight still finished"
+    );
+    assert_eq!(
+        out.absorbed.len() + out.resumed.len() + cancelled.not_sent.len(),
+        40,
+        "every item is absorbed or listed as not sent"
+    );
+    // Absorbed items survive in the checkpoint...
+    assert_eq!(cp.absorbed().len(), out.absorbed.len());
+
+    // ...and a later run picks up from it, paying only for what was never sent.
+    let rt2 = Realtime::ok_after(Duration::from_secs(1));
+    let mut stage2 = Scripted::numbered(40);
+    let mut c2 = ctx(&rt2, None);
+    c2.checkpoint = Some(&cp);
+    let out2 = run_stage(
+        STAGE,
+        &mut stage2,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c2,
+    )
+    .await;
+    assert!(out2.cancelled.is_none() && out2.is_complete());
+    assert_eq!(out2.resumed.len(), out.absorbed.len());
+    assert_eq!(out2.absorbed.len(), cancelled.not_sent.len());
+    assert_eq!(rt2.call_count(), cancelled.not_sent.len());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_batch_receives_a_cancel_call_and_the_stage_is_cancelled_not_failed() {
+    let store = Arc::new(JobStore::new());
+    let id = store.create("audit", None);
+    let (s2, i2) = (store.clone(), id.clone());
+    let api = Api::new()
+        .polls_before_end(&[(3, 1), (2, 2), (1, 3)])
+        .probing(move |n| {
+            if n == 1 {
+                s2.cancel(&i2);
+            }
+        });
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let meter = UsageMeter::default();
+    let mut stage = Scripted::new(&["a", "b", "c", "d"]);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.job = Some((&store, &id));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert_eq!(
+        api.polls.load(Ordering::SeqCst),
+        2,
+        "no poll after the one that saw the cancel"
+    );
+    assert_eq!(
+        *api.cancel_calls.lock().unwrap(),
+        vec!["msgbatch_0".to_string()]
+    );
+    assert!(api.fetched.lock().unwrap().is_empty());
+    let cancelled = out.cancelled.as_ref().expect("the stage is cancelled");
+    assert_eq!(cancelled.batches_cancelled, vec!["msgbatch_0".to_string()]);
+    assert_eq!(
+        sorted(cancelled.not_sent.clone()),
+        ids(&["a", "b", "c", "d"])
+    );
+    assert!(out.failed.is_empty(), "not failed: {:?}", out.failed);
+    assert!(!meter.outage_stopped());
+    let records = cp.batches();
+    assert_eq!(records.len(), 1);
+    assert!(
+        !records[0].settled,
+        "the batch stays on record so a resume polls it"
+    );
+
+    // A later run polls the cancelled batch and takes what it finished; it submits nothing.
+    let api2 = Api::new().knowing(&records[0]);
+    let mut stage2 = Scripted::new(&["a", "b", "c", "d"]);
+    let mut c2 = ctx(&api2.realtime, Some(&api2));
+    c2.checkpoint = Some(&cp);
+    let out2 = run_stage(STAGE, &mut stage2, StageMode::Batch, &c2).await;
+    assert_eq!(out2.absorbed.len(), 4);
+    assert!(out2.cancelled.is_none());
+    assert_eq!(api2.submit_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_cancelled_before_the_stage_starts_submits_and_sends_nothing() {
+    for batch_mode in [false, true] {
+        let store = Arc::new(JobStore::new());
+        let id = store.create("audit", None);
+        store.cancel(&id);
+        let api = Api::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        let mut stage = Scripted::numbered(5);
+        let (mode, mut c) = if batch_mode {
+            (StageMode::Batch, ctx(&api.realtime, Some(&api)))
+        } else {
+            (StageMode::Parallel { max_in_flight: 4 }, ctx(&rt, None))
+        };
+        c.job = Some((&store, &id));
+
+        let out = run_stage(STAGE, &mut stage, mode, &c).await;
+
+        let cancelled = out.cancelled.expect("cancelled");
+        assert_eq!(cancelled.not_sent.len(), 5, "batch_mode={batch_mode}");
+        assert!(out.absorbed.is_empty() && out.failed.is_empty());
+        assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rt.call_count(), 0);
+        assert_eq!(api.realtime.call_count(), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_during_a_rate_limit_wait_ends_the_wait_within_a_tick() {
+    let store = Arc::new(JobStore::new());
+    let id = store.create("audit", None);
+    let (s2, i2) = (store.clone(), id.clone());
+    // The submit is rate limited for an hour; the job is cancelled while it waits.
+    let api = Api::new().submit_script(move |_| {
+        s2.cancel(&i2);
+        Some(rate_limited(3600))
+    });
+    let mut stage = Scripted::new(&["a", "b"]);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.job = Some((&store, &id));
+    let t0 = Instant::now();
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert!(Instant::now().duration_since(t0) < Duration::from_secs(10));
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        1,
+        "it did not submit again"
+    );
+    assert!(out.cancelled.is_some());
+    assert!(out.failed.is_empty());
 }
