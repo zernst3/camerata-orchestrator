@@ -64,10 +64,24 @@ fn two_advisories_on_one_package_version_have_different_keys() {
 #[test]
 fn a_row_that_is_not_a_dependency_advisory_ignores_a_capture_of_the_same_name() {
     let f = finding("RULE-X", "src/a.rs", 7, "high");
+    // The exact bytes of an ordinary row's key: repo, path, fingerprint of rule and snippet,
+    // ordinal; no line.
+    assert_eq!(
+        finding_key(&f),
+        "owner/repo\u{0}src/a.rs\u{0}66dd93459448b64b\u{0}0"
+    );
     // A non-dependency row with an unrelated capture of the same name keeps its key.
     let mut g = f.clone();
     g.captures.insert("advisory".to_string(), "X".to_string());
     assert_eq!(finding_key(&g), finding_key(&f));
+    // Also once the rows are keyed the way the pipeline keys them: the capture does not decide
+    // the ordinal of a row that is not a dependency advisory.
+    let mut keyed = vec![f.clone()];
+    crate::inspections::backfill_site_keys(&mut keyed);
+    let mut keyed_g = vec![g];
+    crate::inspections::backfill_site_keys(&mut keyed_g);
+    assert_eq!(finding_key(&keyed_g[0]), finding_key(&keyed[0]));
+    assert_eq!(finding_key(&keyed[0]), finding_key(&f));
 }
 
 #[test]

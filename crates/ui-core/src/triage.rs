@@ -1981,6 +1981,16 @@ mod tests {
         );
         assert_ne!(finding_key(&a), finding_key(&b));
         assert_eq!(finding_key(&a), key(0));
+        // Any other row is keyed the same way (ordinal 0 when the server numbered no repeat),
+        // even with an "advisory" capture of its own: the capture is not part of the key.
+        let unkeyed: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "RULE-X",
+            "severity": "low", "snippet": "s", "detail": "",
+            "captures": { "advisory": "X" }
+        }))
+        .unwrap();
+        let expected = camerata_api_types::site_key::site_key("o/r", "a.rs", "RULE-X", "s", 0);
+        assert_eq!(finding_key(&unkeyed), expected);
     }
 
     #[test]
