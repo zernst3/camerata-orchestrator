@@ -2249,6 +2249,23 @@ fn a_requirement_absent_from_the_code_is_still_a_precondition() {
     );
 }
 
+/// Review of R1-1 (a): a bare one-word object that is itself an exploit-context word is not a
+/// restated expression just because the word occurs somewhere in the code.
+#[test]
+fn a_bare_exploit_context_word_in_the_code_does_not_exempt_a_requires() {
+    let f = statement(POLICY_STATEMENT);
+    let why = "Exploiting app/api/messages/route.ts requires authenticated, so any signed-in \
+               user can read every message.";
+    let entry = split_entry(why, "Scope the policy to the row owner.");
+    assert_eq!(
+        accept_entry(&f, &entry, POLICY_CODE, &[]),
+        Err(Reject::InventedPrecondition)
+    );
+    // The hearth sentence (an expression, not a bare word) stays accepted.
+    let entry = split_entry(POLICY_WHY, "Scope the policy to the row owner.");
+    assert!(accept_entry(&f, &entry, POLICY_CODE, &[]).is_ok());
+}
+
 /// R1-1 (a): the backticked-construct exemption now applies to the `why` field too, in a sentence
 /// that says nothing about exploiting the problem.
 #[test]

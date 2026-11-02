@@ -844,6 +844,17 @@ fn without_code_requirements(sentence: &str) -> String {
 /// The shortest "requires" object that can count as restated from the code shown.
 const MIN_RESTATED_OBJECT_CHARS: usize = 6;
 
+/// Whether a "requires" object is an expression rather than a bare word: more than one word, or
+/// holding a character that is not a letter, digit or underscore (`auth.role() = 'x'`). A bare
+/// word that is itself an exploit-context word ("authenticated") says nothing about the code
+/// just because the word occurs in it.
+fn is_expression(object: &str) -> bool {
+    object.split_whitespace().count() > 1
+        || object
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && c != '_')
+}
+
 /// `sentence` with every "requires <object>" removed whose object is the code's own condition,
 /// restated: the object (the rest of the clause, up to a comma or "so") appears verbatim in
 /// `code_shown`, the code and excerpts the model was given. "messages_select only requires
@@ -863,9 +874,11 @@ fn without_restated_requirements(sentence: &str, code_shown: &str) -> String {
             .trim_end_matches(['.', ';', ':', '!', '?'])
             .trim();
         let bare = object.trim_matches(['`', '\'', '"']);
-        let restated = [object, bare]
-            .iter()
-            .any(|o| o.chars().count() >= MIN_RESTATED_OBJECT_CHARS && code_shown.contains(*o));
+        let restated = [object, bare].iter().any(|o| {
+            o.chars().count() >= MIN_RESTATED_OBJECT_CHARS
+                && is_expression(o)
+                && code_shown.contains(*o)
+        });
         if restated {
             caps[2].to_string()
         } else {
