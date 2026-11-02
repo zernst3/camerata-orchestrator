@@ -322,6 +322,15 @@ pub fn max_output_for(model_id: &str) -> Option<u32> {
         .filter(|n| *n > 0)
 }
 
+/// The context window of `model_id` in tokens (the registry's `context`), or `None` for a model
+/// the catalog does not know or lists without a figure. The size checks of a prompt compare
+/// against this.
+pub fn context_window_for(model_id: &str) -> Option<u64> {
+    registry_entry_for(model_id)
+        .map(|e| e.context)
+        .filter(|n| *n > 0)
+}
+
 /// THE one place a Messages-API request body is made valid for its model. Every Anthropic
 /// `/v1/messages`, batch `params` and `count_tokens` body is passed through this just before
 /// it is sent; no call site tests a model id itself.

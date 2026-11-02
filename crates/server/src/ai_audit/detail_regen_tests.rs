@@ -471,7 +471,7 @@ async fn every_pass_of_a_terse_scan_shares_one_system_prompt() {
     let (_f, _p, _r, ok, err) = run_passes(
         &llm,
         REPO,
-        "REPO MAP",
+        &RepoMap::whole_text("REPO MAP"),
         &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,

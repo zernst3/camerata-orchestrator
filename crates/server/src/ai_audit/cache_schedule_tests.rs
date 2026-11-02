@@ -295,7 +295,7 @@ async fn scan(llm: &CacheModelLlm, n_chunks: usize, n_batches: usize, concurrenc
     let (_f, _p, _r, ok, err) = run_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &run_nonce(),
         &std::collections::HashSet::new(),
         None,
@@ -385,7 +385,7 @@ async fn a_second_routing_group_reads_the_first_groups_digest() {
     let (_f, _p, _r, ok, _e) = run_passes(
         &llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &run_nonce(),
         &std::collections::HashSet::new(),
         None,

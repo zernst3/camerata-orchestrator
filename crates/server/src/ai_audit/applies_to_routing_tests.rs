@@ -687,7 +687,7 @@ async fn run_routed_batch_default_off(
         &files(),
         &rules,
         &plan,
-        "",
+        &RepoMap::whole_text(""),
         &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,
