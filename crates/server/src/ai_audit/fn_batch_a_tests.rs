@@ -1057,6 +1057,78 @@ fn the_same_adjustment_sentence_is_not_a_shared_object() {
     assert_eq!(out.len(), 2, "unrelated findings must not fuse: {out:?}");
 }
 
+/// Two findings in different files and under different rule ids that share nothing but one
+/// bookkeeping capture written by this branch or D8. They are two defects and stay two rows.
+fn assert_sharing_only_this_key_does_not_fuse(key: &str, value: &str) {
+    let mut a = finding(
+        "CONFIG-FLAG-DEBUG-MODE",
+        "high",
+        "Different defect entirely",
+    );
+    a.path = "config.rs".to_string();
+    a.line = 5;
+    a.snippet = "code at config.rs".to_string();
+    let mut b = finding("AI-HANDLER-TRUSTS-FLAG", "high", "A separate problem");
+    b.path = "handler.rs".to_string();
+    b.line = 80;
+    b.snippet = "code at handler.rs".to_string();
+    a.captures.insert(key.to_string(), value.to_string());
+    b.captures.insert(key.to_string(), value.to_string());
+    assert!(!shared_captured_object(&a, &b), "{key} linked two rows");
+    let out = merge_semantic_groups(vec![a, b], &[]);
+    assert_eq!(out.len(), 2, "{key}: unrelated findings fused: {out:?}");
+}
+
+#[test]
+fn rows_sharing_only_also_seen_by_are_not_fused() {
+    assert_sharing_only_this_key_does_not_fuse(crate::ALSO_SEEN_BY_CAPTURE, "camerata-arch");
+}
+
+#[test]
+fn rows_sharing_only_detail_source_are_not_fused() {
+    assert_sharing_only_this_key_does_not_fuse(
+        crate::report_export::DETAIL_SOURCE_CAPTURE,
+        crate::report_export::SCAN_DETAIL,
+    );
+    assert_sharing_only_this_key_does_not_fuse(
+        crate::report_export::DETAIL_REJECTION_CAPTURE,
+        "added an exploit precondition that neither the statement nor the code shown makes",
+    );
+}
+
+#[test]
+fn rows_sharing_only_fix_source_are_not_fused() {
+    assert_sharing_only_this_key_does_not_fuse(
+        crate::report_export::FIX_SOURCE_CAPTURE,
+        crate::report_export::STANDARD_FIX,
+    );
+    assert_sharing_only_this_key_does_not_fuse(
+        crate::report_export::FIX_REJECTION_CAPTURE,
+        "you named `zzRejectedName`, which appears nowhere in the repository",
+    );
+}
+
+/// Control: a real shared object capture still fuses the same pair, beside those keys.
+#[test]
+fn a_real_shared_object_still_fuses_beside_the_new_bookkeeping_keys() {
+    let mut a = finding("CONFIG-FLAG-DEBUG-MODE", "high", "Debug flag on");
+    a.path = "config.rs".to_string();
+    a.line = 5;
+    let mut b = finding("AI-HANDLER-TRUSTS-FLAG", "high", "Handler trusts the flag");
+    b.path = "handler.rs".to_string();
+    b.line = 80;
+    for f in [&mut a, &mut b] {
+        f.captures.insert(
+            crate::ALSO_SEEN_BY_CAPTURE.to_string(),
+            "camerata-arch".to_string(),
+        );
+        f.captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+    }
+    assert!(shared_captured_object(&a, &b));
+    assert_eq!(merge_semantic_groups(vec![a, b], &[]).len(), 1);
+}
+
 #[test]
 fn a_real_shared_object_still_matches_beside_the_bookkeeping() {
     let mut a = with_bookkeeping("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5);
@@ -1135,13 +1207,18 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 6] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 11] = [
     "severity_adjustments",
     "carried_from",
     "history-status",
     "produced_tier",
     "gitignore-status",
     "secret-kind",
+    "fix_source",
+    "fix_rejection",
+    "detail_source",
+    "detail_rejection",
+    "also_seen_by",
 ];
 
 /// A value that would read as identity if it were counted: three or more characters, and shaped

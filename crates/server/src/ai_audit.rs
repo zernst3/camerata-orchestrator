@@ -9599,6 +9599,17 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // would otherwise read as one object and fuse the two findings.
     "gitignore-status",
     "secret-kind",
+    // Provenance and fix/detail-source marks the pipeline writes onto a row. `fix_source` and
+    // its rejection text are on every Standard-fix row (D8), `detail_source` and its rejection
+    // text on every row that shipped the scan's statement (R1-1), `also_seen_by` on a row that
+    // absorbed a same-id preview of another tool (R1-2). The same value on two rows says the
+    // same bookkeeping applied, not that they are about the same object, and carried rows
+    // re-enter the cross-family merge with last run's marks.
+    crate::report_export::FIX_SOURCE_CAPTURE,
+    crate::report_export::FIX_REJECTION_CAPTURE,
+    crate::report_export::DETAIL_SOURCE_CAPTURE,
+    crate::report_export::DETAIL_REJECTION_CAPTURE,
+    crate::ALSO_SEEN_BY_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
