@@ -202,7 +202,7 @@ async fn a_stopped_run_sends_no_second_fix_try() {
 
 // ── Estimation ─────────────────────────────────────────────────────────────────────────────
 
-const VERDICT_WITH_EFFORT: &str = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"x","effort":"low"}]}"#;
+const VERDICT_WITH_EFFORT: &str = r#"{"severity":"high","real":"yes","reason":"x","effort":"low"}"#;
 
 fn calibration_finding() -> Finding {
     Finding {
@@ -227,8 +227,7 @@ async fn a_failed_calibration_call_is_tried_again_at_the_end_and_the_estimate_la
         None,
         None,
         None,
-        false,
-        "This repository has 1 code files.",
+        &Stage1Inputs::new("This repository has 1 code files."),
     )
     .await;
     assert!(failed.is_empty(), "no failed estimation pass: {failed:?}");
@@ -247,8 +246,7 @@ async fn estimation_that_fails_both_tries_is_a_failed_pass_with_both_on_record()
         None,
         None,
         None,
-        false,
-        "This repository has 1 code files.",
+        &Stage1Inputs::new("This repository has 1 code files."),
     )
     .await;
     assert_eq!(failed.len(), 1);
@@ -287,8 +285,8 @@ impl LlmPort for FailsOneChunk {
 }
 
 #[tokio::test]
-async fn a_calibration_chunk_that_fails_both_tries_is_a_failed_part_naming_its_findings() {
-    // 41 findings make two chunks; the second holds only the last, which lives in chunk2.rs.
+async fn a_calibration_site_that_fails_both_tries_is_a_failed_part_naming_it() {
+    // 41 sites make two groups; the second holds only the last, which lives in chunk2.rs.
     let mut findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE)
         .map(|_| calibration_finding())
         .collect();
@@ -303,8 +301,7 @@ async fn a_calibration_chunk_that_fails_both_tries_is_a_failed_part_naming_its_f
         None,
         None,
         None,
-        false,
-        "This repository has 2 code files.",
+        &Stage1Inputs::new("This repository has 2 code files."),
     )
     .await;
     assert_eq!(
@@ -315,7 +312,7 @@ async fn a_calibration_chunk_that_fails_both_tries_is_a_failed_part_naming_its_f
     assert_eq!(
         out[0].effort.as_deref(),
         Some("low"),
-        "chunk one calibrated"
+        "group one calibrated"
     );
     assert_eq!(failed.len(), 1, "{failed:?}");
     let part = &failed[0];
@@ -494,8 +491,7 @@ async fn a_calibration_call_that_failed_on_content_is_not_sent_again_at_the_end(
         None,
         None,
         None,
-        false,
-        "This repository has 1 code files.",
+        &Stage1Inputs::new("This repository has 1 code files."),
     )
     .await;
     assert_eq!(failed.len(), 1, "{failed:?}");

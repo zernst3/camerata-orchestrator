@@ -177,19 +177,26 @@ fn needs_review_reason_appended_to_detail_is_redacted() {
         ..raw_finding(&p, 3)
     }];
     let raw = serde_json::json!({"verdicts": [{
-        "index": 0, "confidence": "low",
+        "index": 0, "real": "unclear",
         "reason": format!("the key {} may be a test value", p.value),
     }]})
     .to_string();
     let out = apply_verdicts(&raw, findings);
     assert_eq!(out.len(), 1);
+    assert!(out[0].detail.contains("[calibrated:"), "{}", out[0].detail);
     assert!(
-        out[0].detail.contains("[needs review:"),
+        !out[0].detail.contains("[needs review"),
         "{}",
         out[0].detail
     );
     assert!(!out[0].detail.contains(&p.value));
     assert!(detect_secrets(&out[0].detail).is_empty());
+    // The reason kept on the row for the group reviewer is redacted too.
+    let kept = out[0]
+        .captures
+        .get(crate::ai_audit::STAGE1_CAPTURE)
+        .expect("the stage 1 verdict is kept on the row");
+    assert!(!kept.contains(&p.value), "{kept}");
 }
 
 /// Replies with one canned body to every call and records every request.
@@ -456,12 +463,28 @@ async fn verify_findings_prompt_contains_only_redacted_snippets() {
     // Deliberately NOT pre-redacted: a row that bypassed construction must still not reach the
     // calibration model raw.
     let findings = vec![raw_finding(&p, 3)];
-    let stub = Stub::new(r#"{"verdicts":[]}"#);
-    let _ = verify_findings(&stub, "acme/app", findings, None, None, None, false, "").await;
+    let stub = Stub::new(r#"{}"#);
+    // The code window is cut from the file as given: a file that bypassed the run's own
+    // redaction must not reach the model raw through the window either.
+    let files = vec![(".env".to_string(), format!("x\ny\n{}\nz\n", p.text))];
+    let _ = verify_findings(
+        &stub,
+        "acme/app",
+        findings,
+        None,
+        None,
+        None,
+        &Stage1Inputs::new("").with_files(&files),
+    )
+    .await;
     let sent = stub.everything_sent();
     assert!(
-        sent.contains("Scrutinize these findings"),
+        sent.contains("The finding (scanned severity"),
         "the calibration prompt was built"
+    );
+    assert!(
+        sent.contains("The code around the site"),
+        "the window was built from the file"
     );
     assert!(
         !sent.contains(&p.value),

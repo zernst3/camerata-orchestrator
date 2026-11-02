@@ -48,7 +48,8 @@
 //!   is retried once at a higher limit, inside the same admitted pass), so a retried pass can
 //!   cost about twice the reserve;
 //! * a call larger than every call before it adds the difference;
-//! * thorough calibration runs three calls per batch under one admission.
+//! * a calibration site whose reply was cut off at the output limit is asked once more inside
+//!   the same admission, like every other retried call.
 //!
 //! The first pass of a run is always admitted (nothing has been spent), so a cap smaller than
 //! one pass still lets that one pass finish.

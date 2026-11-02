@@ -163,23 +163,20 @@ pub(crate) fn alternatives_reply_schema() -> Value {
     )
 }
 
-/// The calibration reply for a batch of `n` findings: a verdict per finding, addressed by
-/// `index` (an integer from 0 to `n - 1`, so no verdict can point outside the batch).
-/// `category` is optional ("omit the field if none clearly applies").
-pub(crate) fn calibration_reply_schema(n: usize) -> Value {
-    let indices: Vec<usize> = (0..n.max(1)).collect();
-    let verdict = object(
+/// The stage 1 reply for one site: the verdict itself, no index and no list. `real` is the one
+/// answer about doubt (`unclear` means the code shown does not settle it); there is no confidence
+/// field. `category` is optional ("omit the field if none clearly applies").
+pub(crate) fn stage1_reply_schema() -> Value {
+    object(
         &[
-            ("index", json!({ "type": "integer", "enum": indices })),
             ("severity", one_of(SEVERITIES)),
-            ("confidence", one_of(&["high", "low"])),
+            ("real", one_of(&["yes", "no", "unclear"])),
             ("effort", one_of(&["low", "medium", "high"])),
             ("category", one_of(CALIBRATION_CATEGORIES)),
             ("reason", string()),
         ],
-        &["index", "severity", "confidence", "effort", "reason"],
-    );
-    object(&[("verdicts", array(verdict))], &["verdicts"])
+        &["severity", "real", "effort", "reason"],
+    )
 }
 
 /// The detail regeneration reply for a batch whose findings carry the opaque `ids`: ONE REQUIRED

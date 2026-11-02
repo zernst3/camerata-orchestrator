@@ -2649,7 +2649,7 @@ fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
 }
 
 /// Apply the D5 severity floor to a whole finding set — the deterministic pass run after
-/// `apply_verdicts`/`consensus_verdicts` in `verify_findings` (and safe to run over ANY finding
+/// `apply_verdicts` in `verify_findings` (and safe to run over ANY finding
 /// set, including deterministic-floor findings that never see the LLM calibration pass at all,
 /// since it derives everything from the finding's own text rather than the model's verdict).
 pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> {
@@ -8595,6 +8595,11 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
     // says the same bound applied, not that they are about the same object.
     crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // What stage 1 left on the row for the group reviewer and the tree: its verdict (`real` and
+    // the one-line reason) and the outlier reasons it recorded (`severity_raise_held`). They say
+    // the same thing about every row they sit on; they name no object.
+    STAGE1_CAPTURE,
+    OUTLIER_REASONS_CAPTURE,
     // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
     crate::onboard::HISTORY_STATUS_CAPTURE,
     // The templated sentences `enrich_secret_context` puts on every secret-shaped floor finding
@@ -10975,6 +10980,7 @@ pub async fn audit_repo(
             rows_in,
             rows_out,
             accounting: acc,
+            model: None,
         });
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
@@ -11021,6 +11027,13 @@ pub async fn audit_repo(
     // content instead of a mystery hang or an empty placeholder. (Dedup/merge also
     // shrinks N, so this round is now faster too.)
     let pre_calibration_len = all_findings.len();
+    // `--thorough` (three-pass consensus) is removed; the flag is ignored for one release with a
+    // notice, and stage 2's recorded disagreement is the second opinion.
+    if let Some(notice) = thorough_notice(thorough) {
+        eprintln!("[camerata-server] {notice}");
+    }
+    // Whether stage 1 ran, so the ledger names its model only when a model was asked.
+    let mut calibration_ran = false;
     let verified = if all_findings.is_empty()
         || meter.is_some_and(|m| m.stage_blocked(repo, STAGE_CALIBRATION))
     {
@@ -11028,6 +11041,7 @@ pub async fn audit_repo(
         // findings go on exactly as the scan produced them, none dropped.
         all_findings
     } else {
+        calibration_ran = true;
         // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
         // count, from signals already computed. detect_stack is the same one grounding uses.
         let stack = crate::onboard::detect_stack(repo, files);
@@ -11040,6 +11054,7 @@ pub async fn audit_repo(
                 files.len()
             )
         };
+        let calibration_rules = crate::scan_routing::rule_pairs(&effective_selected);
         let (verified, estimation_failed) = verify_findings(
             llm,
             repo,
@@ -11047,8 +11062,10 @@ pub async fn audit_repo(
             calib_model.as_deref(),
             feedback,
             meter,
-            thorough,
-            &repo_shape,
+            &Stage1Inputs::new(&repo_shape)
+                .with_files(map_files.unwrap_or(files))
+                .with_rules(&calibration_rules)
+                .with_concurrency(concurrency),
         )
         .await;
         // C3-1b: disclose a run-wide estimation-pass failure the same way the
@@ -11130,6 +11147,9 @@ pub async fn audit_repo(
             rows_in: pre_calibration_len,
             rows_out,
             accounting: acc,
+            // The resolved stage 1 model, recorded only when the stage asked a model. It comes
+            // from the `--calibration-model` flag or the project setting, else the scan model.
+            model: calibration_ran.then(|| calib_model.clone()).flatten(),
         });
     }
     // Pass-1 W2 (A5.4): splice in the `violates`-option findings AFTER calibration (so this
@@ -11152,6 +11172,7 @@ pub async fn audit_repo(
             rows_in,
             rows_out,
             accounting: acc,
+            model: None,
         });
     }
     // Tag every finding under a multi-option rule with the option it was actually judged
@@ -11209,6 +11230,7 @@ pub async fn audit_repo(
             rows_in,
             rows_out,
             accounting: acc,
+            model: None,
         });
     }
     Ok((
@@ -12232,6 +12254,8 @@ mod detail_regen_tests;
 mod batch_mode;
 
 mod calibration;
+#[cfg(test)]
+mod calibration_tests;
 pub use batch_mode::{
     resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
 };
@@ -12462,54 +12486,6 @@ mod tests {
             *seen.borrow(),
             1,
             "on_status fires exactly once, for the ended poll only"
-        );
-    }
-
-    #[test]
-    fn consensus_is_conservative_on_disagreement() {
-        // Three passes disagree on index 0 (high/low/high) — majority severity is high, but the
-        // disagreement forces confidence "low" (needs review). Index 1 unanimously high+confident.
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""},{"index":1,"severity":"high","confidence":"high","reason":"clear injection"}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"low","confidence":"low","reason":"debatable preference"},{"index":1,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""},{"index":1,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 2);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let arr = v["verdicts"].as_array().unwrap();
-        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        assert_eq!(v0["severity"], "high", "majority severity wins");
-        assert_eq!(v0["confidence"], "low", "disagreement -> needs review");
-        assert_eq!(
-            v0["reason"], "debatable preference",
-            "prefers the low-confidence reason"
-        );
-        let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
-        assert_eq!(v1["severity"], "high");
-        assert_eq!(v1["confidence"], "high", "unanimous high stays confident");
-    }
-
-    /// Thorough-mode consensus (#51) must thread `effort` through the same majority-vote
-    /// merge as severity/confidence: unanimous votes pass straight through, and a tie
-    /// breaks to "medium" (effort has no humility direction the way severity does).
-    #[test]
-    fn consensus_verdicts_threads_effort_with_majority_and_tie_to_medium() {
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"low","reason":""}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"high","reason":""}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 2);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let arr = v["verdicts"].as_array().unwrap();
-        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        assert_eq!(
-            v0["effort"], "low",
-            "unanimous effort votes pass straight through"
-        );
-        let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
-        assert_eq!(
-            v1["effort"], "medium",
-            "a low/high tie must break to medium"
         );
     }
 
@@ -13553,17 +13529,19 @@ mod tests {
             finding("AI-REAL", "high"),     // index 2 -> kept as-is
         ];
         let raw = r#"{"verdicts":[
-            {"index":0,"confidence":"low","reason":"negligible timing residual"},
-            {"index":1,"severity":"low","confidence":"high","reason":"low impact"},
-            {"index":2,"severity":"high","confidence":"high","reason":"concrete"}
+            {"index":0,"real":"unclear","reason":"negligible timing residual"},
+            {"index":1,"severity":"low","real":"yes","reason":"low impact"},
+            {"index":2,"severity":"high","real":"yes","reason":"concrete"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         // The calibration pass NEVER drops — every finding reaches the architect.
         assert_eq!(out.len(), 3, "no finding is dropped");
         let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
+        assert!(timing.needs_review, "an unclear verdict flags the finding");
+        assert_eq!(timing.confidence.as_deref(), Some("needs-review"));
         assert!(
-            timing.detail.contains("[needs review"),
-            "low-confidence flagged"
+            !timing.detail.contains("[needs review"),
+            "the flag is structured, not a suffix on the client text"
         );
         let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
         assert_eq!(authz.severity, "low", "recalibrated down");
@@ -13575,7 +13553,8 @@ mod tests {
     /// "no output captured" the way `audit_repo`'s old placeholder registration did.
     #[tokio::test]
     async fn verify_findings_records_prompt_and_output_to_transcript() {
-        let resp_text = r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"stub verdict"}]}"#;
+        let resp_text =
+            r#"{"severity":"critical","real":"yes","effort":"low","reason":"stub verdict"}"#;
         let llm = StubCompleter {
             text: resp_text.to_string(),
         };
@@ -13589,8 +13568,7 @@ mod tests {
             None,
             Some((&store, "run-1")),
             None,
-            false, // thorough
-            "This repository has 1 code files.",
+            &Stage1Inputs::new("This repository has 1 code files."),
         )
         .await;
 
@@ -13607,7 +13585,7 @@ mod tests {
             "the generated prompt must be recorded, not left empty"
         );
         assert!(
-            entry.prompt.contains("Scrutinize these findings"),
+            entry.prompt.contains("The finding (scanned severity"),
             "the recorded prompt should be the ACTUAL prompt sent, got: {}",
             entry.prompt
         );
@@ -13623,7 +13601,8 @@ mod tests {
     /// recording is purely additive.
     #[tokio::test]
     async fn verify_findings_with_no_feedback_still_calibrates() {
-        let resp_text = r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"stub verdict"}]}"#;
+        let resp_text =
+            r#"{"severity":"critical","real":"yes","effort":"low","reason":"stub verdict"}"#;
         let llm = StubCompleter {
             text: resp_text.to_string(),
         };
@@ -13636,8 +13615,7 @@ mod tests {
             None,
             None, // feedback
             None,
-            false,
-            "This repository has 1 code files.",
+            &Stage1Inputs::new("This repository has 1 code files."),
         )
         .await;
 
@@ -13645,46 +13623,6 @@ mod tests {
             out[0].severity, "critical",
             "calibration still applies without a transcript store"
         );
-    }
-
-    /// THOROUGH mode runs 3 calibration passes; every one of them must land in the
-    /// transcript (none left silent) even though `apply_verdicts` only ever sees the
-    /// merged consensus.
-    #[tokio::test]
-    async fn verify_findings_thorough_mode_records_every_pass() {
-        let resp_text = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"stub verdict"}]}"#;
-        let llm = StubCompleter {
-            text: resp_text.to_string(),
-        };
-        let findings = vec![finding("AI-X", "medium")];
-        let store = crate::transcript::TranscriptStore::default();
-
-        let (out, _estimation_failed) = verify_findings(
-            &llm,
-            "me/api",
-            findings,
-            None,
-            Some((&store, "run-2")),
-            None,
-            true, // thorough — 3 passes
-            "This repository has 1 code files.",
-        )
-        .await;
-        assert_eq!(out[0].severity, "high");
-
-        let transcripts = store.get("run-2");
-        let entry = transcripts
-            .iter()
-            .find(|a| a.session_id == "audit-me/api-calibrate")
-            .expect("calibration pass registers its own transcript entry");
-        for i in 1..=3 {
-            assert!(
-                entry.output.contains(&format!("pass {i}/3")),
-                "pass {i} must be recorded, got: {}",
-                entry.output
-            );
-        }
-        assert_eq!(entry.status, "done");
     }
 
     /// Records which `LlmPort` method was actually invoked — `complete` (flat, no progress
@@ -13750,8 +13688,7 @@ mod tests {
     /// `complete_streaming` regardless of whether a transcript is attached.
     #[tokio::test]
     async fn verify_findings_with_no_feedback_uses_the_streaming_seam_not_flat_complete() {
-        let resp_text =
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"x"}]}"#;
+        let resp_text = r#"{"severity":"high","real":"yes","effort":"low","reason":"x"}"#;
         let completer = SeamRecordingCompleter {
             complete_calls: 0.into(),
             streaming_calls: 0.into(),
@@ -13766,8 +13703,7 @@ mod tests {
             None,
             None, // feedback: None — the headless-CLI shape
             None,
-            false,
-            "This repository has 1 code files.",
+            &Stage1Inputs::new("This repository has 1 code files."),
         )
         .await;
 
@@ -13867,13 +13803,10 @@ mod tests {
         );
     }
 
-    /// max_tokens must SCALE with the finding count instead of the old hardcoded flat 4096 —
-    /// a large finding set legitimately needs more output tokens than that, and the API
-    /// backend (unlike the CLI) actually enforces the cap, silently truncating the response
-    /// otherwise. A FULL `CALIBRATION_BATCH_SIZE` chunk is deliberately sized (see that
-    /// constant's doc comment) to already exceed the old flat floor.
+    /// Every site is its own call, and each call asks for ONE verdict: its output cap is the
+    /// per-verdict budget plus the stage's thinking allowance, never the old batch-sized cap.
     #[tokio::test]
-    async fn verify_findings_scales_max_tokens_with_finding_count() {
+    async fn verify_findings_caps_each_sites_reply_at_one_verdict() {
         let completer = CapturingCompleter::default();
         let findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE)
             .map(|_| finding("AI-X", "medium"))
@@ -13886,27 +13819,29 @@ mod tests {
             None,
             None,
             None,
-            false,
-            "This repository has many code files.",
+            &Stage1Inputs::new("This repository has many code files."),
         )
         .await;
 
         let seen = completer.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "a full single chunk makes exactly one call");
-        let expected = calibration_max_tokens(CALIBRATION_BATCH_SIZE);
-        assert!(
-            expected > 4096,
-            "test setup must exercise the scaled-above-floor branch, got {expected}"
-        );
-        assert_eq!(seen[0].max_tokens, expected);
         assert_eq!(
-            seen[0].effort.as_deref(),
-            Some("medium"),
-            "calibration runs at medium effort"
+            seen.len(),
+            CALIBRATION_BATCH_SIZE,
+            "one call per site, not one per chunk"
         );
+        let expected = calibration_max_tokens(1);
+        assert!(expected >= 4096, "never under the old flat floor");
+        for req in seen.iter() {
+            assert_eq!(req.max_tokens, expected);
+            assert_eq!(
+                req.effort.as_deref(),
+                Some("medium"),
+                "calibration runs at medium effort"
+            );
+        }
         assert!(
-            expected >= CALIBRATION_BATCH_SIZE as u32 * VERIFY_TOKENS_PER_FINDING + 4_000,
-            "the cap covers the verdicts' text plus the thinking allowance"
+            expected >= VERIFY_TOKENS_PER_FINDING + 1_000,
+            "the cap covers the verdict's text plus the thinking allowance"
         );
     }
 
@@ -13924,8 +13859,7 @@ mod tests {
             None,
             None,
             None,
-            false,
-            "This repository has 1 code files.",
+            &Stage1Inputs::new("This repository has 1 code files."),
         )
         .await;
 
@@ -14027,10 +13961,10 @@ mod tests {
     async fn verify_findings_chunks_large_finding_sets_and_merges_without_dropping() {
         let n = CALIBRATION_BATCH_SIZE * 2 + 4;
         let findings: Vec<Finding> = (0..n).map(|_| finding("AI-X", "medium")).collect();
-        // `CapturingCompleter` always returns `"{}"` (no `verdicts` key) — `apply_verdicts`
-        // degrades that to "findings unchanged", which is fine: this test's assertions are
-        // about COUNT and CHUNK-COUNT (no finding dropped, no chunk skipped), not verdict
-        // content.
+        // `CapturingCompleter` always returns `"{}"` (no verdict) — each site degrades to
+        // "finding unchanged" and is disclosed as a failed part, which is fine: this test's
+        // assertions are about COUNT and CALL-COUNT (no finding dropped, no site skipped), not
+        // verdict content.
         let completer = CapturingCompleter::default();
 
         let (out, _estimation_failed) = verify_findings(
@@ -14040,17 +13974,15 @@ mod tests {
             None,
             None,
             None,
-            false,
-            "This repository has many code files.",
+            &Stage1Inputs::new("This repository has many code files."),
         )
         .await;
 
         assert_eq!(out.len(), n, "no finding dropped across chunk boundaries");
-        let expected_chunks = n.div_ceil(CALIBRATION_BATCH_SIZE);
         assert_eq!(
             completer.seen.lock().unwrap().len(),
-            expected_chunks,
-            "M findings must be split into the expected number of bounded chunks"
+            n,
+            "every site is asked, in whatever group it falls"
         );
     }
 
@@ -14070,8 +14002,7 @@ mod tests {
             None,
             None,
             None,
-            false,
-            "This repository has 2 code files.",
+            &Stage1Inputs::new("This repository has 2 code files."),
         )
         .await;
 
@@ -14097,7 +14028,7 @@ mod tests {
     /// NO failed pass is fabricated.
     #[tokio::test]
     async fn verify_findings_records_no_failed_pass_when_estimates_land() {
-        let resp_text = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":"x"}]}"#;
+        let resp_text = r#"{"severity":"high","real":"yes","effort":"low","reason":"x"}"#;
         let llm = StubCompleter {
             text: resp_text.to_string(),
         };
@@ -14109,8 +14040,7 @@ mod tests {
             None,
             None,
             None,
-            false,
-            "This repository has 1 code files.",
+            &Stage1Inputs::new("This repository has 1 code files."),
         )
         .await;
 
@@ -14130,7 +14060,7 @@ mod tests {
     fn apply_verdicts_accepts_explicit_critical_verdict() {
         let findings = vec![finding("AI-UNAUTH-CHARGE", "high")];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge with service_role"}
+            {"index":0,"severity":"critical","real":"yes","reason":"unauthenticated charge with service_role"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14151,8 +14081,8 @@ mod tests {
             finding("AI-UNTOUCHED", "high"),       // index 1: verdict omits severity
         ];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"high","confidence":"high","reason":"a real but contained bug"},
-            {"index":1,"confidence":"high","reason":"no severity opinion given"}
+            {"index":0,"severity":"high","real":"yes","reason":"a real but contained bug"},
+            {"index":1,"real":"yes","reason":"no severity opinion given"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         let ordinary = out
@@ -14197,7 +14127,7 @@ mod tests {
              forging a session cookie.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"escalate to critical"}
+            {"index":0,"severity":"critical","real":"yes","reason":"escalate to critical"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14226,7 +14156,7 @@ mod tests {
             "The export endpoint returns every user's records with no authorization check.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"unconditionally exploitable with one request"}
+            {"index":0,"severity":"critical","real":"yes","reason":"unconditionally exploitable with one request"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14247,7 +14177,7 @@ mod tests {
              request.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"confirmed critical"}
+            {"index":0,"severity":"critical","real":"yes","reason":"confirmed critical"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14276,7 +14206,7 @@ mod tests {
              knowing the exact object path, which is not discoverable by brute force.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"sensitive data exposed"}
+            {"index":0,"severity":"critical","real":"yes","reason":"sensitive data exposed"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14297,7 +14227,7 @@ mod tests {
             "A live Stripe secret key is hardcoded in this file and committed to the repository.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"secret committed to version control"}
+            {"index":0,"severity":"critical","real":"yes","reason":"secret committed to version control"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
@@ -14845,8 +14775,8 @@ mod tests {
         // Calibration itself did not escalate the unauthenticated finding (a plausible
         // under-rated model verdict) — the deterministic floor must catch it anyway.
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"high","confidence":"high","reason":"no auth check"},
-            {"index":1,"severity":"medium","confidence":"high","reason":"style"}
+            {"index":0,"severity":"high","real":"yes","reason":"no auth check"},
+            {"index":1,"severity":"medium","real":"yes","reason":"style"}
         ]}"#;
         let calibrated = apply_verdicts(raw, findings);
         let floored = apply_severity_calibration_rules(calibrated);
@@ -14943,7 +14873,7 @@ mod tests {
              check; exploitation requires forging a session cookie to pass the check.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"escalate to critical"}
+            {"index":0,"severity":"critical","real":"yes","reason":"escalate to critical"}
         ]}"#;
         let calibrated = apply_verdicts(raw, findings);
         assert_eq!(
@@ -15343,7 +15273,7 @@ mod tests {
             "A live Stripe secret key is hardcoded in this file and committed to the repository.",
         )];
         let raw = r#"{"verdicts":[
-            {"index":0,"severity":"critical","confidence":"high","reason":"secret committed to version control"}
+            {"index":0,"severity":"critical","real":"yes","reason":"secret committed to version control"}
         ]}"#;
         let calibrated = apply_verdicts(raw, findings);
         let floored = apply_severity_calibration_rules(calibrated);
@@ -15441,9 +15371,8 @@ mod tests {
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
 
-    /// `apply_verdicts` must set the STRUCTURED `confidence`/`needs_review` fields, not just
-    /// the string-embedded `[needs review]` detail tag — the tag stays for one release (UI
-    /// back-compat), but a report/consumer that reads the structured field must see it too.
+    /// `apply_verdicts` sets the STRUCTURED `confidence`/`needs_review` fields, derived from the
+    /// verdict's `real` answer. The `[needs review]` detail tag is no longer written.
     #[test]
     fn apply_verdicts_sets_structured_confidence_and_needs_review() {
         let findings = vec![
@@ -15451,25 +15380,26 @@ mod tests {
             finding("AI-REAL", "high"),     // index 1 -> high confidence
         ];
         let raw = r#"{"verdicts":[
-            {"index":0,"confidence":"low","effort":"low","reason":"negligible timing residual"},
-            {"index":1,"severity":"high","confidence":"high","effort":"high","reason":"concrete"}
+            {"index":0,"real":"unclear","effort":"low","reason":"negligible timing residual"},
+            {"index":1,"severity":"high","real":"yes","effort":"high","reason":"concrete"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
         let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
         assert_eq!(timing.confidence.as_deref(), Some("needs-review"));
         assert!(
             timing.needs_review,
-            "low confidence must set structured needs_review"
+            "an unclear verdict must set structured needs_review"
         );
         assert_eq!(timing.effort.as_deref(), Some("low"));
-        // The detail tag is KEPT for one release (UI back-compat) alongside the new field.
-        assert!(timing.detail.contains("[needs review"));
+        // The structured fields are the whole signal: no `[needs review: ...]` suffix is written
+        // onto the client text any more.
+        assert!(!timing.detail.contains("[needs review"));
 
         let real = out.iter().find(|f| f.rule_id == "AI-REAL").unwrap();
         assert_eq!(real.confidence.as_deref(), Some("high"));
         assert!(
             !real.needs_review,
-            "high confidence must not set needs_review"
+            "a real finding in production code must not set needs_review"
         );
         assert_eq!(real.effort.as_deref(), Some("high"));
     }
@@ -15480,8 +15410,7 @@ mod tests {
     #[test]
     fn apply_verdicts_ignores_invalid_effort_value() {
         let findings = vec![finding("AI-X", "medium")];
-        let raw =
-            r#"{"verdicts":[{"index":0,"confidence":"high","effort":"extreme","reason":""}]}"#;
+        let raw = r#"{"verdicts":[{"index":0,"real":"yes","effort":"extreme","reason":""}]}"#;
         let out = apply_verdicts(raw, findings);
         assert_eq!(
             out[0].effort, None,
@@ -15489,7 +15418,7 @@ mod tests {
         );
 
         let findings2 = vec![finding("AI-Y", "medium")];
-        let raw2 = r#"{"verdicts":[{"index":0,"confidence":"high","reason":""}]}"#;
+        let raw2 = r#"{"verdicts":[{"index":0,"real":"yes","reason":""}]}"#;
         let out2 = apply_verdicts(raw2, findings2);
         assert_eq!(
             out2[0].effort, None,
@@ -15502,7 +15431,7 @@ mod tests {
     /// (`verify_system_prompt`) asks the model to emit.
     #[test]
     fn calibration_verdict_json_parses_effort_field() {
-        let raw = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"medium","reason":"a clear break"}]}"#;
+        let raw = r#"{"verdicts":[{"index":0,"severity":"high","real":"yes","effort":"medium","reason":"a clear break"}]}"#;
         let v: serde_json::Value = serde_json::from_str(raw).unwrap();
         let verdict = &v["verdicts"][0];
         assert_eq!(verdict["effort"], "medium");
@@ -16064,127 +15993,6 @@ mod tests {
                 group.scope
             );
         }
-    }
-
-    // ── BUG-5: consensus_verdicts tie-breaking direction ─────────────────────────────
-
-    /// BUG-5 regression: on a tie (high=1, medium=1) the previous code resolved to "high"
-    /// because it checked `counts[2] == max` first.  The correct humility/conservative
-    /// spec is that ties resolve to the LOWER severity.  This test fails before the fix
-    /// and passes after.
-    #[test]
-    fn bug5_consensus_tie_breaks_to_lower_severity_not_higher() {
-        // Two passes: one votes "high", one votes "medium" — equal votes, so tie.
-        // The docstring says "ties break to the LOWER severity" → medium wins.
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"critical path"}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"medium","confidence":"high","reason":"moderate risk"}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 1);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let arr = v["verdicts"].as_array().unwrap();
-        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        // BUG-5 fix: must resolve to "medium" (lower) not "high" (higher).
-        assert_eq!(
-            v0["severity"], "medium",
-            "BUG-5: tie between high(1) and medium(1) must resolve to medium (lower), got: {v0}"
-        );
-    }
-
-    /// A three-way 1-1-1 tie must resolve to "low" (the lowest severity).
-    #[test]
-    fn bug5_three_way_tie_resolves_to_low() {
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"medium","confidence":"high","reason":""}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"low","confidence":"low","reason":"debatable"}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 1);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let arr = v["verdicts"].as_array().unwrap();
-        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        // 1-1-1 tie → must resolve to "low".
-        assert_eq!(
-            v0["severity"], "low",
-            "BUG-5: three-way 1-1-1 tie must resolve to low (lowest), got: {v0}"
-        );
-        // Disagreement → confidence must be "low" (needs-review), regardless of tie direction.
-        assert_eq!(
-            v0["confidence"], "low",
-            "disagreement forces low confidence"
-        );
-    }
-
-    /// Unanimous "high" must still resolve to "high" — the fix must not break the non-tie case.
-    #[test]
-    fn bug5_unanimous_high_stays_high() {
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"injection"}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 1);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let arr = v["verdicts"].as_array().unwrap();
-        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        assert_eq!(v0["severity"], "high", "unanimous high must stay high");
-        assert_eq!(v0["confidence"], "high", "unanimous high → high confidence");
-    }
-
-    // ── critical severity tier: consensus tie-breaking + unanimity ───────────────────
-
-    /// ANTI-OVER-ROTATION GUARD (thorough/consensus mode): a tie between "critical" and "high"
-    /// (one pass votes each) must resolve to "high" — the SAME lower-wins tie-break BUG-5
-    /// established for high-vs-medium, extended one tier up. A single over-eager pass can never
-    /// unilaterally push a finding to critical against an equally-confident dissent.
-    #[test]
-    fn consensus_critical_vs_high_tie_resolves_to_high_not_critical() {
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"looks unauthenticated"}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"contained blast radius"}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 1);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let v0 = v["verdicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["index"] == 0)
-            .unwrap();
-        assert_eq!(
-            v0["severity"], "high",
-            "a critical-vs-high tie must resolve to high (lower), not silently promote to critical: {v0}"
-        );
-        assert_eq!(
-            v0["confidence"], "low",
-            "disagreement forces low confidence (needs review)"
-        );
-    }
-
-    /// Unanimous "critical" across every pass must resolve to "critical" with high confidence —
-    /// the fix must not cap the new tier below its own unanimous vote.
-    #[test]
-    fn consensus_unanimous_critical_stays_critical() {
-        let votes = vec![
-            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge endpoint"}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
-            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
-        ];
-        let out = consensus_verdicts(&votes, 1);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let v0 = v["verdicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["index"] == 0)
-            .unwrap();
-        assert_eq!(
-            v0["severity"], "critical",
-            "unanimous critical must stay critical"
-        );
-        assert_eq!(
-            v0["confidence"], "high",
-            "unanimous critical → high confidence"
-        );
     }
 
     // ── BUG-4: resolution round add_total guard in Batch mode ────────────────────────

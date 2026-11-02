@@ -596,8 +596,7 @@ async fn calibration_stops_between_batches_and_passes_the_rest_through_unchanged
         None,
         None,
         Some(&meter),
-        false,
-        "A repo.",
+        &Stage1Inputs::new("A repo."),
     )
     .await;
     assert_eq!(llm.calls(), 1, "only the first calibration batch ran");

@@ -36,7 +36,7 @@ if "CONFORMANCE audit" in system:
         for p in labels if p != "repo map"
     ]
     out = json.dumps({"findings": findings, "proposed_rules": [], "needs_files": []})
-elif "calibrating an automated audit" in system:
+elif "first reviewer of an automated audit" in system:
     note("calibration")
     hang = os.environ.get("FAKE_CALIBRATION_HANG", "")
     if hang and os.path.exists(hang):
@@ -48,9 +48,8 @@ elif "calibrating an automated audit" in system:
     if flag and os.path.exists(flag):
         out = "I cannot calibrate these findings right now."
     else:
-        n = len([l for l in prompt.splitlines() if l.startswith("[") and "(severity" in l])
-        out = json.dumps({"verdicts": [{"index": i, "severity": "medium", "confidence": "high",
-                                        "reason": "checked", "effort": "low"} for i in range(n)]})
+        out = json.dumps({"severity": "medium", "real": "yes", "reason": "checked",
+                          "effort": "low"})
 elif "ONE concrete, codebase-specific fix" in system:
     note("fix")
     out = json.dumps({"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}

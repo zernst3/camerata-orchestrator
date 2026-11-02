@@ -45,7 +45,7 @@ fn role_of(system: &str) -> Role {
         Role::Scan
     } else if system.starts_with("You write the full explanation") {
         Role::Regen
-    } else if system.starts_with("You are calibrating") {
+    } else if system.starts_with("You are the first reviewer") {
         Role::Calibrate
     } else {
         Role::Other

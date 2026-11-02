@@ -119,21 +119,11 @@ impl Scripted {
                     .to_string()
             }
             PartKind::Calibration => {
-                // One verdict per `[N] (severity` line of the prompt.
-                let n = req
-                    .prompt
-                    .lines()
-                    .filter(|l| l.starts_with('[') && l.contains("(severity"))
-                    .count();
-                let verdicts: Vec<serde_json::Value> = (0..n)
-                    .map(|i| {
-                        serde_json::json!({
-                            "index": i, "severity": "medium", "confidence": "high",
-                            "reason": "checked", "effort": "low",
-                        })
-                    })
-                    .collect();
-                serde_json::json!({ "verdicts": verdicts }).to_string()
+                // Every site is its own call: one verdict per request.
+                serde_json::json!({
+                    "severity": "medium", "real": "yes", "reason": "checked", "effort": "low",
+                })
+                .to_string()
             }
             PartKind::Fix => {
                 // A fix is addressed by the opaque id its block opens with, which is also the label
