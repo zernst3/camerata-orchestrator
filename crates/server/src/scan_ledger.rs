@@ -510,6 +510,10 @@ pub struct ScanLedger {
     /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
     #[serde(default)]
     path_hygiene: PathHygiene,
+    /// M5: how many rows had their quoted evidence opened and checked against the scanned file.
+    /// See [`EvidenceCheck`].
+    #[serde(default)]
+    evidence: EvidenceCheck,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -640,6 +644,49 @@ pub struct ScanInputFacts {
     /// more", so a bounded list never reads as the whole list. `serde(default)` for older ledgers.
     #[serde(default)]
     pub skipped_beyond_cap_total: usize,
+}
+
+/// M5: the tally of the evidence check, which opens each row's file and looks for the quoted
+/// snippet near the cited line (`onboard::evidence_check`).
+///
+/// Every row is in exactly one bucket: `exempt` (the check does not apply to its kind, see
+/// `evidence_check::Exempt`), or checked, and a checked row is either `verified` or
+/// `unverified`. So `checked == verified + unverified` and `checked + exempt` is the number of
+/// rows the check saw ([`Self::reconciles`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceCheck {
+    /// Rows whose snippet was looked for in the file.
+    #[serde(default)]
+    pub checked: usize,
+    /// Checked rows whose snippet was found within the window around the cited line.
+    #[serde(default)]
+    pub verified: usize,
+    /// Checked rows whose snippet was not found there. Each is held for review.
+    #[serde(default)]
+    pub unverified: usize,
+    /// Rows the check does not apply to, by kind.
+    #[serde(default)]
+    pub exempt: usize,
+}
+
+impl EvidenceCheck {
+    /// Every row the check saw.
+    pub fn rows_seen(&self) -> usize {
+        self.checked + self.exempt
+    }
+
+    /// Whether the counts agree with each other: every checked row is verified or unverified.
+    pub fn reconciles(&self) -> bool {
+        self.checked == self.verified + self.unverified
+    }
+
+    /// Add another tally (a second repo's) to this one.
+    pub fn add(&mut self, other: EvidenceCheck) {
+        self.checked += other.checked;
+        self.verified += other.verified;
+        self.unverified += other.unverified;
+        self.exempt += other.exempt;
+    }
 }
 
 /// How many skipped paths are named per reason. A huge repository can have tens of thousands of
@@ -975,6 +1022,17 @@ impl ScanLedger {
     /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
     pub fn path_hygiene(&self) -> &PathHygiene {
         &self.path_hygiene
+    }
+
+    /// M5: add one repo's evidence-check counts to the scan's total. Adds rather than
+    /// overwrites, because a multi-repo scan checks each repo separately.
+    pub fn record_evidence_check(&mut self, counts: EvidenceCheck) {
+        self.evidence.add(counts);
+    }
+
+    /// M5: the scan's evidence-check counts. See [`EvidenceCheck`].
+    pub fn evidence_check(&self) -> &EvidenceCheck {
+        &self.evidence
     }
 
     /// Queue the honest "config-gated, reviewed semantically instead" disclosure for

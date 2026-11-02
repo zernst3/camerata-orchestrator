@@ -3801,7 +3801,13 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
     if disposition != Disposition::Unresolved {
         return false;
     }
-    finding.needs_review || finding.confidence.as_deref() == Some("needs-review")
+    // M5: a row whose quoted snippet was not found near its line is held until the reviewer
+    // decides it; the release gate also refuses to export it without that decision.
+    finding.needs_review
+        || finding.confidence.as_deref() == Some("needs-review")
+        || finding
+            .captures
+            .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
 }
 
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
@@ -6137,6 +6143,9 @@ pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
 #[cfg(test)]
 mod coverage_gaps_tests;
+
+#[cfg(test)]
+mod evidence_hold_tests;
 
 #[cfg(test)]
 mod engine_identity_tests;

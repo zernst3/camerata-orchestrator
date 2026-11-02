@@ -9264,29 +9264,36 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
         .map(|(p, c)| (p.as_str(), c.as_str()))
         .collect();
     for f in findings.iter_mut() {
-        let needle = f.snippet.trim();
-        // Too short to locate reliably (single token / punctuation) — keep the model's line.
-        if needle.len() < 4 {
-            continue;
-        }
         let Some(content) = by_path.get(f.path.as_str()) else {
             continue;
         };
-        let matches: Vec<usize> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(needle))
-            .map(|(i, _)| i + 1) // 1-based
-            .collect();
-        // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
-        // more than once resolves to the intended site. No match → leave the model's line.
-        if let Some(best) = matches
-            .iter()
-            .copied()
-            .min_by_key(|&ln| ln.abs_diff(f.line))
-        {
-            f.line = best;
-        }
+        resolve_finding_line(f, content);
+    }
+}
+
+/// [`resolve_finding_lines`] for one finding whose file text is `content`. Also used by the
+/// evidence check (`onboard::evidence_check`), which applies this correction first and then looks
+/// for the snippet near the corrected line.
+pub(crate) fn resolve_finding_line(f: &mut Finding, content: &str) {
+    let needle = f.snippet.trim();
+    // Too short to locate reliably (single token / punctuation) — keep the model's line.
+    if needle.len() < 4 {
+        return;
+    }
+    let matches: Vec<usize> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(needle))
+        .map(|(i, _)| i + 1) // 1-based
+        .collect();
+    // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
+    // more than once resolves to the intended site. No match → leave the model's line.
+    if let Some(best) = matches
+        .iter()
+        .copied()
+        .min_by_key(|&ln| ln.abs_diff(f.line))
+    {
+        f.line = best;
     }
 }
 
@@ -9676,6 +9683,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::report_export::DETAIL_SOURCE_CAPTURE,
     crate::report_export::DETAIL_REJECTION_CAPTURE,
     crate::ALSO_SEEN_BY_CAPTURE,
+    // M5: the sentence that says a row's quoted snippet was not found near its line.
+    crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

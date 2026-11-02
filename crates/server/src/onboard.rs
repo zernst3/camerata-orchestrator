@@ -21,6 +21,7 @@ pub mod audit;
 pub mod clone_advisory;
 pub mod count;
 pub mod credential_cross_ref;
+pub mod evidence_check;
 pub mod files;
 pub mod finding_context;
 pub mod finding_context_batch;
@@ -3336,6 +3337,15 @@ pub async fn audit_repos_with_llm_controlled(
                     // is never silent.
                     all_failed_passes.extend(fix_failed_passes);
                 }
+                // M5: open each row's file and look for the quoted snippet near its line. A row
+                // where it is not found is marked and held, never dropped or reworded; the counts
+                // go to the ledger. The last step on a repo's rows before they join the report.
+                evidence_check::verify_and_record(
+                    &mut pipeline_ledger,
+                    &mut repo_findings,
+                    &files,
+                    Some(&repo_root_for_history),
+                );
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
