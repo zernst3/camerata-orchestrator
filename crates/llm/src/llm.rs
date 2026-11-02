@@ -6340,6 +6340,28 @@ exit 1"#,
         assert!(refusal_error(&serde_json::json!({})).is_none());
     }
 
+    /// A 429 that outlasts the retries is a typed rate-limit failure whose last attempt keeps the
+    /// `retry-after` the provider sent, so a caller that waits knows how long.
+    #[test]
+    fn a_429_that_outlasts_the_retries_is_rate_limited_and_keeps_its_retry_after() {
+        let mut last = crate::failure::AttemptRecord::new("api", "m");
+        last.http_status = Some(429);
+        last.retry_after_secs = Some(37);
+        let out = crate::retry::ApiOutcome {
+            status: 429,
+            body: r#"{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#.to_string(),
+            attempts: vec![last],
+        };
+        let err = http_failure("Anthropic API", out);
+        let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::RateLimited);
+        assert!(failure.retryable);
+        assert_eq!(
+            crate::failure::retry_after_of(&err),
+            Some(std::time::Duration::from_secs(37))
+        );
+    }
+
     /// A batch submit, poll or fetch that ends on an HTTP error is a typed failure that keeps
     /// every attempt (status, provider message, request id, wait), exactly like a real-time call,
     /// and the message keeps the wording callers have always seen.

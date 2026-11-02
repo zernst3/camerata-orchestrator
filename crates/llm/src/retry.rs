@@ -17,6 +17,11 @@
 //! tries once more: 5s, 20s, 60s, 120s. 400/401/403 are never retried — a bad request or bad
 //! credential doesn't get better by waiting.
 //!
+//! A 429 (or a `rate_limit_error` event) that outlasts the schedule ends as
+//! [`FailureClass::RateLimited`], not `Transport`: the provider asked for a slower pace, which is
+//! a pause and not an outage. The class carries the last `retry-after` on its attempt trail
+//! ([`crate::failure::retry_after_of`]). An overload (529, 503) stays `Transport`.
+//!
 //! ONE loop: [`drive`] is the only retry loop in the crate. The API transport and the CLI
 //! backend both run through it, each supplying one attempt as a closure and the sleeper to
 //! wait with (a test injects a recording sleeper and so never waits).
@@ -487,13 +492,30 @@ where
         Err(((None, message), attempts)) => {
             let retries = attempts.len().saturating_sub(1);
             let mut failure = LlmCallFailure::new(
-                FailureClass::Transport,
+                exhausted_stream_class(&attempts),
                 format!("Anthropic API request failed after {retries} retries: {message}"),
             );
             failure.attempts = attempts;
             failure.retryable = true;
             Err(anyhow::Error::new(failure))
         }
+    }
+}
+
+/// The class of a streamed call whose retries ran out with no HTTP answer: a `rate_limit_error`
+/// event on the last attempt is [`FailureClass::RateLimited`] (the provider asked for a slower
+/// pace, which a run waits out and does not count toward an outage); everything else (a stall, a
+/// broken stream, an overload, a failed connection) is [`FailureClass::Transport`]. An HTTP 429 is
+/// classified from its status by [`crate::failure::classify_http`].
+fn exhausted_stream_class(attempts: &[AttemptRecord]) -> FailureClass {
+    if attempts
+        .last()
+        .and_then(|a| a.error_type.as_deref())
+        .is_some_and(|t| t == "rate_limit_error")
+    {
+        FailureClass::RateLimited
+    } else {
+        FailureClass::Transport
     }
 }
 
@@ -820,6 +842,52 @@ mod tests {
         assert_eq!(failure.attempts.len(), 4, "first try plus three retries");
         assert!(err.to_string().contains("failed after 3 retries"), "{err}");
         assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+    }
+
+    /// A rate limit the provider keeps sending past the retries is its own class, so a run can tell
+    /// "slow down" from "unreachable"; the trail keeps the `retry-after` of the last answer.
+    #[tokio::test]
+    async fn a_rate_limit_event_that_outlasts_the_retries_is_rate_limited_not_transport() {
+        let sleeper = RecordingSleeper::default();
+        let err = execute_stream(
+            || async {
+                StreamAttempt::<u32>::Provider {
+                    error_type: "rate_limit_error".to_string(),
+                    message: "slow down".to_string(),
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await
+        .err()
+        .expect("a rate limit that never clears surfaces");
+        let failure = crate::failure::call_failure_of(&err).expect("typed");
+        assert_eq!(failure.class, FailureClass::RateLimited);
+        assert!(failure.retryable);
+        assert_eq!(failure.attempts.len(), 4, "first try plus three retries");
+        assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+    }
+
+    /// An overloaded event is still transport: it is the provider struggling, not asking us to slow.
+    #[tokio::test]
+    async fn an_overloaded_event_that_outlasts_the_retries_stays_transport() {
+        let sleeper = RecordingSleeper::default();
+        let err = execute_stream(
+            || async {
+                StreamAttempt::<u32>::Provider {
+                    error_type: "overloaded_error".to_string(),
+                    message: "Overloaded".to_string(),
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await
+        .err()
+        .expect("surfaces");
+        let failure = crate::failure::call_failure_of(&err).expect("typed");
+        assert_eq!(failure.class, FailureClass::Transport);
     }
 
     // ── streamed calls ──────────────────────────────────────────────────────────────────
