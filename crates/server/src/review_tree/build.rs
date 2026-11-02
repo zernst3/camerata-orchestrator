@@ -11,9 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::grouping::residual_sub_id;
 use super::mapping::{category_label, place_row, RulePlacement, ToolMap};
-use super::types::{
-    GroupRole, NodeKind, NodeLevel, Outlier, ReviewTree, TextSource, TreeNode,
-};
+use super::types::{GroupRole, NodeKind, NodeLevel, Outlier, ReviewTree, TextSource, TreeNode};
 use crate::ai_audit::{finding_class, primary_rank, FindingClass};
 use crate::onboard::Finding;
 
@@ -68,8 +66,10 @@ fn sub_belongs_to(sub: &str, rule: &str) -> bool {
 /// a sub-group node of that rule.
 fn valid_path(f: &Finding) -> Option<&[String; 3]> {
     let path: &[String; 3] = f.group_path.as_slice().try_into().ok()?;
-    (path[0].starts_with("cat:") && path[1].starts_with("rule:") && sub_belongs_to(&path[2], &path[1]))
-        .then_some(path)
+    (path[0].starts_with("cat:")
+        && path[1].starts_with("rule:")
+        && sub_belongs_to(&path[2], &path[1]))
+    .then_some(path)
 }
 
 /// The ordinal of a sub-group id (`sub:SEC-1/3` is 3).
@@ -141,7 +141,10 @@ pub fn build_tree(
 
     let mut sub_nodes: Vec<TreeNode> = Vec::new();
     for ((rule, ordinal, id), members) in &subs {
-        let keys: Vec<String> = members.iter().map(|&i| findings[i].site_key.clone()).collect();
+        let keys: Vec<String> = members
+            .iter()
+            .map(|&i| findings[i].site_key.clone())
+            .collect();
         let key_set: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
         let mut rule_ids: Vec<String> = members
             .iter()

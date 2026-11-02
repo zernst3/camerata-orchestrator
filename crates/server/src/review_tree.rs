@@ -25,11 +25,11 @@ pub use mapping::{
     family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
     UNCATEGORISED,
 };
-pub use unfold::unfold_also_locations;
 pub use types::{
     DuplicateLink, FlaggedBy, GroupRole, NodeKind, NodeLevel, Outlier, OutlierBy, OutlierReason,
     ReviewTree, TextSource, TreeNode,
 };
+pub use unfold::unfold_also_locations;
 
 use std::path::{Path, PathBuf};
 
@@ -167,8 +167,10 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 }
 
 #[cfg(test)]
-mod tests;
+mod scale_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 #[cfg(test)]
 mod tree_tests;

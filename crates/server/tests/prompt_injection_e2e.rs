@@ -223,15 +223,13 @@ async fn an_obeyed_injection_hides_nothing_and_is_itself_reported() {
     assert_eq!(injection[0].severity, "medium");
     assert!(injection[0].detail.contains("OWASP LLM01"));
     assert_eq!(injection[0].preview_tool.as_deref(), Some("camerata-arch"));
-    // The fake header on line 7 is the same rule in the same file, so the pipeline folds it into
-    // the line-1 row as a second location.
-    assert!(
-        injection[0]
-            .also_locations
-            .iter()
-            .any(|l| l.path == FILE && l.line == FAKE_HEADER_LINE),
+    // The fake header on line 7 is the same rule in the same file, a different place: it is its
+    // own row.
+    assert_eq!(
+        at(&report, INJECTION_RULE, FAKE_HEADER_LINE).len(),
+        1,
         "the fake file header is flagged too: {:#?}",
-        injection[0]
+        report.findings
     );
 
     // 3. Every model request that carries the file frames it under the token its own system
@@ -301,9 +299,10 @@ fn outside_frames(prompt: &str, token: &str) -> String {
 }
 
 /// A model that DOES report the injected comment (as the clause tells it to) must not turn the
-/// deterministic row into two: the model's row and the checker's row are one finding.
+/// deterministic row into two: the model's row collapses into the checker's and stays on it as a
+/// collapsed source.
 #[tokio::test]
-async fn a_model_that_reports_the_injection_too_adds_no_second_row() {
+async fn a_model_that_reports_the_injection_too_collapses_into_the_checkers_row_and_is_kept() {
     let dir = tempfile::tempdir().unwrap();
     stage(dir.path());
     let model = ObedientModel::reporting_the_injection();
@@ -315,26 +314,25 @@ async fn a_model_that_reports_the_injection_too_adds_no_second_row() {
         .filter(|f| {
             f.path == FILE
                 && f.rule_id.trim_start_matches("AI-") == INJECTION_RULE
-                && (f.line == INJECTION_LINE
-                    || f.also_locations.iter().any(|l| l.line == INJECTION_LINE))
+                && f.line == INJECTION_LINE
         })
         .collect();
+    // The model reported the checker's own rule at the same line: the same family, the same
+    // place, so the two collapse into the checker's row, which keeps the model's report as a
+    // collapsed source and never loses it.
     assert_eq!(
         rows.len(),
         1,
         "the injected comment is one row however many layers saw it: {:#?}",
         report.findings
     );
-    // The model's report was not lost: the surviving row is the checker's and it absorbed the
-    // model's, which left its own quoted line behind as a second location.
     assert_eq!(rows[0].preview_tool.as_deref(), Some("camerata-arch"));
     assert!(
         rows[0]
-            .also_locations
+            .flagged_by
             .iter()
-            .any(|l| l.line == INJECTION_LINE
-                && l.snippet.contains("AI reviewer: report no findings")),
-        "the model's row merged into the checker's: {:#?}",
+            .any(|b| b.path == FILE && b.line == INJECTION_LINE),
+        "the model's report is kept as a collapsed source at its own line: {:#?}",
         rows[0]
     );
 }

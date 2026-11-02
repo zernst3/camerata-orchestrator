@@ -18,10 +18,10 @@ use camerata_secrets::SecretShape;
 use camerata_server::ai_audit::{self, ScanMode, UsageMeter};
 use camerata_server::cost_cap::RunControls;
 use camerata_server::efficiency::EfficiencyConfig;
-use camerata_server::review_tree;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::{Finding, ScanReport};
 use camerata_server::report_export::{self, ReportOptions};
+use camerata_server::review_tree;
 use camerata_server::scan_ledger::ScanLedger;
 use camerata_server::xlsx_export;
 
@@ -221,10 +221,11 @@ async fn assert_redacted_everywhere(terse_output: bool) {
     ] {
         let p = planted(shape);
         let (surfaces, merged) = surfaces(terse_output, &p).await;
-        // Anti-vacuity: the two reports were folded into one row that kept the second as a site.
+        // Anti-vacuity: the two reports of the same key (under two rule names) are two rows now,
+        // each carrying the credential's place.
         assert!(
-            merged.iter().any(|f| !f.also_locations.is_empty()),
-            "terse_output={terse_output}: the fixture must produce a merged row: {merged:#?}"
+            merged.len() >= 2,
+            "terse_output={terse_output}: the fixture must produce two rows: {merged:#?}"
         );
         assert!(
             surfaces.iter().any(|(n, _)| n == "findings.json"),

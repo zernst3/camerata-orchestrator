@@ -71,7 +71,10 @@ pub(crate) fn same_cause_hint(a: &Finding, b: &Finding, content: Option<&str>) -
 }
 
 /// What the collapse leaves of `findings` after the located flag is set from `files`.
-pub(crate) fn collapse_located(mut findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
+pub(crate) fn collapse_located(
+    mut findings: Vec<Finding>,
+    files: &[(String, String)],
+) -> Vec<Finding> {
     mark_located(&mut findings, files);
     collapse_identical(findings, &ToolMap::builtin()).rows
 }

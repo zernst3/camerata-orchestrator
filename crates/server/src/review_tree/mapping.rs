@@ -67,6 +67,24 @@ impl ToolMap {
         Self { selectors }
     }
 
+    /// A map from a ready-made selector table (native rule id to the tool rule ids that enforce
+    /// it), as the preview merge already holds one. `None` is the built-in tables alone.
+    pub fn from_selectors(native_selectors: Option<&HashMap<String, Vec<String>>>) -> Self {
+        let mut selectors: HashMap<String, String> = HashMap::new();
+        if let Some(by_native) = native_selectors {
+            let mut native: Vec<(&String, &Vec<String>)> = by_native.iter().collect();
+            native.sort();
+            for (native_id, tools) in native {
+                for tool in tools {
+                    selectors
+                        .entry(tool.clone())
+                        .or_insert_with(|| native_id.clone());
+                }
+            }
+        }
+        Self { selectors }
+    }
+
     /// The native rule `tool_rule_id` (an external tool's rule id) enforces, if the tables know
     /// one. Order: the explicit tool tables, then the corpus selectors, then the one native floor
     /// rule that shares the tool rule's security category.

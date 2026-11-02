@@ -826,7 +826,8 @@ fn two_ai_rows_for_different_credentials_with_one_rule_id_stay_two_rows() {
 }
 
 #[test]
-fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_cluster_of_two_rows() {
+fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_cluster_of_two_rows(
+) {
     let floor = credential_row(
         "SEC-NO-HARDCODED-SECRETS-1",
         5,

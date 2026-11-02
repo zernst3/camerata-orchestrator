@@ -31,6 +31,9 @@ use crate::ai_audit::{
     same_snippet, severity_rank, shared_captured_object, Origin, MIN_MERGE_SNIPPET,
     SEMANTIC_MERGE_WINDOW,
 };
+use crate::onboard::evidence_check::{
+    EVIDENCE_UNVERIFIED_CAPTURE, EVIDENCE_UNVERIFIED_SITES_CAPTURE,
+};
 use crate::onboard::Finding;
 
 /// How many later rows one row is compared with inside its window. A pile of more rows than this
@@ -184,6 +187,47 @@ fn survivor_rank(f: &Finding, index: usize, total: usize) -> (u8, u8, u8, u8, u8
     )
 }
 
+/// A collapse must never launder a row the evidence check held: when a collapsed source carries
+/// the evidence-unverified mark and the survivor does not, the survivor takes the mark and names
+/// the source's site, so it stays held. A survivor already marked names the extra sites too.
+fn carry_evidence_marks(survivor: &mut Finding, sources: &[Finding]) {
+    if sources.is_empty() {
+        return;
+    }
+    let mut sites: Vec<String> = survivor
+        .captures
+        .get(EVIDENCE_UNVERIFIED_SITES_CAPTURE)
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    for src in sources {
+        let own = format!("{}:{}", src.path, src.line);
+        if !sites.contains(&own) {
+            sites.push(own);
+        }
+        if let Some(listed) = src.captures.get(EVIDENCE_UNVERIFIED_SITES_CAPTURE) {
+            for l in listed.lines() {
+                if !sites.iter().any(|s| s == l) {
+                    sites.push(l.to_string());
+                }
+            }
+        }
+    }
+    if !survivor.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE) {
+        let reason = sources[0]
+            .captures
+            .get(EVIDENCE_UNVERIFIED_CAPTURE)
+            .cloned()
+            .unwrap_or_default();
+        survivor
+            .captures
+            .insert(EVIDENCE_UNVERIFIED_CAPTURE.to_string(), reason);
+    }
+    survivor.captures.insert(
+        EVIDENCE_UNVERIFIED_SITES_CAPTURE.to_string(),
+        sites.join("\n"),
+    );
+}
+
 /// Collapse every set of mechanically identical rows into one row, keeping every source in
 /// [`Finding::flagged_by`]. Pure and linear: rows are bucketed by repo, path and rule family
 /// first, and only compared inside a line window. The output keeps the input's order (a survivor
@@ -210,14 +254,10 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
         }
         members.sort_by_key(|&i| (findings[i].line, i));
         for (k, &a) in members.iter().enumerate() {
-            let mut compared = 0;
-            for &b in &members[k + 1..] {
-                if findings[b].line.abs_diff(findings[a].line) > SEMANTIC_MERGE_WINDOW
-                    || compared >= MAX_FOLLOWERS
-                {
+            for &b in members[k + 1..].iter().take(MAX_FOLLOWERS) {
+                if findings[b].line.abs_diff(findings[a].line) > SEMANTIC_MERGE_WINDOW {
                     break;
                 }
-                compared += 1;
                 if uf.find(a) != uf.find(b) && identical(&findings[a], &findings[b]) {
                     uf.union(a, b);
                 }
@@ -242,11 +282,7 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
             .copied()
             .max_by_key(|&i| survivor_rank(&findings[i], i, n))
             .unwrap_or(members[0]);
-        let mut sources: Vec<usize> = members
-            .iter()
-            .copied()
-            .filter(|&i| i != survivor)
-            .collect();
+        let mut sources: Vec<usize> = members.iter().copied().filter(|&i| i != survivor).collect();
         sources.sort_unstable();
         for &s in &sources {
             survivor_of.insert(s, survivor);
@@ -274,6 +310,7 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                 .max_by_key(|s| severity_rank(s))
                 .unwrap_or_else(|| row.severity.clone());
             let mut donor: Option<Finding> = None;
+            let mut folded_rows: Vec<Finding> = Vec::new();
             for &s in sources {
                 let Some(src) = sources_taken[s].take() else {
                     continue;
@@ -290,10 +327,14 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                     line: src.line,
                 });
                 row.flagged_by.extend(src.flagged_by.iter().cloned());
+                if src.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE) {
+                    folded_rows.push(src.clone());
+                }
                 if donor.is_none() && src.fix_specific.is_some() {
                     donor = Some(src);
                 }
             }
+            carry_evidence_marks(&mut row, &folded_rows);
             if severity_rank(&max_severity) > severity_rank(&row.severity) {
                 let from = row.severity.clone();
                 record_severity_adjustment(

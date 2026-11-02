@@ -19,11 +19,11 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use camerata_checks::arch_checker::{ledger_detector_rule_ids_for_repo, RepoView};
 use camerata_server::ai_audit::{self, ScanMode};
-use camerata_server::review_tree;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::architectural::audit_architectural;
 use camerata_server::onboard::ScanReport;
 use camerata_server::report_export::{self, ReportOptions};
+use camerata_server::review_tree;
 use camerata_server::scan_ledger::{RuleTier, ScanLedger, NO_WIRED_DETECTOR_REASON};
 
 /// The real corpus rule under test: declares `enforcement = "architectural"`, IS answered by a

@@ -759,7 +759,7 @@ async fn req_i1_the_i2_gate_and_this_harness_agree_on_the_same_scan() {
 /// container token (so `objects_conflict`'s disjointness veto is disabled — tracker C4). The
 /// real pipeline:
 ///
-/// - detects all three (`cross-family-merge` records `rows_in: 3`),
+/// - detects all three (`collapse-identical` records `rows_in: 3`),
 /// - absorbs two into the third (`merged_into` carries both, so `unaccounted == 0` and the
 ///   WEAKER conservation invariant above legitimately passes),
 /// - and (since W7) exports ONE row whose `also_locations` array carries BOTH absorbed
@@ -781,54 +781,49 @@ async fn req_i1_the_i2_gate_and_this_harness_agree_on_the_same_scan() {
 async fn req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact() {
     let art = scan_and_export("self_measurement_parity_repo", "e2e/parity").await;
 
-    // How many rows were absorbed by merges across the whole scan?
-    let absorbed: usize = art
+    // How many rows did the scan detect, and how many were collapsed into another because they
+    // were mechanically the same site? Nothing else is folded: grouping returns every row.
+    let detected: usize = art
+        .ledger
+        .stages()
+        .iter()
+        .filter(|s| s.stage == "collapse-identical")
+        .map(|s| s.rows_in)
+        .sum();
+    let collapsed: usize = art
         .ledger
         .stages()
         .iter()
         .map(|s| s.merged_into.len())
         .sum();
     assert!(
-        absorbed > 0,
-        "this fixture must produce at least one absorbed row or there is nothing to measure: \
-         {:#?}",
+        detected > 0,
+        "this fixture must reach the collapse stage or there is nothing to measure: {:#?}",
         art.ledger.stages()
     );
 
-    // Every absorbed site must be observable SOMEWHERE in the exported artifacts. Accept any
-    // representation: an `also_locations` entry, an `also_matches` entry, or an explicit site
-    // count — the property is observability, not a particular field.
+    // Every collapsed source must be observable in the exported artifacts, with its own place.
     let rows = art.findings_export_value["findings"].as_array().unwrap();
     let observable: usize = rows
         .iter()
         .map(|r| {
-            let also_locations = r
-                .get("also_locations")
+            r.get("flagged_by")
                 .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            let also_matches = r
-                .get("also_matches")
-                .and_then(|v| v.as_str())
-                .map(|s| s.split(',').filter(|p| !p.trim().is_empty()).count())
-                .unwrap_or(0);
-            let site_count = r
-                .get("site_count")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.saturating_sub(1) as usize)
-                .unwrap_or(0);
-            also_locations.max(also_matches).max(site_count)
+                .map_or(0, Vec::len)
         })
         .sum();
-
     assert!(
-        observable >= absorbed,
-        "C5 — {absorbed} row(s) were absorbed by a merge and only {observable} of those \
-         absorptions is observable in any exported artifact. The client is shown {} finding(s) \
-         for {} detected site(s); the difference is invisible, so an over-merge cannot be \
-         distinguished from a detection miss by anyone reading the report.\n\nStages: {:#?}",
+        observable >= collapsed,
+        "C5 — {collapsed} row(s) were collapsed into another and only {observable} of those is \
+         observable in any exported artifact. The client is shown {} finding(s) for {detected} \
+         detected site(s).\n\nStages: {:#?}",
         rows.len(),
-        rows.len() + absorbed,
         art.ledger.stages(),
+    );
+    // And the other direction: no detected site vanished without a collapse to account for it.
+    assert!(
+        rows.len() + collapsed >= detected,
+        "{detected} sites were detected, {collapsed} collapsed, and only {} rows were exported",
+        rows.len()
     );
 }

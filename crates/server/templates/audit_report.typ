@@ -666,14 +666,13 @@
 // their intersection reads as "zero" without needing a word for it (and this house style never
 // uses an em/en dash as a placeholder either, see `or_na` above).
 #let grid_cell_content(cell) = {
-  if cell.findings.len() == 0 [] else [
-    #for f in cell.findings [
-      #block(above: 2pt, below: 6pt)[
-        #text(size: 8pt, fill: ink)[#f.headline]
-        #linebreak()
-        #text(font: mono, size: 7.5pt, fill: ink_faint)[#f.repo / #breakable(f.path, n: 24), line #str(f.line) (#f.rule_id)]
-      ]
-    ]
+  // M8: a cell COUNTS its findings. It used to list each one's headline and location a second
+  // time, beside the curated card that is the one place a site is described in full; at report
+  // scale that doubled the document. The cards carry the severity, effort and location, in the
+  // order the grid is read.
+  let n = cell.findings.len()
+  if n == 0 [] else [
+    #text(size: 9pt, weight: 600, fill: ink)[#str(n)] #text(size: 8pt, fill: ink_faint)[#plural(n, "finding", "findings")]
   ]
 }
 
@@ -690,6 +689,11 @@
       ..row.cells.map(cell => grid_cell_content(cell)),
     )).flatten()
   )
+]
+
+#if d.priority_grid.rows.len() > 0 [
+  #v(0.3cm)
+  #text(size: 8.5pt, fill: ink_faint)[Each cell counts the findings in it. Every finding is listed once, in Curated findings, with its severity, effort and location.]
 ]
 
 #if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 [
@@ -948,7 +952,7 @@ Not performed in this engagement:
 // skipped files and points to the full list, which itself holds the first 1,000 per reason; the
 // rest are counted ("and K more").
 #let gaps = d.coverage_gaps
-#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or "scope_limited_note" in gaps [
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or gaps.file_limit_notes.len() > 0 or "skipped_summary" in gaps or "evidence_note" in gaps or "scope_limited_note" in gaps [
   #v(0.2cm)
   #card[
     #subheading[Coverage, not reviewed this scan]
@@ -959,9 +963,20 @@ Not performed in this engagement:
     #for line in gaps.dependency_gaps [
       - #line
     ]
+    // M5: the file limit as a limit on the run, then the count of every file not read, then each
+    // file with its size and reason.
+    #for line in gaps.file_limit_notes [
+      - #line
+    ]
+    #if "skipped_summary" in gaps [
+      - #gaps.skipped_summary
+    ]
+    #if "evidence_note" in gaps [
+      - #gaps.evidence_note
+    ]
     #let shown = calc.min(gaps.skipped_files.len(), 100)
     #for skipped in gaps.skipped_files.slice(0, shown) [
-      - #skipped.repo, #raw(skipped.path): #skipped.reason
+      - #skipped.repo, #raw(skipped.path)#if skipped.size != "" [ (#skipped.size)]: #skipped.reason
     ]
     #if gaps.skipped_files.len() > shown [
       - and #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json

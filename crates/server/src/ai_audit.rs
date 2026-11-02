@@ -9238,9 +9238,6 @@ pub(crate) fn finding_headline(f: &Finding) -> String {
     }
 }
 
-
-
-
 /// The snippet as a dedup key: whitespace collapsed and lowercased, so two chunks quoting the
 /// same line with different spacing still agree.
 pub(crate) fn dedup_snippet_key(snippet: &str) -> String {
@@ -9338,32 +9335,43 @@ pub(crate) fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, 
         .map(|(p, c)| (p.as_str(), c.as_str()))
         .collect();
     for f in findings.iter_mut() {
-        let needle = f.snippet.trim();
-        // Too short to locate reliably (single token / punctuation) — keep the model's line.
-        if needle.len() < 4 {
-            continue;
-        }
         let Some(content) = by_path.get(f.path.as_str()) else {
             continue;
         };
-        let matches: Vec<usize> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(needle))
-            .map(|(i, _)| i + 1) // 1-based
-            .collect();
-        // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
-        // more than once resolves to the intended site. No match → leave the model's line.
-        if let Some(best) = matches
-            .iter()
-            .copied()
-            .min_by_key(|&ln| ln.abs_diff(f.line))
-        {
-            f.line = best;
-        }
+        resolve_finding_line(f, content);
     }
 }
 
+/// [`resolve_finding_lines`] for one finding whose file text is `content`. Also used by the
+/// evidence check (`onboard::evidence_check`), which applies this correction first and then looks
+/// for the snippet near the corrected line.
+pub(crate) fn resolve_finding_line(f: &mut Finding, content: &str) {
+    f.line = resolve_line(content, &f.snippet, f.line);
+}
+
+/// The line `snippet` is on in `content`, nearest `line`; `line` itself when the snippet is too
+/// short to locate or is on no single line. The pure form of [`resolve_finding_line`], which the
+/// evidence check also applies to absorbed sites.
+pub(crate) fn resolve_line(content: &str, snippet: &str, line: usize) -> usize {
+    let needle = snippet.trim();
+    // Too short to locate reliably (single token / punctuation) — keep the model's line.
+    if needle.len() < 4 {
+        return line;
+    }
+    let matches: Vec<usize> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains(needle))
+        .map(|(i, _)| i + 1) // 1-based
+        .collect();
+    // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
+    // more than once resolves to the intended site. No match → leave the model's line.
+    matches
+        .iter()
+        .copied()
+        .min_by_key(|&ln| ln.abs_diff(line))
+        .unwrap_or(line)
+}
 
 /// Minimum snippet length for a finding to be considered co-located with others. Below this a
 /// snippet is too short to be a reliable "this is the same offending code" signal.
@@ -9687,6 +9695,9 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::report_export::DETAIL_SOURCE_CAPTURE,
     crate::report_export::DETAIL_REJECTION_CAPTURE,
     crate::ALSO_SEEN_BY_CAPTURE,
+    // M5: the sentence that says a row's quoted snippet was not found near its line.
+    crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
+    crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_SITES_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -10416,9 +10427,6 @@ impl CauseSignal {
     }
 }
 
-
-
-
 /// A primary with no fix of its own takes `donor`'s, with the donor's label (D8): a standard fix
 /// stays a standard fix, and a model-written one stays a tailored one.
 pub(crate) fn inherit_fix(primary: &mut Finding, donor: &Finding) {
@@ -10471,14 +10479,6 @@ pub fn apply_stack_exceptions(
         })
         .collect()
 }
-
-
-
-
-
-
-
-
 
 /// One route group's share of a scan, ready to run: the files its scope covers (re-chunked on
 /// their own, so a chunk only holds files its rules can apply to), its rules, and how the
@@ -13802,9 +13802,17 @@ mod tests {
             site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 12, "high", code),
             site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", code),
         ];
-        assert_eq!(collapse_located(findings.clone(), &files).len(), 3, "no collapse");
+        assert_eq!(
+            collapse_located(findings.clone(), &files).len(),
+            3,
+            "no collapse"
+        );
         let rows = crate::review_tree::collapse_and_group(findings, &files);
-        assert_eq!(rows.len(), 3, "three labels at one location stay three rows");
+        assert_eq!(
+            rows.len(),
+            3,
+            "three labels at one location stay three rows"
+        );
         let severities: Vec<(&str, &str)> = rows
             .iter()
             .map(|r| (r.rule_id.as_str(), r.severity.as_str()))
@@ -13818,12 +13826,22 @@ mod tests {
             ],
             "every row keeps its own severity"
         );
-        assert!(rows.iter().all(|r| r.also_matches.is_empty() && r.also_locations.is_empty()));
+        assert!(rows
+            .iter()
+            .all(|r| r.also_matches.is_empty() && r.also_locations.is_empty()));
         let links = crate::review_tree::test_support::link_pairs(&rows);
-        assert_eq!(links.len(), 2, "two of the three point at the highest-ranked: {links:?}");
+        assert_eq!(
+            links.len(),
+            2,
+            "two of the three point at the highest-ranked: {links:?}"
+        );
         assert!(links.iter().all(|(_, _, hint)| hint == "same_line"));
         assert_eq!(
-            links.iter().map(|(_, t, _)| t.as_str()).collect::<std::collections::BTreeSet<_>>().len(),
+            links
+                .iter()
+                .map(|(_, t, _)| t.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             1,
             "all point at one row"
         );
@@ -20249,10 +20267,20 @@ mod tests {
         assert_eq!(groups.len(), 1, "same defect: one cluster");
         assert_eq!(groups[0].len(), 2, "both rows are still rows");
         let head = head_of(&groups[0]);
-        assert_eq!(head.rule_id, "RLS-MISSING", "deterministic side heads the cluster");
-        assert_eq!(head.line, 10, "the head keeps its own deterministic anchor line");
+        assert_eq!(
+            head.rule_id, "RLS-MISSING",
+            "deterministic side heads the cluster"
+        );
+        assert_eq!(
+            head.line, 10,
+            "the head keeps its own deterministic anchor line"
+        );
         let severities: Vec<&str> = groups[0].iter().map(|f| f.severity.as_str()).collect();
-        assert_eq!(severities, vec!["high", "medium"], "each row keeps its own severity");
+        assert_eq!(
+            severities,
+            vec!["high", "medium"],
+            "each row keeps its own severity"
+        );
     }
 
     #[test]
@@ -20329,7 +20357,11 @@ mod tests {
             "the security finding heads the pair, never hidden behind a structural row"
         );
         let rows = crate::review_tree::collapse_and_group(vec![structural, security], &files);
-        assert_eq!(rows.len(), 2, "both rows cite the same code location and both stay");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both rows cite the same code location and both stay"
+        );
         assert_eq!(
             crate::review_tree::test_support::link_pairs(&rows),
             vec![(
@@ -20417,14 +20449,24 @@ mod tests {
             .captures
             .insert("flag".to_string(), "debug_mode".to_string());
         let groups = clusters(vec![flag, handler], &[]);
-        assert_eq!(groups.len(), 1, "cross-file findings sharing a captured object cluster");
+        assert_eq!(
+            groups.len(),
+            1,
+            "cross-file findings sharing a captured object cluster"
+        );
         assert_eq!(groups[0].len(), 2);
         let head = head_of(&groups[0]);
         assert_eq!(head.rule_id, "CONFIG-FLAG-DEBUG-MODE");
-        assert_eq!(head.severity, "medium", "the head keeps its own grounded severity");
+        assert_eq!(
+            head.severity, "medium",
+            "the head keeps its own grounded severity"
+        );
         let handler = groups[0].iter().find(|f| f.path == "handler.rs").unwrap();
         assert_eq!((handler.line, handler.severity.as_str()), (80, "high"));
-        assert!(handler.located, "both sides cite real, independently-actionable code");
+        assert!(
+            handler.located,
+            "both sides cite real, independently-actionable code"
+        );
     }
 
     #[test]
@@ -20448,10 +20490,17 @@ mod tests {
         consequence.located = false;
         let groups = clusters(vec![root, consequence], &[]);
         assert_eq!(groups.len(), 1, "they share a root cause");
-        assert_eq!(groups[0].len(), 2, "the consequence is still a row of its own");
+        assert_eq!(
+            groups[0].len(),
+            2,
+            "the consequence is still a row of its own"
+        );
         assert_eq!(head_of(&groups[0]).rule_id, "SEC-RLS-MISSING");
         let consequence = groups[0].iter().find(|f| f.path == "page.tsx").unwrap();
-        assert!(!consequence.located, "it is still marked as having no fix of its own");
+        assert!(
+            !consequence.located,
+            "it is still marked as having no fix of its own"
+        );
     }
 
     #[test]
@@ -20642,7 +20691,10 @@ mod tests {
             "AI-PAYMENT-CALL-USES-LEAKED-KEY-1",
             "AI-PAYMENT-CALL-USES-LEAKED-KEY-2",
         ] {
-            assert!(ids.contains(expected), "missing rule id {expected} in {ids:?}");
+            assert!(
+                ids.contains(expected),
+                "missing rule id {expected} in {ids:?}"
+            );
         }
         let paths: std::collections::HashSet<&str> = rows.iter().map(|l| l.path.as_str()).collect();
         for expected_path in [
@@ -20748,7 +20800,10 @@ mod tests {
             "both rows are in the cluster: {ids:?}"
         );
         let lines = crate::review_tree::test_support::cluster_lines(&groups[0]);
-        assert!(lines.contains(&10) && lines.contains(&12), "both lines kept: {lines:?}");
+        assert!(
+            lines.contains(&10) && lines.contains(&12),
+            "both lines kept: {lines:?}"
+        );
     }
 
     #[test]
@@ -20830,7 +20885,10 @@ mod tests {
             "both rows are in the cluster: {ids:?}"
         );
         let lines = crate::review_tree::test_support::cluster_lines(&groups[0]);
-        assert!(lines.contains(&10) && lines.contains(&19), "both lines kept: {lines:?}");
+        assert!(
+            lines.contains(&10) && lines.contains(&19),
+            "both lines kept: {lines:?}"
+        );
     }
 
     #[test]
@@ -20939,7 +20997,10 @@ mod tests {
         assert_eq!(groups[0].len(), 2, "both rows are kept");
         assert_eq!(groups[0][0].rule_id, "AI-WIDGET-MISCONFIG-REPEAT-1");
         let lines = crate::review_tree::test_support::cluster_lines(&groups[0]);
-        assert!(lines.contains(&100) && lines.contains(&102), "both sites kept: {lines:?}");
+        assert!(
+            lines.contains(&100) && lines.contains(&102),
+            "both sites kept: {lines:?}"
+        );
         // Two rows with no snippet prove nothing about being the same SITE, so the mechanical
         // collapse leaves both.
         assert_eq!(collapse_located(vec![first, second], &[]).len(), 2);
@@ -21028,7 +21089,8 @@ mod tests {
             "same-handler validation + bypass rules cluster despite different categories: {groups:?}"
         );
         assert_eq!(
-            head_of(&groups[0]).rule_id, "AUTH-PRIVILEGED-KEY-BYPASS-1",
+            head_of(&groups[0]).rule_id,
+            "AUTH-PRIVILEGED-KEY-BYPASS-1",
             "the security-tier rule heads the cluster"
         );
         let lines = crate::review_tree::test_support::cluster_lines(&groups[0]);
@@ -21127,7 +21189,8 @@ mod tests {
             "same construct + same inferred category + one side security-tier still cluster: {groups:?}"
         );
         assert_eq!(
-            head_of(&groups[0]).rule_id, "AUTHZ-RBAC-CHECK-INCOMPLETE-1",
+            head_of(&groups[0]).rule_id,
+            "AUTHZ-RBAC-CHECK-INCOMPLETE-1",
             "primacy (deterministic beats invented AI within the same class) is unaffected"
         );
         assert_eq!(groups[0].len(), 2, "both rows are kept");
@@ -21164,7 +21227,8 @@ mod tests {
              despite different categories: {groups:?}"
         );
         assert_eq!(
-            head_of(&groups[0]).rule_id, "ARCH-VALIDATION-INCOMPLETE-1",
+            head_of(&groups[0]).rule_id,
+            "ARCH-VALIDATION-INCOMPLETE-1",
             "primacy (deterministic beats adopted-AI within the same class) is unaffected"
         );
         assert_eq!(groups[0].len(), 2, "both rows are kept");
@@ -21239,7 +21303,10 @@ mod tests {
             "SUPABASE-RLS-PERMISSIVE-POLICY-1",
             "the policy finding heads the cluster"
         );
-        let query_row = groups[0].iter().find(|f| f.path == "src/api/invoices.ts").unwrap();
+        let query_row = groups[0]
+            .iter()
+            .find(|f| f.path == "src/api/invoices.ts")
+            .unwrap();
         assert_eq!(query_row.rule_id, "AI-QUERY-RELIES-ON-PERMISSIVE-POLICY");
     }
 

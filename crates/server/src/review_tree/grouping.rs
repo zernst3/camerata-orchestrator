@@ -18,7 +18,8 @@ use super::mapping::{family_of, place_row, RulePlacement, ToolMap};
 use super::types::{GroupRole, NodeLevel, Outlier, OutlierBy, OutlierReason, TextSource, TreeNode};
 use crate::ai_audit::{
     backfill_captured_object, backfill_credential_identity, cap_placeholder_severity,
-    categorize_rule_id, normalized_capture_values, objects_conflict, primary_rank, same_cause_signal, CauseSignal,
+    categorize_rule_id, normalized_capture_values, objects_conflict, primary_rank,
+    same_cause_signal, CauseSignal,
 };
 use crate::onboard::Finding;
 
@@ -100,8 +101,6 @@ pub fn group_semantic(
     tools: &ToolMap,
     alloc: &mut SubgroupAllocator,
 ) -> (Vec<Finding>, Vec<TreeNode>) {
-    // A carried-forward row from before grouping stopped absorbing may still hold sites.
-    super::unfold::unfold_also_locations(&mut findings);
     for f in &mut findings {
         prepare_row(f);
     }
@@ -185,7 +184,10 @@ pub fn group_semantic(
             rule_ids,
             kind: super::build::kind_of(members.iter().map(|&i| &findings[i])),
             cause: Some(cause.to_string()),
-            members: members.iter().map(|&i| findings[i].site_key.clone()).collect(),
+            members: members
+                .iter()
+                .map(|&i| findings[i].site_key.clone())
+                .collect(),
             outliers,
             summary: None,
             summary_source: TextSource::Model,
@@ -243,26 +245,26 @@ pub(super) fn cluster_rows(
     let mut uf = UnionFind::new(n);
     let mut edges: Vec<Edge> = Vec::new();
     let mut tested: HashSet<(usize, usize)> = HashSet::new();
-    let mut test = |a: usize,
-                    b: usize,
-                    findings: &[Finding],
-                    uf: &mut UnionFind,
-                    edges: &mut Vec<Edge>| {
-        let (a, b) = if a < b { (a, b) } else { (b, a) };
-        if a == b || !tested.insert((a, b)) {
-            return;
-        }
-        let content = content_of.get(findings[a].path.as_str()).copied();
-        if let Some(signal) = same_cause_signal(&findings[a], &findings[b], content) {
-            uf.union(a, b);
-            edges.push(Edge { a, b, signal });
-        }
-    };
+    let mut test =
+        |a: usize, b: usize, findings: &[Finding], uf: &mut UnionFind, edges: &mut Vec<Edge>| {
+            let (a, b) = if a < b { (a, b) } else { (b, a) };
+            if a == b || !tested.insert((a, b)) {
+                return;
+            }
+            let content = content_of.get(findings[a].path.as_str()).copied();
+            if let Some(signal) = same_cause_signal(&findings[a], &findings[b], content) {
+                uf.union(a, b);
+                edges.push(Edge { a, b, signal });
+            }
+        };
     for rows in by_repo.values() {
         // Rows of one file.
         let mut by_path: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for &i in rows {
-            by_path.entry(findings[i].path.as_str()).or_default().push(i);
+            by_path
+                .entry(findings[i].path.as_str())
+                .or_default()
+                .push(i);
         }
         for members in by_path.values_mut() {
             if members.len() <= FULL_PAIR_CAP {
@@ -328,7 +330,12 @@ fn write_links(findings: &mut [Finding], edges: &[Edge], families: &[String]) {
     let n = findings.len();
     // (hint priority, rank of the target, target index, hint) - lowest priority number wins,
     // then the highest-ranked target.
-    type Best = (u8, std::cmp::Reverse<(u8, u8, u8, u8, u8, u8, u8, usize)>, usize, String);
+    type Best = (
+        u8,
+        std::cmp::Reverse<(u8, u8, u8, u8, u8, u8, u8, usize)>,
+        usize,
+        String,
+    );
     let mut best: Vec<Option<Best>> = vec![None; n];
     let rank = |findings: &[Finding], i: usize| primary_rank(&findings[i], n, i);
     let mut offer = |findings: &[Finding], row: usize, target: usize, priority: u8, hint: &str| {
@@ -399,11 +406,10 @@ fn write_links(findings: &mut [Finding], edges: &[Edge], families: &[String]) {
     }
     let keys: Vec<String> = findings.iter().map(|f| f.site_key.clone()).collect();
     for (i, b) in best.into_iter().enumerate() {
-        findings[i].possible_duplicate_of = b.map(|(_, _, target, hint)| {
-            super::types::DuplicateLink {
+        findings[i].possible_duplicate_of =
+            b.map(|(_, _, target, hint)| super::types::DuplicateLink {
                 key: keys[target].clone(),
                 hint,
-            }
-        });
+            });
     }
 }
