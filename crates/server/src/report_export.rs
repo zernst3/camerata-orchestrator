@@ -6037,7 +6037,8 @@ enum FontSources {
 /// (matches the dep-audit coverage-note tone: name the tool, name the fix).
 ///
 /// Runs `typst compile report.typ report.pdf --root <tmpdir>` in a scratch temp dir (RAII
-/// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
+/// cleanup on drop) with a time budget that scales with the report (see [`typst_timeout`]),
+/// with `SOURCE_DATE_EPOCH` pinned to the report's own
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
@@ -6048,8 +6049,92 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     Ok(pdf)
 }
 
-/// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
+/// The least time Typst is given to compile a report, however small.
+pub(crate) const TYPST_TIMEOUT_BASE: Duration = Duration::from_secs(30);
+
+/// Time added for every site the PDF prints. Measured, not guessed: a synthetic report of
+/// 30,000 sites compiled in about 22 seconds on a development laptop (0.75 ms a site, linear
+/// from 2,000 sites up), so 5 ms a site is about six times what the measurement needs and
+/// leaves room for a slower machine.
+pub(crate) const TYPST_TIMEOUT_PER_SITE: Duration = Duration::from_millis(5);
+
+/// The most time Typst is ever given. A report that needs more than this is too large to render
+/// as one PDF, and the export says so rather than waiting on it.
+pub(crate) const TYPST_TIMEOUT_CEILING: Duration = Duration::from_secs(15 * 60);
+
+/// How long Typst may take to compile a report that prints `sites` sites: [`TYPST_TIMEOUT_BASE`]
+/// plus [`TYPST_TIMEOUT_PER_SITE`] for each, never more than [`TYPST_TIMEOUT_CEILING`].
+pub(crate) fn typst_timeout(sites: usize) -> Duration {
+    let per_site = u32::try_from(sites)
+        .ok()
+        .and_then(|n| TYPST_TIMEOUT_PER_SITE.checked_mul(n));
+    match per_site.and_then(|extra| TYPST_TIMEOUT_BASE.checked_add(extra)) {
+        Some(total) => total.min(TYPST_TIMEOUT_CEILING),
+        None => TYPST_TIMEOUT_CEILING,
+    }
+}
+
+/// How many sites the PDF prints: every site on a curated card and on a held-for-review card.
+/// The size the time budget scales with. Zero for data that does not parse, which gets the base
+/// budget; a malformed document fails in Typst quickly, not slowly.
+fn pdf_site_count(data_json: &str) -> usize {
+    #[derive(serde::Deserialize, Default)]
+    struct Group {
+        #[serde(default)]
+        sites: Vec<serde::de::IgnoredAny>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Probe {
+        #[serde(default)]
+        curated_findings: Vec<Group>,
+        #[serde(default)]
+        held_for_review_findings: Vec<Group>,
+    }
+    serde_json::from_str::<Probe>(data_json)
+        .map(|p| {
+            p.curated_findings
+                .iter()
+                .chain(&p.held_for_review_findings)
+                .map(|g| g.sites.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// The error for a compile that outlived its budget: the size of the report, the time it was
+/// given and, when that was the ceiling, that the report is too large to render as one PDF.
+fn typst_timeout_message(sites: usize, allowed: Duration) -> String {
+    let secs = allowed.as_secs();
+    if allowed >= TYPST_TIMEOUT_CEILING {
+        format!(
+            "typst compile timed out after {secs}s on a report of {sites} sites: that is the \
+             ceiling ({}s) and the report is too large to render as one PDF. No PDF was produced.",
+            TYPST_TIMEOUT_CEILING.as_secs()
+        )
+    } else {
+        format!(
+            "typst compile timed out after {secs}s on a report of {sites} sites (the time \
+             allowed for that size: {}s plus {} ms a site). No PDF was produced.",
+            TYPST_TIMEOUT_BASE.as_secs(),
+            TYPST_TIMEOUT_PER_SITE.as_millis()
+        )
+    }
+}
+
+/// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success). Given the
+/// time [`typst_timeout`] allows for a report of this size.
 async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
+    let allowed = typst_timeout(pdf_site_count(data_json));
+    run_typst_within(data_json, fonts, allowed).await
+}
+
+/// [`run_typst`] with an explicit time budget. A compile that exceeds it is killed and fails the
+/// export: whatever Typst had written is never read, so a partial PDF cannot ship.
+async fn run_typst_within(
+    data_json: &str,
+    fonts: FontSources,
+    allowed: Duration,
+) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -6111,13 +6196,13 @@ async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u
     let epoch = creation_epoch(data_json).unwrap_or_else(|| chrono::Utc::now().timestamp());
     cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
 
-    let output = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
+    let output = match tokio::time::timeout(allowed, cmd.output()).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!("Install Typst: brew install typst");
         }
         Ok(Err(e)) => return Err(anyhow::Error::new(e).context("could not run typst")),
-        Err(_elapsed) => anyhow::bail!("typst compile timed out after 30s"),
+        Err(_elapsed) => anyhow::bail!(typst_timeout_message(pdf_site_count(data_json), allowed)),
     };
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -13736,6 +13821,92 @@ mod tests {
             !template.contains("d.matrix.do_now") && !template.contains("d.matrix.accepted"),
             "the severity x effort section must read from d.priority_grid, not d.matrix directly"
         );
+    }
+
+    // ── M8 item 3: the typst time budget scales with the document ──────────────────────
+
+    #[test]
+    fn the_typst_time_budget_is_a_base_plus_a_per_site_allowance_up_to_a_ceiling() {
+        assert_eq!(typst_timeout(0), TYPST_TIMEOUT_BASE);
+        assert_eq!(
+            typst_timeout(1_000),
+            TYPST_TIMEOUT_BASE + TYPST_TIMEOUT_PER_SITE * 1_000
+        );
+        assert!(
+            typst_timeout(30_000) > Duration::from_secs(30),
+            "a 30,000-site report must get more than the old fixed 30 seconds"
+        );
+        assert!(typst_timeout(2_000) > typst_timeout(1_000));
+        assert_eq!(typst_timeout(usize::MAX / 2), TYPST_TIMEOUT_CEILING);
+        assert!(TYPST_TIMEOUT_BASE <= TYPST_TIMEOUT_CEILING);
+    }
+
+    #[test]
+    fn the_site_count_is_every_site_on_a_curated_or_held_card() {
+        let data = serde_json::json!({
+            "curated_findings": [{"sites": [{}, {}, {}]}, {"sites": [{}]}],
+            "held_for_review_findings": [{"sites": [{}, {}]}],
+            "cover": {"project_title": "x"}
+        })
+        .to_string();
+        assert_eq!(pdf_site_count(&data), 6);
+        assert_eq!(pdf_site_count("{}"), 0);
+        assert_eq!(pdf_site_count("not json"), 0);
+    }
+
+    /// A typst that outlives its budget fails the export with a message that names the size and
+    /// the budget, and ships no PDF.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_typst_that_outlives_its_budget_fails_naming_the_size_and_ships_no_pdf() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("typst");
+        // Writes a partial PDF, then keeps going past the budget.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%%PDF-partial' > report.pdf\nexec sleep 30\n",
+        )
+        .expect("write the fake typst");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let data = serde_json::json!({
+            "curated_findings": [{"sites": [{}, {}, {}, {}, {}]}],
+            "held_for_review_findings": []
+        })
+        .to_string();
+        let started = std::time::Instant::now();
+        let result = TYPST_PROGRAM
+            .scope(
+                script,
+                run_typst_within(&data, FontSources::BundledFirst, Duration::from_millis(300)),
+            )
+            .await;
+        let error = result.expect_err("a typst past its budget must fail the export");
+        let message = format!("{error:#}");
+        assert!(message.contains("timed out"), "{message}");
+        assert!(
+            message.contains("5 sites"),
+            "the error must name the size of the report: {message}"
+        );
+        assert!(
+            message.contains("No PDF was produced"),
+            "the error must say no partial PDF was kept: {message}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the compile must be stopped at the budget, not left to finish"
+        );
+    }
+
+    #[test]
+    fn the_timeout_message_names_the_size_the_budget_and_whether_the_ceiling_was_hit() {
+        let below = typst_timeout_message(5_000, typst_timeout(5_000));
+        assert!(below.contains("5000 sites"), "{below}");
+        assert!(below.contains("No PDF was produced"), "{below}");
+        assert!(!below.contains("ceiling"), "{below}");
+        let at_ceiling = typst_timeout_message(10_000_000, TYPST_TIMEOUT_CEILING);
+        assert!(at_ceiling.contains("ceiling"), "{at_ceiling}");
+        assert!(at_ceiling.contains("10000000 sites"), "{at_ceiling}");
     }
 
     /// M8 item 2: the PDF renders each site ONCE. The severity x effort grid used to print every
