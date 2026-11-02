@@ -13860,6 +13860,9 @@ mod request_budget_tests;
 mod batch_split_tests;
 
 #[cfg(test)]
+mod scale_tests;
+
+#[cfg(test)]
 mod malformed_reply_tests;
 
 #[cfg(test)]
