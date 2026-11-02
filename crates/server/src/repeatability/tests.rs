@@ -271,3 +271,112 @@ fn each_leftover_pairs_by_site_at_most_once_and_the_closest_line_wins() {
     assert_eq!(diff.only_in_first[0].line, 20);
     assert!(diff.only_in_second.is_empty());
 }
+
+// ── pair_runs: how two runs pair, as indices ────────────────────────────────────────────────
+
+fn pair(first: &[Finding], second: &[Finding]) -> RunPairing {
+    let a: Vec<&Finding> = first.iter().collect();
+    let b: Vec<&Finding> = second.iter().collect();
+    pair_runs(&a, &b)
+}
+
+#[test]
+fn pair_runs_pairs_the_same_fingerprint_exactly_wherever_the_line_is() {
+    let first = vec![
+        finding("SEC-X-1", "src/a.rs", 10, "high", "danger()"),
+        finding("SEC-X-1", "src/b.rs", 5, "high", "other()"),
+    ];
+    // The first moved 200 lines and was reformatted; the second is where it was.
+    let second = vec![
+        finding("SEC-X-1", "src/b.rs", 5, "high", "other()"),
+        finding("SEC-X-1", "src/a.rs", 210, "high", "  danger()  "),
+    ];
+    let p = pair(&first, &second);
+    let mut exact = p.exact.clone();
+    exact.sort();
+    assert_eq!(exact, vec![(0, 1), (1, 0)]);
+    assert!(p.by_site.is_empty() && p.only_first.is_empty() && p.only_second.is_empty());
+}
+
+#[test]
+fn pair_runs_pairs_by_site_only_when_the_snippet_changed_within_the_window() {
+    let near = crate::ai_audit::SEMANTIC_MERGE_WINDOW;
+    let first = vec![
+        // Same rule and file, the snippet quoted differently, a few lines away: by site.
+        finding("SEC-X-1", "src/a.rs", 40, "high", "run(user_input)"),
+        // Nothing in the second run comes near it.
+        finding("SEC-X-1", "src/c.rs", 3, "high", "gone()"),
+    ];
+    let second = vec![
+        finding(
+            "SEC-X-1",
+            "src/a.rs",
+            40 + near,
+            "high",
+            "run(escape(user_input))",
+        ),
+        // A different rule at the same place is not the same defect.
+        finding("SEC-Y-1", "src/c.rs", 3, "high", "gone()"),
+    ];
+    let p = pair(&first, &second);
+    assert!(p.exact.is_empty());
+    assert_eq!(p.by_site, vec![(0, 0)]);
+    assert_eq!(p.only_first, vec![1]);
+    assert_eq!(p.only_second, vec![1]);
+}
+
+#[test]
+fn pair_runs_does_not_pair_by_site_beyond_the_window() {
+    let far = crate::ai_audit::SEMANTIC_MERGE_WINDOW + 1;
+    let first = vec![finding("SEC-X-1", "src/a.rs", 40, "high", "one()")];
+    let second = vec![finding("SEC-X-1", "src/a.rs", 40 + far, "high", "two()")];
+    let p = pair(&first, &second);
+    assert!(p.exact.is_empty() && p.by_site.is_empty());
+    assert_eq!(p.only_first, vec![0]);
+    assert_eq!(p.only_second, vec![0]);
+}
+
+#[test]
+fn pair_runs_pairs_each_row_once_and_takes_the_closest_line_first() {
+    // One row in the first run, two candidates in the second: the nearer one pairs, the other is
+    // left over. Repeats of one fingerprint pair in order, the later copy is the one left over.
+    let first = vec![
+        finding("SEC-X-1", "src/a.rs", 50, "high", "old()"),
+        finding("SEC-Z-1", "src/z.rs", 1, "high", "x()"),
+        finding("SEC-Z-1", "src/z.rs", 9, "high", "x()"),
+    ];
+    let second = vec![
+        finding("SEC-X-1", "src/a.rs", 56, "high", "new_far()"),
+        finding("SEC-X-1", "src/a.rs", 52, "high", "new_near()"),
+        finding("SEC-Z-1", "src/z.rs", 2, "high", "x()"),
+    ];
+    let p = pair(&first, &second);
+    assert_eq!(p.by_site, vec![(0, 1)], "the nearer line wins");
+    assert_eq!(p.only_second, vec![0], "the farther candidate is left over");
+    assert_eq!(p.exact, vec![(1, 2)], "repeats pair in order");
+    assert_eq!(
+        p.only_first,
+        vec![2],
+        "the later repeat is the one left over"
+    );
+}
+
+#[test]
+fn diff_runs_counts_are_the_pairing_counts() {
+    let first = vec![
+        finding("SEC-X-1", "src/a.rs", 10, "high", "same()"),
+        finding("SEC-X-1", "src/a.rs", 40, "high", "edited(1)"),
+        finding("SEC-X-1", "src/b.rs", 1, "high", "fixed()"),
+    ];
+    let second = vec![
+        finding("SEC-X-1", "src/a.rs", 10, "high", "same()"),
+        finding("SEC-X-1", "src/a.rs", 41, "high", "edited(2)"),
+        finding("SEC-X-1", "src/c.rs", 1, "high", "new()"),
+    ];
+    let p = pair(&first, &second);
+    let d = diff_runs(&first, &second);
+    assert_eq!(d.matched, p.exact.len());
+    assert_eq!(d.matched_by_site, p.by_site.len());
+    assert_eq!(d.only_in_first.len(), p.only_first.len());
+    assert_eq!(d.only_in_second.len(), p.only_second.len());
+}
