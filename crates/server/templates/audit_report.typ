@@ -666,14 +666,13 @@
 // their intersection reads as "zero" without needing a word for it (and this house style never
 // uses an em/en dash as a placeholder either, see `or_na` above).
 #let grid_cell_content(cell) = {
-  if cell.findings.len() == 0 [] else [
-    #for f in cell.findings [
-      #block(above: 2pt, below: 6pt)[
-        #text(size: 8pt, fill: ink)[#f.headline]
-        #linebreak()
-        #text(font: mono, size: 7.5pt, fill: ink_faint)[#f.repo / #breakable(f.path, n: 24), line #str(f.line) (#f.rule_id)]
-      ]
-    ]
+  // M8: a cell COUNTS its findings. It used to list each one's headline and location a second
+  // time, beside the curated card that is the one place a site is described in full; at report
+  // scale that doubled the document. The cards carry the severity, effort and location, in the
+  // order the grid is read.
+  let n = cell.findings.len()
+  if n == 0 [] else [
+    #text(size: 9pt, weight: 600, fill: ink)[#str(n)] #text(size: 8pt, fill: ink_faint)[#plural(n, "finding", "findings")]
   ]
 }
 
@@ -690,6 +689,11 @@
       ..row.cells.map(cell => grid_cell_content(cell)),
     )).flatten()
   )
+]
+
+#if d.priority_grid.rows.len() > 0 [
+  #v(0.3cm)
+  #text(size: 8.5pt, fill: ink_faint)[Each cell counts the findings in it. Every finding is listed once, in Curated findings, with its severity, effort and location.]
 ]
 
 #if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 [

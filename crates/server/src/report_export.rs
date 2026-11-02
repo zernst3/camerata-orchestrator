@@ -13738,6 +13738,82 @@ mod tests {
         );
     }
 
+    /// M8 item 2: the PDF renders each site ONCE. The severity x effort grid used to print every
+    /// finding's headline and location a second time, beside the curated card that is the one
+    /// place a site is described in full. The grid now counts: a cell says how many findings it
+    /// holds and the cards list them. Pinned on the shipped template source (the grid cell must
+    /// not interpolate any per-finding field) and, with typst present, on the rendered text.
+    #[test]
+    fn shipped_template_priority_grid_counts_findings_instead_of_listing_them_again() {
+        let template = include_str!("../templates/audit_report.typ");
+        let start = template
+            .find("#let grid_cell_content(cell)")
+            .expect("the grid cell renderer");
+        let end = template[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("the end of the grid cell renderer");
+        let body = &template[start..end];
+        for per_finding_field in ["f.headline", "f.path", "f.repo", "f.line", "f.rule_id"] {
+            assert!(
+                !body.contains(per_finding_field),
+                "the grid cell must not print {per_finding_field}: the curated card is the one \
+                 place a site is described. Cell body:\n{body}"
+            );
+        }
+        assert!(
+            body.contains("cell.findings.len()"),
+            "the grid cell must count its findings"
+        );
+        assert!(
+            template.contains("listed once, in Curated findings"),
+            "the grid must say where the findings are listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_pdf_prints_each_action_site_exactly_once() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_prints_each_action_site_exactly_once: typst not on PATH"
+            );
+            return;
+        }
+        let findings: Vec<Finding> = (0..8)
+            .map(|i| {
+                finding(
+                    "SEC-NO-RAW-SQL-CONCAT-1",
+                    &format!("src/orders/handler_{i}.rs"),
+                    10 + i,
+                    "medium",
+                )
+            })
+            .collect();
+        let report = report_with(findings, vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let in_grid: usize = json
+            .priority_grid
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .map(|c| c.findings.len())
+            .sum();
+        let on_cards: usize = json.curated_findings.iter().map(|g| g.sites.len()).sum();
+        assert_eq!(in_grid, 8, "all eight reach the grid");
+        assert_eq!(on_cards, 8, "all eight have a card");
+
+        let pdf = compile_pdf(&json).await.expect("the report must compile");
+        let text = pdf_extract::extract_text_from_mem(&pdf).expect("text of the compiled PDF");
+        for i in 0..8 {
+            let path = format!("handler_{i}.rs");
+            assert_eq!(
+                text.matches(&path).count(),
+                1,
+                "{path} must be printed exactly once in the PDF: {text}"
+            );
+        }
+    }
+
     /// Branding regression: no hardcoded agency/"Camerata" cover title, no "Brownfield".
     #[test]
     fn shipped_template_has_no_hardcoded_cover_title() {
