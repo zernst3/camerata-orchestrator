@@ -1881,7 +1881,8 @@ const TYPO_MATCH_MAX_EDITS: usize = 2;
 
 /// The adopted rule id a mistyped label means (R1B-3): the one adopted id within
 /// [`TYPO_MATCH_MAX_EDITS`] edits of the label (`JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1`
-/// for `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1`). Two or more adopted ids that close, no
+/// for `JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1`), judged on the id without its numeric
+/// suffix, which must be identical. Two or more adopted ids that close, no
 /// adopted id that close, a short or unhyphenated label or one naming a placeholder: `None`, so
 /// the label keeps its `AI-` invented id and the junk filter still sees a placeholder.
 fn adopted_typo_match(norm: &str, adopted: &std::collections::HashSet<String>) -> Option<String> {
@@ -1891,14 +1892,31 @@ fn adopted_typo_match(norm: &str, adopted: &std::collections::HashSet<String>) -
     {
         return None;
     }
+    // The trailing `-<digits>` names which rule of a numbered family it is (`RUST-DIOXUS-3` and
+    // `RUST-DIOXUS-7` are different rules), so it is never a typo: suffixes must be identical
+    // and only the stems are compared.
+    let (stem, suffix) = split_numeric_suffix(norm);
     let mut close = adopted.iter().filter(|a| {
+        let (a_stem, a_suffix) = split_numeric_suffix(a);
         a.len() >= TYPO_MATCH_MIN_LEN
-            && a.len().abs_diff(norm.len()) <= TYPO_MATCH_MAX_EDITS
-            && edit_distance(norm, a) <= TYPO_MATCH_MAX_EDITS
+            && a_suffix == suffix
+            && a_stem.len().abs_diff(stem.len()) <= TYPO_MATCH_MAX_EDITS
+            && edit_distance(stem, a_stem) <= TYPO_MATCH_MAX_EDITS
     });
     match (close.next(), close.next()) {
         (Some(only), None) => Some(only.clone()),
         _ => None,
+    }
+}
+
+/// Split a rule id at its trailing `-<digits>`: `("RUST-DIOXUS", "-3")`. An id with no numeric
+/// suffix returns the whole id and an empty suffix.
+fn split_numeric_suffix(id: &str) -> (&str, &str) {
+    match id.rfind('-') {
+        Some(i) if i + 1 < id.len() && id[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            id.split_at(i)
+        }
+        _ => (id, ""),
     }
 }
 
@@ -14831,6 +14849,13 @@ mod tests {
             Some("SUPABASE-AUTH-SESSION-REFRESH-ROTATION-1".to_string()),
             "one adopted id within two edits"
         );
+        // The numeric suffix names a different rule per number, so it is never a typo.
+        let numbered: std::collections::HashSet<String> =
+            ["RUST-DIOXUS-3".to_string(), "SQL-DB-INDEX-1".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(adopted_typo_match("RUST-DIOXUS-7", &numbered), None);
+        assert_eq!(adopted_typo_match("SQL-DB-INDEX-2", &numbered), None);
         for rule in [ambiguous, "SUPABASE-AUTH-SESSION-TIMEOUT-HANDLING-1"] {
             let raw = format!(
                 r#"{{"findings":[{{"path":"a.ts","line":3,"rule":"{rule}",
