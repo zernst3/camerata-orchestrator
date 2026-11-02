@@ -108,7 +108,7 @@ impl InspectionEntry {
     /// Build an entry from a completed report. `id` is assigned by [`InspectionStore::append`]
     /// (it needs the existing list to stay unique); this leaves it empty.
     pub fn from_report(project_id: &str, mut report: ScanReport, kind: InspectionKind) -> Self {
-        backfill_site_keys(&mut report.findings);
+        report.normalize_loaded();
         let p = &report.provenance;
         Self {
             id: String::new(),
@@ -170,23 +170,28 @@ pub struct InspectionStore {
 /// from the row's own fields, so a report saved before the field existed (or edited since) comes
 /// out correct, and one that already has keys comes out unchanged.
 pub fn backfill_site_keys(findings: &mut [Finding]) {
-    let keys = {
-        let rows: Vec<camerata_api_types::site_key::SiteKeyRow<'_>> = findings
-            .iter()
-            .map(|f| camerata_api_types::site_key::SiteKeyRow {
-                repo: &f.repo,
-                path: &f.path,
-                rule_id: &f.rule_id,
-                snippet: &f.snippet,
-                line: f.line,
-                advisory: advisory_of(f),
-            })
-            .collect();
-        camerata_api_types::site_key::site_keys(&rows)
-    };
+    let keys = site_keys_of(findings);
     for (f, key) in findings.iter_mut().zip(keys) {
         f.site_key = key;
     }
+}
+
+/// The site key each of `findings` has (or would have), in the order given, without touching
+/// the rows. [`backfill_site_keys`] writes these; the collapse pass reads them to name a source
+/// it is about to fold into another row.
+pub(crate) fn site_keys_of(findings: &[Finding]) -> Vec<String> {
+    let rows: Vec<camerata_api_types::site_key::SiteKeyRow<'_>> = findings
+        .iter()
+        .map(|f| camerata_api_types::site_key::SiteKeyRow {
+            repo: &f.repo,
+            path: &f.path,
+            rule_id: &f.rule_id,
+            snippet: &f.snippet,
+            line: f.line,
+            advisory: advisory_of(f),
+        })
+        .collect();
+    camerata_api_types::site_key::site_keys(&rows)
 }
 
 /// The advisory id of a dependency row; empty for every other row.
@@ -226,7 +231,7 @@ impl InspectionStore {
                     }) {
                     Ok(file) => {
                         for mut entry in file.entries {
-                            backfill_site_keys(&mut entry.report.findings);
+                            entry.report.normalize_loaded();
                             mem.entry(entry.project_id.clone()).or_default().push(entry);
                         }
                     }
@@ -273,7 +278,7 @@ impl InspectionStore {
     /// entry. A persistence failure is returned as `Err` AFTER the in-memory copy is updated, so
     /// the running app keeps working; the caller logs it.
     pub fn append(&self, mut entry: InspectionEntry) -> Result<InspectionEntry, std::io::Error> {
-        backfill_site_keys(&mut entry.report.findings);
+        entry.report.normalize_loaded();
         let mut guard = self.lock();
         let list = guard.entry(entry.project_id.clone()).or_default();
         entry.id = unique_id(&entry, list);
@@ -302,7 +307,7 @@ impl InspectionStore {
         project_id: &str,
         mut report: ScanReport,
     ) -> Result<bool, std::io::Error> {
-        backfill_site_keys(&mut report.findings);
+        report.normalize_loaded();
         self.update_latest(project_id, |e| e.report = report)
     }
 

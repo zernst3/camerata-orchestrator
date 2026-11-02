@@ -488,6 +488,10 @@ mod tests {
         let findings = vec![crate::onboard::Finding {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "owner/repo".to_string(),
             kind: None,
             path: "src/db.py".to_string(),
@@ -559,6 +563,10 @@ mod tests {
             crate::onboard::Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/db.py".to_string(),
@@ -587,6 +595,10 @@ mod tests {
             crate::onboard::Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/legacy.py".to_string(),
@@ -615,6 +627,10 @@ mod tests {
             crate::onboard::Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/some.rs".to_string(),

@@ -348,7 +348,7 @@ fn a_site_mark_from_an_earlier_run_is_cleared_when_every_site_now_verifies() {
     assert!(sites_listed(&rows[0]).is_none());
 }
 
-// ── a structural group keeps its occurrences' marks ──────────────────────────────────────────
+// ── grouping keeps every row's own mark ──────────────────────────────────────────────────────
 
 fn structural(line: usize, snippet: &str) -> Finding {
     Finding {
@@ -361,43 +361,54 @@ fn structural(line: usize, snippet: &str) -> Finding {
 }
 
 #[test]
-fn a_group_whose_occurrence_has_a_fabricated_snippet_is_held_and_names_the_site() {
-    // The check runs on the occurrences; the group row is built afterwards and its own snippet
-    // ("2 location(s)") is synthetic, so the marks must be carried onto it.
+fn grouping_keeps_a_fabricated_occurrences_mark_on_that_row_and_only_that_row() {
+    // Nothing is folded into a group row any more, so the check's marks stay on the rows it
+    // marked: the fabricated occurrence stays held and names its site, its neighbour is untouched.
     let mut rows = vec![
         structural(3, "const app = express();"),
         structural(6, "this line was never written"),
     ];
     verify_evidence(&mut rows, &files(), None);
-    let grouped = crate::ai_audit::group_structural_needs_review(rows);
-    assert_eq!(grouped.len(), 1);
-    let group = &grouped[0];
-    assert_eq!(group.snippet, "2 location(s)");
-    assert!(marked(group), "the group is held: {:?}", group.captures);
-    assert_eq!(sites_listed(group), Some("src/app.ts:6"));
+    let grouped = crate::review_tree::collapse_and_group(rows, &[]);
+    assert_eq!(grouped.len(), 2, "both occurrences are still rows");
+    let fabricated = grouped.iter().find(|f| f.line == 6).unwrap();
+    assert!(marked(fabricated), "held: {:?}", fabricated.captures);
+    assert!(
+        sites_listed(fabricated).is_none(),
+        "the row is its own site"
+    );
+    let real = grouped.iter().find(|f| f.line == 3).unwrap();
+    assert!(!marked(real));
+    assert_eq!(
+        fabricated.group_path[1], real.group_path[1],
+        "one rule node"
+    );
 }
 
 #[test]
-fn a_group_names_a_failing_primary_and_an_occurrences_failing_absorbed_site_once_each() {
+fn grouping_keeps_a_failing_absorbed_site_named_on_its_row() {
     let mut first = structural(3, "never written either");
     first.also_locations = vec![site("src/app.ts", 5, "also never written")];
-    let mut second = structural(6, REAL);
-    second.also_locations = vec![site("src/app.ts", 5, "also never written")];
-    let mut rows = vec![first, second];
+    let mut rows = vec![first, structural(6, REAL)];
     verify_evidence(&mut rows, &files(), None);
-    let grouped = crate::ai_audit::group_structural_needs_review(rows);
-    let group = &grouped[0];
-    assert!(marked(group));
-    assert_eq!(sites_listed(group), Some("src/app.ts:3\nsrc/app.ts:5"));
+    let grouped = crate::review_tree::collapse_and_group(rows, &[]);
+    let held = grouped.iter().find(|f| f.line == 3).unwrap();
+    assert!(marked(held));
+    assert_eq!(
+        sites_listed(held),
+        Some("src/app.ts:5"),
+        "the failing absorbed site is named"
+    );
 }
 
 #[test]
-fn a_group_of_verified_occurrences_is_not_held_by_this_rule() {
+fn grouped_verified_occurrences_are_not_held_by_this_rule() {
     let mut rows = vec![structural(3, "const app = express();"), structural(6, REAL)];
     verify_evidence(&mut rows, &files(), None);
-    let grouped = crate::ai_audit::group_structural_needs_review(rows);
-    assert!(!marked(&grouped[0]));
-    assert!(sites_listed(&grouped[0]).is_none());
+    let grouped = crate::review_tree::collapse_and_group(rows, &[]);
+    assert!(grouped
+        .iter()
+        .all(|f| !marked(f) && sites_listed(f).is_none()));
 }
 
 // ── absorbed sites the check does not apply to are counted too ───────────────────────────────

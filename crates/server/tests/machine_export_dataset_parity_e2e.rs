@@ -279,6 +279,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
 
     let report = ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -539,14 +540,17 @@ const FINDING_RENDERED: [&str; 27] = [
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
 /// - `also_locations`: rendered, but flattened into the "Also found at" column;
+/// - `flagged_by`: the sources collapsed into the row; a source that cited another line is
+///   listed in the same "Also found at" column;
 /// - `site_count`: rendered as the "Sites" column;
 /// - `is_fp` / `fp_reason`: the False Positives sheet's identity and its extra "FP Reason"
 ///   column; the live sheets have no such column;
 /// - the kind payload (`deviating_sites` ... `reason_detail`): the sheet shows the kind TAG only
 ///   in a findings row; the payload is rendered on the Deviations / Conventions / Coverage
 ///   tables, which this test checks against their own datasets.
-const FINDING_EXTRA_KEYS: [&str; 12] = [
+const FINDING_EXTRA_KEYS: [&str; 13] = [
     "also_locations",
+    "flagged_by",
     "site_count",
     "is_fp",
     "fp_reason",

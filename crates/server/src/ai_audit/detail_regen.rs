@@ -3,15 +3,15 @@
 //!
 //! # Where this runs, and why there
 //!
-//! In `audit_repo`, between `merge_by_location` and `verify_findings` (calibration). That is the
+//! In `audit_repo`, between `collapse_identical` and `verify_findings` (calibration). That is the
 //! earliest point at which "the findings that survive" is known, and the latest point at which
 //! every consumer that decides something from the free text can still be handed the full text:
 //!
 //! | consumer | runs | on |
 //! |---|---|---|
-//! | `merge_by_location` (exact `(path, line)` merge, `primary_rank`) | before | short: it reads path, line, snippet, rule id, severity, never `detail` |
+//! | `collapse_identical` (exact `(path, line)` merge, `primary_rank`) | before | short: it reads path, line, snippet, rule id, severity, never `detail` |
 //! | calibration prompt, `apply_verdicts` precondition check, D5 floor, D6 ceiling | after | full: verdicts are judged from the explanation |
-//! | `merge_semantic_groups` (`semantic_pair_merges`: prose overlap, object veto) | after | full: the signals are lexical overlap and named objects in the prose |
+//! | `group_semantic` (`same_cause_signal`: prose overlap, object veto) | after | full: the signals are lexical overlap and named objects in the prose |
 //! | `fix_evidence_blob` (the fix self-check's grounding set) | after | full: a fix may name anything the explanation names |
 //!
 //! The reasons and the tests that pin each row are in `docs/TECHNICAL.md`, "Terse scan output".

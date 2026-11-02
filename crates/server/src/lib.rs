@@ -7152,13 +7152,14 @@ pub(crate) fn dedup_scan_previews_with(
     selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
+    let tools = crate::review_tree::ToolMap::from_selectors(selectors);
 
     for preview in previews {
-        let preview_cat = finding_security_category(&preview.rule_id);
-
-        // An existing finding at the same location that is the same rule, the native rule this
-        // tool rule enforces, or (security) the same category. The category must be Some (we
-        // don't collapse unrecognized categories).
+        // An existing finding at the same location that is the same rule or the same rule
+        // FAMILY: the native rule this tool rule enforces, or another tool's rule enforcing that
+        // same native rule (`review_tree::family_of`). A row of another family at the same line
+        // is NOT folded in: it stays its own row and the grouping pass links it.
+        let preview_family = crate::review_tree::family_of(&preview, &tools);
         let same_place = |f: &crate::onboard::Finding| {
             f.repo == preview.repo && f.path == preview.path && f.line == preview.line
         };
@@ -7171,9 +7172,7 @@ pub(crate) fn dedup_scan_previews_with(
                 existing.iter().position(|f| {
                     same_place(f)
                         && (preview_is_native_rule_tool(&preview.rule_id, &f.rule_id, selectors)
-                            || preview_cat.is_some_and(|cat| {
-                                finding_security_category(&f.rule_id) == Some(cat)
-                            }))
+                            || crate::review_tree::family_of(f, &tools) == preview_family)
                 })
             });
 
@@ -7202,6 +7201,8 @@ pub(crate) fn dedup_scan_previews_with(
                 } else if let Some(tool) = preview.preview_tool.as_deref() {
                     note_also_seen_by(&mut existing[idx], tool);
                 }
+                // The collapsed tool row keeps its own rule, tool, key and line (A1).
+                existing[idx].flagged_by.push(flagged_by_of(&preview));
                 existing[idx].severity = severity;
                 // drop the preview finding (continue to next)
             } else {
@@ -7216,6 +7217,11 @@ pub(crate) fn dedup_scan_previews_with(
                 {
                     new_canonical.also_matches.push(old_rule_id);
                 }
+                // The row it replaces becomes a collapsed source, with what it had collected.
+                new_canonical
+                    .flagged_by
+                    .append(&mut existing[idx].flagged_by);
+                new_canonical.flagged_by.push(flagged_by_of(&existing[idx]));
                 new_canonical.severity = severity;
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
@@ -7228,6 +7234,19 @@ pub(crate) fn dedup_scan_previews_with(
     }
 
     out
+}
+
+/// The record a row leaves on the row it is collapsed into: its own rule, tool, line and key.
+fn flagged_by_of(f: &crate::onboard::Finding) -> crate::review_tree::FlaggedBy {
+    crate::review_tree::FlaggedBy {
+        rule_id: f.rule_id.clone(),
+        tool: f.preview_tool.clone(),
+        site_key: camerata_api_types::site_key::site_key(
+            &f.repo, &f.path, &f.rule_id, &f.snippet, 0,
+        ),
+        path: f.path.clone(),
+        line: f.line,
+    }
 }
 
 /// Backward-compatible alias kept so the large existing test suite (`dedup_preview_against_floor`)
@@ -28716,6 +28735,7 @@ mod tests {
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
         crate::onboard::ScanReport {
             run_id: None,
+            tree: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -28733,6 +28753,10 @@ mod tests {
             findings: vec![crate::onboard::Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/main.rs".to_string(),

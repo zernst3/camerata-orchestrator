@@ -187,6 +187,11 @@ pub struct FindingRow {
     /// Serialized into `findings.json` and rendered in the workbook's "Also found at"
     /// column, so every absorbed site is observable in the detail artifacts.
     also_locations: Vec<crate::onboard::MergedLocation>,
+    /// Every source that was collapsed into this row because it was mechanically the same site
+    /// (`Finding::flagged_by`), each with its OWN path and line (amendment A1): a collapse never
+    /// loses a location. Serialized into `findings.json` and listed in the workbook's "Also found
+    /// at" column when the source cited another line.
+    flagged_by: Vec<crate::review_tree::FlaggedBy>,
     /// The row's own place from the RAW finding (the `snippet` above is capped for the
     /// workbook, which would tell a line-0 row apart from its own absorbed member wrongly).
     /// Not exported.
@@ -563,6 +568,7 @@ fn partition_rows(
             is_fp,
             fp_reason,
             also_locations: f.also_locations.clone(),
+            flagged_by: f.flagged_by.clone(),
             place: f.place(),
             site_count: f.distinct_site_count(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
@@ -1154,6 +1160,16 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + row.also_locations.len());
     if !row.path.is_empty() {
         out.push(site_label(row.multi_repo, &row.repo, &row.path, row.line));
+    }
+    // A collapsed source that cited another line keeps that line (amendment A1).
+    for b in &row.flagged_by {
+        if b.path == row.path && b.line == row.line {
+            continue;
+        }
+        let label = site_label(row.multi_repo, &row.repo, &b.path, b.line);
+        if !out.contains(&label) {
+            out.push(label);
+        }
     }
     // Only members at a DIFFERENT place are sites; the rest are "also flagged" notes.
     for l in
@@ -3593,6 +3609,7 @@ mod tests {
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             run_id: None,
+            tree: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -6200,6 +6217,63 @@ mod tests {
         let site = &json.curated_findings[0].sites[0];
         assert_eq!(site.site_count, 3);
         assert_eq!(site.also_locations.len(), 2);
+    }
+
+    /// Amendment A1: a source collapsed into a row keeps its OWN line. findings.json carries it in
+    /// `flagged_by` with its path and line, `site_count` counts it as a place, and the workbook's
+    /// "Also found at" column names it. (The SARIF half of the same test lands with the SARIF
+    /// work order.)
+    #[test]
+    fn collapsed_sources_keep_their_own_line_in_sites_sheet_and_sarif() {
+        let mut floor = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        floor.snippet = "let q = format!(\"SELECT {}\", id);".to_string();
+        let mut tool = finding(
+            "camerata.security.sql-string-concat-python",
+            "src/orders.rs",
+            12,
+            "high",
+        );
+        tool.snippet = "let q = format!(\"SELECT {}\", id);".to_string();
+        tool.preview = true;
+        tool.preview_tool = Some("semgrep".to_string());
+        let collapsed = crate::review_tree::collapse_identical(
+            vec![floor, tool],
+            &crate::review_tree::ToolMap::builtin(),
+        );
+        assert_eq!(collapsed.rows.len(), 1);
+        let report = report_with(collapsed.rows, vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        let sources = row["flagged_by"]
+            .as_array()
+            .expect("flagged_by is exported");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["path"], "src/orders.rs");
+        assert_eq!(sources[0]["line"], 12, "the source keeps its own line");
+        assert_eq!(sources[0]["tool"], "semgrep");
+        assert_eq!(
+            row["site_count"], 2,
+            "the source's line is another place: {row}"
+        );
+        let xlsx =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("src/orders.rs:12"),
+            "the workbook names the collapsed source's own line"
+        );
     }
 
     /// req_c6: a rule that FIRED and was merged away as a group member must never render

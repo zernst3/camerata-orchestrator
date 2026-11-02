@@ -539,7 +539,7 @@ fn an_old_format_response_still_parses() {
 // ── the consumers of `detail`: short or full ────────────────────────────────────────────────
 
 #[test]
-fn merge_by_location_reads_no_detail_so_it_runs_on_the_short_one() {
+fn the_collapse_reads_no_detail_so_it_runs_on_the_short_one() {
     let files = files();
     let rows = |detail_a: &str, detail_b: &str| {
         let mut a = finding(detail_a);
@@ -547,17 +547,21 @@ fn merge_by_location_reads_no_detail_so_it_runs_on_the_short_one() {
         let mut b = finding(detail_b);
         b.rule_id = "AI-OTHER-NAME".to_string();
         b.severity = "medium".to_string();
-        merge_by_location(vec![a, b], &files)
+        collapse_located(vec![a, b], &files)
             .into_iter()
-            .map(|f| (f.path, f.line, f.rule_id, f.severity, f.also_matches))
+            .map(|f| (f.path, f.line, f.rule_id, f.severity, f.flagged_by))
             .collect::<Vec<_>>()
     };
     assert_eq!(
         rows(SHORT, SHORT),
         rows(FULL, FULL),
-        "the exact-location merge must decide identically on short and full detail"
+        "the collapse must decide identically on short and full detail"
     );
-    assert_eq!(rows(SHORT, SHORT).len(), 1, "and it does merge them");
+    assert_eq!(
+        rows(SHORT, SHORT).len(),
+        2,
+        "two rule families at one location stay two rows (the grouping pass links them)"
+    );
 }
 
 #[test]
@@ -596,12 +600,12 @@ fn the_semantic_merge_decision_differs_between_short_and_full_so_it_runs_on_the_
         "The handler reads REQUIRE_WEBHOOK_SIGNATURE from src/config.rs and calls process_refund with no signature check so an unauthenticated caller can trigger a refund",
     );
     assert!(
-        semantic_pair_merges(&a, &b, None),
+        same_cause_hint(&a, &b, None),
         "identical full explanations are one defect"
     );
     let (a, b) = pair("Trusts a flag.", "Unguarded refund.");
     assert!(
-        !semantic_pair_merges(&a, &b, None),
+        !same_cause_hint(&a, &b, None),
         "the one-sentence statements share too little prose to merge them"
     );
 }
@@ -675,9 +679,10 @@ async fn audit_repo_hands_calibration_and_everything_after_it_the_full_detail() 
 }
 
 #[tokio::test]
-async fn only_the_findings_that_survive_the_merge_are_regenerated() {
-    // Three scan rows, two of them at the SAME location under different rule ids: the merge
-    // leaves two survivors, and the regeneration is asked about two, not three.
+async fn every_row_that_survives_the_collapse_is_regenerated() {
+    // Three scan rows, two of them at the SAME location under different rule ids. They are two
+    // rule families, so nothing is collapsed: all three survive and the regeneration is asked
+    // about all three.
     let scan = format!(
         r#"{{"findings":[
             {{"path":"{HANDLER}","line":9,"severity":"high","rule":"ARCH-X-1","title":"a","code":"{SNIPPET}","detail":"{SHORT}"}},
@@ -688,10 +693,10 @@ async fn only_the_findings_that_survive_the_merge_are_regenerated() {
     let llm = RoleLlm::new(&scan, Regen::Writes);
     let meter = meter_with(EfficiencyConfig::default());
     let (findings, _) = audit(&llm, &meter).await;
-    assert_eq!(findings.len(), 2);
+    assert_eq!(findings.len(), 3);
     let regen = llm.prompts(Role::Regen);
     assert_eq!(regen.len(), 1, "one batched call, not one per finding");
-    assert_eq!(asked(&regen[0]).len(), 2, "two survivors asked about");
+    assert_eq!(asked(&regen[0]).len(), 3, "three survivors asked about");
 }
 
 // ── failure: marked, reported, never dropped ────────────────────────────────────────────────

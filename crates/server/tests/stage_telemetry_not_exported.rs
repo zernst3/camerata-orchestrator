@@ -15,6 +15,7 @@ use camerata_server::xlsx_export::build_findings_export;
 fn report(ledger: ScanLedger) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
