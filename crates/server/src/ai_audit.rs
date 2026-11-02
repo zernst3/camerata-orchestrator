@@ -10067,6 +10067,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // that shipped with a flag). The same flag on two rows says the same check fired, not that
     // the rows are about the same object.
     crate::review_flags::REVIEW_FLAGS_CAPTURE,
+    // M4: the mark that says a row's text is real junk and holds it (see `junk_finding`).
+    crate::junk_finding::JUNK_CONTENT_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

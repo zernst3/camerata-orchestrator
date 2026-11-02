@@ -10,11 +10,31 @@
 //! 1. scan parsing ([`parse_gate_reason`]) never lets such a row exist;
 //! 2. after the detail and calibration steps ([`carries_discard_verdict`]) a model-invented row
 //!    whose own text says "discard this finding" is removed and counted;
-//! 3. the release gate ([`row_problem`]) refuses a package that still holds one.
+//! 3. the sealed report holds such a row ([`mark_rows`], the [`JUNK_CONTENT_CAPTURE`] mark, read
+//!    by `report_export::is_held_for_review`) and the release gate refuses the package until a
+//!    reviewer has decided the row (`release_gate::junk`).
 //!
 //! Only rows the model INVENTED (rule id prefixed `AI-`, so no adopted rule backs them) are held
 //! to the discard-verdict test, so no prose can remove a row an adopted or deterministic rule
 //! produced.
+//!
+//! # Real junk holds the row; wording only flags it (M4)
+//!
+//! [`classify_row`] splits what it finds in two, and the two have different consequences:
+//!
+//! * **Real junk** ([`JunkReason`]) is a row nobody could act on, or one that carries the model's
+//!   own chat text instead of a finding. A reviewer might never open the row, and a client would
+//!   receive it, so the row is HELD: the release gate refuses the package until a reviewer
+//!   decision exists for that row. The reasons: a placeholder rule id; a filler word where the
+//!   title should be (`x`, `n/a`, `tbd`, ...); no code and no explanation; an empty or filler
+//!   explanation; the model's verdict "discard this finding"; a refusal or chat lead-in where the
+//!   explanation should be ("I cannot ...", "Here is the ..."); and an untranslated JSON
+//!   fragment as the text.
+//! * **Wording judgments** ([`WordingFlag`]) are a reviewer's call on prose that is still a
+//!   finding: a title or explanation that begins "Placeholder ..." as a sentence ("Placeholder
+//!   credentials are committed"), and the phrase "placeholder finding" in an explanation that
+//!   does not say to discard it. They become review flags on the row
+//!   (`crate::review_flags`) and never hold or refuse anything.
 
 /// Words (lower case, after trimming) that stand where real text should be.
 const PLACEHOLDER_WORDS: &[&str] = &[
@@ -133,23 +153,271 @@ pub fn is_junk_invented_row(rule_id: &str, headline: &str, detail: &str) -> bool
         || is_placeholder_title(headline)
 }
 
-/// What the release gate says about one exported row, or `None` when it is fine. Only rows whose
-/// rule id starts with `AI-` (invented by the model) are tested.
+/// Whether `text` is empty or exactly a filler word (`x`, `n/a`, `tbd`, ...): no sentence, no
+/// "placeholder ..." lead. The strict half of [`is_blank_or_placeholder`], the half that is a
+/// fact about the text and not a judgment of its wording.
+pub fn is_filler(text: &str) -> bool {
+    let t = normalized(text);
+    t.is_empty() || PLACEHOLDER_WORDS.contains(&t.as_str())
+}
+
+/// Why a row is real junk: a row the release gate holds until a reviewer decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JunkReason {
+    /// The rule id names a placeholder (`JAVASCRIPT-TYPESRIPT-PLACEHOLDER`).
+    PlaceholderRuleId,
+    /// The title is exactly a filler word.
+    PlaceholderTitle,
+    /// No code and no explanation.
+    NoEvidence,
+    /// The explanation is empty or a filler word.
+    EmptyExplanation,
+    /// The text says "discard this finding".
+    DiscardVerdict,
+    /// The text opens with a model refusal or chat lead-in.
+    ModelRefusal,
+    /// The text is an untranslated JSON fragment.
+    JsonFragment,
+}
+
+impl JunkReason {
+    /// The reason in a sentence, for the gate's problem line and the row's mark.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PlaceholderRuleId => "its rule id names a placeholder",
+            Self::PlaceholderTitle => "its title is a placeholder",
+            Self::NoEvidence => "it has no code and no explanation",
+            Self::EmptyExplanation => "its explanation is empty",
+            Self::DiscardVerdict => "its own text says to discard it",
+            Self::ModelRefusal => "its text is a model refusal or chat reply, not a finding",
+            Self::JsonFragment => "its text is an untranslated JSON fragment",
+        }
+    }
+}
+
+/// A wording judgment about a row's text: a review flag, never a hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordingFlag {
+    /// A title or explanation that begins "Placeholder ..." or "Lorem ipsum ..." as a sentence.
+    PlaceholderLead,
+    /// "placeholder finding" in an explanation that does not say to discard the row.
+    PlaceholderFinding,
+}
+
+impl WordingFlag {
+    /// The name the row's `review_flags` list carries.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::PlaceholderLead => "placeholder_wording",
+            Self::PlaceholderFinding => "placeholder_finding_phrase",
+        }
+    }
+}
+
+/// What [`classify_row`] found in one row's text.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RowContent {
+    /// Real junk: the row is held.
+    pub junk: Vec<JunkReason>,
+    /// Wording judgments: the row is flagged.
+    pub wording: Vec<WordingFlag>,
+}
+
+/// Lower-case openings that make a text a model's reply to the user and not a finding. Matched at
+/// the start of the title, of the explanation, and of the part after the headline separator.
+const REFUSAL_LEADS: &[&str] = &[
+    "i cannot",
+    "i can't",
+    "i can\u{2019}t",
+    "i'm sorry",
+    "i am sorry",
+    "i apologize",
+    "i\u{2019}m sorry",
+    "sorry, ",
+    "i'm unable",
+    "i am unable",
+    "i\u{2019}m unable",
+    "as an ai",
+    "here is the ",
+    "here's the ",
+    "here are the ",
+    "certainly!",
+    "certainly,",
+    "of course,",
+    "sure,",
+    "sure!",
+];
+
+fn starts_like_a_reply(text: &str) -> bool {
+    let t = text.trim_start().to_lowercase();
+    REFUSAL_LEADS.iter().any(|lead| t.starts_with(lead))
+}
+
+/// Whether `text` is a JSON object or array standing where prose should be: it opens with `{` or
+/// `[` and holds a quoted key, or it carries the engine's own reply keys (`"why":`,
+/// `"fix_direction":`), which no prose does.
+fn is_json_fragment(text: &str) -> bool {
+    let t = text.trim();
+    let opens = t.starts_with('{') || t.starts_with('[');
+    (opens && t.contains("\":")) || t.contains("\"why\":") || t.contains("\"fix_direction\":")
+}
+
+/// The parts of a row's text a model wrote: the whole, and each side of the headline separator.
+fn text_parts(text: &str) -> Vec<&str> {
+    let mut parts = vec![text];
+    parts.extend(text.split(crate::ai_audit::HEADLINE_SEP));
+    parts
+}
+
+/// Sort what a row's text holds into real junk and wording judgments. `headline`, `snippet` and
+/// `detail` are the row's own fields; the junk tests about evidence apply only to a row the model
+/// INVENTED (rule id prefixed `AI-`), the rest to every row.
+pub fn classify_row(rule_id: &str, headline: &str, snippet: &str, detail: &str) -> RowContent {
+    let invented = rule_id.starts_with("AI-");
+    let mut out = RowContent::default();
+    if invented {
+        if is_placeholder_rule_id(rule_id) {
+            out.junk.push(JunkReason::PlaceholderRuleId);
+        }
+        if !headline.trim().is_empty() && is_filler(headline) {
+            out.junk.push(JunkReason::PlaceholderTitle);
+        }
+        // The exported snippet falls back to the title when the model gave no code, so a snippet
+        // equal to the headline is "no code", not a second piece of evidence.
+        let code = if snippet.trim() == headline.trim() {
+            ""
+        } else {
+            snippet
+        };
+        // The explanation is what follows the headline separator; with no separator the whole
+        // text is all the row says.
+        let explanation = detail
+            .split_once(crate::ai_audit::HEADLINE_SEP)
+            .map_or(detail, |(_, rest)| rest);
+        match (is_filler(code), is_filler(explanation)) {
+            (true, true) => out.junk.push(JunkReason::NoEvidence),
+            (false, true) => out.junk.push(JunkReason::EmptyExplanation),
+            _ => {}
+        }
+    }
+    let lower_detail = detail.to_lowercase();
+    let lower_headline = headline.to_lowercase();
+    // Only a row the model invented is held to the discard verdict: no prose can hold a row an
+    // adopted or deterministic rule produced for saying "discard".
+    let discard = invented
+        && (lower_detail.contains("discard this finding")
+            || lower_headline.contains("discard this finding"));
+    if discard {
+        out.junk.push(JunkReason::DiscardVerdict);
+    }
+    if text_parts(detail)
+        .into_iter()
+        .chain(text_parts(headline))
+        .any(starts_like_a_reply)
+    {
+        out.junk.push(JunkReason::ModelRefusal);
+    }
+    if is_json_fragment(detail) || is_json_fragment(headline) {
+        out.junk.push(JunkReason::JsonFragment);
+    }
+    if invented {
+        let sentence_lead = |t: &str| {
+            let t = normalized(t);
+            !is_filler(&t) && (t.starts_with("placeholder") || t.starts_with("lorem ipsum"))
+        };
+        if text_parts(detail)
+            .into_iter()
+            .chain(text_parts(headline))
+            .any(sentence_lead)
+        {
+            out.wording.push(WordingFlag::PlaceholderLead);
+        }
+        if !discard
+            && (lower_detail.contains("placeholder finding")
+                || lower_headline.contains("placeholder finding"))
+        {
+            out.wording.push(WordingFlag::PlaceholderFinding);
+        }
+    }
+    out
+}
+
+/// What the release gate says about one exported row, or `None` when it is fine: the first real
+/// junk reason. Wording judgments are never a problem. Used where no reviewer decisions are
+/// available (a standalone audit of a zip).
 pub fn row_problem(rule_id: &str, headline: &str, snippet: &str, detail: &str) -> Option<String> {
-    if !rule_id.starts_with("AI-") {
-        return None;
+    classify_row(rule_id, headline, snippet, detail)
+        .junk
+        .first()
+        .map(|reason| reason.describe().to_string())
+}
+
+/// The `captures` key that marks a row that is real junk, holding it. The value lists the reasons
+/// in words. Absent on any other row. A bookkeeping key (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`).
+pub const JUNK_CONTENT_CAPTURE: &str = "junk_content";
+
+/// The tally of [`mark_rows`], for the scan ledger.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentCheck {
+    /// Rows the check read.
+    #[serde(default)]
+    pub rows_seen: usize,
+    /// Rows marked real junk (held until a reviewer decides them).
+    #[serde(default)]
+    pub held: usize,
+    /// Wording flags written (one per flag, so a row may count twice).
+    #[serde(default)]
+    pub wording_flags: usize,
+}
+
+/// The title, code and explanation of a row, as [`classify_row`] reads them: the title is the part
+/// of the detail before the headline separator.
+fn row_text(f: &crate::onboard::Finding) -> (String, &str, &str) {
+    let headline = f
+        .detail
+        .split_once(crate::ai_audit::HEADLINE_SEP)
+        .map_or(f.detail.as_str(), |(head, _)| head)
+        .to_string();
+    (headline, f.snippet.as_str(), f.detail.as_str())
+}
+
+/// [`classify_row`] over a finding.
+pub fn classify_finding(f: &crate::onboard::Finding) -> RowContent {
+    let (headline, snippet, detail) = row_text(f);
+    classify_row(&f.rule_id, &headline, snippet, detail)
+}
+
+/// Mark every row of `findings` that is real junk with [`JUNK_CONTENT_CAPTURE`] (and clear the
+/// mark on a row that is not), and give every row its content flags. Run at seal, the point the
+/// row set is final, so the mark and the flags describe the rows that ship.
+pub fn mark_rows(findings: &mut [crate::onboard::Finding]) -> ContentCheck {
+    let mut tally = ContentCheck::default();
+    for f in findings.iter_mut() {
+        tally.rows_seen += 1;
+        let content = classify_finding(f);
+        if content.junk.is_empty() {
+            f.captures.remove(JUNK_CONTENT_CAPTURE);
+        } else {
+            tally.held += 1;
+            let reasons = content
+                .junk
+                .iter()
+                .map(|r| r.describe())
+                .collect::<Vec<_>>()
+                .join("; ");
+            f.captures.insert(JUNK_CONTENT_CAPTURE.to_string(), reasons);
+        }
+        let flags: Vec<String> = content
+            .wording
+            .iter()
+            .map(|w| w.flag().to_string())
+            .collect();
+        tally.wording_flags += flags.len();
+        if !flags.is_empty() || !crate::review_flags::flags_of(f).is_empty() {
+            crate::review_flags::set_stage_flags(f, crate::review_flags::FlagStage::Content, flags);
+        }
     }
-    if carries_discard_verdict(detail) || carries_discard_verdict(headline) {
-        return Some("its own text says to discard it".to_string());
-    }
-    // The exported snippet falls back to the title when the model gave no code, so a snippet
-    // equal to the headline is "no code", not a second piece of evidence.
-    let code = if snippet.trim() == headline.trim() {
-        ""
-    } else {
-        snippet
-    };
-    parse_gate_reason(true, rule_id, headline, code, detail).map(str::to_string)
+    tally
 }
 
 #[cfg(test)]
@@ -279,5 +547,162 @@ mod tests {
             "Discard this finding."
         )
         .is_some());
+    }
+
+    // ── M4: real junk holds the row, wording only flags it ──────────────────────────────
+
+    fn junk_of(rule_id: &str, headline: &str, snippet: &str, detail: &str) -> Vec<JunkReason> {
+        classify_row(rule_id, headline, snippet, detail).junk
+    }
+
+    fn wording_of(rule_id: &str, headline: &str, snippet: &str, detail: &str) -> Vec<WordingFlag> {
+        classify_row(rule_id, headline, snippet, detail).wording
+    }
+
+    /// Every pattern that holds a row, one by one.
+    #[test]
+    fn each_real_junk_pattern_holds_the_row() {
+        // A placeholder rule id.
+        assert!(
+            junk_of("AI-X-PLACEHOLDER", "A title", "db.query(q)", "Real text.")
+                .contains(&JunkReason::PlaceholderRuleId)
+        );
+        // A filler word as the title.
+        assert!(junk_of("AI-X-Y", "tbd", "db.query(q)", "Real text.")
+            .contains(&JunkReason::PlaceholderTitle));
+        // No code and no explanation.
+        assert!(junk_of("AI-X-Y", "A title", "x", "n/a").contains(&JunkReason::NoEvidence));
+        // Code, but an empty explanation.
+        assert_eq!(
+            junk_of("AI-X-Y", "A title", "db.query(q)", "  "),
+            vec![JunkReason::EmptyExplanation]
+        );
+        // The model's own verdict.
+        assert!(
+            junk_of("AI-X-Y", "A title", "db.query(q)", "Discard this finding.")
+                .contains(&JunkReason::DiscardVerdict)
+        );
+        // A refusal or chat lead-in, whole or after the headline separator.
+        for text in [
+            "I cannot determine whether this is exploitable.",
+            "I'm sorry, but I can't help with that.",
+            "As an AI model I have no access to the repository.",
+            "Here is the explanation you asked for.",
+            "Certainly! The handler is wrong.",
+            "A title \u{2014} I cannot assist with this request.",
+        ] {
+            assert!(
+                junk_of("SEC-A-1", "A title", "db.query(q)", text)
+                    .contains(&JunkReason::ModelRefusal),
+                "{text}"
+            );
+        }
+        // An untranslated JSON fragment.
+        for text in [
+            r#"{"why":"The handler is wrong.","fix_direction":"Verify."}"#,
+            r#"[{"id":"a1b2c3","why":"x"}]"#,
+            r#"The handler is wrong. "fix_direction": "Verify it.""#,
+        ] {
+            assert!(
+                junk_of("SEC-A-1", "A title", "db.query(q)", text)
+                    .contains(&JunkReason::JsonFragment),
+                "{text}"
+            );
+        }
+    }
+
+    /// Prose that merely MENTIONS the junk words, or quotes JSON, is not junk.
+    #[test]
+    fn real_prose_is_not_junk() {
+        for text in [
+            "The handler cannot be reached without a token, so the check is bypassed.",
+            "The config `{\"debug\": true}` enables verbose errors in production.",
+            "Sorry-style error pages leak the stack: the handler echoes the exception.",
+            "Unable to verify the signature is treated as success.",
+            "Here, the redirect target is taken from the query string.",
+        ] {
+            assert!(
+                junk_of("AI-X-Y", "A title", "db.query(q)", text).is_empty(),
+                "{text}"
+            );
+        }
+    }
+
+    /// The wording judgments never hold: they are flags, in the other list.
+    #[test]
+    fn wording_judgments_are_flags_not_junk() {
+        let row = classify_row(
+            "AI-HARDCODED-CREDENTIAL",
+            "Placeholder credentials are committed",
+            "API_KEY = \"changeme\"",
+            "Placeholder credentials are committed in the example file and loaded in production.",
+        );
+        assert!(row.junk.is_empty(), "{row:?}");
+        assert_eq!(row.wording, vec![WordingFlag::PlaceholderLead]);
+        let row = classify_row(
+            "AI-X-Y",
+            "A title",
+            "db.query(q)",
+            "Treats every row as a placeholder finding when the table is empty.",
+        );
+        assert!(row.junk.is_empty(), "{row:?}");
+        assert_eq!(row.wording, vec![WordingFlag::PlaceholderFinding]);
+        // The bare filler word is the other list.
+        assert!(
+            !wording_of("AI-X-Y", "placeholder", "db.query(q)", "Real text.")
+                .contains(&WordingFlag::PlaceholderLead)
+        );
+        assert!(
+            junk_of("AI-X-Y", "placeholder", "db.query(q)", "Real text.")
+                .contains(&JunkReason::PlaceholderTitle)
+        );
+    }
+
+    /// An adopted or deterministic rule's row is never held for evidence or the discard verdict,
+    /// and never flagged for wording; only a refusal or JSON text holds it.
+    #[test]
+    fn an_adopted_rule_row_is_held_only_for_a_reply_or_a_fragment() {
+        assert!(junk_of("SEC-A-1", "placeholder", "x", "x").is_empty());
+        assert!(junk_of("SEC-A-1", "A title", "code", "Discard this finding.").is_empty());
+        assert!(wording_of("SEC-A-1", "Placeholder text", "code", "Placeholder text.").is_empty());
+        assert!(!junk_of("SEC-A-1", "A title", "code", "I cannot say.").is_empty());
+    }
+
+    #[test]
+    fn mark_rows_holds_junk_flags_wording_and_clears_a_stale_mark() {
+        use crate::onboard::Finding;
+        let row = |detail: &str| Finding {
+            rule_id: "AI-X-Y".to_string(),
+            snippet: "db.query(q)".to_string(),
+            detail: detail.to_string(),
+            ..Finding::default()
+        };
+        let mut rows = vec![
+            row("A title \u{2014} Real text."),
+            row("A title \u{2014} I cannot assist."),
+            row("Placeholder secret \u{2014} Placeholder credentials are committed."),
+        ];
+        rows[0]
+            .captures
+            .insert(JUNK_CONTENT_CAPTURE.to_string(), "stale".to_string());
+        let tally = mark_rows(&mut rows);
+        assert_eq!(
+            tally,
+            ContentCheck {
+                rows_seen: 3,
+                held: 1,
+                wording_flags: 1
+            }
+        );
+        assert!(!rows[0].captures.contains_key(JUNK_CONTENT_CAPTURE));
+        assert!(rows[1].captures.contains_key(JUNK_CONTENT_CAPTURE));
+        assert!(!rows[2].captures.contains_key(JUNK_CONTENT_CAPTURE));
+        assert_eq!(
+            crate::review_flags::flags_of(&rows[2]),
+            vec!["placeholder_wording".to_string()]
+        );
+        // Marking again changes nothing.
+        let again = mark_rows(&mut rows);
+        assert_eq!(again, tally);
     }
 }

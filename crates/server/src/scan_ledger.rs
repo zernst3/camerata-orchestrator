@@ -514,6 +514,10 @@ pub struct ScanLedger {
     /// See [`EvidenceCheck`].
     #[serde(default)]
     evidence: EvidenceCheck,
+    /// M4: how many sealed rows were read for real junk (held) and for wording judgments (flagged).
+    /// See [`crate::junk_finding::ContentCheck`].
+    #[serde(default)]
+    content: crate::junk_finding::ContentCheck,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -1179,6 +1183,17 @@ impl ScanLedger {
     /// M5: the scan's evidence-check counts. See [`EvidenceCheck`].
     pub fn evidence_check(&self) -> &EvidenceCheck {
         &self.evidence
+    }
+
+    /// M4: record the content check of the sealed rows. Overwrites: the check reads the whole
+    /// final row set each time the report is sealed.
+    pub fn record_content_check(&mut self, check: crate::junk_finding::ContentCheck) {
+        self.content = check;
+    }
+
+    /// M4: the content check of the sealed rows. See [`crate::junk_finding::ContentCheck`].
+    pub fn content_check(&self) -> &crate::junk_finding::ContentCheck {
+        &self.content
     }
 
     /// Queue the honest "config-gated, reviewed semantically instead" disclosure for

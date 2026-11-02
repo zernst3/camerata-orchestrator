@@ -1411,6 +1411,10 @@ impl ScanReport {
         self.ledger.record_path_hygiene(hygiene);
         // After the secret sweep, so a key is made from the text the report ships.
         self.assign_site_keys();
+        // M4: real junk is marked (and so held) and wording judgments are flagged, on the rows
+        // that ship. A mark is recomputed here, so a carried row never keeps a stale one.
+        let content = crate::junk_finding::mark_rows(&mut self.findings);
+        self.ledger.record_content_check(content);
         SealedReport(self)
     }
 }

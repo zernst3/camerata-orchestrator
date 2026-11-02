@@ -3255,6 +3255,17 @@ The stage telemetry in the ledger counts the flags per stage and kind
 the rows. The calibration raise-hold and the D5 floor cap are not part of this: they still use
 `mentions_exploit_precondition` and stay as they are.
 
+The release gate follows the same line. `junk_finding::classify_row` splits a row's text into
+*real junk* (`JunkReason`: a placeholder rule id; a filler word as the title; no code and no
+explanation; an empty explanation; "discard this finding"; a model refusal or chat lead-in such as
+"I cannot ..." or "Here is the ..."; an untranslated JSON fragment) and *wording judgments*
+(`WordingFlag`: a title or explanation that begins "Placeholder ..." as a sentence, and the phrase
+"placeholder finding" in an explanation that does not say to discard). `ScanReport::seal` marks
+real junk with the `junk_content` capture, which holds the row (`is_held_for_review`) and makes the
+gate refuse the export until a reviewer decision exists for that row (`release_gate::junk`, through
+`ReviewerDecisions`, the same shape as `evidence_unverified`). Wording judgments become review
+flags and refuse nothing.
+
 **Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
 
 1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the
