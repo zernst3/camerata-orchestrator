@@ -4,7 +4,7 @@
 //!
 //! The scan stub reports the SAME line twice under different rule names, so the real merge folds
 //! one report into the other and the absorbed site lands in `also_locations`. The real production
-//! functions then run (`ai_audit::audit_repo` -> `ai_audit::merge_semantic_groups` -> the report,
+//! functions then run (`ai_audit::audit_repo` -> `ai_audit::group_semantic` -> the report,
 //! workbook, `findings.json` and dataset builders), and every client-visible surface is read: no
 //! surface may hold the key, and the merged row must really be there (anti-vacuity).
 //!
@@ -18,6 +18,7 @@ use camerata_secrets::SecretShape;
 use camerata_server::ai_audit::{self, ScanMode, UsageMeter};
 use camerata_server::cost_cap::RunControls;
 use camerata_server::efficiency::EfficiencyConfig;
+use camerata_server::review_tree;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::{Finding, ScanReport};
 use camerata_server::report_export::{self, ReportOptions};
@@ -82,6 +83,7 @@ impl LlmPort for StubModel {
 fn report(findings: Vec<Finding>, ledger: ScanLedger) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -153,7 +155,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
     )
     .await
     .expect("audit_repo against the stub");
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
 
     let mut ledger = ScanLedger::new();
     for sample in stage_samples {

@@ -558,25 +558,33 @@ fn the_real_secret_is_the_headline_row_whichever_order_the_rows_arrive_in() {
         vec![placeholder_row(), real_row()],
         vec![real_row(), placeholder_row()],
     ] {
-        // The group as the cross-family merge forms it; which row leads is what is under test.
-        let out = [merge_semantic_group(rows)];
-        assert_eq!(out[0].path, ".env.production", "the real secret leads");
-        assert_eq!(out[0].severity, "critical");
-        let absorbed = out[0]
-            .also_locations
+        // Grouping keeps both rows; which one leads is what is under test, and what rating the
+        // placeholder row carries.
+        let groups = crate::review_tree::test_support::clusters(rows, &[]);
+        let all: Vec<&Finding> = groups.iter().flatten().collect();
+        assert_eq!(all.len(), 2, "no row is dropped");
+        let lead = all
             .iter()
-            .find(|l| l.path == ".env.example")
-            .expect("the placeholder is listed as another place");
+            .enumerate()
+            .max_by_key(|(i, f)| crate::ai_audit::primary_rank(f, all.len(), *i))
+            .map(|(_, f)| *f)
+            .expect("a lead row");
+        assert_eq!(lead.path, ".env.production", "the real secret leads");
+        assert_eq!(lead.severity, "critical");
+        let placeholder = all
+            .iter()
+            .find(|f| f.path == ".env.example")
+            .expect("the placeholder row is still a row");
         assert_ne!(
-            absorbed.severity, "critical",
-            "an example file's placeholder is never rated critical, even absorbed"
+            placeholder.severity, "critical",
+            "an example file's placeholder is never rated critical"
         );
     }
 }
 
 #[test]
 fn a_placeholder_only_row_is_never_critical() {
-    let out = merge_semantic_groups(vec![placeholder_row()], &[]);
+    let out = cluster_heads(vec![placeholder_row()], &[]);
     assert_eq!(out.len(), 1);
     assert_ne!(out[0].severity, "critical", "{out:?}");
     assert!(
@@ -587,7 +595,7 @@ fn a_placeholder_only_row_is_never_critical() {
     );
     // Two placeholders merged are still placeholders.
     let sample = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.sample", PLACEHOLDER_LINE);
-    let out = merge_semantic_groups(vec![placeholder_row(), sample], &[]);
+    let out = cluster_heads(vec![placeholder_row(), sample], &[]);
     assert!(out.iter().all(|f| f.severity != "critical"), "{out:?}");
 }
 
@@ -605,7 +613,7 @@ fn a_placeholder_word_inside_a_secret_shaped_value_keeps_its_rating_outside_exam
     let line = word_in_value_line();
     for path in [".env.production", "config/dev.env", "src/config.ts"] {
         let row = secret_row("SEC-NO-VENDOR-TOKEN-1", path, &line);
-        let out = merge_semantic_groups(vec![row], &[]);
+        let out = cluster_heads(vec![row], &[]);
         assert_eq!(out[0].severity, "critical", "{path}: {out:?}");
         assert!(
             crate::severity_bounds::recorded_adjustments(&out[0]).is_empty(),
@@ -613,7 +621,7 @@ fn a_placeholder_word_inside_a_secret_shaped_value_keeps_its_rating_outside_exam
         );
     }
     let example = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.example", &line);
-    let out = merge_semantic_groups(vec![example], &[]);
+    let out = cluster_heads(vec![example], &[]);
     assert_eq!(out[0].severity, "low", "{out:?}");
 }
 
@@ -633,7 +641,7 @@ fn a_value_that_is_wholly_a_template_token_is_lowered_in_any_file() {
     ] {
         for path in [".env.production", "src/config.ts", ".env.example"] {
             let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", path, snippet);
-            let out = merge_semantic_groups(vec![row], &[]);
+            let out = cluster_heads(vec![row], &[]);
             assert_eq!(out[0].severity, "low", "{snippet} in {path}: {out:?}");
         }
     }
@@ -654,7 +662,7 @@ fn a_weak_default_word_outside_an_example_file_keeps_its_rating() {
     ] {
         for path in [".env.production", "docker-compose.yml", "src/config.ts"] {
             let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", path, snippet);
-            let out = merge_semantic_groups(vec![row], &[]);
+            let out = cluster_heads(vec![row], &[]);
             assert_eq!(out[0].severity, "critical", "{snippet} in {path}: {out:?}");
             assert!(
                 crate::severity_bounds::recorded_adjustments(&out[0]).is_empty(),
@@ -662,7 +670,7 @@ fn a_weak_default_word_outside_an_example_file_keeps_its_rating() {
             );
         }
         let example = secret_row("SEC-NO-HARDCODED-SECRETS-1", ".env.example", snippet);
-        let out = merge_semantic_groups(vec![example], &[]);
+        let out = cluster_heads(vec![example], &[]);
         assert_eq!(out[0].severity, "low", "{snippet} in .env.example: {out:?}");
     }
 }
@@ -678,7 +686,7 @@ fn a_bracketed_list_of_values_is_not_a_template() {
         "password: <\"s3cr3tP@ssw0rd!!\">",
     ] {
         let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", "src/config.ts", snippet);
-        let out = merge_semantic_groups(vec![row], &[]);
+        let out = cluster_heads(vec![row], &[]);
         assert_eq!(out[0].severity, "critical", "{snippet}: {out:?}");
     }
 }
@@ -689,18 +697,18 @@ fn a_bracketed_list_of_values_is_not_a_template() {
 fn a_row_that_cites_no_value_outside_an_example_file_keeps_its_rating() {
     for snippet in ["", "   "] {
         let row = secret_row("SEC-NO-SECRET-FILE-1", ".env.production", snippet);
-        let out = merge_semantic_groups(vec![row], &[]);
+        let out = cluster_heads(vec![row], &[]);
         assert_eq!(out[0].severity, "critical", "{snippet:?}: {out:?}");
     }
 }
 
 #[test]
 fn a_real_secret_alone_keeps_its_rating_and_a_non_secret_rule_in_an_example_file_is_untouched() {
-    let out = merge_semantic_groups(vec![real_row()], &[]);
+    let out = cluster_heads(vec![real_row()], &[]);
     assert_eq!(out[0].severity, "critical");
     let mut other = secret_row("ARCH-STRICT-LAYERING-1", "docs/layering.example", "x");
     other.detail = "A layering violation.".to_string();
-    let out = merge_semantic_groups(vec![other], &[]);
+    let out = cluster_heads(vec![other], &[]);
     assert_eq!(out[0].severity, "critical", "only secret rules are lowered");
 }
 
@@ -710,7 +718,7 @@ fn a_real_secret_alone_keeps_its_rating_and_a_non_secret_rule_in_an_example_file
 #[test]
 fn a_real_key_committed_in_an_example_file_keeps_its_rating() {
     let redacted = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.example", REAL_LINE);
-    let out = merge_semantic_groups(vec![redacted], &[]);
+    let out = cluster_heads(vec![redacted], &[]);
     assert_eq!(out[0].severity, "critical", "{out:?}");
     assert!(crate::severity_bounds::recorded_adjustments(&out[0]).is_empty());
     // A raw value as the floor sees it before redaction, built at run time (mixed-case body, no
@@ -721,10 +729,10 @@ fn a_real_key_committed_in_an_example_file_keeps_its_rating() {
         "config/settings.yaml.example",
         &format!("SUPABASE_SERVICE_ROLE_KEY=sb_secret_{body}"),
     );
-    let out = merge_semantic_groups(vec![raw], &[]);
+    let out = cluster_heads(vec![raw], &[]);
     assert_eq!(out[0].severity, "critical", "{out:?}");
     // A placeholder in the same kind of file is still lowered, and ranks below the real key.
-    let out = merge_semantic_groups(vec![placeholder_row()], &[]);
+    let out = cluster_heads(vec![placeholder_row()], &[]);
     assert_eq!(out[0].severity, "low");
 }
 
@@ -752,7 +760,7 @@ fn a_security_rule_that_is_not_a_secret_rule_is_not_lowered_in_an_example_file()
     ] {
         let mut f = secret_row(rule, path, snippet);
         f.detail = "A security defect.".to_string();
-        let out = merge_semantic_groups(vec![f], &[]);
+        let out = cluster_heads(vec![f], &[]);
         assert_eq!(out[0].severity, "critical", "{rule} in {path}: {out:?}");
     }
 }
@@ -793,7 +801,7 @@ fn a_floor_password_and_an_ai_stripe_key_two_lines_apart_stay_two_rows() {
         "A live payment key is written into the source.",
     );
     for rows in [vec![floor.clone(), ai.clone()], vec![ai, floor]] {
-        let out = merge_semantic_groups(rows, &[]);
+        let out = cluster_heads(rows, &[]);
         assert_eq!(out.len(), 2, "two credentials, two decisions: {out:?}");
         assert!(out.iter().all(|f| f.also_locations.is_empty()), "{out:?}");
     }
@@ -813,12 +821,12 @@ fn two_ai_rows_for_different_credentials_with_one_rule_id_stay_two_rows() {
         STRIPE_LINE,
         "A live payment key is written into the source.",
     );
-    let out = merge_semantic_groups(vec![one, two], &[]);
+    let out = cluster_heads(vec![one, two], &[]);
     assert_eq!(out.len(), 2, "{out:?}");
 }
 
 #[test]
-fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_row() {
+fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_cluster_of_two_rows() {
     let floor = credential_row(
         "SEC-NO-HARDCODED-SECRETS-1",
         5,
@@ -831,9 +839,9 @@ fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_
         "stripeKey = \"sk_live_\u{2026}ab12 (32 chars)\"",
         "A live payment key is written into the source.",
     );
-    let out = merge_semantic_groups(vec![floor, ai], &[]);
-    assert_eq!(out.len(), 1, "one credential, one row: {out:?}");
-    assert_eq!(out[0].also_locations.len(), 1);
+    let groups = crate::review_tree::test_support::clusters(vec![floor, ai], &[]);
+    assert_eq!(groups.len(), 1, "one credential, one cluster: {groups:?}");
+    assert_eq!(groups[0].len(), 2, "and both rows are kept");
 }
 
 /// A password shows no prefix and no tail once redacted, only its length, and every 12-character
@@ -853,7 +861,7 @@ fn two_different_passwords_of_one_length_two_lines_apart_stay_two_rows() {
         "An admin password is written into the source.",
     );
     for rows in [vec![one.clone(), two.clone()], vec![two, one]] {
-        let out = merge_semantic_groups(rows, &[]);
+        let out = cluster_heads(rows, &[]);
         assert_eq!(out.len(), 2, "{out:?}");
     }
 }
@@ -872,7 +880,7 @@ fn the_same_password_at_the_same_line_is_one_row() {
         PASSWORD_LINE,
         "A database password is written into the source.",
     );
-    let out = merge_semantic_groups(vec![floor, ai], &[]);
+    let out = cluster_heads(vec![floor, ai], &[]);
     assert_eq!(out.len(), 1, "{out:?}");
 }
 
@@ -920,7 +928,7 @@ fn a_row_that_cites_no_credential_value_is_not_proven_to_be_the_same_credential(
         "",
         "A live payment key is written into the source.",
     );
-    let out = merge_semantic_groups(vec![floor, ai], &[]);
+    let out = cluster_heads(vec![floor, ai], &[]);
     assert_eq!(out.len(), 2, "{out:?}");
 }
 
@@ -935,6 +943,6 @@ fn a_credential_seen_in_two_repositories_is_never_one_row() {
     let mut there = here.clone();
     there.repo = "acme/other".to_string();
     there.rule_id = "AI-HARDCODED-STRIPE-KEY".to_string();
-    let out = merge_semantic_groups(vec![here, there], &[]);
+    let out = cluster_heads(vec![here, there], &[]);
     assert_eq!(out.len(), 2, "{out:?}");
 }

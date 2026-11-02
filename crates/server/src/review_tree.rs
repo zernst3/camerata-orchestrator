@@ -11,6 +11,26 @@
 //! history. [`match_runs`] is pure; [`RunMatch::write_key_links`] is the one place it touches
 //! disk.
 
+mod build;
+mod collapse;
+mod grouping;
+mod mapping;
+mod types;
+mod unfold;
+
+pub use build::{build_tree, kind_of, resolve_rule_categories};
+pub use collapse::{collapse_identical, mark_located, same_place, CollapseOutcome, CollapsedRow};
+pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
+pub use mapping::{
+    family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
+    UNCATEGORISED,
+};
+pub use unfold::unfold_also_locations;
+pub use types::{
+    DuplicateLink, FlaggedBy, GroupRole, NodeKind, NodeLevel, Outlier, OutlierBy, OutlierReason,
+    ReviewTree, TextSource, TreeNode,
+};
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -125,6 +145,16 @@ pub fn match_runs(prev: &[Finding], next: &[Finding]) -> RunMatch {
     out
 }
 
+/// What the scan does to a repo's rows once the audit is done: collapse the rows that are
+/// mechanically identical, then group what is left. Every collapsed source stays on its survivor;
+/// nothing else is merged, dropped or hidden. For callers that want the whole step in one call
+/// (the scan itself records the two stages in its ledger separately).
+pub fn collapse_and_group(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
+    let tools = ToolMap::builtin();
+    let collapsed = collapse_identical(findings, &tools);
+    group_semantic(collapsed.rows, files, &tools, &mut SubgroupAllocator::new()).0
+}
+
 /// A copy of `findings` in (repo, path, line) order with every site key assigned, so the same
 /// rows give the same keys and the same pairing whatever order they were stored in.
 fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
@@ -138,3 +168,7 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tree_tests;

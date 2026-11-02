@@ -28691,6 +28691,7 @@ mod tests {
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
         crate::onboard::ScanReport {
             run_id: None,
+            tree: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -28708,6 +28709,10 @@ mod tests {
             findings: vec![crate::onboard::Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/main.rs".to_string(),

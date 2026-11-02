@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use camerata_checks::arch_checker::{ledger_detector_rule_ids_for_repo, RepoView};
 use camerata_server::ai_audit::{self, ScanMode};
+use camerata_server::review_tree;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::architectural::audit_architectural;
 use camerata_server::onboard::ScanReport;
@@ -138,6 +139,7 @@ fn minimal_report(
 ) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -259,7 +261,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].rule_id, RULE_CONFIG_GATED);
 
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
     assert_eq!(merged.len(), 1);
 
     // ═══ STEP 4: the semantic-phase ledger recording settles `ran`/`findings_emitted` — the ═══

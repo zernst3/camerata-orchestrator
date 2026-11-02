@@ -248,7 +248,7 @@ pub struct Finding {
     pub effort: Option<String>,
     /// Semantic category from a closed taxonomy (`authorization`, `rls-policy`,
     /// `transport-security`, `arch-conformance`, `testing-style`, …). Drives the SECOND,
-    /// cross-family merge pass ([`crate::ai_audit::merge_semantic_groups`]): two findings only
+    /// cross-family merge pass ([`crate::review_tree::group_semantic`]): two findings only
     /// collapse when they share a category. `None` when no source or heuristic could classify
     /// the rule — a `None`-category finding is NEVER semantically merged (fail-open to
     /// over-telling). Assigned from the deterministic rule-id token map or the calibration
@@ -257,7 +257,7 @@ pub struct Finding {
     pub category: Option<String>,
     /// Whether this finding's snippet was resolved to REAL code present in the file (a
     /// presence-type violation) vs an absence/architectural observation whose snippet is a
-    /// description, not code (`located == false`). Computed in [`crate::ai_audit::merge_by_location`]
+    /// description, not code (`located == false`). Computed in [`crate::review_tree::collapse_identical`]
     /// and reused (rather than recomputed) by the informational-bucketing predicate — an
     /// absence-type stance finding is the noise Item 2 down-buckets. Deterministic floor/checker
     /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
@@ -284,8 +284,8 @@ pub struct Finding {
     #[serde(default)]
     pub evaluated_option_id: Option<String>,
     /// Evidence sites ABSORBED from other findings merged into this one during cross-tier /
-    /// cross-file dedup ([`crate::ai_audit::merge_by_location`] /
-    /// [`crate::ai_audit::merge_semantic_groups`], P1 — the deduplication + cross-tier merge
+    /// cross-file dedup ([`crate::review_tree::collapse_identical`] /
+    /// [`crate::review_tree::group_semantic`], P1 — the deduplication + cross-tier merge
     /// design). A finding that survives a merge as the cluster's PRIMARY keeps its own
     /// `repo`/`path`/`line`/`snippet` as before, but every OTHER cluster member's own evidence
     /// site is preserved here instead of being silently discarded — a merged row still
@@ -380,6 +380,26 @@ pub struct Finding {
     /// falls back to the ordinal-0 key while it is empty.
     #[serde(default)]
     pub site_key: String,
+    /// Where this row sits in the review tree: `[category node id, rule node id, sub-group node
+    /// id]` (for example `["cat:authorization", "rule:SEC-RLS-1", "sub:SEC-RLS-1/3"]`). Empty
+    /// until grouping runs; see [`crate::review_tree`]. Placement only: it never changes
+    /// whether the row exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_path: Vec<String>,
+    /// This row's standing in its sub-group. The primary orders the sub-group and has no power
+    /// over the others.
+    #[serde(default, skip_serializing_if = "crate::review_tree::GroupRole::is_primary")]
+    pub group_role: crate::review_tree::GroupRole,
+    /// The sources collapsed into this row because they were mechanically identical to it
+    /// (same repo and file, same rule family, same place). Each keeps its own path, line and
+    /// site key. Empty for a row nothing was collapsed into.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flagged_by: Vec<crate::review_tree::FlaggedBy>,
+    /// A pointer to a higher-ranked row this one may duplicate. Written by the grouping pass for
+    /// every similarity that is not mechanical identity; never changes a row count or a
+    /// severity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible_duplicate_of: Option<crate::review_tree::DuplicateLink>,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -527,6 +547,10 @@ impl Default for Finding {
         Self {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: String::new(),
             path: String::new(),
             line: 0,
@@ -555,66 +579,6 @@ impl Default for Finding {
             kind: None,
         }
     }
-}
-
-/// Compute the [`crate::scan_ledger::StageAccounting`] for a stage that reduces `pre` findings
-/// to `post` findings via the `also_locations`-preserving absorb pattern used by
-/// [`crate::ai_audit::merge_semantic_groups`] and [`crate::ai_audit::group_structural_needs_review`]:
-/// every finding that does not survive as its own output row is instead represented as a
-/// [`MergedLocation`] entry (keyed by `(repo, path, line, rule_id)`) inside the row it was
-/// absorbed into.
-///
-/// # Why this exists (pipeline-integrity ledger fix)
-///
-/// The original instrumentation at both call sites counted merges by diffing `also_matches` — a
-/// rule-id SET, deduplicated by construction — before vs. after the stage. That undercounts (or,
-/// when every absorbed finding shares the surviving primary's OWN rule id — the common "one rule
-/// fires N times in this file" shape `merge_semantic_group` explicitly collapses via its
-/// same-rule-id N-site signal — drops to ZERO) whenever more than one absorbed finding shares a
-/// rule id with the primary or with each other: `seen.insert(rule_id)` in
-/// `ai_audit::merge_semantic_group` only pushes a rule id into `also_matches` the FIRST time it
-/// is seen, so a second (or Nth) absorbed finding with that same id leaves no trace in
-/// `also_matches` at all, even though its OWN evidence site is still unconditionally pushed into
-/// `also_locations`. The `also_matches` id-set is a "which rule families does this row's defect
-/// span" summary, never a per-absorbed-FINDING log — it was never the right signal for an
-/// accounting invariant.
-///
-/// `also_locations` is: every absorbed member gets exactly one entry, unconditionally, regardless
-/// of rule-id collisions (see `merge_semantic_group`'s and `build_structural_group_finding`'s
-/// unconditional pushes). Diffing THAT — as a MULTISET, so a key appearing twice pre-stage (e.g.
-/// already carried in by an earlier merge stage such as `ai-location-merge`) is matched off
-/// before anything is counted as newly merged by THIS stage, rather than naively deduplicated
-/// into a set — gives an exact, collision-proof count of what this stage actually absorbed.
-pub(crate) fn account_location_merge(
-    pre: &[Finding],
-    post: &[Finding],
-) -> crate::scan_ledger::StageAccounting {
-    fn key(l: &MergedLocation) -> (String, String, usize, String) {
-        (l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone())
-    }
-    let mut pre_counts: std::collections::HashMap<(String, String, usize, String), usize> =
-        std::collections::HashMap::new();
-    for f in pre {
-        for l in &f.also_locations {
-            *pre_counts.entry(key(l)).or_insert(0) += 1;
-        }
-    }
-    let mut acc = crate::scan_ledger::StageAccounting::default();
-    for f in post {
-        for l in &f.also_locations {
-            let k = key(l);
-            if let Some(c) = pre_counts.get_mut(&k) {
-                if *c > 0 {
-                    // Already accounted for by an earlier stage — carried forward, not newly
-                    // absorbed here.
-                    *c -= 1;
-                    continue;
-                }
-            }
-            acc.push_merge(l.rule_id.clone(), f.rule_id.clone());
-        }
-    }
-    acc
 }
 
 /// One alternative the architect can codify for a proposed rule.
@@ -1113,6 +1077,12 @@ pub struct ScanReport {
     /// be saved, and for a report written before runs were saved.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// The review tree: category, rule, sub-group, then the sites ([`crate::review_tree`]). Built
+    /// from the rows wherever a report becomes final ([`Self::assign_site_keys`]), so it is
+    /// sealed with them and stored in the inspection entry. `None` only on a report that never
+    /// passed through there.
+    #[serde(default)]
+    pub tree: Option<crate::review_tree::ReviewTree>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -1267,6 +1237,7 @@ impl ScanReport {
     pub fn gated(repos: &[String]) -> Self {
         Self {
             run_id: None,
+            tree: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
@@ -1310,6 +1281,7 @@ impl ScanReport {
     pub fn crashed(repos: &[String], message: String) -> Self {
         Self {
             run_id: None,
+            tree: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
@@ -1360,8 +1332,53 @@ impl ScanReport {
     /// Give every finding its stable site key ([`Finding::site_key`]). Call it wherever a report
     /// becomes final and is handed out (the sealed export report, the report an audit job
     /// returns, the one stored as the last scan), so no consumer ever sees an unkeyed row.
+    ///
+    /// It is also where the review tree is made: every row is keyed, a possible-duplicate link
+    /// follows its target to the target's final key, and the tree is rebuilt from the rows
+    /// ([`Self::attach_tree`]). Safe to call again.
     pub fn assign_site_keys(&mut self) {
+        let before: Vec<String> = self.findings.iter().map(|f| f.site_key.clone()).collect();
         crate::inspections::backfill_site_keys(&mut self.findings);
+        let moved: std::collections::HashMap<String, String> = before
+            .iter()
+            .zip(&self.findings)
+            .filter(|(old, f)| !old.is_empty() && **old != f.site_key)
+            .map(|(old, f)| (old.clone(), f.site_key.clone()))
+            .collect();
+        if !moved.is_empty() {
+            for f in &mut self.findings {
+                if let Some(link) = f.possible_duplicate_of.as_mut() {
+                    if let Some(new_key) = moved.get(&link.key) {
+                        link.key.clone_from(new_key);
+                    }
+                }
+            }
+        }
+        self.attach_tree();
+    }
+
+    /// What a report stored by an older engine needs when it is loaded: the sites an older merge
+    /// folded into another row are promoted to rows of their own
+    /// ([`crate::review_tree::unfold_also_locations`]), then every row is keyed and the tree is
+    /// built ([`Self::assign_site_keys`]). Idempotent; a report made by the current engine passes
+    /// through unchanged.
+    pub fn normalize_loaded(&mut self) {
+        crate::review_tree::unfold_also_locations(&mut self.findings);
+        self.assign_site_keys();
+    }
+
+    /// Rebuild [`Self::tree`] from the rows: every row in exactly one sub-group, nodes above them.
+    /// A node that is still there keeps what the previous tree knew about it. The rows' own
+    /// `group_path` and `group_role` are rewritten to agree with the tree.
+    pub fn attach_tree(&mut self) {
+        let prev = self.tree.take();
+        let run_id = self.run_id.clone().unwrap_or_default();
+        self.tree = Some(crate::review_tree::build_tree(
+            &mut self.findings,
+            prev,
+            &crate::review_tree::ToolMap::builtin(),
+            &run_id,
+        ));
     }
 
     /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
@@ -2132,6 +2149,10 @@ pub async fn audit_repos_with_llm_controlled(
         .with_rules_fingerprint(rules_fp.clone())
         .with_ai_key(ai_key.clone());
     let mut all_findings = Vec::new();
+    // The review tree's sub-groups, formed repo by repo as the rows are grouped; the tree is
+    // assembled from them and the rows once the report is built.
+    let mut sub_allocator = crate::review_tree::SubgroupAllocator::new();
+    let mut tree_sub_nodes: Vec<crate::review_tree::TreeNode> = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut test_files_total = 0usize;
@@ -2253,7 +2274,7 @@ pub async fn audit_repos_with_llm_controlled(
     // The model is now ALSO handed the full selected ruleset, including rules that
     // already have a deterministic detector, as a deliberate second pair of eyes; a
     // model finding that duplicates a deterministic one at the same site collapses back
-    // into a single row (`crate::ai_audit::merge_semantic_groups`), never doubling a row.
+    // into a single row (`crate::review_tree::group_semantic`), never doubling a row.
     //
     // NO exclusion remains here.
     //
@@ -3288,31 +3309,42 @@ pub async fn audit_repos_with_llm_controlled(
                         );
                     }
                 }
-                // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
-                // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
-                // the same defect flagged by two rule families a few lines apart, keeping the
-                // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
-                // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                // Bug 3, now without absorption: the COMBINED floor + arch + AI set is first
+                // collapsed on mechanical identity only (the same rule family, the same file, the
+                // same place; every collapsed source stays on the survivor in `flagged_by`), then
+                // grouped. Grouping writes each row's place in the review tree and links rows
+                // that may describe the same thing; it returns every row it was given. Runs
+                // BEFORE suppression classification so a waiver still sees the grouped row.
                 //
-                // W1 ledger fix: account for merges via `also_locations` (one entry per
-                // ABSORBED FINDING, pushed unconditionally — see `account_location_merge`'s doc
-                // comment), not `also_matches` (a deduplicated rule-id SET that silently
-                // undercounts, or entirely drops, an absorption whose rule id collides with the
-                // primary's or with another absorbed member's — the exact shape of the
-                // 45-rows-in/32-out/8-merged/5-unaccounted defect this fixes).
+                // Ledger: `collapse-identical` reconciles `rows_in == rows_out + collapsed`;
+                // `group` reconciles `rows_in == rows_out` with nothing to account for.
                 bookkeeping.take(&mut repo_findings);
-                let pre_merge_findings = repo_findings.clone();
+                let tool_map = crate::review_tree::ToolMap::from_corpus(corpus);
                 let rows_in = repo_findings.len();
-                let mut repo_findings =
-                    crate::ai_audit::merge_semantic_groups(repo_findings, &files);
-                let rows_out = repo_findings.len();
-                let acc = account_location_merge(&pre_merge_findings, &repo_findings);
+                let collapse = crate::review_tree::collapse_identical(repo_findings, &tool_map);
+                let acc = collapse.accounting();
+                let rows_out = collapse.rows.len();
                 pipeline_ledger.record_stage_for_repo(
                     spec,
-                    "cross-family-merge",
+                    "collapse-identical",
                     rows_in,
                     rows_out,
                     acc,
+                );
+                let rows_in = rows_out;
+                let (mut repo_findings, repo_sub_nodes) = crate::review_tree::group_semantic(
+                    collapse.rows,
+                    &files,
+                    &tool_map,
+                    &mut sub_allocator,
+                );
+                tree_sub_nodes.extend(repo_sub_nodes);
+                pipeline_ledger.record_stage_for_repo(
+                    spec,
+                    "group",
+                    rows_in,
+                    repo_findings.len(),
+                    crate::scan_ledger::StageAccounting::default(),
                 );
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
@@ -3410,26 +3442,16 @@ pub async fn audit_repos_with_llm_controlled(
         None
     };
 
-    // P7: collapse needs-review STRUCTURAL findings (one rule flagged as a debatable
-    // structural/consistency preference at many unrelated locations) into ONE grouped,
-    // informational finding per rule — see `group_structural_needs_review`'s doc comment. Runs
-    // ACROSS THE WHOLE SCAN (every repo), after every per-repo pass, so a rule that fires in
-    // more than one repo still collapses to a single row.
-    //
-    // W1 ledger fix: this stage used to carry NO ledger instrumentation at all, so the rows it
-    // collapses were invisible to the pipeline-integrity ledger entirely (never even reported as
-    // unaccounted) — a blind spot, not a clean reconciliation. Instrumented the same way as
-    // `cross-family-merge`, via `account_location_merge` over `also_locations`.
-    let pre_structural_group = all_findings.clone();
-    let rows_in = all_findings.len();
-    let mut all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    // P7 used to collapse the needs-review STRUCTURAL rows of one rule into a single grouped row
+    // here, absorbing the rest. Nothing is absorbed any more: every one of those rows stays a row
+    // and the review tree holds them together (a rule node of routine rows, decided as a batch).
     bookkeeping.restore(&mut all_findings);
-    let rows_out = all_findings.len();
-    if rows_in != rows_out {
-        let acc = account_location_merge(&pre_structural_group, &all_findings);
-        pipeline_ledger.record_stage("structural-needs-review-merge", rows_in, rows_out, acc);
-    }
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.tree = Some(crate::review_tree::ReviewTree {
+        nodes: tree_sub_nodes,
+        ..crate::review_tree::ReviewTree::default()
+    });
+    report.attach_tree();
     // A Firebase repository gets the one sentence that says what Firebase coverage is, so a
     // clean Firebase section is never read as coverage of the Dart client or of console rules.
     if report
@@ -4154,7 +4176,7 @@ mod tests {
         let mut held = BookkeepingCaptures::default();
         held.take(&mut guarded);
         assert!(guarded.iter().all(|f| f.captures.is_empty()), "{guarded:?}");
-        let mut merged = crate::ai_audit::merge_semantic_groups(guarded, &[]);
+        let mut merged = crate::review_tree::test_support::cluster_heads(guarded, &[]);
         assert_eq!(
             merged.len(),
             2,
@@ -4213,378 +4235,6 @@ mod tests {
     }
 
     // ── W1 ledger fix: pipeline-integrity accounting for merge stages ──────────────────────
-
-    fn structural_site(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
-        Finding {
-            repo: repo.to_string(),
-            path: path.to_string(),
-            line,
-            rule_id: rule_id.to_string(),
-            severity: "medium".to_string(),
-            snippet: String::new(),
-            detail: String::new(),
-            ..Finding::default()
-        }
-    }
-
-    /// REGRESSION for the real-world defect: `camerata inspect`'s ledger summary reported
-    /// `cross-family-merge rows 45 -> 32 merged=8 ... unaccounted=5` on a real scan — findings
-    /// absorbed by `ai_audit::merge_semantic_group`'s "N occurrences of one rule" collapse signal
-    /// (`same_rule_adjacent`) never show up in the surviving row's `also_matches`, because that
-    /// field is a rule-id SET deduplicated against the primary's OWN id (`seen.insert` in
-    /// `merge_semantic_group`): when every absorbed finding shares the primary's rule id, NOTHING
-    /// new is ever pushed to `also_matches`, even though each absorbed finding's own evidence
-    /// site unconditionally lands in `also_locations`. The OLD instrumentation (diffing
-    /// `also_matches` before/after) reported these rows `unaccounted` — the data survived, only
-    /// the ledger's accounting was blind to it (an accounting bug, not a deletion). This proves
-    /// `account_location_merge` reconciles the stage exactly, and that every input rule id stays
-    /// reachable.
-    #[test]
-    fn cross_family_merge_ledger_fully_reconciles_a_same_rule_id_n_site_collapse() {
-        let findings = vec![
-            structural_site("acme/api", "svc.rs", 10, "ARCH-NO-DIRECT-DB-1"),
-            structural_site("acme/api", "svc.rs", 200, "ARCH-NO-DIRECT-DB-1"),
-            structural_site("acme/api", "svc.rs", 400, "ARCH-NO-DIRECT-DB-1"),
-        ];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "sanity: the N-site collapse must still produce exactly one row: {out:?}"
-        );
-        // Sanity on the OLD, buggy signal: this is EXACTLY the defect shape — nothing new in
-        // `also_matches` for the absorbed rows, because they share the primary's own rule id.
-        assert!(
-            out[0].also_matches.is_empty(),
-            "sanity: also_matches alone can never see this absorption: {:?}",
-            out[0].also_matches
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "every absorbed row must have a recorded disposition, not just the surviving row: \
-             {entry:?}"
-        );
-        assert_eq!(
-            entry.rows_in,
-            entry.rows_out + entry.accounted_total(),
-            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), n - 1);
-
-        // Every input rule id must still be reachable: as a surviving primary, in some row's
-        // `also_matches`, or in some row's `also_locations` (this merge's actual recording
-        // mechanism for a same-rule-id absorption).
-        let reachable: std::collections::HashSet<String> = out
-            .iter()
-            .flat_map(|f| {
-                std::iter::once(f.rule_id.clone())
-                    .chain(f.also_matches.iter().cloned())
-                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
-            })
-            .collect();
-        assert!(
-            reachable.contains("ARCH-NO-DIRECT-DB-1"),
-            "the absorbed rule id must remain reachable: {reachable:?}"
-        );
-    }
-
-    /// The same accounting must hold even when the absorbed findings' rule ids collide with
-    /// EACH OTHER but not with the primary — e.g. two independently-reported AI findings that
-    /// both got invented under the same ad hoc rule id, folded into a deterministic primary via
-    /// a shared captured object. `also_matches` dedupes the id down to ONE entry even though TWO
-    /// rows were absorbed; `account_location_merge` must still count both.
-    #[test]
-    fn cross_family_merge_ledger_reconciles_when_absorbed_rows_share_a_non_primary_rule_id() {
-        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-DETERMINISTIC-SITE-1");
-        det.category = Some("authorization".to_string());
-        det.captures
-            .insert("object".to_string(), "orders".to_string());
-        let mut ai1 = structural_site("acme/api", "handler.rs", 52, "AI-SITE-DEFECT-1");
-        ai1.category = Some("authorization".to_string());
-        ai1.captures
-            .insert("object".to_string(), "orders".to_string());
-        let mut ai2 = structural_site("acme/api", "handler.rs", 54, "AI-SITE-DEFECT-1");
-        ai2.category = Some("authorization".to_string());
-        ai2.captures
-            .insert("object".to_string(), "orders".to_string());
-
-        let findings = vec![det, ai1, ai2];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "all three must merge via the shared captured object: {out:?}"
-        );
-        assert_eq!(
-            out[0].also_matches,
-            vec!["AI-SITE-DEFECT-1".to_string()],
-            "sanity: also_matches dedupes the shared id down to ONE entry even though TWO rows \
-             were absorbed: {:?}",
-            out[0].also_matches
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "both absorbed rows must be recorded even though they share a rule id with each \
-             other: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), n - 1);
-    }
-
-    /// W4 NEW case the root-cause fix makes reachable for the first time: a deterministic
-    /// finding and a MODEL finding for the SAME rule id at the same site. Before W4 this could
-    /// never happen — a rule with a deterministic detector was excluded from the AI prompt
-    /// entirely, so the model never had the chance to cite it. Now that every selected rule
-    /// reaches the model as a deliberate second pair of eyes, this collision is a real,
-    /// reachable shape and must still collapse to ONE row with the deterministic finding as
-    /// primary — never two rows, and never silently dropping the model's corroborating
-    /// evidence.
-    #[test]
-    fn cross_family_merge_collapses_a_deterministic_and_model_finding_sharing_one_rule_id() {
-        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-NO-HARDCODED-SECRETS-1");
-        det.severity = "medium".to_string();
-        det.detail = "deterministic-detected-secret".to_string();
-        // Two secret rows merge only when they are the same credential (the same redacted
-        // fingerprint here), so both rows cite the same redacted value.
-        det.snippet = "token = \"sk_live_\u{2026}ab12 (32 chars)\"".to_string();
-        // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
-        // `Origin::Deterministic`.
-
-        let mut model = structural_site(
-            "acme/api",
-            "handler.rs",
-            52, // within SEMANTIC_MERGE_WINDOW of the deterministic finding's line
-            "SEC-NO-HARDCODED-SECRETS-1", // the SAME corpus rule id — the model adopted it
-        );
-        model.severity = "critical".to_string(); // uncalibrated AI severity, routinely inflated
-        model.detail = "ai-detected-secret".to_string();
-        model.snippet = "token = \"sk_live_\u{2026}ab12 (32 chars)\"".to_string();
-        model.confidence = Some("high".to_string()); // calibration touched it -> Origin::AdoptedAi
-
-        let findings = vec![det, model];
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "a deterministic + model finding for the SAME rule id at one site must collapse \
-             to one row, never two: {out:?}"
-        );
-        assert_eq!(out[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
-        // `merged_severity` only returns the PRIMARY's own severity (never `max()`) when the
-        // primary's origin is Deterministic in a mixed-tier group — "medium" surviving (not
-        // "critical") is only possible if the deterministic finding actually won primacy.
-        assert_eq!(
-            out[0].severity, "medium",
-            "the deterministic finding must win primacy over the model's inflated severity: \
-             {:?}",
-            out[0]
-        );
-        assert_eq!(
-            out[0].detail, "deterministic-detected-secret",
-            "the surviving row's own text must be the DETERMINISTIC finding's, not the \
-             model's: {:?}",
-            out[0]
-        );
-        // Sanity on the defect shape this collision is the NEW instance of: `also_matches` is a
-        // rule-id SET deduped against the primary's own id, so it can NEVER see an absorption
-        // whose rule id is identical to the primary's — same root cause as the N-site collapse
-        // tested above, just via ORIGIN instead of repeated occurrence.
-        assert!(
-            out[0].also_matches.is_empty(),
-            "sanity: also_matches alone can never see a same-rule-id absorption: {:?}",
-            out[0].also_matches
-        );
-        // The model's finding is NOT silently dropped: its own evidence site survives in
-        // `also_locations`, the mechanism `account_location_merge` reconciles on.
-        assert!(
-            out[0]
-                .also_locations
-                .iter()
-                .any(|l| l.line == 52 && l.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
-            "the model's absorbed finding must still have its own recorded site: {:?}",
-            out[0].also_locations
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "the model's absorbed finding must have a recorded disposition, not vanish into \
-             unaccounted: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), 1);
-    }
-
-    /// R1B-5: the deterministic `SupabaseRlsChecker` row and the model's row for the SAME rule
-    /// id at the SAME migration line (a table created with no RLS) end as ONE row in the
-    /// cross-family merge, keeping the deterministic tier and the model's evidence site.
-    #[test]
-    fn cross_family_merge_collapses_a_real_rls_checker_row_and_the_models_row_at_one_site() {
-        let migration = "-- 0002_profiles.sql\n\ncreate table public.profiles (\n  id uuid primary key\n);\n\nalter table public.profiles enable row level security;\n\ncreate table public.member_contacts (\n  id uuid primary key default gen_random_uuid(),\n  email text not null\n);\n";
-        let path = "supabase/migrations/0002_profiles.sql";
-        let files = vec![(path.to_string(), migration.to_string())];
-        use camerata_checks::arch_checker::ArchChecker;
-        let violations = camerata_checks::supabase::rls_checker::SupabaseRlsChecker.check(
-            &camerata_checks::arch_checker::RepoView {
-                spec: "acme/portal",
-                files: &files,
-            },
-        );
-        let floor: Vec<Finding> = violations
-            .iter()
-            .filter(|v| v.rule_id == "SUPABASE-RLS-ENABLED-1")
-            .map(|v| architectural::arch_violation_to_finding("acme/portal", v))
-            .collect();
-        assert_eq!(floor.len(), 1, "{floor:#?}");
-        let site = floor[0].line;
-        assert_eq!(site, 9, "the checker anchors on the create table line");
-
-        let mut model = Finding {
-            repo: "acme/portal".to_string(),
-            path: path.to_string(),
-            line: site,
-            rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
-            severity: "critical".to_string(),
-            snippet: "create table public.member_contacts (".to_string(),
-            detail: "Contacts table has no RLS — The member_contacts table holds names, emails and phone numbers and never enables row level security.".to_string(),
-            confidence: Some("high".to_string()),
-            ..Finding::default()
-        };
-        model.category = Some("rls-policy".to_string());
-
-        let findings = vec![floor[0].clone(), model];
-        let pre = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &files);
-        assert_eq!(
-            out.len(),
-            1,
-            "floor row + model row at one site must be one row: {out:#?}"
-        );
-        assert!(
-            out[0].preview_tool.is_some() && out[0].confidence.is_none(),
-            "the deterministic row is the survivor: {:?}",
-            out[0]
-        );
-        let acc = account_location_merge(&pre, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, out.len(), acc);
-        assert_eq!(entry.unaccounted, 0, "{entry:?}");
-    }
-
-    /// REGRESSION for a REAL scan's `cross-family-merge rows 116 -> 83 merged=32 ... held=0
-    /// informational=0 deduped=0 unaccounted=1 !! UNACCOUNTED` — a DIFFERENT leak than the
-    /// same-rule-id-N-site-collapse case above, and different from the already-fixed
-    /// `structural-needs-review-merge` second collapse: this one lives INSIDE
-    /// `ai_audit::merge_semantic_group` itself.
-    ///
-    /// `pre_primary` already absorbed a site (acme/api, handler.rs, 52, RULE-1) in an EARLIER
-    /// stage — simulated here by pre-populating its own `also_locations`, exactly like a merged
-    /// primary surviving the intra-AI-tier exact-location merge would arrive carrying one.
-    /// `y` is a SEPARATE, genuinely distinct top-level `Finding` whose OWN identity
-    /// (repo/path/line/rule_id) happens to be IDENTICAL to that already-absorbed site — a real,
-    /// reachable shape: two different detectors (or two different pipeline stages) independently
-    /// flagging the exact same rule at the exact same line. `semantic_pair_merges`'s
-    /// `same_rule_adjacent` signal (same rule id + same file + same severity) groups `y` together
-    /// with `pre_primary`.
-    ///
-    /// The old `merge_semantic_group` pushed `y`'s own site into the SAME `also_locations` list
-    /// as `pre_primary`'s pre-existing entry, then deduplicated the WHOLE list by
-    /// `(repo, path, line, rule_id)` in one pass — so `y`'s fresh entry collided with the
-    /// pre-existing one and was silently dropped. `account_location_merge` then saw only ONE
-    /// occurrence of that key post-stage, found it already present pre-stage, and reconciled it
-    /// as "carried forward, not new" — so `y` left no trace anywhere: not a surviving row, not a
-    /// new `also_locations` entry, not counted as merged. This proves the fix keeps every
-    /// member's fresh absorption as its OWN entry regardless of a pre-existing key collision, so
-    /// `y` is never lost.
-    #[test]
-    fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
-    ) {
-        let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
-        pre_primary.also_locations = vec![MergedLocation::site(
-            "acme/api".to_string(),
-            "handler.rs".to_string(),
-            52,
-            "RULE-1".to_string(),
-            "already-absorbed-earlier".to_string(),
-            false,
-        )];
-        let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
-
-        let findings = vec![pre_primary, y];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "sanity: the same-rule-id/same-file/same-severity signal must still merge these \
-             into one row: {out:?}"
-        );
-        // Both the pre-existing absorbed site AND `y`'s own fresh absorption must leave a
-        // DISTINCT recorded site — not collapsed into one just because the key coincides.
-        let sites_at_52 = out[0]
-            .also_locations
-            .iter()
-            .filter(|l| l.path == "handler.rs" && l.line == 52 && l.rule_id == "RULE-1")
-            .count();
-        assert_eq!(
-            sites_at_52, 2,
-            "the pre-existing absorbed site and y's own fresh absorption must BOTH survive as \
-             distinct also_locations entries: {:?}",
-            out[0].also_locations
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "y must have a recorded disposition, not vanish into unaccounted just because its \
-             own site coincides with something the primary already absorbed: {entry:?}"
-        );
-        assert_eq!(
-            entry.rows_in,
-            entry.rows_out + entry.accounted_total(),
-            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
-        );
-        assert_eq!(
-            entry.merged_into.len(),
-            1,
-            "exactly one NEW merge (y into pre_primary) must be recorded this stage: {entry:?}"
-        );
-
-        // Every input rule id must still be reachable.
-        let reachable: std::collections::HashSet<String> = out
-            .iter()
-            .flat_map(|f| {
-                std::iter::once(f.rule_id.clone())
-                    .chain(f.also_matches.iter().cloned())
-                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
-            })
-            .collect();
-        assert!(
-            reachable.contains("RULE-1"),
-            "the absorbed rule id must remain reachable: {reachable:?}"
-        );
-    }
 
     #[test]
     fn read_local_pulls_code_files_and_prunes_noise() {
@@ -5563,6 +5213,10 @@ mod tests {
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "me/api".into(),
             kind: None,
             path: path.into(),
@@ -5606,6 +5260,10 @@ mod tests {
             Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "me/api".into(),
                 kind: None,
                 path: "a.rs".into(),
@@ -5633,6 +5291,10 @@ mod tests {
             Finding {
                 could_be_intentional: false,
                 site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "me/web".into(),
                 kind: None,
                 path: "b.tsx".into(),
@@ -5681,6 +5343,10 @@ mod tests {
         Finding {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: repo.to_string(),
             kind: None,
             path: path.to_string(),
@@ -5832,6 +5498,10 @@ mod tests {
         let f = Finding {
             could_be_intentional: false,
             site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "me/api".into(),
             kind: None,
             path: "src/tricky,path.rs".into(),

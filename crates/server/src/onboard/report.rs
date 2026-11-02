@@ -14,6 +14,7 @@ pub fn build_report(
     let proposed_rules = propose_rules(&findings, &repos);
     ScanReport {
         run_id: None,
+        tree: None,
         repos,
         stacks,
         files_scanned,

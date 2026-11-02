@@ -6,7 +6,7 @@
 //! Motivation: on a real unseen repo the semantic tier once emitted ZERO rows while five real
 //! security defects went undetected — a silent collapse indistinguishable from "nothing to
 //! report." This test drives the REAL production functions a scan calls after the model
-//! responds (`ai_audit::audit_repo` -> `ai_audit::merge_semantic_groups` ->
+//! responds (`ai_audit::audit_repo` -> `ai_audit::group_semantic` ->
 //! `report_export::build_report_json`) with a STUBBED `LlmPort` standing in for the model, over
 //! a synthetic two-file fixture with a classic cross-file config-to-handler defect: a
 //! verification flag defined in one file, and a privileged handler in ANOTHER file that trusts
@@ -18,7 +18,7 @@
 //! that entry point always constructs a REAL network-backed `Llm` from the process environment
 //! with no `LlmPort` injection seam, so a zero-spend stubbed-model e2e test has to assemble the
 //! same real pipeline functions `audit_repos` itself calls, rather than go through it. Every
-//! function this test calls (`audit_repo`, `merge_semantic_groups`, `build_report_json`) is the
+//! function this test calls (`audit_repo`, `group_semantic`, `build_report_json`) is the
 //! exact, unmodified production code path — only the network call is replaced.
 //!
 //! ZERO API SPEND: the stub never makes a network call.
@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use camerata_server::ai_audit::{self, ScanMode};
+use camerata_server::review_tree;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::ScanReport;
 use camerata_server::report_export::{self, ReportOptions};
@@ -161,6 +162,7 @@ fn minimal_report(
 ) -> ScanReport {
     ScanReport {
         run_id: None,
+        tree: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),
@@ -268,7 +270,7 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
     // ═══ The real cross-family/cross-reference merge pass runs over it (singleton group — ═══
     // nothing to merge WITH, since there is no deterministic sibling — but this is the exact
     // function production code calls next, not a hand-simulated shape).
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
     assert_eq!(
         merged.len(),
         1,
