@@ -3797,11 +3797,16 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
     }
     // M5: a row whose quoted snippet was not found near its line is held until the reviewer
     // decides it; the release gate also refuses to export it without that decision.
+    // M4: a row whose text is real junk (an empty or placeholder explanation, the model's own
+    // refusal, a JSON fragment) is held the same way, until the reviewer decides it.
     finding.needs_review
         || finding.confidence.as_deref() == Some("needs-review")
         || finding
             .captures
             .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+        || finding
+            .captures
+            .contains_key(crate::junk_finding::JUNK_CONTENT_CAPTURE)
 }
 
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
@@ -6192,6 +6197,7 @@ mod tests {
         ScanReport {
             run_id: None,
             tree: None,
+            discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -15015,6 +15021,7 @@ mod export_invariants_gate {
         ScanReport {
             run_id: None,
             tree: None,
+            discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

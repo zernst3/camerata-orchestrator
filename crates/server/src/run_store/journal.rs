@@ -821,6 +821,10 @@ impl BatchApi for JournalBatchApi {
         self.inner.poll(batch_id).await
     }
 
+    async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
+        self.inner.cancel_batch(batch_id).await
+    }
+
     async fn fetch(&self, batch_id: &str, ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
         if let Some(rows) = self.stored_rows(batch_id) {
             return Ok(rows.iter().map(StoredRow::replayed).collect());

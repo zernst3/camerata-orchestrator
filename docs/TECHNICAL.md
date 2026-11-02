@@ -3235,6 +3235,52 @@ against a runaway bill, not a saving, so it fails loudly:
   the export button; the job progress counts refused passes as NOT RUN, not done; and
   the server adds an "INCOMPLETE" note to the report message.
 
+**Review flags (M4): wording is a flag, never a lock.** The detail and fix stages check the
+model's prose with string tests (a name the statement made is missing, an exploit precondition
+nobody made, an identifier the evidence does not hold, a fix that contradicts its detail or
+describes the tool). A reviewer reads every row, so these checks no longer re-ask three or four
+times, hold a run or refuse an export. A reply that fails one gets exactly one re-ask, carrying the
+check's feedback line. If the second reply fails too, the better one ships and the failure is
+recorded on the row as a review flag: `precondition_added`, `unverified_name:<token>` (detail),
+`fix_ungrounded`, `contradiction`, `methodology_leak` (fix). The flags of a row are one sorted JSON
+list in the `review_flags` capture (`crate::review_flags`), a bookkeeping key like
+`evidence_unverified`. "Better" means: for the detail, a reply that adds no precondition and drops
+fewer names (when every reply adds one, the scan's own statement plus the checked fix direction
+ships, the engine's existing text); for the fix, a reply that is not worse than the rule's authored
+fix (a fix that contradicts its detail or describes the tool is worse; if the rule has an authored
+fix it ships as a standard fix), then the one that failed fewer checks, then the later one. A
+finding is never held for wording, even when its re-ask is lost to transport or the spend limit.
+The stage telemetry in the ledger counts the flags per stage and kind
+(`StageTelemetry::review_flags`), and `review_flags::count_on_rows` reconciles the figures with
+the rows. The calibration raise-hold and the D5 floor cap are not part of this: they still use
+`mentions_exploit_precondition` and stay as they are.
+
+The release gate follows the same line. `junk_finding::classify_row` sorts a row's text three
+ways. A row that is *not a finding* (`DiscardReason`: a placeholder rule id; a filler word as the
+title; no code and no explanation; "discard this finding") is thrown out by the engine: kept,
+marked with the `engine_discarded` capture and its reason, moved to `ScanReport::discarded` and
+left out of every client export. It is never held and never blocks. *Broken text on a finding that
+may be real* (`JunkReason`: an empty explanation; a model refusal or chat lead-in such as "I
+cannot ..." or "Here is the ..."; an untranslated JSON fragment) is marked at seal with the
+`junk_content` capture, which holds the row (`is_held_for_review`) and makes the gate refuse the
+export until a reviewer decision exists for that row (`release_gate::junk`, through
+`ReviewerDecisions`, the same shape as `evidence_unverified`). *Wording judgments* (`WordingFlag`:
+a title or explanation that begins "Placeholder ..." as a sentence, and the phrase "placeholder
+finding" in an explanation that does not say to discard) become review flags and refuse nothing.
+An internal export (`release_internal`) may carry held rows, each marked in the internal
+workbook's Held column; a client export is refused until each has a decision.
+
+**Thrown-out findings are kept, never deleted (A10).** Every engine path that used to remove a
+finding on a judgment now marks it with `engine_discard::mark` and keeps it apart from the rows
+that ship: scan parsing of placeholder text, the discard verdict and placeholder rule id or
+headline, a rule judged not applicable, a rule with no established convention, and a stack
+exception (`engine_discard` lists them). The scan ledger counts them by reason
+(`ScanLedger::discarded`) and `ScanReport::discarded_reconciles` checks the rows against that
+count. The seal moves any marked or not-a-finding row that reached it into `discarded` as a
+safety net. Exact repeats of one row (`dedup_findings_keep_max_severity`), the mechanical collapse
+(`review_tree::collapse_identical`, every source kept in `flagged_by`) and the external-tool
+preview dedup are collapses of the same place, not judgments, and are unchanged.
+
 **Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
 
 1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the

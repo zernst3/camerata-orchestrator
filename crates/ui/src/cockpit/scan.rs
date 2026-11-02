@@ -3684,6 +3684,9 @@ pub(super) struct DetailPaneRow {
     /// The finding's explanation, with the calibration `[needs review: …]` flag split off.
     pub explanation: String,
     pub needs_review: Option<String>,
+    /// The review flags the engine left on the row (M4): a wording check failed and the best text
+    /// shipped. Shown as chips so a reviewer sees what to read twice.
+    pub review_flags: Vec<String>,
     /// Structured calibration confidence (`high` / `needs-review`).
     pub confidence: Option<String>,
     /// Structured remediation-effort estimate (`low` / `medium` / `high`).
@@ -3736,6 +3739,7 @@ impl DetailPaneRow {
                 .filter(|d| !d.trim().is_empty()),
             explanation: body,
             needs_review,
+            review_flags: camerata_ui_core::triage::review_flags_of(f),
             confidence: f.confidence.clone(),
             effort: f.effort.clone(),
             fix: fix.filter(|s| !s.trim().is_empty()),
@@ -4029,6 +4033,13 @@ pub(super) fn FindingDetailPane(
                             b { class: "nr-inline",
                                 if nr.is_empty() { "[needs review]" } else { "[needs review: {nr}]" }
                             }
+                        }
+                    }
+                }
+                if !r.review_flags.is_empty() {
+                    p { class: "pane-review-flags", "data-review-flags": "true",
+                        for flag in r.review_flags.iter() {
+                            span { class: "review-flag-chip", key: "{flag}", "{flag}" }
                         }
                     }
                 }
@@ -17408,6 +17419,36 @@ mod pane_render_tests {
         let away = render(row(), PaneFocus::Elsewhere, None, None);
         assert!(away.contains("pane-keys off"), "html=\n{away}");
         assert!(!away.contains("pane-keys armed"), "html=\n{away}");
+    }
+
+    /// M4: a row the engine flagged shows each flag as a chip in the pane; a row with none shows
+    /// no flag element at all.
+    #[test]
+    fn m4_the_pane_shows_a_chip_for_each_review_flag() {
+        let mut flagged = sample();
+        flagged.captures.insert(
+            "review_flags".to_string(),
+            r#"["fix_ungrounded","unverified_name:src/config.rs"]"#.to_string(),
+        );
+        let row = DetailPaneRow::from_finding(&flagged, None, None, 0, 1);
+        assert_eq!(
+            row.review_flags,
+            vec![
+                "fix_ungrounded".to_string(),
+                "unverified_name:src/config.rs".to_string()
+            ]
+        );
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("review-flag-chip"), "html=\n{html}");
+        assert!(html.contains("fix_ungrounded"), "html=\n{html}");
+        assert!(
+            html.contains("unverified_name:src/config.rs"),
+            "html=\n{html}"
+        );
+
+        let clean = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
+        let html = render(Some(clean), PaneFocus::Cursor, None, None);
+        assert!(!html.contains("data-review-flags"), "html=\n{html}");
     }
 
     /// req_pass2_11: the `I`/`F` prompt renders with the disposition it is collecting a

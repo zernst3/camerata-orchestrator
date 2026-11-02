@@ -139,6 +139,12 @@ impl BookkeepingCaptures {
         for f in findings {
             let mut taken = Vec::new();
             for key in BOOKKEEPING_CAPTURE_KEYS {
+                // The review flags stay on the row: they are not identity (`object_captures`
+                // excludes every bookkeeping key), and a flag a later stage writes would
+                // otherwise replace the held list on restore and lose the earlier flags.
+                if *key == crate::review_flags::REVIEW_FLAGS_CAPTURE {
+                    continue;
+                }
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
                 }
@@ -1097,6 +1103,11 @@ pub struct ScanReport {
     /// passed through there.
     #[serde(default)]
     pub tree: Option<crate::review_tree::ReviewTree>,
+    /// A10: the rows the engine threw out and kept (`engine_discard`), each marked with its
+    /// reason. They are not in [`Self::findings`], so every exporter leaves them out by default,
+    /// and they never hold or block an export. Additive/`serde(default)` so older reports load.
+    #[serde(default)]
+    pub discarded: Vec<Finding>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -1282,6 +1293,7 @@ impl ScanReport {
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
@@ -1323,6 +1335,7 @@ impl ScanReport {
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
@@ -1353,6 +1366,9 @@ impl ScanReport {
     pub fn assign_site_keys(&mut self) {
         let before: Vec<String> = self.findings.iter().map(|f| f.site_key.clone()).collect();
         crate::inspections::backfill_site_keys(&mut self.findings);
+        // A10: the rows the engine threw out are addressable too (a later decision, the Engine
+        // Check), so they carry a site key of their own.
+        crate::inspections::backfill_site_keys(&mut self.discarded);
         let moved: std::collections::HashMap<String, String> = before
             .iter()
             .zip(&self.findings)
@@ -1393,6 +1409,41 @@ impl ScanReport {
             );
         }
         self.assign_site_keys();
+    }
+
+    /// Fold a targeted rescan's rows into the stored report. `refreshed` lists, per repo whose
+    /// audit returned Ok, the rule ids that were re-evaluated there; only the old rows (shipped
+    /// and thrown out) of those `(rule, repo)` pairs are replaced. A repo whose rescan failed, or
+    /// that the rule does not apply to, keeps every old row: nothing is lost to a failure, which
+    /// the caller discloses.
+    pub fn fold_rescan_rows(
+        &mut self,
+        refreshed: &[(String, Vec<String>)],
+        rows: Vec<Finding>,
+        discarded: Vec<Finding>,
+    ) {
+        let replaced = |f: &Finding| {
+            refreshed.iter().any(|(repo, ids)| {
+                *repo == f.repo && ids.iter().any(|id| id.eq_ignore_ascii_case(&f.rule_id))
+            })
+        };
+        self.findings.retain(|f| !replaced(f));
+        self.findings.extend(rows);
+        self.discarded.retain(|f| !replaced(f));
+        self.discarded.extend(discarded);
+        self.ledger.set_discarded(&self.discarded);
+        // The stored report is handed out as it is (the rescan route only sweeps secrets), so the
+        // new rows are keyed and the tree is rebuilt now, not at the next seal.
+        self.assign_site_keys();
+    }
+
+    /// A10: whether the rows the engine threw out and kept ([`Self::discarded`]) are the rows the
+    /// ledger counted, by reason, and each carries its mark.
+    pub fn discarded_reconciles(&self) -> bool {
+        self.discarded
+            .iter()
+            .all(crate::engine_discard::is_discarded)
+            && crate::engine_discard::tally(&self.discarded) == self.ledger.discarded().by_reason
     }
 
     /// Rebuild [`Self::tree`] from the rows: every row in exactly one sub-group, nodes above them.
@@ -1443,6 +1494,14 @@ impl ScanReport {
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
     pub fn seal(mut self) -> SealedReport {
+        // A10: the safety net behind the engine's own throw-out steps. A row that reached the seal
+        // marked thrown out, or as a row that is not a finding (a carried row from an older run),
+        // is moved aside, kept, and counted. Nothing is deleted.
+        let thrown = crate::junk_finding::take_thrown_out(&mut self.findings);
+        if !thrown.is_empty() {
+            self.ledger.record_discarded(&thrown);
+            self.discarded.extend(thrown);
+        }
         self.sweep_secrets_before_seal();
         self.refresh_patterns_across_services();
         // W21: audit every row's `path` HERE, because this is the one moment "every row" is
@@ -1455,6 +1514,10 @@ impl ScanReport {
         self.ledger.record_path_hygiene(hygiene);
         // After the secret sweep, so a key is made from the text the report ships.
         self.assign_site_keys();
+        // M4: real junk is marked (and so held) and wording judgments are flagged, on the rows
+        // that ship. A mark is recomputed here, so a carried row never keeps a stale one.
+        let content = crate::junk_finding::mark_rows(&mut self.findings);
+        self.ledger.record_content_check(content);
         SealedReport(self)
     }
 }
@@ -2222,6 +2285,9 @@ pub async fn audit_repos_with_llm_controlled(
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // A10: the rows the engine threw out. Kept, marked with the reason, and apart from the rows
+    // that ship: they become `ScanReport::discarded`.
+    let mut all_discarded: Vec<Finding> = Vec::new();
     // W1: the pipeline-integrity ledger for this scan — see `crate::scan_ledger`'s module
     // doc. Named `pipeline_ledger` (not `ledger`) to avoid colliding with this function's own
     // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
@@ -3018,6 +3084,13 @@ pub async fn audit_repos_with_llm_controlled(
                                 repo_failed_passes,
                                 repo_stage_samples,
                             )) => {
+                                // A10: rows the audit threw out come back marked; keep them apart
+                                // from the rows that go on, and count them by reason.
+                                let (thrown_out, kept) =
+                                    crate::engine_discard::split_discarded(ai_findings);
+                                ai_findings = kept;
+                                pipeline_ledger.record_discarded(&thrown_out);
+                                all_discarded.extend(thrown_out);
                                 // H12: whoever the rule id belongs to, these came from the model.
                                 for f in &mut ai_findings {
                                     f.captures
@@ -3317,12 +3390,18 @@ pub async fn audit_repos_with_llm_controlled(
                         &repo_stack.frameworks,
                         c,
                     );
+                    // A10: an excepted finding is kept, marked, and apart from the rows that go on.
+                    let (excepted, kept) =
+                        crate::engine_discard::split_discarded(std::mem::take(&mut repo_findings));
+                    repo_findings = kept;
+                    pipeline_ledger.record_discarded(&excepted);
+                    all_discarded.extend(excepted);
                     let rows_out = repo_findings.len();
-                    // W1: a stack exception DROPS a finding outright (it names an idiomatic
-                    // platform pattern, not a violation) — the one stage in this loop that
-                    // reduces the row count without a merge target, so it gets its own
+                    // W1: a stack exception TAKES a finding out of the rows that ship (it names
+                    // an idiomatic platform pattern, not a violation) — the one stage in this
+                    // loop that reduces the row count without a merge target, so it gets its own
                     // explicit `other` bucket rather than silently vanishing into
-                    // "unaccounted".
+                    // "unaccounted". The row itself is kept (A10): see `ScanReport::discarded`.
                     if rows_in != rows_out {
                         let mut acc = crate::scan_ledger::StageAccounting::default();
                         acc.other
@@ -3483,6 +3562,7 @@ pub async fn audit_repos_with_llm_controlled(
     // and the review tree holds them together (a rule node of routine rows, decided as a batch).
     bookkeeping.restore(&mut all_findings);
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.discarded = all_discarded;
     report.tree = Some(crate::review_tree::ReviewTree {
         nodes: tree_sub_nodes,
         ..crate::review_tree::ReviewTree::default()
@@ -4238,6 +4318,34 @@ mod tests {
                 .contains_key(crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE));
             assert!(f.captures.contains_key("history-status"));
         }
+    }
+
+    /// M4 fix (a): a second review flag written after the bookkeeping was held aside does not
+    /// replace the first. The detail flag and the fix flag both survive the take and restore.
+    #[test]
+    fn a_second_review_flag_does_not_overwrite_the_first_through_take_and_restore() {
+        use crate::review_flags::{flags_of, set_stage_flags, FlagStage};
+        let mut f = Finding {
+            repo: "acme/api".to_string(),
+            path: "src/a.ts".to_string(),
+            rule_id: "AI-X-1".to_string(),
+            snippet: "const a = 1;".to_string(),
+            ..Finding::default()
+        };
+        set_stage_flags(&mut f, FlagStage::Detail, vec!["precondition_added".into()]);
+        let mut rows = vec![f];
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut rows);
+        // A stage that runs while the keys are held aside adds the fix flag.
+        set_stage_flags(&mut rows[0], FlagStage::Fix, vec!["fix_ungrounded".into()]);
+        held.restore(&mut rows);
+        assert_eq!(
+            flags_of(&rows[0]),
+            vec![
+                "fix_ungrounded".to_string(),
+                "precondition_added".to_string()
+            ]
+        );
     }
 
     /// req_a8 (the general statement): `semantic_rule_ids_for_repo` applies NO filter other

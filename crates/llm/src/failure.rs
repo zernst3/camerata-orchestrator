@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
-    /// The provider could not be reached or was overloaded: a dropped connection, a timeout, a
-    /// 429, a 5xx or a 529 that outlasted the retries. Retried once at the end of the run; a
+    /// The provider could not be reached: a dropped connection, a timeout or a 5xx (500 to 504)
+    /// that outlasted the retries. Retried once at the end of the run; a
     /// streak of these stops the run.
     Transport,
     /// A credential or the account is the problem: a 401 or 403, a missing CLI binary, exhausted
@@ -35,6 +35,13 @@ pub enum FailureClass {
     OutageStop,
     /// A file could not be read for a reason other than being binary or not UTF-8.
     Io,
+    /// The provider said to slow down or that it is busy (a 429 or `rate_limit_error`, a 529 or
+    /// `overloaded_error`) and kept saying it past the transport's retries. A pause, not an
+    /// outage: it never counts toward the outage streak, and the batch runner waits the provider's `retry-after`, shrinks its concurrency and sends the
+    /// part again until its wall-clock deadline. The end-of-run second try covers it like a
+    /// transport failure. A connection failure, a timeout and a 500 to 504 stay [`Self::Transport`]
+    /// and still trip the outage stop.
+    RateLimited,
 }
 
 impl FailureClass {
@@ -53,17 +60,20 @@ impl FailureClass {
             Self::SpendLimit => "spend_limit",
             Self::OutageStop => "outage_stop",
             Self::Io => "io",
+            Self::RateLimited => "rate_limited",
         }
     }
 
-    /// True for the classes the end-of-run second try covers: transport trouble only (a dropped
-    /// connection, a timeout, a 429, a 5xx). The second try re-sends the SAME request, which is
-    /// right when the provider could not be reached and wrong when it answered.
+    /// True for the classes the end-of-run second try covers: transport trouble (a dropped
+    /// connection, a timeout, a 5xx) and a rate limit or overload that outlasted the retries. The
+    /// second try re-sends the SAME request, which is right when the provider could not be reached
+    /// or asked us to wait, and wrong when it answered.
     pub fn is_retried_at_end(self) -> bool {
-        self == Self::Transport
+        matches!(self, Self::Transport | Self::RateLimited)
     }
 
-    /// True for the one class that counts toward the outage stop's streak.
+    /// True for the one class that counts toward the outage stop's streak. A rate limit does not: a
+    /// streak of 429s is the provider asking for a slower pace, so it is a pause and not an outage.
     pub fn counts_toward_outage(self) -> bool {
         self == Self::Transport
     }
@@ -285,6 +295,38 @@ pub fn call_failure_of(e: &anyhow::Error) -> Option<&LlmCallFailure> {
     e.downcast_ref::<LlmCallFailure>()
 }
 
+/// How long the provider asked the caller to wait: the `retry-after` of the LAST attempt on the
+/// typed failure inside `e`. `None` when the error carries no trail or the provider sent none.
+/// A caller that pauses on a rate limit waits this long (the transport already waited it, capped,
+/// between its own attempts).
+pub fn retry_after_of(e: &anyhow::Error) -> Option<std::time::Duration> {
+    call_failure_of(e)?
+        .attempts
+        .last()?
+        .retry_after_secs
+        .map(std::time::Duration::from_secs)
+}
+
+/// True when the provider answered that it is overloaded (a 529, or an `overloaded_error`), read
+/// from the typed failure's status and trail or, for an untyped error, from its text. Such an
+/// answer classifies as [`FailureClass::RateLimited`]; this reads the signal off an error whose
+/// class a caller built by hand.
+pub fn is_overloaded(e: &anyhow::Error) -> bool {
+    if let Some(f) = call_failure_of(e) {
+        return f.http.as_ref().is_some_and(|(status, _)| *status == 529)
+            || f.attempts.iter().any(|a| {
+                a.http_status == Some(529) || a.error_type.as_deref() == Some("overloaded_error")
+            })
+            || text_says_overloaded(&f.message);
+    }
+    text_says_overloaded(&e.to_string())
+}
+
+fn text_says_overloaded(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("overloaded") || lower.contains("529")
+}
+
 /// The text the provider put in an error response body: `(error type, message)`.
 pub fn provider_error_of(body: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -344,10 +386,15 @@ pub fn classify_http(status: u16, error_type: Option<&str>, message: &str) -> (F
     if mentions_exhausted_account(&lower) {
         return (FailureClass::AuthOrBilling, false);
     }
-    if status == 429 || status == 408 || (500..600).contains(&status) {
+    // A 429 is the provider asking for a slower pace: a pause, not an outage.
+    // An overload (529) is the provider being busy: the same kind of pause.
+    if status == 429 || status == 529 || matches!(etype, "rate_limit_error" | "overloaded_error") {
+        return (FailureClass::RateLimited, true);
+    }
+    if status == 408 || (500..600).contains(&status) {
         return (FailureClass::Transport, true);
     }
-    if matches!(etype, "rate_limit_error" | "overloaded_error" | "api_error") {
+    if etype == "api_error" {
         return (FailureClass::Transport, true);
     }
     (FailureClass::Content, false)
@@ -361,13 +408,21 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
     if mentions_exhausted_account(&lower) || mentions_bad_credential(&lower) {
         return (FailureClass::AuthOrBilling, false);
     }
-    let transport = [
-        "overloaded",
+    // Checked before the transport words. An overload is the same kind of pause as a 429.
+    if [
         "rate limit",
         "rate_limit",
         "too many requests",
         "429",
+        "overloaded",
         "529",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+    {
+        return (FailureClass::RateLimited, true);
+    }
+    let transport = [
         "503",
         "502",
         "500",
@@ -430,6 +485,7 @@ mod tests {
             FailureClass::OutageStop,
             FailureClass::Io,
             FailureClass::AuthOrBilling,
+            FailureClass::RateLimited,
         ] {
             assert!(!c.counts_toward_outage(), "{c:?}");
         }
@@ -447,9 +503,10 @@ mod tests {
 
     #[test]
     fn http_statuses_classify_by_what_waiting_can_fix() {
-        for s in [429, 500, 502, 503, 529, 408] {
+        for s in [500, 502, 503, 504, 408] {
             assert_eq!(classify_http(s, None, "").0, FailureClass::Transport, "{s}");
         }
+        assert_eq!(classify_http(529, None, "").0, FailureClass::RateLimited);
         for s in [401, 402, 403] {
             assert_eq!(
                 classify_http(s, None, "").0,
@@ -485,11 +542,133 @@ mod tests {
         );
     }
 
+    /// A 429 is the provider saying slow down, which is a pause and not an outage: its own class,
+    /// so the run's outage streak can leave it out while the end-of-run second try still covers it.
     #[test]
-    fn cli_text_classifies_overload_as_transport_and_login_as_auth() {
+    fn a_429_and_an_overload_are_both_rate_limited_and_server_errors_are_transport() {
+        assert_eq!(
+            classify_http(429, None, "").0,
+            FailureClass::RateLimited,
+            "a bare 429"
+        );
+        let (class, retry) = classify_http(429, Some("rate_limit_error"), "Number of requests");
+        assert_eq!(class, FailureClass::RateLimited);
+        assert!(retry, "waiting clears a rate limit");
+        assert_eq!(
+            classify_http(200, Some("rate_limit_error"), "").0,
+            FailureClass::RateLimited,
+            "the provider's own error type counts without the status"
+        );
+        // An overload (Fable wave 3, within run to completion) is a pause like a 429: the provider
+        // is busy, and waiting clears it.
+        let (class, retry) = classify_http(529, None, "");
+        assert_eq!(class, FailureClass::RateLimited);
+        assert!(retry);
+        assert_eq!(
+            classify_http(200, Some("overloaded_error"), "Overloaded").0,
+            FailureClass::RateLimited,
+            "the provider's own error type counts without the status"
+        );
+        // A server error or a timeout is still the provider being unreachable: an outage.
+        for s in [500, 502, 503, 504, 408] {
+            assert_eq!(classify_http(s, None, "").0, FailureClass::Transport, "{s}");
+        }
+        assert_eq!(
+            classify_http(500, Some("api_error"), "Internal").0,
+            FailureClass::Transport
+        );
+        assert_eq!(
+            classify_http(
+                429,
+                Some("rate_limit_error"),
+                "You have reached your usage limit"
+            )
+            .0,
+            FailureClass::AuthOrBilling,
+            "a 429 that says the account is out is still billing"
+        );
+    }
+
+    #[test]
+    fn rate_limited_is_retried_at_the_end_but_never_counts_toward_an_outage() {
+        let c = FailureClass::RateLimited;
+        assert!(!c.counts_toward_outage());
+        assert!(!c.stops_run());
+        assert!(c.is_retried_at_end(), "the end-of-run second try covers it");
+        assert_eq!(c.as_str(), "rate_limited");
+        assert_eq!(serde_json::to_string(&c).unwrap(), "\"rate_limited\"");
+    }
+
+    #[test]
+    fn cli_text_that_says_rate_limited_or_overloaded_is_rate_limited_and_connection_trouble_is_transport(
+    ) {
+        for t in [
+            "API Error: 429 Too Many Requests",
+            "rate limit exceeded, retry later",
+            "rate_limit_error: slow down",
+        ] {
+            assert_eq!(classify_text(t).0, FailureClass::RateLimited, "{t}");
+        }
+        for t in ["API Error: 529 overloaded_error", "Overloaded"] {
+            assert_eq!(classify_text(t).0, FailureClass::RateLimited, "{t}");
+        }
+        for t in [
+            "connection reset by peer",
+            "request timed out",
+            "API Error: 500 internal",
+            "502 bad gateway",
+            "503 service unavailable",
+            "504 gateway timeout",
+        ] {
+            assert_eq!(classify_text(t).0, FailureClass::Transport, "{t}");
+        }
+    }
+
+    #[test]
+    fn the_retry_after_the_provider_sent_is_read_off_the_last_attempt() {
+        let mut first = AttemptRecord::new("api", "m");
+        first.retry_after_secs = Some(5);
+        let mut last = AttemptRecord::new("api", "m");
+        last.retry_after_secs = Some(45);
+        let mut f = LlmCallFailure::new(FailureClass::RateLimited, "HTTP 429");
+        f.attempts = vec![first, last];
+        let e = anyhow::Error::new(f).context("while calibrating");
+        assert_eq!(
+            retry_after_of(&e),
+            Some(std::time::Duration::from_secs(45)),
+            "the last attempt's value, through context"
+        );
+        assert_eq!(retry_after_of(&anyhow::anyhow!("boom")), None);
+        let none = LlmCallFailure::new(FailureClass::RateLimited, "HTTP 429");
+        assert_eq!(retry_after_of(&anyhow::Error::new(none)), None);
+    }
+
+    #[test]
+    fn an_overloaded_answer_is_recognised_from_the_status_the_type_or_the_text() {
+        let mut f = LlmCallFailure::new(FailureClass::Transport, "Message Batches API HTTP 529");
+        f.http = Some((529, "{}".to_string()));
+        assert!(is_overloaded(&anyhow::Error::new(f)));
+        let mut rec = AttemptRecord::new("api", "m");
+        rec.error_type = Some("overloaded_error".to_string());
+        let mut g = LlmCallFailure::new(FailureClass::Transport, "stream error");
+        g.attempts = vec![rec];
+        assert!(is_overloaded(&anyhow::Error::new(g)));
+        assert!(is_overloaded(&anyhow::anyhow!(
+            "API Error: 529 overloaded_error"
+        )));
+        assert!(!is_overloaded(&anyhow::anyhow!("connection reset by peer")));
+        let h = LlmCallFailure::new(FailureClass::RateLimited, "HTTP 429");
+        assert!(
+            !is_overloaded(&anyhow::Error::new(h)),
+            "a 429 is not an overload"
+        );
+    }
+
+    #[test]
+    fn cli_text_classifies_overload_as_rate_limited_and_login_as_auth() {
         assert_eq!(
             classify_text("API Error: 529 overloaded_error").0,
-            FailureClass::Transport
+            FailureClass::RateLimited
         );
         assert_eq!(
             classify_text("Claude AI usage limit reached").0,

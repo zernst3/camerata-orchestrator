@@ -240,8 +240,10 @@ async fn without_an_authored_remediation_the_model_is_still_asked() {
 
 #[tokio::test]
 async fn rejected_fix_attempts_are_counted_as_wasted_tokens() {
-    // Every reply names an identifier that is not in the evidence, so every attempt is thrown
-    // away: MAX_FIX_REGENERATIONS + 1 batched rounds plus the solo retry.
+    // Every reply names an identifier that is not in the evidence, so every attempt fails its
+    // check: one attempt and one re-ask (M4), where there were MAX_FIX_REGENERATIONS + 1 batched
+    // rounds plus the solo retry. The second reply ships flagged; both calls are counted as
+    // rejected replies.
     let llm = ScriptedLlm::new(&[(
         r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#,
         false,
@@ -258,11 +260,14 @@ async fn rejected_fix_attempts_are_counted_as_wasted_tokens() {
         None,
     )
     .await;
-    assert_eq!(out[0].fix_specific, None);
-    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        out[0].fix_specific.as_deref(),
+        Some("Use `neverInEvidence` here.")
+    );
+    assert!(failed.is_empty(), "{failed:?}");
     let fix = meter.stage_telemetry(1_000).stages[0].usage.clone();
-    // The rounds and the solo retry; a rejected fix is not sent again at the end of the run.
-    let attempts = (MAX_FIX_REGENERATIONS + 2) as u64;
+    // The attempt and the re-ask; a rejected fix is not sent again at the end of the run.
+    let attempts = 2u64;
     assert_eq!(fix.calls, attempts);
     assert_eq!(fix.wasted_calls, attempts, "every attempt was thrown away");
     assert_eq!(fix.wasted_input_tokens, fix.input_tokens);

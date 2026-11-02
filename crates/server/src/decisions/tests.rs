@@ -1619,3 +1619,67 @@ async fn a_migration_with_no_scan_rows_stores_nothing_and_leaves_the_draft_untou
         serde_json::json!({})
     );
 }
+
+// ── discarded rows ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
+    let (state, app, pid) = app_with_project();
+    // The engine threw one row out and kept it (M4); the rows of the tree are the kept ones.
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.findings = three_rows();
+    report.discarded = vec![row("AI-PLACEHOLDER", "src/junk.rs", 3, "x")];
+    report.provenance.started_at = "2026-11-02T10:00:00Z".to_string();
+    report.provenance.finished_at = "2026-11-02T10:00:00Z".to_string();
+    let entry = state
+        .inspections
+        .append(InspectionEntry::from_report(
+            &pid,
+            report,
+            InspectionKind::Full,
+        ))
+        .unwrap();
+    let discarded = &entry.report.discarded[0];
+    assert!(
+        !discarded.site_key.is_empty(),
+        "a discarded row has a site key"
+    );
+    assert!(
+        entry
+            .report
+            .tree
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .all(|n| !n.members.contains(&discarded.site_key)),
+        "and is not a member of the review tree"
+    );
+
+    // A reviewer's ruling on it (the A12 restore builds on this) is stored under that key.
+    let uri = format!("/api/projects/{pid}/decisions");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &discarded.site_key,
+            DecisionState::Confirmed,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = call(&app, "GET", &uri, None).await;
+    let got: DecisionsResp = serde_json::from_value(body).unwrap();
+    let stored = got
+        .decisions
+        .iter()
+        .find(|d| d.key == discarded.site_key)
+        .expect("read back");
+    assert_eq!(stored.state, DecisionState::Confirmed);
+    assert!(stored.is_active());
+    // The store answers the gate's question for the discarded row too.
+    assert!(StoreDecisions::for_project(&state.decisions, &pid).has_decision(discarded));
+}
