@@ -74,9 +74,15 @@ pub struct Decision {
     /// Required unless this is a site-scope Confirmed (and always for a node decision).
     pub reason: String,
     pub scope: Scope,
-    /// Node record only: every member key at the time of the decision.
+    /// Node record only: every member key the decision covers (one per-site record each). The
+    /// members at the time of the decision, less `except`.
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Node record only: members the decision deliberately left out (unticked outliers, held
+    /// rows). They have no per-site record, stay Unresolved, are not "new since the decision"
+    /// and are never touched by revoking the node.
+    #[serde(default)]
+    pub except: Vec<String>,
     /// The node decision this per-site record came from.
     #[serde(default)]
     pub inherited_from: Option<String>,
@@ -108,11 +114,10 @@ impl Decision {
     }
 }
 
-/// The decision each site key currently has: the LATEST record that is not revoked. A record a
-/// group decision wrote counts only while its node record is not revoked and still lists the key
-/// in `applies_to`; otherwise it is ignored. Node records are about a node, not a site, and are
-/// not in the map. The server and the UI both work out a site's decision with this one function.
-pub fn effective_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
+/// Every live site-level record of each site key, oldest first: records not revoked and not
+/// node records, and a record a group decision wrote only while its node record is live and
+/// lists the key in `applies_to`.
+pub fn live_by_key(decisions: &[Decision]) -> HashMap<&str, Vec<&Decision>> {
     let nodes: HashMap<&str, HashSet<&str>> = decisions
         .iter()
         .filter(|d| d.is_active() && d.is_node_record())
@@ -123,7 +128,7 @@ pub fn effective_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
             )
         })
         .collect();
-    let mut by_key: HashMap<&str, &Decision> = HashMap::new();
+    let mut by_key: HashMap<&str, Vec<&Decision>> = HashMap::new();
     for d in decisions.iter().filter(|d| d.is_active()) {
         if d.is_node_record() {
             continue;
@@ -136,9 +141,18 @@ pub fn effective_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
                 continue;
             }
         }
-        by_key.insert(d.key.as_str(), d);
+        by_key.entry(d.key.as_str()).or_default().push(d);
     }
     by_key
+}
+
+/// The decision each site key currently has: the LATEST of its live records (see
+/// [`live_by_key`]). The server and the UI both work out a site's decision with this function.
+pub fn effective_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
+    live_by_key(decisions)
+        .into_iter()
+        .filter_map(|(key, records)| records.last().map(|d| (key, *d)))
+        .collect()
 }
 
 // ── Requests and responses ────────────────────────────────────────────────────────────────
@@ -161,6 +175,10 @@ pub struct NewDecisionReq {
     pub needed_me: Option<bool>,
     #[serde(default)]
     pub sample_verdict: Option<SampleVerdict>,
+    /// Node scope: site keys to leave out of the decision. Held rows are left out by the server
+    /// whether or not they are listed.
+    #[serde(default)]
+    pub except: Vec<String>,
 }
 
 /// One disposition as the UI's onboarding draft held it. The states and buckets are the strings
@@ -313,6 +331,7 @@ mod tests {
             reason: "scheduled for the Q1 auth work".into(),
             scope: Scope::Node("sub:SEC-1/0".into()),
             applies_to: vec!["k1".into(), "k2".into()],
+            except: vec!["k3".into()],
             inherited_from: None,
             decided_by: "zach".into(),
             decided_at: "2026-11-02T10:00:00Z".into(),
@@ -337,6 +356,7 @@ mod tests {
             "reason": "scheduled for the Q1 auth work",
             "scope": { "node": "sub:SEC-1/0" },
             "applies_to": ["k1", "k2"],
+            "except": ["k3"],
             "inherited_from": null,
             "decided_by": "zach",
             "decided_at": "2026-11-02T10:00:00Z",
@@ -416,6 +436,7 @@ mod tests {
             decided_by: "zach".into(),
             needed_me: Some(true),
             sample_verdict: Some(SampleVerdict::FalseAlarm),
+            except: vec!["k7".into()],
         };
         assert_eq!(
             serde_json::to_value(&new).unwrap(),
@@ -426,7 +447,8 @@ mod tests {
                 "reason": "pattern reviewed",
                 "decided_by": "zach",
                 "needed_me": true,
-                "sample_verdict": "false_alarm"
+                "sample_verdict": "false_alarm",
+                "except": ["k7"]
             })
         );
 

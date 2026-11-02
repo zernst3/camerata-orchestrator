@@ -47,9 +47,9 @@ fn store_refusal(e: &DecisionStoreError) -> Response {
         DecisionStoreError::UnknownNode(_) | DecisionStoreError::NotFound(_) => {
             StatusCode::NOT_FOUND
         }
-        DecisionStoreError::EmptyNode(_)
-        | DecisionStoreError::AlreadyRevoked(_)
-        | DecisionStoreError::InheritedRecord(_) => StatusCode::CONFLICT,
+        DecisionStoreError::EmptyNode(_) | DecisionStoreError::AlreadyRevoked(_) => {
+            StatusCode::CONFLICT
+        }
         DecisionStoreError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     refusal(status, e.code(), e.to_string())
@@ -170,9 +170,19 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
                 return store_refusal(&DecisionStoreError::UnknownNode(node_id.clone()));
             }
             let members = tree.batch_members(node_id);
+            // Held rows are never covered by a batch: the gate needs a ruling on them by name,
+            // and an inherited record would hide that nobody looked.
+            let mut with_held = req.clone();
+            let held = super::held_keys(&latest.report.findings, &state.decisions.active(id));
+            with_held.except.extend(
+                members
+                    .iter()
+                    .filter(|m| held.contains(m.as_str()))
+                    .cloned(),
+            );
             state
                 .decisions
-                .record_node(id, node_id, &members, req, ctx)
+                .record_node(id, node_id, &members, &with_held, ctx)
                 .map(|(decision, inherited_count)| DecisionRecorded {
                     decision,
                     inherited_count,
@@ -193,10 +203,9 @@ fn migrate(state: &AppState, id: &str, req: MigrateDraftReq) -> Response {
             "migrated_from_draft must be true for a migration",
         );
     }
-    // Once, ever. A project that was migrated before writes nothing; its draft is blanked again
-    // so an older build that re-saved dispositions into it cannot make the UI ask twice.
+    // Once, ever. A project that was migrated before writes nothing. Its draft is left alone: it
+    // now carries the changes the UI has not yet been able to store.
     if state.decisions.migrated_from_draft_at(id).is_some() {
-        blank_draft_dispositions(state, id);
         return Json(MigrationOutcome {
             already_migrated: true,
             migrated: 0,
@@ -228,6 +237,7 @@ fn migrate(state: &AppState, id: &str, req: MigrateDraftReq) -> Response {
             reason: d.reason.trim().to_string(),
             scope: Scope::Site,
             applies_to: Vec::new(),
+            except: Vec::new(),
             inherited_from: None,
             decided_by: MIGRATED_BY.to_string(),
             decided_at: when.clone(),
@@ -263,17 +273,14 @@ fn migrate(state: &AppState, id: &str, req: MigrateDraftReq) -> Response {
             })
             .into_response()
         }
-        Ok(false) => {
-            blank_draft_dispositions(state, id);
-            Json(MigrationOutcome {
-                already_migrated: true,
-                migrated: 0,
-                unmatched: Vec::new(),
-                skipped: 0,
-                dispositions: BTreeMap::new(),
-            })
-            .into_response()
-        }
+        Ok(false) => Json(MigrationOutcome {
+            already_migrated: true,
+            migrated: 0,
+            unmatched: Vec::new(),
+            skipped: 0,
+            dispositions: BTreeMap::new(),
+        })
+        .into_response(),
         Err(e) => store_refusal(&e),
     }
 }

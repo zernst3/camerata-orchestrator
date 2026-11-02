@@ -87,8 +87,6 @@ pub enum DecisionStoreError {
     NotFound(String),
     #[error("decision {0} is already revoked")]
     AlreadyRevoked(String),
-    #[error("{0} was written by a group decision: revoke that decision instead")]
-    InheritedRecord(String),
     #[error("the decisions could not be saved: {0}")]
     Persist(#[from] std::io::Error),
 }
@@ -105,7 +103,6 @@ impl DecisionStoreError {
             Self::EmptyNode(_) => "empty_node",
             Self::NotFound(_) => "not_found",
             Self::AlreadyRevoked(_) => "already_revoked",
-            Self::InheritedRecord(_) => "revoke_the_group_decision",
             Self::Persist(_) => "persist_failed",
         }
     }
@@ -249,9 +246,16 @@ impl DecisionStore {
                 return Err(DecisionStoreError::MergeTargetInvalid);
             }
         }
-        if req.state != DecisionState::Confirmed && req.reason.trim().is_empty() {
+        // The review screen has always asked for a reason where the decision makes a claim
+        // beyond the finding: accepting the risk, calling the tool wrong, merging. Confirming
+        // and scheduling tech debt (now or later) disagree with nothing and need none.
+        let needs_reason = matches!(
+            req.state,
+            DecisionState::Ignored | DecisionState::FalsePositive | DecisionState::MergedInto(_)
+        );
+        if needs_reason && req.reason.trim().is_empty() {
             return Err(DecisionStoreError::ReasonRequired(
-                "a decision other than Confirm needs a reason",
+                "ignoring a finding, calling it a false positive or merging it needs a reason",
             ));
         }
         self.mutate(project_id, |pd| {
@@ -263,6 +267,7 @@ impl DecisionStore {
                 reason: req.reason.trim().to_string(),
                 scope: Scope::Site,
                 applies_to: Vec::new(),
+                except: Vec::new(),
                 inherited_from: None,
                 decided_by: decider(&req.decided_by),
                 decided_at: ctx.now.to_string(),
@@ -300,7 +305,21 @@ impl DecisionStore {
                 "a decision on a group always needs a reason, Confirm included",
             ));
         }
-        if members.is_empty() {
+        // The members the decision leaves out: whatever the caller excepted (unticked outliers)
+        // and the server's own list of held rows. Only real members count.
+        let excepted: std::collections::HashSet<&str> =
+            req.except.iter().map(String::as_str).collect();
+        let covered: Vec<String> = members
+            .iter()
+            .filter(|m| !excepted.contains(m.as_str()))
+            .cloned()
+            .collect();
+        let left_out: Vec<String> = members
+            .iter()
+            .filter(|m| excepted.contains(m.as_str()))
+            .cloned()
+            .collect();
+        if covered.is_empty() {
             return Err(DecisionStoreError::EmptyNode(node_id.to_string()));
         }
         self.mutate(project_id, |pd| {
@@ -313,7 +332,8 @@ impl DecisionStore {
                 state: req.state.clone(),
                 reason: reason.clone(),
                 scope: Scope::Node(node_id.to_string()),
-                applies_to: members.to_vec(),
+                applies_to: covered.clone(),
+                except: left_out.clone(),
                 inherited_from: None,
                 decided_by: decided_by.clone(),
                 decided_at: ctx.now.to_string(),
@@ -324,10 +344,10 @@ impl DecisionStore {
                 confirmed_by_client: None,
                 revoked_at: None,
             };
-            pd.decisions.reserve(members.len() + 1);
+            pd.decisions.reserve(covered.len() + 1);
             pd.decisions.push(node.clone());
             // One record per member, so every site holds the decision and its reason in the file.
-            for (i, key) in members.iter().enumerate() {
+            for (i, key) in covered.iter().enumerate() {
                 pd.decisions.push(Decision {
                     id: format!("{id}.{i:05}"),
                     key: key.clone(),
@@ -335,6 +355,7 @@ impl DecisionStore {
                     reason: reason.clone(),
                     scope: Scope::Site,
                     applies_to: Vec::new(),
+                    except: Vec::new(),
                     inherited_from: Some(id.clone()),
                     decided_by: decided_by.clone(),
                     decided_at: ctx.now.to_string(),
@@ -346,14 +367,14 @@ impl DecisionStore {
                     revoked_at: None,
                 });
             }
-            Ok((node, members.len()))
+            Ok((node, covered.len()))
         })
     }
 
     /// Revoke a decision: stamp `revoked_at` on it, and on a node decision on every per-site
     /// record it wrote. Nothing is deleted. Returns the ids revoked. A per-site record written
-    /// by a group decision cannot be revoked alone (rule on that site instead, or revoke the
-    /// group decision).
+    /// by a group decision CAN be revoked alone: that is the reviewer undoing one site of a
+    /// batch, and it leaves the node decision and the other sites as they were.
     pub fn revoke(
         &self,
         project_id: &str,
@@ -364,9 +385,6 @@ impl DecisionStore {
             let Some(target) = pd.decisions.iter().find(|d| d.id == decision_id) else {
                 return Err(DecisionStoreError::NotFound(decision_id.to_string()));
             };
-            if target.inherited_from.is_some() {
-                return Err(DecisionStoreError::InheritedRecord(decision_id.to_string()));
-            }
             if target.revoked_at.is_some() {
                 return Err(DecisionStoreError::AlreadyRevoked(decision_id.to_string()));
             }
@@ -421,6 +439,11 @@ impl DecisionStore {
     }
 
     /// Write one project's data atomically while the caller holds the lock.
+    ///
+    /// TODO(append-only log): this rewrites the project's whole file, and `mutate` clones it,
+    /// on every write. A node decision is one write, so it is acceptable now; at tens of
+    /// thousands of records, move to an append-only log (one line per record, compacted on
+    /// open) so a single-site ruling costs one line, not the file.
     fn persist_locked(
         &self,
         project_id: &str,
@@ -462,6 +485,30 @@ struct StoredFileRef<'a> {
     project_id: &'a str,
     #[serde(flatten)]
     data: &'a ProjectDecisions,
+}
+
+/// The site keys a batch decision never covers: rows held for a ruling of their own. A row is
+/// held when its quoted evidence could not be verified, or when it was merged into another site.
+/// This is the one place a new kind of hold (the Engine Check's pending correction) is added.
+pub fn held_keys(
+    rows: &[crate::onboard::Finding],
+    active: &[Decision],
+) -> std::collections::HashSet<String> {
+    let mut held: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|f| {
+            f.captures
+                .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+        })
+        .map(|f| f.site_key.clone())
+        .collect();
+    held.extend(
+        effective_by_key(active)
+            .into_iter()
+            .filter(|(_, d)| matches!(d.state, DecisionState::MergedInto(_)))
+            .map(|(k, _)| k.to_string()),
+    );
+    held
 }
 
 fn decider(by: &str) -> String {

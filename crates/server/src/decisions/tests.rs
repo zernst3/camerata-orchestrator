@@ -86,6 +86,7 @@ fn node_req(node_id: &str, state: DecisionState, reason: &str) -> NewDecisionReq
         decided_by: "zach".to_string(),
         needed_me: None,
         sample_verdict: None,
+        except: Vec::new(),
     }
 }
 
@@ -98,6 +99,7 @@ fn site_req(key: &str, state: DecisionState, reason: &str) -> NewDecisionReq {
         decided_by: "zach".to_string(),
         needed_me: None,
         sample_verdict: None,
+        except: Vec::new(),
     }
 }
 
@@ -352,6 +354,7 @@ fn decision_applies_only_to_an_exact_key_match() {
         reason: "r".into(),
         scope: Scope::Site,
         applies_to: Vec::new(),
+        except: Vec::new(),
         inherited_from: None,
         decided_by: "z".into(),
         decided_at: NOW.into(),
@@ -484,10 +487,11 @@ fn revoked_node_decision_reverts_every_inherited_record() {
 }
 
 #[test]
-fn a_record_a_group_decision_wrote_cannot_be_revoked_alone_and_a_site_ruling_overrides_it() {
+fn undoing_one_site_of_a_group_decision_revokes_only_its_record_and_a_site_ruling_overrides_it() {
     let (rows, tree) = tree_of(three_rows());
     let node = rule_node(&tree, "SEC-1");
     let a = key_at(&rows, "src/a.rs");
+    let b = key_at(&rows, "src/b.rs");
     let store = DecisionStore::new();
     store
         .record_node(
@@ -504,28 +508,191 @@ fn a_record_a_group_decision_wrote_cannot_be_revoked_alone_and_a_site_ruling_ove
         .find(|d| d.key == a && d.inherited_from.is_some())
         .unwrap()
         .id;
-    assert!(matches!(
-        store.revoke("p", &inherited_id, NOW).unwrap_err(),
-        DecisionStoreError::InheritedRecord(_)
-    ));
+
+    // An undo of one site (the UI's revert) revokes just that site's record.
+    let revoked = store.revoke("p", &inherited_id, NOW).unwrap();
+    assert_eq!(revoked, vec![inherited_id.clone()]);
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    assert!(applied.get(&a).is_none_or(|s| s.decision.is_none()));
+    assert!(
+        applied.get(&b).unwrap().decision.is_some(),
+        "the others stay decided"
+    );
+    assert!(
+        applied
+            .get(&a)
+            .is_none_or(|s| s.new_since_decision.is_none()),
+        "an undone member is not new: the node decision covered it"
+    );
 
     // The reviewer's own ruling on one site wins over the batch; revoking it brings the batch back.
     let own = store
         .record_site(
             "p",
-            &site_req(&a, DecisionState::Ignored, "this one is dead code"),
+            &site_req(&b, DecisionState::Ignored, "this one is dead code"),
             ctx("insp-1"),
         )
         .unwrap();
     let applied = apply_to(&tree, &store.active("p"), &[]);
-    let d = applied.get(&a).unwrap().decision.as_ref().unwrap();
+    let d = applied.get(&b).unwrap().decision.as_ref().unwrap();
     assert_eq!(d.state, DecisionState::Ignored);
     assert_eq!(d.inherited_from, None);
     store.revoke("p", &own.id, NOW).unwrap();
     let applied = apply_to(&tree, &store.active("p"), &[]);
-    let d = applied.get(&a).unwrap().decision.as_ref().unwrap();
+    let d = applied.get(&b).unwrap().decision.as_ref().unwrap();
     assert_eq!(d.state, DecisionState::Confirmed);
     assert!(d.inherited_from.is_some());
+}
+
+// ── exclusions ────────────────────────────────────────────────────────────────────────────
+
+fn node_req_except(node_id: &str, reason: &str, except: &[&str]) -> NewDecisionReq {
+    NewDecisionReq {
+        except: except.iter().map(|k| (*k).to_string()).collect(),
+        ..node_req(node_id, DecisionState::Confirmed, reason)
+    }
+}
+
+#[test]
+fn an_excluded_outlier_is_not_covered() {
+    let (rows, tree) = tree_of(three_rows());
+    let node = rule_node(&tree, "SEC-1");
+    let members = tree.batch_members(&node);
+    let outlier = key_at(&rows, "src/b.rs");
+    let store = DecisionStore::new();
+    let (record, written) = store
+        .record_node(
+            "p",
+            &node,
+            &members,
+            &node_req_except(&node, "the pattern holds", &[&outlier]),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    assert_eq!(written, 2, "the outlier gets no record");
+    assert_eq!(record.except, vec![outlier.clone()]);
+    assert!(!record.applies_to.contains(&outlier));
+    assert_eq!(record.applies_to.len(), 2);
+    assert!(
+        store.list("p").iter().all(|d| d.key != outlier),
+        "no per-site record names the outlier"
+    );
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    assert!(
+        applied.get(&outlier).is_none(),
+        "it stays Unresolved, with no marker"
+    );
+    for path in ["src/a.rs", "src/c.rs"] {
+        assert!(applied
+            .get(&key_at(&rows, path))
+            .unwrap()
+            .decision
+            .is_some());
+    }
+
+    // A key that is not a member is ignored; excluding everyone leaves nothing to decide.
+    let all: Vec<&str> = members.iter().map(String::as_str).collect();
+    let err = store
+        .record_node(
+            "p",
+            &node,
+            &members,
+            &node_req_except(&node, "r", &all),
+            ctx("insp-1"),
+        )
+        .unwrap_err();
+    assert!(matches!(err, DecisionStoreError::EmptyNode(_)));
+}
+
+#[test]
+fn a_held_row_passed_in_except_stays_unresolved() {
+    let (rows, tree) = tree_of(three_rows());
+    let node = rule_node(&tree, "SEC-1");
+    let held = key_at(&rows, "src/c.rs");
+    let store = DecisionStore::new();
+    store
+        .record_node(
+            "p",
+            &node,
+            &tree.batch_members(&node),
+            &node_req_except(&node, "reviewed", &[&held]),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    assert!(applied.get(&held).is_none());
+    assert!(!StoreDecisions::for_project(&store, "p")
+        .has_decision(rows.iter().find(|f| f.site_key == held).unwrap()));
+}
+
+#[tokio::test]
+async fn the_route_always_excludes_held_rows_even_when_the_caller_forgot_them() {
+    let (state, app, pid) = app_with_project();
+    let mut rows = three_rows();
+    rows[2].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    let entry = state
+        .inspections
+        .append(entry_of(&pid, rows, "2026-11-02T10:00:00Z"))
+        .unwrap();
+    let node = rule_node(entry.report.tree.as_ref().unwrap(), "SEC-1");
+    let held = key_at(&entry.report.findings, "src/c.rs");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions"),
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::Confirmed,
+            "reviewed the group",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(done.inherited_count, 2);
+    assert_eq!(done.decision.except, vec![held.clone()]);
+    assert!(state.decisions.list(&pid).iter().all(|d| d.key != held));
+}
+
+#[test]
+fn revoke_leaves_excluded_members_untouched() {
+    let (rows, tree) = tree_of(three_rows());
+    let node = rule_node(&tree, "SEC-1");
+    let b = key_at(&rows, "src/b.rs");
+    let store = DecisionStore::new();
+    // The reviewer rules on the outlier by itself, then decides the group without it.
+    let own = store
+        .record_site(
+            "p",
+            &site_req(&b, DecisionState::FalsePositive, "generated"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let (record, _) = store
+        .record_node(
+            "p",
+            &node,
+            &tree.batch_members(&node),
+            &node_req_except(&node, "the rest are real", &[&b]),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let revoked = store.revoke("p", &record.id, NOW).unwrap();
+    assert_eq!(revoked.len(), 3, "the node record and its two records");
+    let after = store.list("p");
+    let mine = after.iter().find(|d| d.id == own.id).unwrap();
+    assert!(
+        mine.revoked_at.is_none(),
+        "the excluded member's own ruling is untouched"
+    );
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    assert_eq!(
+        applied.get(&b).unwrap().decision.as_ref().unwrap().state,
+        DecisionState::FalsePositive
+    );
 }
 
 // ── persistence ───────────────────────────────────────────────────────────────────────────
@@ -634,7 +801,7 @@ fn wire(state: &str, reason: &str, bucket: &str) -> crate::report_export::Dispos
 }
 
 #[test]
-fn the_export_ignores_request_dispositions_once_the_store_has_records_and_reports_disagreement() {
+fn the_export_uses_the_store_first_and_fills_in_per_key_from_the_request() {
     let store = DecisionStore::new();
     let mut from_request = HashMap::new();
     from_request.insert("k1".to_string(), wire("Ignored", "from the draft", "Later"));
@@ -660,31 +827,57 @@ fn the_export_ignores_request_dispositions_once_the_store_has_records_and_report
         )
         .unwrap();
 
+    // The store wins per key; the request's entry for k1 is overruled and the disagreement kept.
     let e = effective_dispositions(&store, "p", &from_request);
-    assert!(
-        e.from_store,
-        "the store has records, so the request is ignored"
-    );
+    assert!(e.from_store);
     assert_eq!(e.map.len(), 2);
     assert_eq!(e.map["k1"], wire("TechDebt", "pull it in", "Now"));
     assert_eq!(e.map["k2"].state, "FalsePositive");
-    // k1 differs (Ignored in the request, tech debt in the store); k2 is only in the store.
     let keys: Vec<&str> = e.disagreements.iter().map(|d| d.key.as_str()).collect();
-    assert_eq!(keys, vec!["k1", "k2"]);
+    assert_eq!(keys, vec!["k1"]);
     assert_eq!(e.disagreements[0].request.as_deref(), Some("Ignored"));
     assert_eq!(e.disagreements[0].store.as_deref(), Some("TechDebt"));
-    assert_eq!(e.disagreements[1].request, None);
 
-    // Agreement is not logged.
-    let mut agree = HashMap::new();
-    agree.insert("k1".to_string(), wire("TechDebt", "pull it in", "Now"));
-    agree.insert(
+    // A key only the request knows (the store has no record for it) still counts: the request's
+    // disposition fills in, per key, and is not a disagreement.
+    let mut partial = from_request.clone();
+    partial.insert("k9".to_string(), wire("Confirmed", "", "Later"));
+    partial.insert(
         "k2".to_string(),
         wire("FalsePositive", "generated", "Later"),
     );
-    assert!(effective_dispositions(&store, "p", &agree)
-        .disagreements
-        .is_empty());
+    let e = effective_dispositions(&store, "p", &partial);
+    assert_eq!(
+        e.map.len(),
+        3,
+        "k1 and k2 from the store, k9 from the request"
+    );
+    assert_eq!(e.map["k9"].state, "Confirmed");
+    assert_eq!(e.map["k1"].state, "TechDebt");
+    let keys: Vec<&str> = e.disagreements.iter().map(|d| d.key.as_str()).collect();
+    assert_eq!(keys, vec!["k1"], "k2 agrees and k9 is only a fill-in");
+
+    // A key the store revoked has no record, so the request's entry for it is used.
+    let k2 = store.list("p").into_iter().find(|d| d.key == "k2").unwrap();
+    store.revoke("p", &k2.id, NOW).unwrap();
+    let e = effective_dispositions(&store, "p", &partial);
+    assert_eq!(e.map["k2"].state, "FalsePositive");
+    assert_eq!(e.map.len(), 3);
+}
+
+#[test]
+fn a_tech_debt_decision_needs_no_reason_but_ignore_and_false_positive_do() {
+    let store = DecisionStore::new();
+    for (state, ok) in [
+        (DecisionState::TechDebtNow, true),
+        (DecisionState::TechDebtLater, true),
+        (DecisionState::Confirmed, true),
+        (DecisionState::Ignored, false),
+        (DecisionState::FalsePositive, false),
+    ] {
+        let r = store.record_site("p", &site_req("k", state.clone(), ""), ctx("i"));
+        assert_eq!(r.is_ok(), ok, "{state:?}");
+    }
 }
 
 // ── the routes ────────────────────────────────────────────────────────────────────────────
@@ -1025,11 +1218,24 @@ async fn draft_dispositions_migrate_once_and_the_draft_is_blanked() {
     assert!(again.already_migrated);
     assert_eq!(again.migrated, 0);
     assert_eq!(state.decisions.list(&pid).len(), 3, "nothing was written");
+    // The draft now carries the UI's not-yet-stored changes, so a repeat never touches it.
     assert_eq!(
         state.draft.load(&pid).unwrap()["dispositions"],
-        serde_json::json!({}),
-        "and the draft is blank again"
+        dispositions
     );
+
+    // A migration of nothing still marks the project migrated, so the UI asks once.
+    let (state3, app3, pid3) = app_with_project();
+    let (status, body) = call(
+        &app3,
+        "POST",
+        &format!("/api/projects/{pid3}/decisions"),
+        Some(serde_json::json!({"migrated_from_draft": true, "dispositions": {}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state3.decisions.migrated_from_draft_at(&pid3).is_some());
+    assert!(state3.decisions.list(&pid3).is_empty());
 
     // A draft key that is already a site key (saved after the site key existed) migrates too.
     let (state2, app2, pid2) = app_with_project();
@@ -1056,4 +1262,220 @@ async fn draft_dispositions_migrate_once_and_the_draft_is_blanked() {
         state2.decisions.list(&pid2)[0].key,
         key_at(&entry2.report.findings, "src/a.rs")
     );
+}
+
+// ── the write-through bridge, driven against the real routes ───────────────────────────────
+
+mod bridge {
+    use super::*;
+    use camerata_ui_core::decisions::{
+        dispositions_from_decisions, overlay_pending, BridgeOp, DecisionBridge,
+    };
+    use camerata_ui_core::triage::{Disposition, TechDebtBucket, TriageState};
+
+    fn disp(state: TriageState, reason: &str) -> Disposition {
+        Disposition {
+            state,
+            reason: reason.to_string(),
+            bucket: TechDebtBucket::Later,
+        }
+    }
+
+    /// What the UI's executor does with the bridge's plan, against the real routes. With
+    /// `offline` set no request is made, as when the server cannot be reached.
+    async fn drive(
+        app: &axum::Router,
+        pid: &str,
+        bridge: &mut DecisionBridge,
+        desired: &HashMap<String, Disposition>,
+        offline: bool,
+    ) {
+        let uri = format!("/api/projects/{pid}/decisions");
+        for op in bridge.next_ops(desired) {
+            if offline {
+                return;
+            }
+            match op {
+                BridgeOp::Post {
+                    key,
+                    disposition,
+                    request,
+                } => {
+                    let (status, body) = call(
+                        app,
+                        "POST",
+                        &uri,
+                        Some(to_json(&PostDecisionsReq::Decide(request))),
+                    )
+                    .await;
+                    if status != StatusCode::OK {
+                        return;
+                    }
+                    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+                    bridge.ack_post(&key, disposition, done.decision.id);
+                }
+                BridgeOp::Revoke { key, decision_ids } => {
+                    for id in decision_ids {
+                        let (status, _) =
+                            call(app, "POST", &format!("{uri}/{id}/revoke"), None).await;
+                        // Already gone counts as done.
+                        assert!(
+                            matches!(
+                                status,
+                                StatusCode::OK | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+                            ),
+                            "{status}"
+                        );
+                    }
+                    bridge.ack_revoke(&key);
+                }
+            }
+        }
+    }
+
+    async fn stored(app: &axum::Router, pid: &str) -> DecisionsResp {
+        let (status, body) =
+            call(app, "GET", &format!("/api/projects/{pid}/decisions"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_value(body).unwrap()
+    }
+
+    /// A project with an inspection, a file-backed decision store and the migration already run.
+    async fn migrated_project(
+        dir: &std::path::Path,
+    ) -> (AppState, axum::Router, String, InspectionEntry) {
+        let mut state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state.decisions = DecisionStore::at(dir.join("decisions"));
+        let project = state
+            .projects
+            .create("Acme", vec!["acme/app".to_string()])
+            .unwrap();
+        let entry = state
+            .inspections
+            .append(entry_of(&project.id, three_rows(), "2026-11-02T10:00:00Z"))
+            .unwrap();
+        let app = router(state.clone());
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/api/projects/{}/decisions", project.id),
+            Some(serde_json::json!({"migrated_from_draft": true, "dispositions": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        (state, app, project.id, entry)
+    }
+
+    #[tokio::test]
+    async fn a_disposition_made_in_the_ui_after_migration_reaches_the_store_and_survives_a_restart()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (_state, app, pid, entry) = migrated_project(dir.path()).await;
+        let a = key_at(&entry.report.findings, "src/a.rs");
+        let b = key_at(&entry.report.findings, "src/b.rs");
+
+        let mut bridge = DecisionBridge::from_decisions(&stored(&app, &pid).await.decisions);
+        let mut screen = HashMap::new();
+        screen.insert(a.clone(), disp(TriageState::Ignored, "dead code"));
+        screen.insert(b.clone(), disp(TriageState::Confirmed, ""));
+        drive(&app, &pid, &mut bridge, &screen, false).await;
+        assert!(bridge.pending(&screen).is_empty(), "everything was stored");
+
+        // Then a reason edit.
+        screen.insert(a.clone(), disp(TriageState::Ignored, "dead code since v2"));
+        drive(&app, &pid, &mut bridge, &screen, false).await;
+
+        // A restart: a new store over the same directory knows both.
+        let reopened = DecisionStore::at(dir.path().join("decisions"));
+        let shown = dispositions_from_decisions(&reopened.list(&pid));
+        assert_eq!(shown, screen);
+        // And the export reads them from the store with an empty request.
+        let e = effective_dispositions(&reopened, &pid, &HashMap::new());
+        assert_eq!(e.map[&a].state, "Ignored");
+        assert_eq!(e.map[&a].reason, "dead code since v2");
+        assert_eq!(e.map[&b].state, "Confirmed");
+    }
+
+    #[tokio::test]
+    async fn a_failed_post_keeps_the_change_in_the_draft_and_it_is_stored_on_the_next_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app, pid, entry) = migrated_project(dir.path()).await;
+        let a = key_at(&entry.report.findings, "src/a.rs");
+
+        let mut bridge = DecisionBridge::from_decisions(&stored(&app, &pid).await.decisions);
+        let mut screen = HashMap::new();
+        screen.insert(a.clone(), disp(TriageState::FalsePositive, "generated"));
+        drive(&app, &pid, &mut bridge, &screen, true).await;
+        assert!(
+            state.decisions.list(&pid).is_empty(),
+            "nothing reached the store"
+        );
+
+        // The draft keeps exactly the unstored change.
+        let pending = bridge.pending(&screen);
+        assert_eq!(pending.len(), 1);
+        state.draft.save(
+            &pid,
+            serde_json::json!({ "dispositions": serde_json::to_value(&pending).unwrap() }),
+        );
+
+        // The next load: the draft's pending changes go over what the store holds, the bridge
+        // plans the same post, and this time it is stored.
+        let draft = state.draft.load(&pid).unwrap();
+        let from_draft: HashMap<String, Disposition> =
+            serde_json::from_value(draft["dispositions"].clone()).unwrap();
+        let decisions = stored(&app, &pid).await.decisions;
+        let shown = overlay_pending(dispositions_from_decisions(&decisions), &from_draft);
+        assert_eq!(shown[&a].state, TriageState::FalsePositive);
+        let mut bridge = DecisionBridge::from_decisions(&decisions);
+        drive(&app, &pid, &mut bridge, &shown, false).await;
+        let live = state.decisions.active(&pid);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].key, a);
+        assert_eq!(live[0].state, DecisionState::FalsePositive);
+        assert!(bridge.pending(&shown).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_undo_revokes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app, pid, entry) = migrated_project(dir.path()).await;
+        let a = key_at(&entry.report.findings, "src/a.rs");
+        let b = key_at(&entry.report.findings, "src/b.rs");
+        let c = key_at(&entry.report.findings, "src/c.rs");
+        let node = rule_node(entry.report.tree.as_ref().unwrap(), "SEC-1");
+
+        // A group decision covers all three, then the reviewer rules on a by itself.
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/api/projects/{pid}/decisions"),
+            Some(to_json(&PostDecisionsReq::Decide(node_req(
+                &node,
+                DecisionState::Confirmed,
+                "group reviewed",
+            )))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut bridge = DecisionBridge::from_decisions(&stored(&app, &pid).await.decisions);
+        let mut screen = dispositions_from_decisions(&stored(&app, &pid).await.decisions);
+        assert_eq!(screen.len(), 3);
+        screen.insert(a.clone(), disp(TriageState::Ignored, "own ruling"));
+        drive(&app, &pid, &mut bridge, &screen, false).await;
+
+        // Undo a (two live records: the group's and its own) and b (the group's only).
+        screen.remove(&a);
+        screen.insert(b.clone(), Disposition::default());
+        drive(&app, &pid, &mut bridge, &screen, false).await;
+
+        let shown = dispositions_from_decisions(&state.decisions.list(&pid));
+        assert!(!shown.contains_key(&a), "a is Unresolved in the store too");
+        assert!(!shown.contains_key(&b));
+        assert_eq!(shown[&c].state, TriageState::Confirmed, "c is untouched");
+        let all = state.decisions.list(&pid);
+        let node_record = all.iter().find(|d| d.is_node_record()).unwrap();
+        assert!(node_record.is_active(), "the group decision itself stands");
+        assert!(bridge.pending(&screen).is_empty());
+    }
 }

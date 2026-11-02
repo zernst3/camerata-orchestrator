@@ -99,8 +99,13 @@ pub fn apply_to(tree: &ReviewTree, decisions: &[Decision], links: &[KeyLink]) ->
             continue;
         }
         let covered: HashSet<&str> = rec.applies_to.iter().map(String::as_str).collect();
+        let left_out: HashSet<&str> = rec.except.iter().map(String::as_str).collect();
         for member in tree.batch_members(node_id) {
-            if covered.contains(member.as_str()) || by_key.contains_key(member.as_str()) {
+            // A member the decision left out on purpose is not new: it was seen and set aside.
+            if covered.contains(member.as_str())
+                || left_out.contains(member.as_str())
+                || by_key.contains_key(member.as_str())
+            {
                 continue;
             }
             // The successor of a covered site is a moved site, shown stale below, not a new one.
@@ -191,7 +196,7 @@ impl ReviewerDecisions for StoreDecisions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectiveDispositions {
     pub map: HashMap<String, DispositionWire>,
-    /// True when the store had records and the request's own dispositions were ignored.
+    /// True when the store held a live record for at least one key.
     pub from_store: bool,
     /// Where the request's dispositions and the store's differ (empty unless `from_store`).
     pub disagreements: Vec<DispositionDisagreement>,
@@ -206,44 +211,44 @@ pub struct DispositionDisagreement {
 }
 
 /// The dispositions an export should use. For one release the export request still carries
-/// `dispositions`; once the store has any record they are ignored and the store's are used, and
-/// every key on which the two differ is reported.
+/// `dispositions`. The store's records win for every key the store has one for; the request's
+/// disposition is used only for a key the store has no live record for (the UI's changes that
+/// have not been stored yet). Every key both decided differently is reported.
 pub fn effective_dispositions(
     store: &DecisionStore,
     project_id: &str,
     from_request: &HashMap<String, DispositionWire>,
 ) -> EffectiveDispositions {
-    if !store.has_active_records(project_id) {
-        return EffectiveDispositions {
-            map: from_request.clone(),
-            from_store: false,
-            disagreements: Vec::new(),
-        };
-    }
     let all = store.active(project_id);
-    let map: HashMap<String, DispositionWire> = effective_by_key(&all)
+    let from_store: HashMap<String, DispositionWire> = effective_by_key(&all)
         .into_iter()
         .filter_map(|(key, d)| wire_of(d).map(|w| (key.to_string(), w)))
         .collect();
+    // The store first; the request's disposition only for a key the store has no record for.
+    let mut map = from_request.clone();
+    // A key the store holds a merge for has no wire disposition but is not "unknown" to it.
+    let store_keys: HashSet<&str> = effective_by_key(&all).into_keys().collect();
+    map.retain(|k, _| !store_keys.contains(k.as_str()));
+    map.extend(from_store.clone());
 
-    let mut keys: Vec<&String> = map.keys().chain(from_request.keys()).collect();
+    // A disagreement is a key both sides decided, differently.
+    let mut keys: Vec<&String> = from_store.keys().collect();
     keys.sort();
-    keys.dedup();
     let disagreements = keys
         .into_iter()
         .filter_map(|key| {
-            let theirs = from_request.get(key).and_then(decision_label);
-            let ours = map.get(key).and_then(decision_label);
-            (theirs != ours).then(|| DispositionDisagreement {
+            let theirs = from_request.get(key).and_then(decision_label)?;
+            let ours = from_store.get(key).and_then(decision_label);
+            (Some(&theirs) != ours.as_ref()).then(|| DispositionDisagreement {
                 key: key.clone(),
-                request: theirs.map(|(state, _)| state),
+                request: Some(theirs.0),
                 store: ours.map(|(state, _)| state),
             })
         })
         .collect();
     EffectiveDispositions {
         map,
-        from_store: true,
+        from_store: !store_keys.is_empty(),
         disagreements,
     }
 }
