@@ -120,8 +120,11 @@ fn an_empty_or_unreadable_state_is_not_a_decision() {
 
 #[test]
 fn a_decision_about_another_row_does_not_cover_this_one() {
+    // Another site: different code. The site key is line-independent (WO1), so a row that
+    // differs only by line is the same site and its decision rightly covers it.
     let mut other = unverified_row();
     other.line = 99;
+    other.snippet = "db.query(otherSql)".to_string();
     let dispositions = HashMap::from([(
         finding_key(&other),
         DispositionWire {
