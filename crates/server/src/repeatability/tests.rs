@@ -72,6 +72,25 @@ fn an_architectural_checker_row_tallies_as_deterministic_not_preview() {
 }
 
 #[test]
+fn a_not_assessed_architectural_row_tallies_as_convention_not_deterministic() {
+    use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+    let mut arch = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "info", "public.t");
+    arch.preview = true;
+    arch.preview_tool = Some(crate::onboard::ARCH_PREVIEW_TOOL.to_string());
+    arch.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
+        reason: NotAssessedReason::PassFailed,
+        reason_detail: "pass failed".to_string(),
+    }));
+    assert_eq!(finding_tier(&arch), "convention");
+
+    // The needs-review architectural grade stays a deterministic row.
+    let mut needs_review = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "high", "public.t");
+    needs_review.preview_tool = Some(crate::onboard::ARCH_PREVIEW_TOOL.to_string());
+    needs_review.confidence = Some("needs-review".to_string());
+    assert_eq!(finding_tier(&needs_review), "deterministic");
+}
+
+#[test]
 fn convention_rows_with_no_confidence_are_not_tallied_as_deterministic() {
     use camerata_api_types::audit::{
         ConventionObservedKind, FindingKind, NoConventionKind, NotAssessedKind, NotAssessedReason,

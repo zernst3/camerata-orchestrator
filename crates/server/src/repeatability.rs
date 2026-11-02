@@ -33,11 +33,9 @@ pub fn finding_match_key(f: &Finding) -> String {
 /// [`crate::onboard::ARCH_PREVIEW_TOOL`] as their `preview_tool` but are exact by construction).
 pub fn finding_tier(f: &Finding) -> &'static str {
     use camerata_api_types::audit::FindingKind;
-    if f.preview_tool.as_deref() == Some(crate::onboard::ARCH_PREVIEW_TOOL) {
-        "deterministic"
-    } else if f.preview_tool.is_some() {
-        "preview"
-    } else if matches!(
+    // Convention-class kinds come first: a not-assessed architectural row also carries
+    // `preview_tool = camerata-arch`, but it is an honesty row, never a deterministic result.
+    if matches!(
         f.kind,
         Some(
             FindingKind::ConventionObserved(_)
@@ -46,6 +44,10 @@ pub fn finding_tier(f: &Finding) -> &'static str {
         )
     ) {
         "convention"
+    } else if f.preview_tool.as_deref() == Some(crate::onboard::ARCH_PREVIEW_TOOL) {
+        "deterministic"
+    } else if f.preview_tool.is_some() {
+        "preview"
     } else if crate::report_export::is_ai_tier(f) {
         "ai"
     } else {
