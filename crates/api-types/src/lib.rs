@@ -49,6 +49,10 @@
 //!   reviewed record, the stats) as a deny-list the export tests check every client artifact
 //!   against. Names only, no shapes: the shapes live in `camerata-ui-core`.
 //!
+//! - [`decisions`]: the reviewer's decisions on sites (state, scope, reason, the per-site records a
+//!   node decision writes) and the request and response shapes of the decision routes, shared by
+//!   the server's decision store and the review UI.
+//!
 //! - [`site_key`]: the stable name of one finding row across reruns (repo, path, fingerprint and an
 //!   ordinal, never the line), shared by the server, the export code and the review UI.
 //!
@@ -58,6 +62,7 @@
 pub mod audit;
 pub mod claude_cli;
 pub mod credentials;
+pub mod decisions;
 pub mod feedback;
 pub mod fingerprint;
 pub mod governance;
