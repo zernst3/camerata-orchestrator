@@ -217,3 +217,93 @@ fn the_cap_helper_is_exact_at_the_boundary() {
         .unwrap();
     assert_eq!(shown + left_out, 10);
 }
+
+// ── M8 item 4: a synthetic report at scale ──────────────────────────────────────────────
+
+/// `rows` findings spread across `rules` rules, each at its own file and line, with severities
+/// cycling so every tier is populated. Rule ids are invented, so no corpus entry is needed.
+fn scale_report(rows: usize, rules: usize) -> ScanReport {
+    let severities = ["critical", "high", "medium", "low"];
+    let findings: Vec<Finding> = (0..rows)
+        .map(|i| {
+            let rule = i % rules;
+            let mut f = finding(
+                &format!("SCALE-RULE-{rule:03}-1"),
+                &format!("src/area_{rule:03}/file_{i:05}.rs"),
+                1 + (i % 400),
+                severities[i % severities.len()],
+            );
+            f.detail = format!("Finding {i} under rule {rule}: the call at this site builds its query by concatenation.");
+            f
+        })
+        .collect();
+    let rule_ids: Vec<String> = (0..rules).map(|r| format!("SCALE-RULE-{r:03}-1")).collect();
+    report_with(findings, rule_ids.iter().map(String::as_str).collect())
+}
+
+/// Exports `report` to the workbook and to the data the PDF template renders, and, when
+/// `render_pdf` is set and typst is installed, compiles the PDF. Returns what each step cost.
+async fn export_everything(report: &ScanReport, render_pdf: bool) -> (usize, usize, Option<usize>) {
+    let sealed = report.clone().seal();
+    let started = std::time::Instant::now();
+    let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts())
+        .expect("the workbook must export");
+    eprintln!(
+        "scale: workbook {} bytes in {:?}",
+        xlsx.len(),
+        started.elapsed()
+    );
+    assert_eq!(
+        sheet_row_count(&xlsx, "Sites"),
+        1 + report.findings.len(),
+        "every row's site must be on the Sites sheet"
+    );
+
+    let started = std::time::Instant::now();
+    let json =
+        crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+    let data = crate::report_export::render_data_json(&json).expect("the PDF data must serialize");
+    eprintln!(
+        "scale: PDF data {} bytes in {:?}",
+        data.len(),
+        started.elapsed()
+    );
+
+    let mut pdf_bytes = None;
+    if render_pdf && camerata_test_env::typst_on_path() {
+        let started = std::time::Instant::now();
+        let pdf = crate::report_export::compile_pdf_from_data(&data)
+            .await
+            .expect("the PDF must render");
+        eprintln!("scale: PDF {} bytes in {:?}", pdf.len(), started.elapsed());
+        assert!(pdf.starts_with(b"%PDF"));
+        pdf_bytes = Some(pdf.len());
+    }
+    (xlsx.len(), data.len(), pdf_bytes)
+}
+
+/// The always-on size: big enough to catch a per-row cost that grows, small enough for the
+/// normal suite.
+#[tokio::test]
+async fn a_report_of_2000_rows_across_100_rules_exports_to_xlsx_and_pdf() {
+    let report = scale_report(2_000, 100);
+    let (xlsx, data, _) = export_everything(&report, true).await;
+    assert!(xlsx > 0 && data > 0);
+}
+
+/// The size the engine review set as the target: 30,000 rows across 100 rules. Run on demand:
+/// `cargo test -p camerata-server --lib export_scale -- --ignored --nocapture`. The workbook
+/// and the PDF data are exported in full; the PDF render is slow, so it is part of this run
+/// and not of the normal suite. Measured on a development laptop (debug test build, release
+/// Typst 0.15): workbook 7.4 MB in 19 to 27 s, PDF data 38 MB in 4 to 7 s, PDF 54 MB in 22 to
+/// 33 s with Typst peaking near 4.8 GB resident.
+#[tokio::test]
+#[ignore = "30,000-row export including the PDF render; slow, run on demand"]
+async fn a_report_of_30000_rows_across_100_rules_exports_to_xlsx_and_pdf() {
+    let report = scale_report(30_000, 100);
+    let (xlsx, data, pdf) = export_everything(&report, true).await;
+    assert!(xlsx > 0 && data > 0);
+    if camerata_test_env::typst_on_path() {
+        assert!(pdf.is_some());
+    }
+}
