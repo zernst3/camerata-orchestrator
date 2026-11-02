@@ -2570,9 +2570,9 @@ mod tests {
 
     const CHIP: &str = "Previously on this shape";
 
-    /// A defect on `line` whose offending snippet is `snippet`, under one rule.
-    /// Fixture rows that differ only by line must stay distinct rows, as the server's ordinal
-    /// keeps repeats of one snippet apart: the line stands in for the ordinal.
+    /// Give a fixture row the site key the server would give it if its line were the ordinal.
+    /// Rows that differ only by line must stay distinct rows, as the server's ordinal keeps
+    /// repeats of one snippet apart. Call it after setting the row's fields.
     fn keyed_by_line(mut f: FindingView) -> FindingView {
         f.site_key = camerata_api_types::site_key::site_key(
             &f.repo, &f.path, &f.rule_id, &f.snippet, f.line,
@@ -2580,6 +2580,7 @@ mod tests {
         f
     }
 
+    /// A defect on `line` whose offending snippet is `snippet`, under one rule.
     fn shaped(line: usize, snippet: &str) -> FindingView {
         let mut f = defect(line);
         f.snippet = snippet.to_string();
