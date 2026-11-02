@@ -8618,6 +8618,32 @@ mod tests {
         );
     }
 
+    /// Review of R1-2: a same-id preview merge records which tool also saw the row, but that
+    /// provenance is not a rule id, so the scorecard's "rules checked" count is unchanged.
+    #[test]
+    fn a_same_id_preview_merge_does_not_change_the_scorecard_rule_counts() {
+        let id = "SEC-NO-HARDCODED-SECRETS-1";
+        let counts = |merged: bool| {
+            let mut rows = vec![finding(id, "a.rs", 1, "critical")];
+            if merged {
+                let mut preview = finding(id, "a.rs", 1, "critical");
+                preview.preview = true;
+                preview.preview_tool = Some("camerata-arch".to_string());
+                let out = crate::dedup_scan_previews(&mut rows, vec![preview]);
+                assert!(out.is_empty(), "merged into the existing row");
+            }
+            let report = report_with(rows, vec![id]);
+            let json =
+                build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+            json.scorecard
+                .rows
+                .iter()
+                .map(|r| (r.category.clone(), r.audited_rules, r.clean_rules))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts(true), counts(false));
+    }
+
     #[test]
     fn scorecard_includes_a_clean_row_for_an_audited_category_with_zero_findings() {
         // An audited category with NO real findings at all (every hit was a false

@@ -7107,6 +7107,24 @@ fn preview_is_native_rule_tool(
         .is_some_and(|sels| sels.contains(&wanted))
 }
 
+/// The `Finding::captures` key listing the preview tools that also reported a row of the same
+/// rule id at its place (comma separated, no duplicates). Provenance only: not a rule id and
+/// never read as one.
+pub(crate) const ALSO_SEEN_BY_CAPTURE: &str = "also_seen_by";
+
+fn note_also_seen_by(f: &mut crate::onboard::Finding, tool: &str) {
+    let entry = f
+        .captures
+        .entry(ALSO_SEEN_BY_CAPTURE.to_string())
+        .or_default();
+    if !entry.split(',').any(|t| t == tool) {
+        if !entry.is_empty() {
+            entry.push(',');
+        }
+        entry.push_str(tool);
+    }
+}
+
 /// [`dedup_scan_previews`] with the corpus's tool mapping. A preview row collapses into an
 /// existing row at the same `(repo, path, line)` when:
 ///
@@ -7165,20 +7183,16 @@ pub(crate) fn dedup_scan_previews_with(
 
             if preview_rank >= existing_rank {
                 // Existing row has equal or higher precedence: keep it, fold preview in.
-                // Both ids stay on the row. For the same id the second "id" is the preview
-                // tool's provenance (`<tool>:<rule id>`), so which tool also saw it is kept.
-                let folded = if preview.rule_id != existing[idx].rule_id {
-                    Some(preview.rule_id.clone())
-                } else {
-                    preview
-                        .preview_tool
-                        .as_deref()
-                        .map(|tool| format!("{tool}:{}", preview.rule_id))
-                };
-                if let Some(folded) = folded {
-                    if !existing[idx].also_matches.contains(&folded) {
-                        existing[idx].also_matches.push(folded);
+                // Both ids stay on the row. For the same id there is no second rule id; which
+                // tool also saw the row is recorded in `captures` (`also_seen_by`), never in
+                // `also_matches`, which every rule-id consumer (scorecard, remediation plan)
+                // reads as rule ids.
+                if preview.rule_id != existing[idx].rule_id {
+                    if !existing[idx].also_matches.contains(&preview.rule_id) {
+                        existing[idx].also_matches.push(preview.rule_id.clone());
                     }
+                } else if let Some(tool) = preview.preview_tool.as_deref() {
+                    note_also_seen_by(&mut existing[idx], tool);
                 }
                 existing[idx].severity = severity;
                 // drop the preview finding (continue to next)
@@ -25788,10 +25802,17 @@ mod tests {
         assert_eq!(out[0].line, 9);
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].severity, "medium", "the higher severity wins");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "same id: no second rule id: {:?}",
+            existing[0].also_matches
+        );
         assert_eq!(
-            existing[0].also_matches,
-            vec!["camerata-arch:UI-UTC-DATES-1".to_string()],
-            "same id: only the preview tool's provenance is added"
+            existing[0]
+                .captures
+                .get(ALSO_SEEN_BY_CAPTURE)
+                .map(String::as_str),
+            Some("camerata-arch")
         );
 
         // The other way round: the existing row is the higher one and stays so.
@@ -25839,13 +25860,13 @@ mod tests {
             existing[0].also_matches
         );
         assert_eq!(existing[1].rule_id, "camerata.security.hardcoded-secret");
-        assert!(
+        assert_eq!(
             existing[1]
-                .also_matches
-                .iter()
-                .any(|m| m.contains("semgrep")),
-            "the identical-id row took the merge: {:?}",
-            existing[1].also_matches
+                .captures
+                .get(ALSO_SEEN_BY_CAPTURE)
+                .map(String::as_str),
+            Some("semgrep"),
+            "the identical-id row took the merge"
         );
     }
 
@@ -25867,22 +25888,25 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(existing[0].rule_id, "UI-UTC-DATES-1");
         assert!(!existing[0].preview, "the merged row stays a native row");
-        assert_eq!(
-            existing[0].also_matches,
-            vec!["camerata-arch:UI-UTC-DATES-1".to_string()]
-        );
-        // Merging the same preview again does not repeat it.
-        let _ = dedup_scan_previews(
-            &mut existing,
-            vec![tool_preview(
-                "src/a.ts",
-                4,
-                "UI-UTC-DATES-1",
-                "camerata-arch",
-                "medium",
-            )],
-        );
-        assert_eq!(existing[0].also_matches.len(), 1);
+        // Provenance lives in captures, never in also_matches (a rule-id list).
+        assert!(existing[0].also_matches.is_empty());
+        let seen = |f: &crate::onboard::Finding| f.captures.get(ALSO_SEEN_BY_CAPTURE).cloned();
+        assert_eq!(seen(&existing[0]).as_deref(), Some("camerata-arch"));
+        // Merging the same preview again does not repeat it; another tool is appended.
+        for tool in ["camerata-arch", "semgrep"] {
+            let _ = dedup_scan_previews(
+                &mut existing,
+                vec![tool_preview(
+                    "src/a.ts",
+                    4,
+                    "UI-UTC-DATES-1",
+                    tool,
+                    "medium",
+                )],
+            );
+        }
+        assert_eq!(seen(&existing[0]).as_deref(), Some("camerata-arch,semgrep"));
+        assert!(existing[0].also_matches.is_empty());
     }
 
     /// R1-2: the eslint rule that enforces a native rule collapses into the native rule's row on

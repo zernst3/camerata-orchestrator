@@ -809,6 +809,48 @@ mod tests {
         );
     }
 
+    /// Review of R1-2: a row that absorbed a same-id preview of another tool is still ONE rule:
+    /// its unit names that rule alone, with no "violates 2 rules" note and no tool token among
+    /// the rule ids.
+    #[test]
+    fn a_row_with_a_same_id_preview_merge_is_one_rule_in_the_plan() {
+        let mut existing = vec![crate::onboard::Finding {
+            repo: "o/a".to_string(),
+            path: "src/a.ts".to_string(),
+            line: 4,
+            rule_id: "UI-UTC-DATES-1".to_string(),
+            severity: "medium".to_string(),
+            snippet: "new Date()".to_string(),
+            ..crate::onboard::Finding::default()
+        }];
+        let preview = crate::onboard::Finding {
+            preview: true,
+            preview_tool: Some("camerata-arch".to_string()),
+            ..existing[0].clone()
+        };
+        assert!(crate::dedup_scan_previews(&mut existing, vec![preview]).is_empty());
+        let f = &existing[0];
+        let merged = PlanFinding {
+            key: "k".to_string(),
+            fingerprint: fingerprint(&f.rule_id, &f.snippet),
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            rule_id: f.rule_id.clone(),
+            severity: f.severity.clone(),
+            snippet: f.snippet.clone(),
+            also_matches: f.also_matches.clone(),
+        };
+        let p = plan(vec![merged], &HashMap::new(), &PlanOptions::default());
+        assert_eq!(p.units.len(), 1);
+        assert_eq!(p.units[0].rule_ids, vec!["UI-UTC-DATES-1"]);
+        assert!(
+            p.notes.iter().all(|n| !n.contains("violates")),
+            "{:?}",
+            p.notes
+        );
+    }
+
     #[test]
     fn a_location_violating_three_rules_becomes_one_unit_naming_all_three_with_the_worst_rule_primary(
     ) {
