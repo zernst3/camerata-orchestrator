@@ -131,6 +131,9 @@ pub use camerata_app_core::schedule;
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
+/// A10: a finding the engine throws out is kept, marked and left out of the client export, never
+/// deleted. See the module doc comment.
+pub mod engine_discard;
 /// D3: the standard JavaScript, Web and Node API names and the ESLint rule names a fix may use
 /// without them being in the finding's evidence.
 pub(crate) mod fix_standard_names;
@@ -5131,6 +5134,8 @@ async fn rescan_alternatives_handler(
     let rescan_meter =
         crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::from_env());
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
+    // A10: the rows this rescan's audit threw out, kept apart from the rows that ship.
+    let mut all_discarded: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
     // The same picks with the repo each was made for, one per (rule, repo): what the stored
@@ -5204,6 +5209,10 @@ async fn rescan_alternatives_handler(
         .await
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
+                // A10: rows the audit threw out come back marked; they are kept apart from the
+                // rows that ship and folded into the stored report's `discarded` below.
+                let (thrown_out, findings) = crate::engine_discard::split_discarded(findings);
+                all_discarded.extend(thrown_out);
                 all_findings.extend(findings);
                 for mut r in recs {
                     r.repo = spec.to_string();
@@ -5236,6 +5245,12 @@ async fn rescan_alternatives_handler(
             .findings
             .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
         report.findings.extend(all_findings.clone());
+        // A10: a rescan replaces the rescanned rules' rows, thrown-out ones included.
+        report
+            .discarded
+            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
+        report.discarded.extend(std::mem::take(&mut all_discarded));
+        report.ledger.set_discarded(&report.discarded);
         report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
@@ -28736,6 +28751,7 @@ mod tests {
         crate::onboard::ScanReport {
             run_id: None,
             tree: None,
+            discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

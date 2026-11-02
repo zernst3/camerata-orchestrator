@@ -518,6 +518,10 @@ pub struct ScanLedger {
     /// See [`crate::junk_finding::ContentCheck`].
     #[serde(default)]
     content: crate::junk_finding::ContentCheck,
+    /// A10: the rows the engine threw out and kept, by reason. The report's `discarded` rows
+    /// reconcile against this ([`crate::onboard::ScanReport::discarded_reconciles`]).
+    #[serde(default)]
+    discarded: DiscardTally,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -705,6 +709,22 @@ pub struct FileCapHit {
     /// recorded, which is read as the production limit.
     #[serde(default)]
     pub limit: usize,
+}
+
+/// A10: how many rows the engine threw out and kept, by reason (`engine_discard`). Every one of
+/// them is a row of `ScanReport::discarded`; none was deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscardTally {
+    /// Rows thrown out, by the reason written on the row.
+    #[serde(default)]
+    pub by_reason: std::collections::BTreeMap<String, usize>,
+}
+
+impl DiscardTally {
+    /// Every row thrown out.
+    pub fn total(&self) -> usize {
+        self.by_reason.values().sum()
+    }
 }
 
 /// M5: the tally of the evidence check, which opens each row's file and looks for the quoted
@@ -1189,6 +1209,26 @@ impl ScanLedger {
     /// final row set each time the report is sealed.
     pub fn record_content_check(&mut self, check: crate::junk_finding::ContentCheck) {
         self.content = check;
+    }
+
+    /// A10: add `rows`, rows the engine threw out and kept, to the tally of discards by reason.
+    pub fn record_discarded(&mut self, rows: &[crate::onboard::Finding]) {
+        for (reason, n) in crate::engine_discard::tally(rows) {
+            *self.discarded.by_reason.entry(reason).or_insert(0) += n;
+        }
+    }
+
+    /// A10: replace the discard tally with the count of `rows` (used when a rescan replaces some
+    /// of the stored discarded rows, so the tally and the rows stay the same set).
+    pub fn set_discarded(&mut self, rows: &[crate::onboard::Finding]) {
+        self.discarded = DiscardTally {
+            by_reason: crate::engine_discard::tally(rows),
+        };
+    }
+
+    /// A10: the discard tally. See [`DiscardTally`].
+    pub fn discarded(&self) -> &DiscardTally {
+        &self.discarded
     }
 
     /// M4: the content check of the sealed rows. See [`crate::junk_finding::ContentCheck`].

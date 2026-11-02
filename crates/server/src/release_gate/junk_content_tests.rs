@@ -55,32 +55,48 @@ fn content_problems_of(failure: &GateFailure) -> Vec<&Problem> {
 }
 
 /// The incident: rule `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`, title `placeholder`, code `x`, and the
-/// explanation the detail step wrote ("Discard this finding").
+/// explanation the detail step wrote ("Discard this finding"). A10: the row is not a finding, so
+/// the engine throws it out (keeps and marks it) and leaves it out of the client package. It is
+/// not held, so it does not block the release.
 #[test]
-fn a_package_holding_the_placeholder_row_is_refused() {
+fn a_package_holding_the_placeholder_row_leaves_it_out_and_does_not_block() {
     let junk = ai_row(
         "AI-JAVASCRIPT-TYPESRIPT-PLACEHOLDER",
         "x",
         "placeholder \u{2014} This finding contains only a placeholder statement with the code 'x'. Discard this finding.",
     );
-    match release(package_for(report_with(junk))) {
-        Err(ReleaseError::Blocked(failure)) => {
-            let problems = content_problems_of(&failure);
-            assert_eq!(problems.len(), 1, "{:?}", failure.report);
-            assert_eq!(problems[0].file, "findings.json");
-            assert_eq!(
-                problems[0].evidence.as_deref(),
-                Some("AI-JAVASCRIPT-TYPESRIPT-PLACEHOLDER")
-            );
-        }
-        other => panic!("the junk row must block the release: {other:?}"),
+    let sealed = report_with(junk).seal();
+    assert_eq!(sealed.discarded.len(), 1);
+    assert!(sealed
+        .findings
+        .iter()
+        .all(|f| f.rule_id != "AI-JAVASCRIPT-TYPESRIPT-PLACEHOLDER"));
+    let released = release(package_for(report_with(ai_row(
+        "AI-JAVASCRIPT-TYPESRIPT-PLACEHOLDER",
+        "x",
+        "placeholder \u{2014} This finding contains only a placeholder statement with the code 'x'. Discard this finding.",
+    ))))
+    .expect("a thrown-out row never blocks the release");
+    for (name, bytes) in read_zip_entries(&released.bytes).expect("zip") {
+        let text = if name.ends_with(".xlsx") {
+            xlsx_strings(&bytes).expect("strings").join("\n")
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        assert!(
+            !text.contains("TYPESRIPT-PLACEHOLDER"),
+            "row text in {name}"
+        );
     }
 }
 
-/// Each junk shape alone blocks: a placeholder rule id, no evidence at all, a discard verdict.
+/// Each shape that is not a finding (a placeholder rule id, no evidence at all, a discard
+/// verdict) is thrown out at the seal: kept, marked with its reason, out of the package, and
+/// never blocking. The ledger's tally and the kept rows are the same set.
 #[test]
-fn each_junk_shape_alone_blocks_the_release() {
-    for junk in [
+fn each_not_a_finding_shape_is_kept_apart_and_never_blocks_the_release() {
+    use crate::engine_discard::{is_discarded, reason_of};
+    let shapes = [
         ai_row(
             "AI-TYPESCRIPT-PLACEHOLDER",
             "db.query(sql)",
@@ -92,15 +108,23 @@ fn each_junk_shape_alone_blocks_the_release() {
             "db.query(sql)",
             "Raw SQL \u{2014} Built from input. Discard this finding.",
         ),
-    ] {
+    ];
+    let mut report = scan_report();
+    report.findings.extend(shapes.clone());
+    let sealed = report.seal();
+    assert_eq!(sealed.discarded.len(), 3);
+    assert!(sealed.discarded.iter().all(is_discarded));
+    assert!(sealed.discarded.iter().all(|f| reason_of(f).is_some()));
+    assert!(
+        sealed.discarded_reconciles(),
+        "{:?}",
+        sealed.ledger.discarded()
+    );
+    assert_eq!(sealed.ledger.discarded().total(), 3);
+    for junk in shapes {
         let detail = junk.detail.clone();
-        assert!(
-            matches!(
-                release(package_for(report_with(junk))),
-                Err(ReleaseError::Blocked(_))
-            ),
-            "{detail}"
-        );
+        let released = release(package_for(report_with(junk)));
+        assert!(released.is_ok(), "{detail}: {:?}", released.err());
     }
 }
 

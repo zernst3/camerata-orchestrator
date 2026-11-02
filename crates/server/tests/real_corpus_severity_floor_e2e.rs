@@ -81,6 +81,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
     ScanReport {
         run_id: None,
         tree: None,
+        discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),

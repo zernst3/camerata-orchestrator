@@ -2113,20 +2113,22 @@ pub fn parse_ai_findings(
             if title.is_empty() && detail.is_empty() && code.is_empty() {
                 continue;
             }
-            // D1: a row the model filled with placeholder text (title `placeholder`, code and
-            // detail `x`, a rule id naming a placeholder) never becomes a finding. Counted below.
-            if let Some(why) = crate::junk_finding::parse_gate_reason(
+            // D1, A10: a row the model filled with placeholder text (title `placeholder`, code
+            // and detail `x`, a rule id naming a placeholder) is not a finding. It is KEPT,
+            // marked thrown out with the reason, and kept apart from the rows that go on
+            // (`audit_repo` parks it; it is never deleted). Counted below.
+            let placeholder_why = crate::junk_finding::parse_gate_reason(
                 !adopted.contains(&rule_id),
                 &rule_id,
                 &title,
                 &code,
                 &detail,
-            ) {
+            );
+            if let Some(why) = placeholder_why {
                 junk_dropped.push(format!(
                     "{rule_id} at {}: {why}",
                     f["path"].as_str().unwrap_or("(repo)")
                 ));
-                continue;
             }
             // `snippet` holds the VERBATIM offending line when the model gave one (matches the
             // deterministic floor, and lets the line-resolution post-step grep for it). Fall
@@ -2200,6 +2202,12 @@ pub fn parse_ai_findings(
             // The model's `code` is its verbatim quote and its prose can repeat a value: redact
             // before the row exists anywhere else (docs/design/2026-10-23, leak path A8).
             crate::onboard::redact::redact_finding(&mut finding);
+            if let Some(why) = placeholder_why {
+                crate::engine_discard::mark(
+                    &mut finding,
+                    &format!("{}: {why}", crate::engine_discard::PLACEHOLDER_ROW),
+                );
+            }
             findings.push(finding);
         }
     }
@@ -2207,7 +2215,7 @@ pub fn parse_ai_findings(
         // Operator side only: the client report never mentions a row the model should not have
         // written.
         eprintln!(
-            "[camerata-server] {repo}: dropped {} junk finding(s) at scan parsing: {}",
+            "[camerata-server] {repo}: threw out {} junk finding(s) at scan parsing (kept, marked): {}",
             junk_dropped.len(),
             junk_dropped.join("; ")
         );
@@ -9446,34 +9454,41 @@ pub(crate) const MIN_CONTAINED_SNIPPET: usize = 12;
 /// problem (two things one rule found at line 0 of a file, or at one unresolved line
 /// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
 /// any repeat carried. Order is preserved.
-/// D1: remove, after the detail and calibration steps, every row the model INVENTED (rule id
-/// prefixed `AI-`) whose own text says to throw it away ("discard this finding", "placeholder
-/// finding"), or whose rule id or headline is a placeholder. Calibration itself never drops a
-/// row; the verdict it and the detail step write into the row's explanation is what is acted on
-/// here, and only for a row no adopted rule backs. Operator side, each removal is logged with its
-/// rule and place; the client report never mentions it. Returns how many rows were removed.
-fn drop_discarded_invented_rows(repo: &str, findings: &mut Vec<Finding>) -> usize {
-    let mut removed = Vec::new();
-    findings.retain(|f| {
-        let junk = f.rule_id.starts_with("AI-")
-            && crate::junk_finding::is_junk_invented_row(
-                &f.rule_id,
-                &finding_headline(f),
-                &f.detail,
-            );
-        if junk {
-            removed.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+/// D1, A10: after the detail and calibration steps, throw out every row the model INVENTED (rule
+/// id prefixed `AI-`) whose own text says to discard it ("discard this finding"), or whose rule
+/// id or headline is a placeholder. Calibration itself never drops a row; the verdict it and the
+/// detail step write into the row's explanation is what is acted on here, and only for a row no
+/// adopted rule backs. The row is KEPT and marked [`crate::engine_discard`] with the reason, never
+/// deleted. Operator side, each is logged with its rule and place; the client report never
+/// mentions it. Returns how many rows were marked.
+fn mark_discarded_invented_rows(repo: &str, findings: &mut [Finding]) -> usize {
+    let mut marked = Vec::new();
+    for f in findings.iter_mut() {
+        if crate::engine_discard::is_discarded(f) || !f.rule_id.starts_with("AI-") {
+            continue;
         }
-        !junk
-    });
-    if !removed.is_empty() {
+        let headline = finding_headline(f);
+        if !crate::junk_finding::is_junk_invented_row(&f.rule_id, &headline, &f.detail) {
+            continue;
+        }
+        let reason = if crate::junk_finding::is_placeholder_rule_id(&f.rule_id) {
+            crate::engine_discard::PLACEHOLDER_RULE_ID
+        } else if !headline.trim().is_empty() && crate::junk_finding::is_filler(&headline) {
+            crate::engine_discard::PLACEHOLDER_HEADLINE
+        } else {
+            crate::engine_discard::DISCARD_VERDICT
+        };
+        crate::engine_discard::mark(f, reason);
+        marked.push(format!("{} at {}:{}", f.rule_id, f.path, f.line));
+    }
+    if !marked.is_empty() {
         eprintln!(
-            "[camerata-server] {repo}: dropped {} finding(s) the model's own text said to discard: {}",
-            removed.len(),
-            removed.join("; ")
+            "[camerata-server] {repo}: threw out {} finding(s) the model's own text said to discard (kept, marked): {}",
+            marked.len(),
+            marked.join("; ")
         );
     }
-    removed.len()
+    marked.len()
 }
 
 fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
@@ -9880,6 +9895,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::review_flags::REVIEW_FLAGS_CAPTURE,
     // M4: the mark that says a row's text is real junk and holds it (see `junk_finding`).
     crate::junk_finding::JUNK_CONTENT_CAPTURE,
+    // A10: the mark that says the engine threw the row out (the reason is the value).
+    crate::engine_discard::ENGINE_DISCARDED_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -10655,16 +10672,21 @@ pub fn apply_stack_exceptions(
     }
     findings
         .into_iter()
-        .filter(|f| {
+        .map(|mut f| {
             let rule = corpus
                 .get_by_id(&f.rule_id)
                 .or_else(|| corpus.get_by_id(f.rule_id.trim_start_matches("AI-")));
-            match rule {
+            let excepted = match rule {
                 Some(rule) => rule
                     .stack_exception_for(detected_frameworks, &f.path)
-                    .is_none(),
-                None => true,
+                    .is_some(),
+                None => false,
+            };
+            if excepted {
+                // A10: kept, marked thrown out, and left out of what ships.
+                crate::engine_discard::mark(&mut f, crate::engine_discard::STACK_EXCEPTION);
             }
+            f
         })
         .collect()
 }
@@ -12228,6 +12250,15 @@ pub async fn audit_repo(
     // collapsed: it stays its own row and the grouping pass links it. This is N-in / M-out
     // (M <= N) with every dropped row accounted for, not the calibration pass's N-in/N-out
     // scoring.
+    // A10: rows the scan parser marked thrown out (placeholder text) are kept apart from the rows
+    // that go through the merges, calibration and the fix stage, and rejoin the result at the end.
+    let mut parked: Vec<Finding> = Vec::new();
+    {
+        let (thrown_out, kept) =
+            crate::engine_discard::split_discarded(std::mem::take(&mut all_findings));
+        all_findings = kept;
+        parked.extend(thrown_out);
+    }
     {
         let rows_in = all_findings.len();
         dedup_findings_keep_max_severity(&mut all_findings);
@@ -12343,12 +12374,13 @@ pub async fn audit_repo(
             .map(|r| r.rule_id.to_ascii_uppercase())
             .collect();
         if !not_applicable.is_empty() {
-            let before = verified.len();
-            verified.retain(|f| {
+            for f in verified.iter_mut() {
                 let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
-                !not_applicable.contains(&bare)
-            });
-            dropped_not_applicable = before.saturating_sub(verified.len());
+                if not_applicable.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+                    crate::engine_discard::mark(f, crate::engine_discard::RULE_NOT_APPLICABLE);
+                    dropped_not_applicable += 1;
+                }
+            }
         }
         // Pass-1 W3 (A5.3): the no-convention twin of the P7 filter above, with its own
         // accounting label. Dropping the rule from `effective_selected` upstream stops the
@@ -12362,17 +12394,26 @@ pub async fn audit_repo(
             .map(|r| r.rule_id.to_ascii_uppercase())
             .collect();
         if !no_convention.is_empty() {
-            let before = verified.len();
-            verified.retain(|f| {
+            for f in verified.iter_mut() {
                 let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
-                !no_convention.contains(&bare)
-            });
-            dropped_no_convention = before.saturating_sub(verified.len());
+                if no_convention.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+                    crate::engine_discard::mark(f, crate::engine_discard::NO_CONVENTION);
+                    dropped_no_convention += 1;
+                }
+            }
         }
     }
     // D1: the detail and calibration steps write "discard this finding" into a placeholder row's
     // explanation; act on it for the rows the model invented, and account for the removal below.
-    let dropped_discarded = drop_discarded_invented_rows(repo, &mut verified);
+    let dropped_discarded = mark_discarded_invented_rows(repo, &mut verified);
+    // A10: the rows thrown out above are KEPT, but apart from the rows that go on: the stages
+    // below (the option splice, kind assignment, the convention emissions) must not see them. The
+    // calibration stage accounts for them as leaving it (`other` below); they rejoin the returned
+    // set at the end, still marked, and the caller keeps them apart from the rows that ship.
+    let (thrown_out, kept_after_calibration) =
+        crate::engine_discard::split_discarded(std::mem::take(&mut verified));
+    verified = kept_after_calibration;
+    parked.extend(thrown_out);
     // W1: calibration itself never drops a row (see this block's own doc comment above); the
     // ONLY row-count reductions between `pre_calibration_len` and here are the P7
     // not-applicable filter, the A5.3 no-convention filter and the D1 discard filter just
@@ -12482,6 +12523,8 @@ pub async fn audit_repo(
             accounting: acc,
         });
     }
+    // A10: the rows thrown out along the way come back marked, after the rows that ship.
+    verified.extend(parked);
     Ok((
         verified,
         all_proposed,
@@ -13851,13 +13894,16 @@ mod tests {
         let frameworks = vec!["Supabase".to_string()];
         let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &corpus);
 
+        // A10: the excepted finding is kept and marked thrown out, not deleted.
+        assert_eq!(out.len(), 2, "no row is deleted: {out:?}");
+        let (thrown, shipped) = crate::engine_discard::split_discarded(out);
+        assert_eq!(thrown.len(), 1, "the Edge Functions finding is thrown out");
         assert_eq!(
-            out.len(),
-            1,
-            "the Edge Functions finding must be suppressed: {out:?}"
+            crate::engine_discard::reason_of(&thrown[0]),
+            Some(crate::engine_discard::STACK_EXCEPTION)
         );
         assert_eq!(
-            out[0].path, "src/server.rs",
+            shipped[0].path, "src/server.rs",
             "a monolith-first violation OUTSIDE supabase/functions/ must still fire"
         );
     }
@@ -13905,12 +13951,15 @@ mod tests {
         let frameworks = vec!["Next.js".to_string()];
         let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &set);
 
+        // A10: kept and marked thrown out, not deleted.
+        assert_eq!(out.len(), 2, "no row is deleted: {out:?}");
+        let (thrown, shipped) = crate::engine_discard::split_discarded(out);
         assert_eq!(
-            out.len(),
+            thrown.len(),
             1,
-            "the app-router-idiomatic path must be suppressed: {out:?}"
+            "the app-router-idiomatic path must be thrown out: {thrown:?}"
         );
-        assert_eq!(out[0].path, "pages/api/users.ts");
+        assert_eq!(shipped[0].path, "pages/api/users.ts");
     }
 
     /// A rule with NO `stack_exceptions` declared (the overwhelming majority of the corpus)
@@ -14559,10 +14608,11 @@ mod tests {
         assert_eq!(findings[1].severity, "medium");
     }
 
-    /// D1: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
+    /// D1, A10: the row a scan once returned for a rule named `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`
     /// (title `placeholder`, code and detail `x`) is not a finding; the real row beside it is.
+    /// The placeholder row is KEPT, marked thrown out with the reason; the real row is unmarked.
     #[test]
-    fn parse_ai_findings_drops_a_placeholder_row_and_keeps_the_real_one() {
+    fn parse_ai_findings_marks_a_placeholder_row_and_keeps_the_real_one() {
         let raw = r#"{"findings":[
             {"path":"lib/supabase/admin.ts","line":8,"severity":"low",
              "rule":"JAVASCRIPT-TYPESRIPT-PLACEHOLDER","title":"placeholder","code":"x","detail":"x"},
@@ -14573,8 +14623,15 @@ mod tests {
         ],"proposed_rules":[]}"#;
         let none = std::collections::HashSet::new();
         let (findings, _) = parse_ai_findings("me/api", raw, &none);
-        assert_eq!(findings.len(), 1, "{findings:#?}");
-        assert_eq!(findings[0].line, 12);
+        assert_eq!(findings.len(), 2, "no row is deleted: {findings:#?}");
+        let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+        assert_eq!(kept.len(), 1, "{kept:#?}");
+        assert_eq!(kept[0].line, 12);
+        assert_eq!(thrown.len(), 1, "{thrown:#?}");
+        assert_eq!(thrown[0].line, 8);
+        assert!(crate::engine_discard::reason_of(&thrown[0])
+            .unwrap()
+            .starts_with(crate::engine_discard::PLACEHOLDER_ROW));
     }
 
     /// R1B-5: a bare table name and its schema-qualified form are the same object, so they do
@@ -14660,7 +14717,8 @@ mod tests {
         }
     }
 
-    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still drops it.
+    /// R1B-3: the typo match never rescues a placeholder id: the junk filter still throws it out
+    /// (A10: kept and marked, not deleted).
     #[test]
     fn parse_ai_findings_does_not_canonicalise_a_placeholder_id_onto_an_adopted_rule() {
         let adopted: std::collections::HashSet<String> =
@@ -14671,10 +14729,12 @@ mod tests {
             "title":"A real title","code":"user!.id","detail":"A real explanation."}],
             "proposed_rules":[]}"#;
         let (findings, _) = parse_ai_findings("me/api", raw, &adopted);
-        assert!(findings.is_empty(), "{findings:#?}");
+        let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+        assert!(kept.is_empty(), "{kept:#?}");
+        assert_eq!(thrown.len(), 1, "{thrown:#?}");
     }
 
-    /// D1: each junk shape is refused on its own (an empty reply for code and detail, a
+    /// D1, A10: each junk shape is thrown out on its own, kept and marked (an empty reply for code and detail, a
     /// placeholder title over real text, a placeholder rule id over real text).
     #[test]
     fn parse_ai_findings_refuses_each_junk_shape_for_an_invented_rule() {
@@ -14687,7 +14747,10 @@ mod tests {
         ] {
             let raw = format!(r#"{{"findings":[{row}],"proposed_rules":[]}}"#);
             let (findings, _) = parse_ai_findings("me/api", &raw, &none);
-            assert!(findings.is_empty(), "{row} produced {findings:#?}");
+            // A10: the row is kept, marked thrown out; none of it goes on as a finding.
+            let (thrown, kept) = crate::engine_discard::split_discarded(findings);
+            assert!(kept.is_empty(), "{row} produced {kept:#?}");
+            assert_eq!(thrown.len(), 1, "{row} was deleted");
         }
     }
 
@@ -14704,21 +14767,32 @@ mod tests {
         assert_eq!(findings.len(), 1);
     }
 
-    /// D1: after the detail and calibration steps, a model-invented row whose explanation says
-    /// to discard it is removed; a row under an adopted rule is never removed by its prose.
+    /// D1, A10: after the detail and calibration steps, a model-invented row whose explanation
+    /// says to discard it is KEPT and marked thrown out (with its reason); a row under an adopted
+    /// rule is never marked by its prose. No row is removed.
     #[test]
-    fn drop_discarded_invented_rows_acts_on_the_discard_verdict() {
-        let mut discarded = finding("AI-JAVASCRIPT-PLACEHOLDER-NOTE", "low");
+    fn mark_discarded_invented_rows_acts_on_the_discard_verdict() {
+        let mut discarded = finding("AI-NOTE-ONLY", "low");
         discarded.detail = "This finding contains only a placeholder statement with the code 'x'. Discard this finding.".into();
         let mut kept_ai = finding("AI-REAL-ONE", "high");
         kept_ai.detail = "Real title — The handler trusts the caller.".into();
         let mut adopted = finding("SEC-NO-RAW-SQL-CONCAT-1", "high");
         adopted.detail = "Raw SQL — a note that says discard this finding".into();
         let mut rows = vec![discarded, kept_ai, adopted];
-        let removed = drop_discarded_invented_rows("me/api", &mut rows);
-        assert_eq!(removed, 1);
+        let marked = mark_discarded_invented_rows("me/api", &mut rows);
+        assert_eq!(marked, 1);
         let ids: Vec<&str> = rows.iter().map(|f| f.rule_id.as_str()).collect();
-        assert_eq!(ids, vec!["AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"]);
+        assert_eq!(
+            ids,
+            vec!["AI-NOTE-ONLY", "AI-REAL-ONE", "SEC-NO-RAW-SQL-CONCAT-1"],
+            "no row is removed"
+        );
+        assert_eq!(
+            crate::engine_discard::reason_of(&rows[0]),
+            Some(crate::engine_discard::DISCARD_VERDICT)
+        );
+        assert!(!crate::engine_discard::is_discarded(&rows[1]));
+        assert!(!crate::engine_discard::is_discarded(&rows[2]));
     }
 
     #[test]
@@ -19255,10 +19329,18 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         assert!(!recs[0].applicable);
+        // A10: the stray the model cited anyway is KEPT, marked thrown out, and apart from every
+        // row that ships: it is never a finding of the report.
+        let (thrown, shipped) = crate::engine_discard::split_discarded(findings);
         assert!(
-            findings.iter().all(|f| f.rule_id != "MULTI-RULE-1"),
+            shipped.iter().all(|f| f.rule_id != "MULTI-RULE-1"),
             "a not-applicable rule must emit ZERO findings, even one the model cited anyway: \
-             {findings:?}"
+             {shipped:?}"
+        );
+        assert_eq!(thrown.len(), 1, "{thrown:?}");
+        assert_eq!(
+            crate::engine_discard::reason_of(&thrown[0]),
+            Some(crate::engine_discard::RULE_NOT_APPLICABLE)
         );
     }
 
@@ -20254,6 +20336,9 @@ mod tests {
         .expect("stub completer never errors");
 
         assert!(recs.iter().any(|r| r.no_convention));
+        // A10: the two strays are kept, marked thrown out, apart from the rows that ship.
+        let (thrown, findings) = crate::engine_discard::split_discarded(findings);
+        assert_eq!(thrown.len(), 2, "{thrown:?}");
         let under_rule: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.rule_id == "MULTI-RULE-1")
@@ -20280,6 +20365,120 @@ mod tests {
         assert!(stage_samples
             .iter()
             .any(|s| s.stage == "no-convention-emission"));
+    }
+
+    /// A10 (`no_engine_path_deletes_a_finding`): every judgment path that used to delete a row
+    /// keeps it, marked with its reason. One scripted run feeds `audit_repo` six model entries:
+    /// a stray under a not-applicable rule, two strays under a no-convention rule, a row whose
+    /// own text says to discard it, a row filled with placeholder text and one real defect. Every
+    /// entry comes back as a row; only the real one is unmarked.
+    #[tokio::test]
+    async fn no_engine_path_deletes_a_finding() {
+        use crate::engine_discard::{
+            reason_of, DISCARD_VERDICT, NO_CONVENTION, PLACEHOLDER_ROW, RULE_NOT_APPLICABLE,
+        };
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "NA-RULE-1", "applicable": false,
+                 "recommendation_reasoning": "no evidence of pagination anywhere in this codebase"},
+                {"rule_id": "MULTI-RULE-1", "applicable": true, "no_convention": true,
+                 "observed_options": [{"option_id": "opt-a", "sites": 3},
+                                       {"option_id": "opt-b", "sites": 2}],
+                 "evidence": "src/lib.rs:1 — both patterns in one file",
+                 "recommendation_reasoning": "three sites do A, two do B — no majority"}
+            ],
+            "findings": [
+                {"rule": "NA-RULE-1", "severity": "medium", "title": "stray under na rule",
+                 "path": "src/na.rs", "line": 1, "code": "fn na() { old(); }", "detail": "stray"},
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the B way",
+                 "path": "src/lib.rs", "line": 1, "code": "fn handler() { b_way(); }",
+                 "detail": "stray per-site claim"},
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the A way",
+                 "path": "src/other.rs", "line": 2, "code": "fn other() { a_way(); }",
+                 "detail": "second stray per-site claim"},
+                {"rule": "AI-NOTE-ONLY", "severity": "low", "title": "a note",
+                 "path": "src/note.rs", "line": 3, "code": "fn note() { keep(); }",
+                 "detail": "Nothing to act on. Discard this finding."},
+                {"rule": "AI-FILLER", "severity": "low", "title": "placeholder",
+                 "path": "src/filler.rs", "line": 4, "code": "x", "detail": "x"},
+                {"rule": "AI-REAL-DEFECT", "severity": "high", "title": "unchecked owner",
+                 "path": "src/real.rs", "line": 5, "code": "fn real() { delete(id); }",
+                 "detail": "The handler deletes by id without checking the owner."}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
+        let files = vec![
+            ("src/na.rs".to_string(), "fn na() { old(); }\n".to_string()),
+            (
+                "src/lib.rs".to_string(),
+                "fn handler() { b_way(); }\n".to_string(),
+            ),
+            (
+                "src/other.rs".to_string(),
+                "fn other() { a_way(); }\n".to_string(),
+            ),
+            (
+                "src/note.rs".to_string(),
+                "fn note() { keep(); }\n".to_string(),
+            ),
+            ("src/filler.rs".to_string(), "x\n".to_string()),
+            (
+                "src/real.rs".to_string(),
+                "fn real() { delete(id); }\n".to_string(),
+            ),
+        ];
+        let selected = vec![
+            ("NA-RULE-1".to_string(), "Paginate lists.".to_string()),
+            ("MULTI-RULE-1".to_string(), "Do it the A way.".to_string()),
+        ];
+        let alternatives = vec![
+            two_option_alternatives("NA-RULE-1", Some("opt-a")),
+            two_option_alternatives("MULTI-RULE-1", Some("opt-a")),
+        ];
+        let (findings, _proposed, _recs, _failed, stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &crate::scan_routing::rules_from_pairs(&selected),
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        let at = |path: &str| {
+            findings
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("the row at {path} was deleted: {findings:?}"))
+        };
+        assert_eq!(reason_of(at("src/na.rs")), Some(RULE_NOT_APPLICABLE));
+        assert_eq!(reason_of(at("src/lib.rs")), Some(NO_CONVENTION));
+        assert_eq!(reason_of(at("src/other.rs")), Some(NO_CONVENTION));
+        assert_eq!(reason_of(at("src/note.rs")), Some(DISCARD_VERDICT));
+        assert!(
+            reason_of(at("src/filler.rs")).is_some_and(|r| r.starts_with(PLACEHOLDER_ROW)),
+            "{:?}",
+            at("src/filler.rs")
+        );
+        assert_eq!(reason_of(at("src/real.rs")), None);
+        // The ledger still reconciles: the rows that left the calibration stage are accounted
+        // for by their labels, and the rows kept apart are counted by reason.
+        assert!(stage_samples.iter().all(|s| {
+            s.rows_in + s.accounting.added_total()
+                >= s.rows_out + s.accounting.accounted().min(s.rows_in)
+        }));
     }
 
     /// req A5.5 END-TO-END through `audit_repo`: a decided convention with zero violations

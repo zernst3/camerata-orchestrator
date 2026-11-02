@@ -9,32 +9,37 @@
 //!
 //! 1. scan parsing ([`parse_gate_reason`]) never lets such a row exist;
 //! 2. after the detail and calibration steps ([`carries_discard_verdict`]) a model-invented row
-//!    whose own text says "discard this finding" is removed and counted;
-//! 3. the sealed report holds such a row ([`mark_rows`], the [`JUNK_CONTENT_CAPTURE`] mark, read
-//!    by `report_export::is_held_for_review`) and the release gate refuses the package until a
-//!    reviewer has decided the row (`release_gate::junk`).
+//!    whose own text says "discard this finding" is marked thrown out and kept apart;
+//! 3. the seal moves any such row that got that far aside the same way ([`take_thrown_out`]),
+//!    and holds a row with broken text ([`mark_rows`], the [`JUNK_CONTENT_CAPTURE`] mark, read
+//!    by `report_export::is_held_for_review`) until a reviewer has decided it
+//!    (`release_gate::junk`).
 //!
 //! Only rows the model INVENTED (rule id prefixed `AI-`, so no adopted rule backs them) are held
-//! to the discard-verdict test, so no prose can remove a row an adopted or deterministic rule
+//! to the discard-verdict test, so no prose can throw out a row an adopted or deterministic rule
 //! produced.
 //!
-//! # Real junk holds the row; wording only flags it (M4)
+//! # Three outcomes for a row's text (M4, A10)
 //!
-//! [`classify_row`] splits what it finds in two, and the two have different consequences:
+//! [`classify_row`] sorts what it finds into three lists, and each has its own consequence:
 //!
-//! * **Real junk** ([`JunkReason`]) is a row nobody could act on, or one that carries the model's
-//!   own chat text instead of a finding. A reviewer might never open the row, and a client would
-//!   receive it, so the row is HELD: the release gate refuses the package until a reviewer
-//!   decision exists for that row. The reasons: a placeholder rule id; a filler word where the
-//!   title should be (`x`, `n/a`, `tbd`, ...); no code and no explanation; an empty or filler
-//!   explanation; the model's verdict "discard this finding"; a refusal or chat lead-in where the
-//!   explanation should be ("I cannot ...", "Here is the ..."); and an untranslated JSON
-//!   fragment as the text.
+//! * **Thrown out** ([`DiscardReason`]) is a row that is not a finding at all: a placeholder rule
+//!   id, a filler word where the title should be (`x`, `n/a`, `tbd`, ...), no code and no
+//!   explanation, or the model's own verdict "discard this finding". The engine keeps the row,
+//!   marks it `engine_discarded` and leaves it out of the client export (`crate::engine_discard`).
+//!   It is not held, so it never blocks an export.
+//! * **Held** ([`JunkReason`]) is broken text on a finding that may be real: an empty
+//!   explanation, a refusal or chat lead-in where the explanation should be ("I cannot ...",
+//!   "Here is the ..."), or an untranslated JSON fragment. A reviewer might never open the row,
+//!   and a client would receive it, so the row is HELD: the release gate refuses the package
+//!   until a reviewer decision exists for that row.
 //! * **Wording judgments** ([`WordingFlag`]) are a reviewer's call on prose that is still a
 //!   finding: a title or explanation that begins "Placeholder ..." as a sentence ("Placeholder
 //!   credentials are committed"), and the phrase "placeholder finding" in an explanation that
 //!   does not say to discard it. They become review flags on the row
 //!   (`crate::review_flags`) and never hold or refuse anything.
+//!
+//! A row that is thrown out is not also held.
 
 /// Words (lower case, after trimming) that stand where real text should be.
 const PLACEHOLDER_WORDS: &[&str] = &[
@@ -147,10 +152,16 @@ pub fn carries_discard_verdict(text: &str) -> bool {
 /// Evidence length is deliberately not tested here (the parse test already did that on the
 /// model's own words; the steps after it write prose, not code).
 pub fn is_junk_invented_row(rule_id: &str, headline: &str, detail: &str) -> bool {
-    carries_discard_verdict(detail)
-        || carries_discard_verdict(headline)
+    says_discard(detail)
+        || says_discard(headline)
         || is_placeholder_rule_id(rule_id)
-        || is_placeholder_title(headline)
+        || (!headline.trim().is_empty() && is_filler(headline))
+}
+
+/// Whether `text` says, in so many words, to discard the row. The phrase "placeholder finding"
+/// alone is a wording judgment ([`WordingFlag::PlaceholderFinding`]), not a verdict.
+fn says_discard(text: &str) -> bool {
+    text.to_lowercase().contains("discard this finding")
 }
 
 /// Whether `text` is empty or exactly a filler word (`x`, `n/a`, `tbd`, ...): no sentence, no
@@ -161,19 +172,12 @@ pub fn is_filler(text: &str) -> bool {
     t.is_empty() || PLACEHOLDER_WORDS.contains(&t.as_str())
 }
 
-/// Why a row is real junk: a row the release gate holds until a reviewer decides it.
+/// Why a row's text is broken: a row the release gate holds until a reviewer decides it. The row
+/// may still be a real finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JunkReason {
-    /// The rule id names a placeholder (`JAVASCRIPT-TYPESRIPT-PLACEHOLDER`).
-    PlaceholderRuleId,
-    /// The title is exactly a filler word.
-    PlaceholderTitle,
-    /// No code and no explanation.
-    NoEvidence,
-    /// The explanation is empty or a filler word.
+    /// The explanation is empty or a filler word, on a row that does have code.
     EmptyExplanation,
-    /// The text says "discard this finding".
-    DiscardVerdict,
     /// The text opens with a model refusal or chat lead-in.
     ModelRefusal,
     /// The text is an untranslated JSON fragment.
@@ -184,13 +188,35 @@ impl JunkReason {
     /// The reason in a sentence, for the gate's problem line and the row's mark.
     pub fn describe(self) -> &'static str {
         match self {
-            Self::PlaceholderRuleId => "its rule id names a placeholder",
-            Self::PlaceholderTitle => "its title is a placeholder",
-            Self::NoEvidence => "it has no code and no explanation",
             Self::EmptyExplanation => "its explanation is empty",
-            Self::DiscardVerdict => "its own text says to discard it",
             Self::ModelRefusal => "its text is a model refusal or chat reply, not a finding",
             Self::JsonFragment => "its text is an untranslated JSON fragment",
+        }
+    }
+}
+
+/// Why a row is not a finding at all: the engine throws it out (keeps it, marks it, leaves it out
+/// of the client export). It is never held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardReason {
+    /// The rule id names a placeholder (`JAVASCRIPT-TYPESRIPT-PLACEHOLDER`).
+    PlaceholderRuleId,
+    /// The title is exactly a filler word.
+    PlaceholderTitle,
+    /// No code and no explanation.
+    NoEvidence,
+    /// The text says "discard this finding".
+    DiscardVerdict,
+}
+
+impl DiscardReason {
+    /// The reason in words: the text written on the row's `engine_discarded` mark.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PlaceholderRuleId => crate::engine_discard::PLACEHOLDER_RULE_ID,
+            Self::PlaceholderTitle => crate::engine_discard::PLACEHOLDER_HEADLINE,
+            Self::NoEvidence => "it has no code and no explanation",
+            Self::DiscardVerdict => crate::engine_discard::DISCARD_VERDICT,
         }
     }
 }
@@ -217,8 +243,10 @@ impl WordingFlag {
 /// What [`classify_row`] found in one row's text.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RowContent {
-    /// Real junk: the row is held.
+    /// Broken text: the row is held.
     pub junk: Vec<JunkReason>,
+    /// Not a finding: the row is thrown out and kept apart. A row with any of these is not held.
+    pub discard: Vec<DiscardReason>,
     /// Wording judgments: the row is flagged.
     pub wording: Vec<WordingFlag>,
 }
@@ -277,10 +305,10 @@ pub fn classify_row(rule_id: &str, headline: &str, snippet: &str, detail: &str) 
     let mut out = RowContent::default();
     if invented {
         if is_placeholder_rule_id(rule_id) {
-            out.junk.push(JunkReason::PlaceholderRuleId);
+            out.discard.push(DiscardReason::PlaceholderRuleId);
         }
         if !headline.trim().is_empty() && is_filler(headline) {
-            out.junk.push(JunkReason::PlaceholderTitle);
+            out.discard.push(DiscardReason::PlaceholderTitle);
         }
         // The exported snippet falls back to the title when the model gave no code, so a snippet
         // equal to the headline is "no code", not a second piece of evidence.
@@ -295,7 +323,7 @@ pub fn classify_row(rule_id: &str, headline: &str, snippet: &str, detail: &str) 
             .split_once(crate::ai_audit::HEADLINE_SEP)
             .map_or(detail, |(_, rest)| rest);
         match (is_filler(code), is_filler(explanation)) {
-            (true, true) => out.junk.push(JunkReason::NoEvidence),
+            (true, true) => out.discard.push(DiscardReason::NoEvidence),
             (false, true) => out.junk.push(JunkReason::EmptyExplanation),
             _ => {}
         }
@@ -308,7 +336,7 @@ pub fn classify_row(rule_id: &str, headline: &str, snippet: &str, detail: &str) 
         && (lower_detail.contains("discard this finding")
             || lower_headline.contains("discard this finding"));
     if discard {
-        out.junk.push(JunkReason::DiscardVerdict);
+        out.discard.push(DiscardReason::DiscardVerdict);
     }
     if text_parts(detail)
         .into_iter()
@@ -339,22 +367,55 @@ pub fn classify_row(rule_id: &str, headline: &str, snippet: &str, detail: &str) 
             out.wording.push(WordingFlag::PlaceholderFinding);
         }
     }
+    // A row that is not a finding is thrown out, not held.
+    if !out.discard.is_empty() {
+        out.junk.clear();
+    }
     out
 }
 
-/// What the release gate says about one exported row, or `None` when it is fine: the first real
-/// junk reason. Wording judgments are never a problem. Used where no reviewer decisions are
-/// available (a standalone audit of a zip).
+/// What a standalone audit of a zip says about one exported row, or `None` when it is fine: the
+/// first reason it is thrown out or held. Wording judgments are never a problem. A zip that holds
+/// such a row is unfit to ship whichever list the row belongs to (the engine leaves a thrown-out
+/// row out of the export, so one in a package is a defect); used where no reviewer decisions are
+/// available.
 pub fn row_problem(rule_id: &str, headline: &str, snippet: &str, detail: &str) -> Option<String> {
-    classify_row(rule_id, headline, snippet, detail)
-        .junk
+    let content = classify_row(rule_id, headline, snippet, detail);
+    content
+        .discard
         .first()
-        .map(|reason| reason.describe().to_string())
+        .map(|reason| reason.describe())
+        .or_else(|| content.junk.first().map(|reason| reason.describe()))
+        .map(str::to_string)
 }
 
 /// The `captures` key that marks a row that is real junk, holding it. The value lists the reasons
 /// in words. Absent on any other row. A bookkeeping key (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`).
 pub const JUNK_CONTENT_CAPTURE: &str = "junk_content";
+
+/// Move every row that is not a finding out of `findings`: the rows already marked
+/// `engine_discarded` and the rows [`classify_row`] throws out (marked here with the reason).
+/// Nothing is deleted: the rows are returned, in their original order, for the caller to keep
+/// apart. Run at seal, the safety net behind the engine's own throw-out steps.
+pub fn take_thrown_out(
+    findings: &mut Vec<crate::onboard::Finding>,
+) -> Vec<crate::onboard::Finding> {
+    let rows = std::mem::take(findings);
+    let mut thrown = Vec::new();
+    for mut f in rows {
+        if !crate::engine_discard::is_discarded(&f) {
+            if let Some(reason) = classify_finding(&f).discard.first() {
+                crate::engine_discard::mark(&mut f, reason.describe());
+            }
+        }
+        if crate::engine_discard::is_discarded(&f) {
+            thrown.push(f);
+        } else {
+            findings.push(f);
+        }
+    }
+    thrown
+}
 
 /// The tally of [`mark_rows`], for the scan ledger.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -559,28 +620,22 @@ mod tests {
         classify_row(rule_id, headline, snippet, detail).wording
     }
 
-    /// Every pattern that holds a row, one by one.
+    fn discard_of(
+        rule_id: &str,
+        headline: &str,
+        snippet: &str,
+        detail: &str,
+    ) -> Vec<DiscardReason> {
+        classify_row(rule_id, headline, snippet, detail).discard
+    }
+
+    /// Every pattern that HOLDS a row (broken text on a finding that may be real), one by one.
     #[test]
-    fn each_real_junk_pattern_holds_the_row() {
-        // A placeholder rule id.
-        assert!(
-            junk_of("AI-X-PLACEHOLDER", "A title", "db.query(q)", "Real text.")
-                .contains(&JunkReason::PlaceholderRuleId)
-        );
-        // A filler word as the title.
-        assert!(junk_of("AI-X-Y", "tbd", "db.query(q)", "Real text.")
-            .contains(&JunkReason::PlaceholderTitle));
-        // No code and no explanation.
-        assert!(junk_of("AI-X-Y", "A title", "x", "n/a").contains(&JunkReason::NoEvidence));
+    fn each_broken_text_pattern_holds_the_row() {
         // Code, but an empty explanation.
         assert_eq!(
             junk_of("AI-X-Y", "A title", "db.query(q)", "  "),
             vec![JunkReason::EmptyExplanation]
-        );
-        // The model's own verdict.
-        assert!(
-            junk_of("AI-X-Y", "A title", "db.query(q)", "Discard this finding.")
-                .contains(&JunkReason::DiscardVerdict)
         );
         // A refusal or chat lead-in, whole or after the headline separator.
         for text in [
@@ -609,6 +664,30 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A10: these are not findings at all. The engine throws the row out (keeps and marks it); it
+    /// is never also HELD.
+    #[test]
+    fn each_not_a_finding_pattern_is_thrown_out_and_never_held() {
+        let row = classify_row("AI-X-PLACEHOLDER", "A title", "db.query(q)", "Real text.");
+        assert_eq!(row.discard, vec![DiscardReason::PlaceholderRuleId]);
+        assert!(row.junk.is_empty());
+        assert!(discard_of("AI-X-Y", "tbd", "db.query(q)", "Real text.")
+            .contains(&DiscardReason::PlaceholderTitle));
+        assert!(discard_of("AI-X-Y", "A title", "x", "n/a").contains(&DiscardReason::NoEvidence));
+        assert!(
+            discard_of("AI-X-Y", "A title", "db.query(q)", "Discard this finding.")
+                .contains(&DiscardReason::DiscardVerdict)
+        );
+        // A discard verdict wrapped in a refusal is still thrown out, not held.
+        let both = classify_row(
+            "AI-X-Y",
+            "A title",
+            "db.query(q)",
+            "I cannot say. Discard this finding.",
+        );
+        assert!(!both.discard.is_empty() && both.junk.is_empty(), "{both:?}");
     }
 
     /// Prose that merely MENTIONS the junk words, or quotes JSON, is not junk.
@@ -653,17 +732,18 @@ mod tests {
                 .contains(&WordingFlag::PlaceholderLead)
         );
         assert!(
-            junk_of("AI-X-Y", "placeholder", "db.query(q)", "Real text.")
-                .contains(&JunkReason::PlaceholderTitle)
+            discard_of("AI-X-Y", "placeholder", "db.query(q)", "Real text.")
+                .contains(&DiscardReason::PlaceholderTitle)
         );
     }
 
-    /// An adopted or deterministic rule's row is never held for evidence or the discard verdict,
-    /// and never flagged for wording; only a refusal or JSON text holds it.
+    /// An adopted or deterministic rule's row is never held for evidence, never thrown out for the
+    /// discard verdict, and never flagged for wording; only a refusal or JSON text holds it.
     #[test]
     fn an_adopted_rule_row_is_held_only_for_a_reply_or_a_fragment() {
         assert!(junk_of("SEC-A-1", "placeholder", "x", "x").is_empty());
-        assert!(junk_of("SEC-A-1", "A title", "code", "Discard this finding.").is_empty());
+        assert!(discard_of("SEC-A-1", "placeholder", "x", "x").is_empty());
+        assert!(discard_of("SEC-A-1", "A title", "code", "Discard this finding.").is_empty());
         assert!(wording_of("SEC-A-1", "Placeholder text", "code", "Placeholder text.").is_empty());
         assert!(!junk_of("SEC-A-1", "A title", "code", "I cannot say.").is_empty());
     }
@@ -704,5 +784,53 @@ mod tests {
         // Marking again changes nothing.
         let again = mark_rows(&mut rows);
         assert_eq!(again, tally);
+    }
+
+    /// A10: the seal's safety net moves a row that is not a finding aside, marked with its reason,
+    /// and loses none; a row held for broken text stays where it is.
+    #[test]
+    fn take_thrown_out_moves_rows_aside_and_loses_none() {
+        use crate::onboard::Finding;
+        let row = |rule: &str, detail: &str| Finding {
+            rule_id: rule.to_string(),
+            snippet: "db.query(q)".to_string(),
+            detail: detail.to_string(),
+            ..Finding::default()
+        };
+        let mut already = row("AI-OTHER", "A title \u{2014} Real text.");
+        crate::engine_discard::mark(&mut already, crate::engine_discard::STACK_EXCEPTION);
+        let mut rows = vec![
+            row("AI-KEEP", "A title \u{2014} Real text."),
+            row("AI-X-PLACEHOLDER", "A title \u{2014} Real text."),
+            row("AI-NOTE", "A title \u{2014} Discard this finding."),
+            row("AI-REFUSAL", "A title \u{2014} I cannot assist."),
+            already,
+        ];
+        let before = rows.len();
+        let thrown = take_thrown_out(&mut rows);
+        assert_eq!(rows.len() + thrown.len(), before, "no row is lost");
+        assert_eq!(
+            rows.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),
+            ["AI-KEEP", "AI-REFUSAL"]
+        );
+        assert_eq!(
+            thrown
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            ["AI-X-PLACEHOLDER", "AI-NOTE", "AI-OTHER"]
+        );
+        assert_eq!(
+            crate::engine_discard::reason_of(&thrown[0]),
+            Some(crate::engine_discard::PLACEHOLDER_RULE_ID)
+        );
+        assert_eq!(
+            crate::engine_discard::reason_of(&thrown[1]),
+            Some(crate::engine_discard::DISCARD_VERDICT)
+        );
+        assert_eq!(
+            crate::engine_discard::reason_of(&thrown[2]),
+            Some(crate::engine_discard::STACK_EXCEPTION)
+        );
     }
 }

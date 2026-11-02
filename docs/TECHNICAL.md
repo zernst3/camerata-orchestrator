@@ -3255,16 +3255,31 @@ The stage telemetry in the ledger counts the flags per stage and kind
 the rows. The calibration raise-hold and the D5 floor cap are not part of this: they still use
 `mentions_exploit_precondition` and stay as they are.
 
-The release gate follows the same line. `junk_finding::classify_row` splits a row's text into
-*real junk* (`JunkReason`: a placeholder rule id; a filler word as the title; no code and no
-explanation; an empty explanation; "discard this finding"; a model refusal or chat lead-in such as
-"I cannot ..." or "Here is the ..."; an untranslated JSON fragment) and *wording judgments*
-(`WordingFlag`: a title or explanation that begins "Placeholder ..." as a sentence, and the phrase
-"placeholder finding" in an explanation that does not say to discard). `ScanReport::seal` marks
-real junk with the `junk_content` capture, which holds the row (`is_held_for_review`) and makes the
-gate refuse the export until a reviewer decision exists for that row (`release_gate::junk`, through
-`ReviewerDecisions`, the same shape as `evidence_unverified`). Wording judgments become review
-flags and refuse nothing.
+The release gate follows the same line. `junk_finding::classify_row` sorts a row's text three
+ways. A row that is *not a finding* (`DiscardReason`: a placeholder rule id; a filler word as the
+title; no code and no explanation; "discard this finding") is thrown out by the engine: kept,
+marked with the `engine_discarded` capture and its reason, moved to `ScanReport::discarded` and
+left out of every client export. It is never held and never blocks. *Broken text on a finding that
+may be real* (`JunkReason`: an empty explanation; a model refusal or chat lead-in such as "I
+cannot ..." or "Here is the ..."; an untranslated JSON fragment) is marked at seal with the
+`junk_content` capture, which holds the row (`is_held_for_review`) and makes the gate refuse the
+export until a reviewer decision exists for that row (`release_gate::junk`, through
+`ReviewerDecisions`, the same shape as `evidence_unverified`). *Wording judgments* (`WordingFlag`:
+a title or explanation that begins "Placeholder ..." as a sentence, and the phrase "placeholder
+finding" in an explanation that does not say to discard) become review flags and refuse nothing.
+An internal export (`release_internal`) may carry held rows, each marked in the internal
+workbook's Held column; a client export is refused until each has a decision.
+
+**Thrown-out findings are kept, never deleted (A10).** Every engine path that used to remove a
+finding on a judgment now marks it with `engine_discard::mark` and keeps it apart from the rows
+that ship: scan parsing of placeholder text, the discard verdict and placeholder rule id or
+headline, a rule judged not applicable, a rule with no established convention, and a stack
+exception (`engine_discard` lists them). The scan ledger counts them by reason
+(`ScanLedger::discarded`) and `ScanReport::discarded_reconciles` checks the rows against that
+count. The seal moves any marked or not-a-finding row that reached it into `discarded` as a
+safety net. Exact repeats of one row (`dedup_findings_keep_max_severity`), the mechanical collapse
+(`review_tree::collapse_identical`, every source kept in `flagged_by`) and the external-tool
+preview dedup are collapses of the same place, not judgments, and are unchanged.
 
 **Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
 

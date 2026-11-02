@@ -1103,6 +1103,11 @@ pub struct ScanReport {
     /// passed through there.
     #[serde(default)]
     pub tree: Option<crate::review_tree::ReviewTree>,
+    /// A10: the rows the engine threw out and kept (`engine_discard`), each marked with its
+    /// reason. They are not in [`Self::findings`], so every exporter leaves them out by default,
+    /// and they never hold or block an export. Additive/`serde(default)` so older reports load.
+    #[serde(default)]
+    pub discarded: Vec<Finding>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -1288,6 +1293,7 @@ impl ScanReport {
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
@@ -1329,6 +1335,7 @@ impl ScanReport {
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
@@ -1401,6 +1408,15 @@ impl ScanReport {
         self.assign_site_keys();
     }
 
+    /// A10: whether the rows the engine threw out and kept ([`Self::discarded`]) are the rows the
+    /// ledger counted, by reason, and each carries its mark.
+    pub fn discarded_reconciles(&self) -> bool {
+        self.discarded
+            .iter()
+            .all(crate::engine_discard::is_discarded)
+            && crate::engine_discard::tally(&self.discarded) == self.ledger.discarded().by_reason
+    }
+
     /// Rebuild [`Self::tree`] from the rows: every row in exactly one sub-group, nodes above them.
     /// A node that is still there keeps what the previous tree knew about it. The rows' own
     /// `group_path` and `group_role` are rewritten to agree with the tree.
@@ -1449,6 +1465,14 @@ impl ScanReport {
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
     pub fn seal(mut self) -> SealedReport {
+        // A10: the safety net behind the engine's own throw-out steps. A row that reached the seal
+        // marked thrown out, or as a row that is not a finding (a carried row from an older run),
+        // is moved aside, kept, and counted. Nothing is deleted.
+        let thrown = crate::junk_finding::take_thrown_out(&mut self.findings);
+        if !thrown.is_empty() {
+            self.ledger.record_discarded(&thrown);
+            self.discarded.extend(thrown);
+        }
         self.sweep_secrets_before_seal();
         self.refresh_patterns_across_services();
         // W21: audit every row's `path` HERE, because this is the one moment "every row" is
@@ -2232,6 +2256,9 @@ pub async fn audit_repos_with_llm_controlled(
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // A10: the rows the engine threw out. Kept, marked with the reason, and apart from the rows
+    // that ship: they become `ScanReport::discarded`.
+    let mut all_discarded: Vec<Finding> = Vec::new();
     // W1: the pipeline-integrity ledger for this scan — see `crate::scan_ledger`'s module
     // doc. Named `pipeline_ledger` (not `ledger`) to avoid colliding with this function's own
     // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
@@ -3028,6 +3055,13 @@ pub async fn audit_repos_with_llm_controlled(
                                 repo_failed_passes,
                                 repo_stage_samples,
                             )) => {
+                                // A10: rows the audit threw out come back marked; keep them apart
+                                // from the rows that go on, and count them by reason.
+                                let (thrown_out, kept) =
+                                    crate::engine_discard::split_discarded(ai_findings);
+                                ai_findings = kept;
+                                pipeline_ledger.record_discarded(&thrown_out);
+                                all_discarded.extend(thrown_out);
                                 // H12: whoever the rule id belongs to, these came from the model.
                                 for f in &mut ai_findings {
                                     f.captures
@@ -3327,12 +3361,18 @@ pub async fn audit_repos_with_llm_controlled(
                         &repo_stack.frameworks,
                         c,
                     );
+                    // A10: an excepted finding is kept, marked, and apart from the rows that go on.
+                    let (excepted, kept) =
+                        crate::engine_discard::split_discarded(std::mem::take(&mut repo_findings));
+                    repo_findings = kept;
+                    pipeline_ledger.record_discarded(&excepted);
+                    all_discarded.extend(excepted);
                     let rows_out = repo_findings.len();
-                    // W1: a stack exception DROPS a finding outright (it names an idiomatic
-                    // platform pattern, not a violation) — the one stage in this loop that
-                    // reduces the row count without a merge target, so it gets its own
+                    // W1: a stack exception TAKES a finding out of the rows that ship (it names
+                    // an idiomatic platform pattern, not a violation) — the one stage in this
+                    // loop that reduces the row count without a merge target, so it gets its own
                     // explicit `other` bucket rather than silently vanishing into
-                    // "unaccounted".
+                    // "unaccounted". The row itself is kept (A10): see `ScanReport::discarded`.
                     if rows_in != rows_out {
                         let mut acc = crate::scan_ledger::StageAccounting::default();
                         acc.other
@@ -3493,6 +3533,7 @@ pub async fn audit_repos_with_llm_controlled(
     // and the review tree holds them together (a rule node of routine rows, decided as a batch).
     bookkeeping.restore(&mut all_findings);
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.discarded = all_discarded;
     report.tree = Some(crate::review_tree::ReviewTree {
         nodes: tree_sub_nodes,
         ..crate::review_tree::ReviewTree::default()
