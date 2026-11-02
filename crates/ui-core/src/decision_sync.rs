@@ -189,15 +189,16 @@ where
         }
         for op in ops {
             let result = match &op {
-                BridgeOp::Post { request, .. } => t.post(request).await.map(Some),
+                BridgeOp::Post { request, .. } => t.post(request.as_ref()).await.map(Some),
                 BridgeOp::Revoke { decision_ids, .. } => {
                     let mut last = Ok(None);
                     for id in decision_ids {
                         match t.revoke(id).await {
                             Ok(()) => {}
                             // Already gone, or already revoked: as good as revoked.
-                            Err(OpError::Refused { status, .. }) if matches!(status, 404 | 409) => {
-                            }
+                            Err(OpError::Refused {
+                                status: 404 | 409, ..
+                            }) => {}
                             Err(e) => {
                                 last = Err(e);
                                 break;

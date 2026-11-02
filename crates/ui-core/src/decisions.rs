@@ -136,7 +136,7 @@ pub enum BridgeOp {
     Post {
         key: String,
         disposition: Disposition,
-        request: NewDecisionReq,
+        request: Box<NewDecisionReq>,
     },
     /// `POST .../decisions/:id/revoke` for each of the site's live records.
     Revoke {
@@ -390,7 +390,7 @@ impl DecisionBridge {
             ops.push(BridgeOp::Post {
                 key: key.clone(),
                 disposition: d.clone(),
-                request: NewDecisionReq {
+                request: Box::new(NewDecisionReq {
                     scope: Scope::Site,
                     key: key.clone(),
                     state,
@@ -401,7 +401,7 @@ impl DecisionBridge {
                     except: Vec::new(),
                     run_id: stamp.map(|s| s.run_id.clone()).unwrap_or_default(),
                     decided_at: stamp.map(|s| s.at.clone()).unwrap_or_default(),
-                },
+                }),
             });
         }
         for (key, synced) in &self.synced {

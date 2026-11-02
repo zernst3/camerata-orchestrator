@@ -1228,15 +1228,18 @@ async fn draft_dispositions_migrate_once_and_the_draft_is_blanked() {
         dispositions
     );
 
-    // A migration of nothing still marks the project migrated, so the UI asks once.
+    // A migration of nothing still marks the project migrated, so the UI asks once, but only
+    // once there are scan rows (without them it is refused like any other).
     let (state3, app3, pid3) = app_with_project();
-    let (status, body) = call(
-        &app3,
-        "POST",
-        &format!("/api/projects/{pid3}/decisions"),
-        Some(serde_json::json!({"migrated_from_draft": true, "dispositions": {}})),
-    )
-    .await;
+    let empty = serde_json::json!({"migrated_from_draft": true, "dispositions": {}});
+    let uri3 = format!("/api/projects/{pid3}/decisions");
+    let (status, _) = call(&app3, "POST", &uri3, Some(empty.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    state3
+        .inspections
+        .append(entry_of(&pid3, rows.clone(), "2026-11-02T10:00:00Z"))
+        .unwrap();
+    let (status, body) = call(&app3, "POST", &uri3, Some(empty)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(state3.decisions.migrated_from_draft_at(&pid3).is_some());
     assert!(state3.decisions.list(&pid3).is_empty());
@@ -1309,7 +1312,7 @@ mod bridge {
                         app,
                         "POST",
                         &uri,
-                        Some(to_json(&PostDecisionsReq::Decide(request))),
+                        Some(to_json(&PostDecisionsReq::Decide(*request))),
                     )
                     .await;
                     if status != StatusCode::OK {

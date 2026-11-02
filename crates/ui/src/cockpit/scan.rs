@@ -1425,7 +1425,7 @@ async fn apply_decision_load(
     queue: camerata_ui_core::decisions::DraftQueue,
     bridge: std::rc::Rc<std::cell::RefCell<camerata_ui_core::decisions::DecisionBridge>>,
     mut dispositions: Signal<std::collections::HashMap<String, Disposition>>,
-    mut availability: Signal<camerata_ui_core::decisions::Availability>,
+    mut availability: Signal<Option<camerata_ui_core::decisions::Availability>>,
     mut banner: Signal<Option<&'static str>>,
     mut project_id: Signal<String>,
 ) {
@@ -1441,7 +1441,7 @@ async fn apply_decision_load(
             .await
     };
     dispositions.set(loaded.shown);
-    availability.set(loaded.bridge.availability());
+    availability.set(Some(loaded.bridge.availability()));
     banner.set(loaded.banner);
     *bridge.borrow_mut() = loaded.bridge;
 }
@@ -8545,7 +8545,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             camerata_ui_core::decisions::DecisionBridge::default(),
         ))
     });
-    let decision_availability = use_signal(|| camerata_ui_core::decisions::Availability::Unknown);
+    // `None` while the store is still being read: the queue shows as it always did.
+    let decision_availability =
+        use_signal(|| Option::<camerata_ui_core::decisions::Availability>::None);
     let decision_banner = use_signal(|| Option::<&'static str>::None);
     let bridge_pid = use_signal(String::new);
     let mut bridge_tick = use_signal(|| 0u32);
@@ -8683,7 +8685,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             // queue exactly as it was loaded.
             let queue_state = {
                 let mut bridge = decision_bridge_save.borrow_mut();
-                if availability != camerata_ui_core::decisions::Availability::Unknown {
+                if availability
+                    .is_some_and(|a| a != camerata_ui_core::decisions::Availability::Unknown)
+                {
                     let run = bridge.run_id().to_string();
                     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                     bridge.observe(&disp, &run, &now);
@@ -8718,7 +8722,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 .await;
             });
             // Write the screen's decisions through to the store as they happen.
-            if availability == camerata_ui_core::decisions::Availability::Live {
+            if availability == Some(camerata_ui_core::decisions::Availability::Live) {
                 let sync = DecisionSync {
                     bridge: decision_bridge_save.clone(),
                     project_id: bridge_pid,
@@ -10039,7 +10043,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         titles: pattern_titles(),
                     }
                 } else if kind_view() == KindSurface::Queue
-                    && decision_availability() != camerata_ui_core::decisions::Availability::Unknown
+                    && decision_availability()
+                        != Some(camerata_ui_core::decisions::Availability::Unknown)
                 {
                     // Single-select over the triage tables, each with a live count. The set
                     // and its order come from `TriageState::all()` and the count from
