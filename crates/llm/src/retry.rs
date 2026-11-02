@@ -20,7 +20,8 @@
 //! A 429 (or a `rate_limit_error` event) that outlasts the schedule ends as
 //! [`FailureClass::RateLimited`], not `Transport`: the provider asked for a slower pace, which is
 //! a pause and not an outage. The class carries the last `retry-after` on its attempt trail
-//! ([`crate::failure::retry_after_of`]). An overload (529, 503) stays `Transport`.
+//! ([`crate::failure::retry_after_of`]). An overload (529, `overloaded_error`) is the same kind of
+//! pause. A dropped connection, a timeout and a 500 to 504 stay `Transport`.
 //!
 //! ONE loop: [`drive`] is the only retry loop in the crate. The API transport and the CLI
 //! backend both run through it, each supplying one attempt as a closure and the sleeper to
@@ -503,15 +504,16 @@ where
 }
 
 /// The class of a streamed call whose retries ran out with no HTTP answer: a `rate_limit_error`
-/// event on the last attempt is [`FailureClass::RateLimited`] (the provider asked for a slower
-/// pace, which a run waits out and does not count toward an outage); everything else (a stall, a
-/// broken stream, an overload, a failed connection) is [`FailureClass::Transport`]. An HTTP 429 is
+/// or `overloaded_error` event on the last attempt is [`FailureClass::RateLimited`] (the provider
+/// asked for a slower pace or is busy, which a run waits out and does not count toward an
+/// outage); everything else (a stall, a broken stream, a failed connection) is
+/// [`FailureClass::Transport`]. An HTTP 429 is
 /// classified from its status by [`crate::failure::classify_http`].
 fn exhausted_stream_class(attempts: &[AttemptRecord]) -> FailureClass {
     if attempts
         .last()
         .and_then(|a| a.error_type.as_deref())
-        .is_some_and(|t| t == "rate_limit_error")
+        .is_some_and(|t| matches!(t, "rate_limit_error" | "overloaded_error"))
     {
         FailureClass::RateLimited
     } else {
@@ -869,9 +871,10 @@ mod tests {
         assert_eq!(sleeper.waits(), vec![2, 8, 30]);
     }
 
-    /// An overloaded event is still transport: it is the provider struggling, not asking us to slow.
+    /// An overloaded event is a pause like a rate limit (Fable wave 3): the provider is busy and
+    /// waiting clears it, so it never counts toward the outage streak.
     #[tokio::test]
-    async fn an_overloaded_event_that_outlasts_the_retries_stays_transport() {
+    async fn an_overloaded_event_that_outlasts_the_retries_is_rate_limited() {
         let sleeper = RecordingSleeper::default();
         let err = execute_stream(
             || async {
@@ -880,6 +883,22 @@ mod tests {
                     message: "Overloaded".to_string(),
                 }
             },
+            &sleeper,
+            "m",
+        )
+        .await
+        .err()
+        .expect("surfaces");
+        let failure = crate::failure::call_failure_of(&err).expect("typed");
+        assert_eq!(failure.class, FailureClass::RateLimited);
+    }
+
+    /// A stream that only stalled or broke is still transport: the provider was not reached.
+    #[tokio::test]
+    async fn a_stalled_stream_that_outlasts_the_retries_stays_transport() {
+        let sleeper = RecordingSleeper::default();
+        let err = execute_stream(
+            || async { StreamAttempt::<u32>::Stalled("silent for 120s".to_string()) },
             &sleeper,
             "m",
         )

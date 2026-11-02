@@ -419,6 +419,19 @@ impl JobStore {
         }
     }
 
+    /// The stage is paused waiting out a rate limit or an overload: count it as activity and say
+    /// so on the liveness label, so a long `retry-after` never reads as a stalled job.
+    pub fn note_paused(&self, id: &str) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.tracker.record_progress("paused: rate limited");
+        }
+    }
+
     /// The label the job's liveness tracker last recorded (`calibration: 6 of 6 ended`), which
     /// outlives the stage's progress line.
     #[cfg(test)]

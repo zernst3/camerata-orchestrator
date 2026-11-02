@@ -482,12 +482,16 @@ fn cancel_requested(ctx: &StageCtx<'_>) -> bool {
 }
 
 /// Wait `dur`, looking at the cancel flag at least once per poll interval. Returns `true` as soon
-/// as the job is cancelled, so a long `retry-after` never holds a cancelled job.
+/// as the job is cancelled, so a long `retry-after` never holds a cancelled job. Every tick also
+/// touches the job ("paused: rate limited"), so a long hold never reads as a stalled job.
 async fn sleep_or_cancel(ctx: &StageCtx<'_>, dur: Duration) -> bool {
     let end = Instant::now() + dur;
     loop {
         if cancel_requested(ctx) {
             return true;
+        }
+        if let Some((jobs, id)) = ctx.job {
+            jobs.note_paused(id);
         }
         let now = Instant::now();
         if now >= end {
@@ -824,8 +828,8 @@ impl Aimd {
 
     /// The provider said to slow down: halve the permits (floor one) and hold every new request
     /// for `wait`. A second signal while already holding extends the hold but does not halve
-    /// again: a burst of simultaneous 429s is one event. `rate_limited` starts the deadline clock
-    /// (an overload does not: it fails on its own path).
+    /// again: a burst of simultaneous 429s is one event. `rate_limited` starts the deadline clock;
+    /// every caller passes `true` now that an overload is the same kind of pause as a 429.
     pub(crate) fn on_throttle(&mut self, wait: Duration, now: Instant, rate_limited: bool) {
         let already_holding = self.pause_until.is_some_and(|until| now < until);
         if !already_holding {
@@ -1014,8 +1018,10 @@ async fn run_parallel<S>(
                         queue.push_front(work);
                     }
                 } else {
+                    // A failure a caller classified by hand as transport but that says the provider
+                    // is overloaded still slows the stage down like a 429.
                     if failure::is_overloaded(&e) {
-                        aimd.on_throttle(wait, now, false);
+                        aimd.on_throttle(wait, now, true);
                     }
                     let reason = disclosable_error(&format!("{e:#}"));
                     match resend_or_fail(ctx, book, &work, class, &reason, attempts) {

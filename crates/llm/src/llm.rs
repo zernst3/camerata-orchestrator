@@ -6409,7 +6409,7 @@ exit 1"#,
             "{err}"
         );
         let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
-        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.class, crate::failure::FailureClass::RateLimited);
         assert_eq!(failure.attempts.len(), 2);
         assert_eq!(failure.attempts[0].request_id.as_deref(), Some("req_1"));
     }

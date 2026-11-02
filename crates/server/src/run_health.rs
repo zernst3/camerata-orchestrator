@@ -189,6 +189,46 @@ mod tests {
         assert!(h.is_stopped());
     }
 
+    /// Fable wave 3: an overload (529, `overloaded_error`) is the provider being busy, a pause like
+    /// a 429. Real errors, classified by the transport's own rules, never reach the streak; a
+    /// connection failure, a timeout and a 500 to 504 still do.
+    #[test]
+    fn three_overloads_in_a_row_do_not_trip_the_outage_stop_but_connection_failures_still_do() {
+        use camerata_llm::failure::{classify_error, classify_http, LlmCallFailure};
+        let typed = |status: u16, etype: Option<&str>| {
+            let (class, _) = classify_http(status, etype, "x");
+            anyhow::Error::new(LlmCallFailure::new(class, format!("HTTP {status}")))
+        };
+        let overloads = [
+            typed(529, Some("overloaded_error")),
+            typed(529, None),
+            anyhow::anyhow!("API Error: 529 overloaded_error"),
+            typed(200, Some("overloaded_error")),
+        ];
+        let h = RunHealth::default();
+        for e in &overloads {
+            h.note_failure(classify_error(e), &e.to_string());
+        }
+        assert!(!h.is_stopped(), "four overloads in a row are a pause");
+        assert_eq!(h.streak(), 0);
+
+        for outage in [
+            typed(500, None),
+            typed(502, None),
+            typed(503, None),
+            typed(504, None),
+            typed(408, None),
+            anyhow::anyhow!("connection reset by peer"),
+            anyhow::anyhow!("request timed out"),
+        ] {
+            let h = RunHealth::default();
+            for _ in 0..OUTAGE_STREAK {
+                h.note_failure(classify_error(&outage), &outage.to_string());
+            }
+            assert!(h.is_stopped(), "{outage} three times is an outage");
+        }
+    }
+
     #[test]
     fn any_success_resets_the_streak() {
         let h = RunHealth::default();

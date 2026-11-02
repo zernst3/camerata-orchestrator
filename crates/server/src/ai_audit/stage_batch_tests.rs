@@ -1479,3 +1479,139 @@ async fn a_cancel_during_a_rate_limit_wait_ends_the_wait_within_a_tick() {
     assert!(out.cancelled.is_some());
     assert!(out.failed.is_empty());
 }
+
+// ── overload is a pause (Fable wave 3) ──────────────────────────────────────────────────────────
+
+/// What the transport returns for a 529 `overloaded_error` that outlasted its retries, classified
+/// by the transport's own rules (no retry-after: the provider sent none).
+fn overloaded() -> anyhow::Error {
+    let (class, _) =
+        camerata_llm::failure::classify_http(529, Some("overloaded_error"), "Overloaded");
+    let mut rec = AttemptRecord::new("api", MODEL);
+    rec.http_status = Some(529);
+    rec.error_type = Some("overloaded_error".to_string());
+    let mut f = LlmCallFailure::new(class, "Anthropic API HTTP 529: overloaded");
+    f.attempts = vec![rec];
+    f.retryable = true;
+    anyhow::Error::new(f)
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_overloads_in_a_row_pause_the_stage_and_it_recovers_without_an_outage_stop() {
+    // The first three calls are overloaded; with no retry-after the pause is the 30 second default.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let seen = counter.clone();
+    let rt = Realtime::new(move |id, _| {
+        if seen.fetch_add(1, Ordering::SeqCst) < 3 {
+            (Duration::from_secs(1), Err(overloaded()))
+        } else {
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        }
+    });
+    let meter = UsageMeter::default();
+    let mut stage = Scripted::numbered(10);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+    let t0 = Instant::now();
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 4 },
+        &c,
+    )
+    .await;
+
+    assert!(!meter.outage_stopped(), "three overloads are not an outage");
+    assert_eq!(
+        out.absorbed.len(),
+        10,
+        "every item was sent again and answered"
+    );
+    assert!(out.failed.is_empty());
+    assert!(out.pacing.throttles >= 1, "it halved: {:?}", out.pacing);
+    assert!(
+        Instant::now().duration_since(t0) >= Duration::from_secs(30),
+        "and held for the default pause"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_connection_failures_in_a_row_still_trip_the_outage_stop() {
+    let rt = Realtime::new(|_, _| {
+        (
+            Duration::from_secs(1),
+            Err(anyhow::Error::new(LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API request failed after 3 retries: connection reset by peer",
+            ))),
+        )
+    });
+    let meter = UsageMeter::default();
+    let mut stage = Scripted::numbered(10);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 1 },
+        &c,
+    )
+    .await;
+
+    assert!(meter.outage_stopped(), "connection failures are an outage");
+    assert!(out.absorbed.is_empty());
+    assert_eq!(out.failed.len(), 10);
+    assert!(out
+        .failed
+        .iter()
+        .any(|f| f.class == FailureClass::OutageStop));
+}
+
+// ── a paused stage is alive ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_long_retry_after_keeps_touching_the_job_and_labels_it_paused() {
+    let store = Arc::new(JobStore::new());
+    let id = store.create("audit", None);
+    // item-000 is rate limited for 60 seconds on its first call. The job is aged when that call
+    // starts; what the retry call finds is what the 60 second hold did to it.
+    type Look = (u128, Option<String>);
+    let looks: Arc<Mutex<Vec<Look>>> = Arc::new(Mutex::new(Vec::new()));
+    let (s2, i2, l2) = (store.clone(), id.clone(), looks.clone());
+    let rt = Realtime::new(move |item, nth| {
+        if nth == 1 {
+            l2.lock()
+                .unwrap()
+                .push((idle_ms(&s2, &i2), s2.last_progress_label(&i2)));
+        }
+        if item == "item-000" && nth == 0 {
+            s2.age_activity_for_test(&i2);
+            (Duration::from_secs(1), Err(rate_limited(60)))
+        } else {
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+        }
+    });
+    let mut stage = Scripted::numbered(1);
+    let mut c = ctx(&rt, None);
+    c.job = Some((&store, &id));
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 1 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(out.absorbed.len(), 1);
+    let looks = looks.lock().unwrap().clone();
+    assert_eq!(looks.len(), 1, "the item was sent again once");
+    let (idle, label) = &looks[0];
+    assert!(
+        *idle < 5_000,
+        "the hold kept touching the job (idle {idle} ms)"
+    );
+    assert_eq!(label.as_deref(), Some("paused: rate limited"));
+}
