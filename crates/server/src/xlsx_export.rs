@@ -2150,6 +2150,7 @@ fn write_coverage_sheet(
             .chain(&gaps.dependency_gaps)
             .chain(&gaps.file_limit_notes)
             .chain(gaps.skipped_summary.iter())
+            .chain(gaps.evidence_note.iter())
         {
             ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
@@ -2227,12 +2228,7 @@ fn write_coverage_sheet(
                     &skipped.reason,
                     &fmts.cell(None, false, false),
                 )?;
-                ws.write_string_with_format(
-                    next_r,
-                    3,
-                    &skipped.size,
-                    &fmts.cell(None, false, false),
-                )?;
+                write_size_cell(ws, next_r, &skipped.size, &fmts.cell(None, false, false))?;
                 next_r += 1;
             }
             // The list is bounded per reason; the files past the bound are counted, not named.
@@ -2242,6 +2238,18 @@ fn write_coverage_sheet(
         }
     }
 
+    Ok(())
+}
+
+/// The Coverage sheet's "Size" cell. The one place that writes it, so moving sheet text onto the
+/// capped writer (M8's `write_text_with_format`) is a change to the one call in this function.
+fn write_size_cell(
+    ws: &mut Worksheet,
+    row: u32,
+    size: &str,
+    format: &Format,
+) -> Result<(), XlsxError> {
+    ws.write_string_with_format(row, 3, size, format)?;
     Ok(())
 }
 

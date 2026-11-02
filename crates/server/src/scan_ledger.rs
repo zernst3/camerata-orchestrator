@@ -729,6 +729,12 @@ pub struct EvidenceCheck {
     /// snippet describes an impact, not a line) is not checked and not counted.
     #[serde(default)]
     pub site_checked: usize,
+    /// Absorbed sites the check does not apply to: a consequence of the row's root cause (its
+    /// snippet describes an impact), a site in another repository, a site with no snippet or no
+    /// line, and every site of a row exempt by kind. `site_checked + site_exempt` is every
+    /// absorbed site the check saw.
+    #[serde(default)]
+    pub site_exempt: usize,
     /// Checked absorbed sites whose snippet was found near their own line.
     #[serde(default)]
     pub site_verified: usize,
@@ -738,6 +744,11 @@ pub struct EvidenceCheck {
 }
 
 impl EvidenceCheck {
+    /// Every absorbed site the check saw.
+    pub fn sites_seen(&self) -> usize {
+        self.site_checked + self.site_exempt
+    }
+
     /// Every row the check saw.
     pub fn rows_seen(&self) -> usize {
         self.checked + self.exempt
@@ -756,6 +767,7 @@ impl EvidenceCheck {
         self.unverified += other.unverified;
         self.exempt += other.exempt;
         self.site_checked += other.site_checked;
+        self.site_exempt += other.site_exempt;
         self.site_verified += other.site_verified;
         self.site_unverified += other.site_unverified;
     }

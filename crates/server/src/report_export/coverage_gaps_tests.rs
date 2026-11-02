@@ -501,3 +501,59 @@ async fn the_pdf_prints_the_size_and_the_file_limit() {
     assert!(text.contains("402 KB"), "{text}");
     assert!(text.contains("reached the 1-file limit"), "{text}");
 }
+
+#[test]
+fn coverage_says_how_many_absorbed_sites_were_not_checked() {
+    let mut report = report_with_gaps();
+    report
+        .ledger
+        .record_evidence_check(crate::scan_ledger::EvidenceCheck {
+            site_checked: 4,
+            site_verified: 4,
+            site_exempt: 3,
+            ..Default::default()
+        });
+    let gaps = coverage_gaps(&report);
+    assert_eq!(
+        gaps.evidence_note.as_deref(),
+        Some(
+            "3 absorbed sites were not checked against their files: they describe an impact \
+             rather than quote code, belong to a summary row, sit in another repository or cite \
+             no line."
+        )
+    );
+    // The PDF data, findings.json and the workbook carry it.
+    let sealed = report.seal();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+    assert!(render_data_json(&json)
+        .unwrap()
+        .contains("3 absorbed sites were not checked"));
+    let export = crate::xlsx_export::build_findings_export(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &json,
+        &HashMap::new(),
+    );
+    let value = serde_json::to_value(&export).unwrap();
+    assert!(value["coverage"]["evidence_note"].is_string());
+    let bytes =
+        crate::xlsx_export::build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+    let all = crate::release_gate::xlsx_strings(&bytes)
+        .unwrap()
+        .join("\n");
+    assert!(all.contains("3 absorbed sites were not checked"), "{all}");
+}
+
+#[test]
+fn coverage_is_silent_when_every_absorbed_site_was_checked() {
+    let mut report = report_with_gaps();
+    report
+        .ledger
+        .record_evidence_check(crate::scan_ledger::EvidenceCheck {
+            site_checked: 4,
+            site_verified: 4,
+            ..Default::default()
+        });
+    assert!(coverage_gaps(&report).evidence_note.is_none());
+}

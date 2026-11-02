@@ -252,6 +252,7 @@ pub fn verify_evidence(
             Some(Exempt::Informational | Exempt::DependencyAdvisory)
         );
         let failed_sites = if by_kind {
+            counts.site_exempt += f.also_locations.len();
             Vec::new()
         } else {
             verify_sites(f, &mut sources, &mut counts)
@@ -340,6 +341,7 @@ fn verify_sites(
     let row_repo = f.repo.clone();
     for site in &mut f.also_locations {
         if !site_is_checkable(site, &row_repo) {
+            counts.site_exempt += 1;
             continue;
         }
         counts.site_checked += 1;

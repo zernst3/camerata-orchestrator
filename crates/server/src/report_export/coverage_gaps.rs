@@ -81,6 +81,10 @@ pub struct CoverageGapsJson {
     /// One sentence per repo that reached the file limit, with how many of its files were not
     /// scanned. The limit is a coverage limit on the run, not only a list of paths.
     pub file_limit_notes: Vec<String>,
+    /// One sentence saying how many absorbed sites were not checked against their files (M5), and
+    /// why. `None` when every absorbed site was checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_note: Option<String>,
     /// The sentence every renderer prints for them ("and K more skipped files ..."); `None`
     /// when the list is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +176,22 @@ fn files_noun(n: usize) -> &'static str {
     } else {
         "files were"
     }
+}
+
+/// The sentence for `exempt` absorbed sites the evidence check did not apply to. `None` when none.
+fn evidence_note_sentence(exempt: usize) -> Option<String> {
+    (exempt > 0).then(|| {
+        let (noun, pronoun) = if exempt == 1 {
+            ("site was", "its file")
+        } else {
+            ("sites were", "their files")
+        };
+        format!(
+            "{exempt} absorbed {noun} not checked against {pronoun}: they describe an impact \
+             rather than quote code, belong to a summary row, sit in another repository or cite \
+             no line."
+        )
+    })
 }
 
 /// The file limit a hit applied: the one it recorded, or the production limit for a ledger
@@ -272,6 +292,7 @@ impl CoverageGapsJson {
             && self.skipped_beyond_cap_total == 0
             && self.skipped_summary.is_none()
             && self.file_limit_notes.is_empty()
+            && self.evidence_note.is_none()
             && self.scope_limited_rules.is_empty()
     }
 }
@@ -335,6 +356,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
         skipped_summary: skipped_summary_sentence(&input.skipped_totals, &input.file_cap_hits),
         file_limit_notes: file_limit_sentences(&input.file_cap_hits),
+        evidence_note: evidence_note_sentence(report.ledger.evidence_check().site_exempt),
         scope_limited_note: scope_limited_sentence(&scope_limited_rules),
         scope_limited_rules,
     }

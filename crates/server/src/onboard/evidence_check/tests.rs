@@ -399,3 +399,48 @@ fn a_group_of_verified_occurrences_is_not_held_by_this_rule() {
     assert!(!marked(&grouped[0]));
     assert!(sites_listed(&grouped[0]).is_none());
 }
+
+// ── absorbed sites the check does not apply to are counted too ───────────────────────────────
+
+#[test]
+fn every_absorbed_site_is_checked_or_exempt_and_the_two_add_up() {
+    let mut consequence = site("src/app.ts", 3, "downstream impact, not code");
+    consequence.consequence = true;
+    let mut other_repo = site("src/app.ts", 3, "const app = express();");
+    other_repo.repo = "acme/other".to_string();
+    let mut f = row(6, REAL);
+    f.also_locations = vec![
+        site("src/app.ts", 6, REAL),
+        site("src/app.ts", 3, "made up"),
+        consequence,
+        other_repo,
+        site("src/app.ts", 3, ""),
+        site("src/app.ts", 0, REAL),
+    ];
+    // A row exempt by kind: its sites are counted exempt, none is checked.
+    let mut convention = row(6, "summary");
+    convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+        convention_option_id: "x".to_string(),
+        convention_label: "X".to_string(),
+    }));
+    convention.also_locations = vec![site("src/app.ts", 6, REAL), site("src/app.ts", 6, REAL)];
+    let total_sites = f.also_locations.len() + convention.also_locations.len();
+    let mut rows = vec![f, convention];
+    let counts = verify_evidence(&mut rows, &files(), None);
+    assert_eq!(
+        (
+            counts.site_checked,
+            counts.site_verified,
+            counts.site_unverified
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(counts.site_exempt, 6);
+    assert_eq!(counts.sites_seen(), total_sites);
+    assert!(counts.reconciles());
+    let mut ledger = crate::scan_ledger::ScanLedger::new();
+    ledger.record_evidence_check(counts);
+    ledger.record_evidence_check(counts);
+    assert_eq!(ledger.evidence_check().site_exempt, 12);
+    assert_eq!(ledger.evidence_check().sites_seen(), total_sites * 2);
+}
