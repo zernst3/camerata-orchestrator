@@ -94,7 +94,7 @@ async fn scan(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
     run_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,
@@ -833,7 +833,7 @@ async fn a_cut_off_deep_security_chunk_keeps_its_complete_findings_and_is_report
     let (findings, _p, _r, ok, failures) = run_security_passes(
         &llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted(),
         None,

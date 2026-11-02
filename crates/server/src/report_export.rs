@@ -13583,6 +13583,30 @@ mod tests {
         );
     }
 
+    /// M1: a repo whose file list was too large to send in full is a disclosed coverage limit in
+    /// the client wording too, not a silent one, and it is not a failed part.
+    #[test]
+    fn a_file_tree_reduced_to_an_outline_is_disclosed_as_a_scope_limit() {
+        let fallback = crate::ai_audit::FailedPass {
+            repo: "acme/api".to_string(),
+            pass: "full file list in model calls".to_string(),
+            reason: "reduced to a per-directory outline: the repository has 30000 files"
+                .to_string(),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: true,
+        };
+        for internal in [false, true] {
+            let notes = failed_pass_disclosures(std::slice::from_ref(&fallback), internal);
+            assert_eq!(notes.len(), 1);
+            assert!(notes[0].contains("per-directory outline"), "{}", notes[0]);
+            assert!(notes[0].contains("30000 files"), "{}", notes[0]);
+            assert!(!notes[0].contains("did not complete"), "{}", notes[0]);
+        }
+    }
+
     /// C3-1b, W6 wiring: a run where `ai_audit::verify_findings` recorded a run-wide "hour
     /// estimation" `FailedPass` must (a) disclose it in BOTH methodology and summary, exactly
     /// like the pre-existing alternative-recommendation disclosure, and (b) still ship the

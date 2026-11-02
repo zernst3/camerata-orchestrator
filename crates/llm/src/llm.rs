@@ -2599,16 +2599,31 @@ pub struct BatchResultRow {
     pub billed: Option<LlmResponse>,
 }
 
+/// The Message Batches API's limit on one request body, in bytes (256 MB, counted here as a
+/// million bytes to the megabyte so the figure is the lower of the two readings).
+pub const BATCH_BODY_API_LIMIT_BYTES: usize = 256_000_000;
+
+/// Refuse a batch body of `len` bytes that is over [`BATCH_BODY_API_LIMIT_BYTES`].
+pub fn ensure_batch_body_fits(len: usize) -> anyhow::Result<()> {
+    if len > BATCH_BODY_API_LIMIT_BYTES {
+        anyhow::bail!(
+            "the batch body is {len} bytes, over the Message Batches API limit of \
+             {BATCH_BODY_API_LIMIT_BYTES}; split the work into several batches before submitting"
+        );
+    }
+    Ok(())
+}
+
 impl Llm {
     /// Submit a batch of requests to the Anthropic Message Batches API. Returns the
     /// `batch_id` + initial counts, or an error if the submission failed. Requires the
     /// `api` backend and a configured Anthropic API key. The batch processes asynchronously;
     /// poll with [`poll_batch_status`] and fetch results with [`fetch_batch_results`].
     ///
-    /// CAP ENFORCEMENT: logs a warning when `items.len() > 100_000` (the API hard cap);
-    /// the caller is responsible for splitting before calling this function. A 256MB POST
-    /// body limit is not checked here (the average Camerata batch item is ~5-20KB, so
-    /// 100k items is already the binding constraint in practice).
+    /// CAP ENFORCEMENT: logs a warning when `items.len() > 100_000` (the API hard cap); the
+    /// caller is responsible for splitting before calling this function (by count AND by body
+    /// bytes: `ai_audit::batch_mode::plan_sub_batches`). A body over the 256MB limit is refused
+    /// here before the upload ([`ensure_batch_body_fits`]).
     ///
     /// RETRY: same policy as [`Self::complete_api`] — 429/529/5xx/network errors retry the
     /// SAME submission (3 extra attempts, exponential backoff, `retry-after` honored);
@@ -2629,6 +2644,10 @@ impl Llm {
             );
         }
         let body = serde_json::json!({ "requests": items });
+        // The API refuses a body over its size limit; say so here, before the upload, instead of
+        // after it. The callers split by bytes first (`ai_audit::batch_mode::plan_sub_batches`),
+        // so this is the backstop that makes an oversized submission impossible.
+        ensure_batch_body_fits(serde_json::to_vec(&body).map_or(0, |b| b.len()))?;
         // NOTE: no `anthropic-beta` header — `message-batches-2024-09-24` is GA now.
         let make_request = || {
             shared_http_client()
@@ -4168,6 +4187,13 @@ mod tests {
             assert!(!obj.contains_key("tools"), "{what}: {body}");
             assert!(!obj.contains_key("tool_choice"), "{what}: {body}");
         }
+    }
+
+    #[test]
+    fn a_batch_body_over_the_api_limit_is_refused_before_the_upload() {
+        assert!(ensure_batch_body_fits(BATCH_BODY_API_LIMIT_BYTES).is_ok());
+        let err = ensure_batch_body_fits(BATCH_BODY_API_LIMIT_BYTES + 1).unwrap_err();
+        assert!(err.to_string().contains("split the work"), "{err}");
     }
 
     /// `build_batch_item` produces a correctly-shaped item with the deterministic `custom_id`

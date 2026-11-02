@@ -95,7 +95,7 @@ async fn scan_metered(llm: &ScriptedLlm, n_files: usize, meter: Option<&UsageMet
     run_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,
@@ -269,7 +269,7 @@ async fn deep_security(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
     run_security_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,

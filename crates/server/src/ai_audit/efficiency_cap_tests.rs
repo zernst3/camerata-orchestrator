@@ -106,7 +106,7 @@ async fn scan(llm: &StubLlm, n_batches: usize, concurrency: usize, meter: &Usage
     let (_f, _p, _r, ok, err) = run_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,
@@ -507,7 +507,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
     let (findings, _p, _r, ok, err) = run_passes_batch(
         &llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,
@@ -798,7 +798,7 @@ async fn a_run_whose_first_calls_all_refuse_still_stops_at_the_cap() {
     let (_f, _p, _r, ok, failures) = run_passes(
         &llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,

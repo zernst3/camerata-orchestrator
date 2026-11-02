@@ -263,6 +263,36 @@ pub(crate) struct RoundOutcome {
 /// The API's per-batch item cap.
 const BATCH_CAP: usize = 100_000;
 
+/// The most bytes of request body one Message Batch submission carries. The API takes 256 MB; a
+/// quarter of that is left free for the JSON envelope and for any difference between how this
+/// counts a body and how the API does, so a submission can never be refused for its size. Work
+/// bigger than this is submitted as several batches ([`plan_sub_batches`]).
+pub(crate) const MAX_BATCH_BODY_BYTES: usize = 192_000_000;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own body limit for the batches submitted on its thread (see
+    /// [`set_test_body_limit`]).
+    static TEST_BODY_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// The body limit a submission uses: [`MAX_BATCH_BODY_BYTES`], except in a test that set its own
+/// with [`set_test_body_limit`] so a small synthetic set can show the split.
+pub(crate) fn max_batch_body_bytes() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = TEST_BODY_LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    MAX_BATCH_BODY_BYTES
+}
+
+/// Set (or clear, with `None`) this test thread's body limit. Tests run each on its own thread
+/// with a current-thread runtime, so the setting cannot leak into another test.
+#[cfg(test)]
+pub(crate) fn set_test_body_limit(limit: Option<usize>) {
+    TEST_BODY_LIMIT.with(|c| c.set(limit));
+}
+
 /// How many times a sub-batch's poll-and-fetch is attempted after a SUCCESSFUL submit when errors
 /// are not fatal (each attempt already tolerates a streak of failed polls, see
 /// [`MAX_CONSECUTIVE_POLL_FAILURES`]). Bounded so a broken network cannot hold a scan forever;
@@ -284,13 +314,49 @@ pub(crate) struct RoundContext<'a> {
     pub meter: Option<&'a UsageMeter>,
     /// The projected input dollars of one item, for the spend-limit gate.
     pub per_item_usd: Option<f64>,
+    /// The most request-body bytes one submission carries ([`MAX_BATCH_BODY_BYTES`] in production).
+    pub max_body_bytes: usize,
     /// `true` (the pre-rank-2 behavior): a failed submit, poll or fetch aborts the scan.
     /// `false`: it fails only that sub-batch's items, so replies already in hand are kept and
     /// the failure is disclosed per item.
     pub fatal_errors: bool,
 }
 
-/// Submit `work` as one or more Message Batches (split at [`BATCH_CAP`]), each checked against
+/// Split `work` into the runs of items each submission carries: at most [`BATCH_CAP`] items and at
+/// most `max_body_bytes` of request body, packed greedily in order. Contiguous ranges of `work`,
+/// so the results join back in order; the same work always splits at the same places, which is
+/// what lets a resume find the batches it already submitted by their contents and submit only the
+/// ones that are missing. An item that alone exceeds the limit still gets its own submission (the
+/// API refuses it and the failure is disclosed for that item).
+///
+/// Sizes are measured on the serialized item under the longest cache TTL, the largest the item
+/// can be, so the plan does not depend on how many items end up in a submission.
+pub(crate) fn plan_sub_batches(
+    ctx: &RoundContext<'_>,
+    work: &[&BatchWork],
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut bytes = 0usize;
+    for (i, w) in work.iter().enumerate() {
+        let item = crate::llm::build_batch_item(&w.custom_id, &w.req, ctx.model, CacheTtl::OneHour);
+        // The item plus the comma that joins it to the next.
+        let size = serde_json::to_vec(&item).map_or(0, |b| b.len()) + 1;
+        if i > start && (i - start >= BATCH_CAP || bytes + size > ctx.max_body_bytes) {
+            ranges.push(start..i);
+            start = i;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < work.len() {
+        ranges.push(start..work.len());
+    }
+    ranges
+}
+
+/// Submit `work` as one or more Message Batches (split by item count at [`BATCH_CAP`] and by body
+/// size at [`MAX_BATCH_BODY_BYTES`], see [`plan_sub_batches`]), each checked against
 /// the spend limit BEFORE it is submitted (a submitted batch cannot be cancelled cheaply), poll
 /// each to the end and collect every item's outcome. Used for the first round and for the
 /// resubmission round, so the resubmission passes through the same spend gate.
@@ -300,15 +366,17 @@ pub(crate) async fn submit_round(
 ) -> anyhow::Result<RoundOutcome> {
     let eff = efficiency_of(ctx.meter);
     let mut out = RoundOutcome::default();
-    let n_subs = work.len().div_ceil(BATCH_CAP);
+    let ranges = plan_sub_batches(ctx, work);
+    let n_subs = ranges.len();
     if n_subs > 1 {
         eprintln!(
-            "[camerata-server] batch mode: {} items exceed the 100k cap, splitting into {n_subs} \
-             sub-batches",
+            "[camerata-server] batch mode: {} items do not fit one submission (at most {BATCH_CAP} \
+             items and {MAX_BATCH_BODY_BYTES} body bytes), splitting into {n_subs} sub-batches",
             work.len()
         );
     }
-    for (sub_idx, sub) in work.chunks(BATCH_CAP).enumerate() {
+    for (sub_idx, range) in ranges.into_iter().enumerate() {
+        let sub = &work[range];
         // After an outage stop nothing more is submitted: every item is recorded NOT RUN (the
         // meter classes it as an outage stop) and refused, as for the spend limit.
         if ctx.meter.is_some_and(UsageMeter::outage_stopped) {

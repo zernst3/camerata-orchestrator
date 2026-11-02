@@ -107,7 +107,7 @@ async fn scan(llm: &dyn LlmPort, n_chunks: usize, meter: Option<&UsageMeter>) ->
     run_passes(
         llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,

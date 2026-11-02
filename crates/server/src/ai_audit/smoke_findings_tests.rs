@@ -421,7 +421,7 @@ async fn scan_requests(n_rules: usize) -> Vec<LlmRequest> {
     run_passes(
         &llm,
         REPO,
-        "REPO MAP:\na.rs: fn a()\n",
+        &RepoMap::whole_text("REPO MAP:\na.rs: fn a()\n"),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,

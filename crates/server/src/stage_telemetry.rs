@@ -317,6 +317,52 @@ impl CandidateTelemetry {
     }
 }
 
+/// What one model call's repo map held (token-efficiency and scale item M1): the complete file
+/// tree leads every call, and only the call's chunk files and their neighbours carry symbols.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoMapCall {
+    pub repo: String,
+    /// The route group's label, or the stage (`alternatives`, `resolution`).
+    pub group: String,
+    /// 1-based chunk index within the group.
+    pub chunk: usize,
+    /// Files in the repo map.
+    pub files_in_map: usize,
+    /// Files with a symbols line in this call.
+    pub files_with_symbols: usize,
+    /// Files the map did not name one by one (all of them when the tree fell back to an
+    /// outline, else none).
+    pub outlined_files: usize,
+}
+
+/// The file tree fell back to a directory outline for one repo: a coverage limitation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoTreeFallback {
+    pub repo: String,
+    pub files: usize,
+    pub tree_tokens: usize,
+    pub budget: usize,
+}
+
+/// How many chunks a run had to split to keep a request inside the model's context window
+/// (M1): the chunks split, the parts that added, and the files split by line ranges.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSplits {
+    pub chunks_split: u64,
+    pub parts_added: u64,
+    pub files_split_by_lines: u64,
+}
+
+/// The repo-map telemetry of a run: one record per call, and every tree fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoMapTelemetry {
+    pub calls: Vec<RepoMapCall>,
+    pub fallbacks: Vec<RepoTreeFallback>,
+    /// Chunks split to fit the model's window. Zero when none was.
+    #[serde(default)]
+    pub splits: RequestSplits,
+}
+
 /// Why the detail-regeneration stage (rank 4) did not write a finding's full explanation on an
 /// attempt, counted once per finding per attempt under one reason (a finding that fails three
 /// rounds counts three times; a reply that gives it two entries, or none, still counts once).
@@ -386,6 +432,7 @@ pub struct StageMeter {
     routing: Mutex<Option<RoutingTelemetry>>,
     candidates: Mutex<Option<CandidateTelemetry>>,
     detail_rejections: Mutex<Option<DetailRejections>>,
+    repo_maps: Mutex<Option<RepoMapTelemetry>>,
 }
 
 impl StageMeter {
@@ -469,6 +516,37 @@ impl StageMeter {
         self.with_candidates(|c| c.fallbacks.push(fallback));
     }
 
+    /// Record what one call's repo map held.
+    pub fn record_repo_map(&self, call: RepoMapCall) {
+        self.with_repo_maps(|m| m.calls.push(call));
+    }
+
+    /// Add one call's request splits to the run's total.
+    pub fn record_request_splits(&self, splits: RequestSplits) {
+        self.with_repo_maps(|m| {
+            m.splits.chunks_split += splits.chunks_split;
+            m.splits.parts_added += splits.parts_added;
+            m.splits.files_split_by_lines += splits.files_split_by_lines;
+        });
+    }
+
+    /// Record that a repo's file tree fell back to an outline.
+    pub fn record_tree_fallback(&self, fallback: RepoTreeFallback) {
+        self.with_repo_maps(|m| {
+            if !m.fallbacks.contains(&fallback) {
+                m.fallbacks.push(fallback);
+            }
+        });
+    }
+
+    fn with_repo_maps(&self, f: impl FnOnce(&mut RepoMapTelemetry)) {
+        let mut maps = self
+            .repo_maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(maps.get_or_insert_with(RepoMapTelemetry::default));
+    }
+
     fn with_candidates(&self, f: impl FnOnce(&mut CandidateTelemetry)) {
         let mut candidates = self
             .candidates
@@ -496,9 +574,15 @@ impl StageMeter {
             .detail_rejections
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo_maps = self
+            .repo_maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let stages = self.lock();
         StageTelemetry {
             counted_lines,
+            repo_maps,
             efficiency: None,
             fix_outcome,
             routing,
@@ -568,6 +652,10 @@ pub struct StageTelemetry {
     /// never ran (or for a record written before this existed).
     #[serde(default)]
     pub detail_rejections: Option<DetailRejections>,
+    /// What each call's repo map held and every fallback of the file tree to an outline. `None`
+    /// when no scan call ran (or for a record written before this existed).
+    #[serde(default)]
+    pub repo_maps: Option<RepoMapTelemetry>,
 }
 
 impl StageTelemetry {
@@ -610,6 +698,9 @@ impl StageTelemetry {
         }
         if let Some(candidates) = &self.candidates {
             render_candidates(&mut out, candidates);
+        }
+        if let Some(maps) = &self.repo_maps {
+            render_repo_maps(&mut out, maps);
         }
         if self.stages.is_empty() {
             writeln!(out, "  (no model call ran this scan)").ok();
@@ -682,6 +773,43 @@ impl StageTelemetry {
         }
         writeln!(out, "  counted lines: {}", self.counted_lines).ok();
         out
+    }
+}
+
+/// The repo-map lines of the stage table: how many calls carried a symbols section and how many
+/// files they covered, and each fallback of the tree to an outline.
+fn render_repo_maps(out: &mut String, maps: &RepoMapTelemetry) {
+    use std::fmt::Write as _;
+    if !maps.calls.is_empty() {
+        let n = maps.calls.len();
+        let with: usize = maps.calls.iter().map(|c| c.files_with_symbols).sum();
+        let outlined = maps.calls.iter().filter(|c| c.outlined_files > 0).count();
+        writeln!(
+            out,
+            "  repo map: {n} call(s); {} file(s) with symbols per call on average; {outlined} \
+             call(s) carried an outline instead of the full file tree",
+            with / n
+        )
+        .ok();
+    }
+    if maps.splits.parts_added > 0 {
+        writeln!(
+            out,
+            "  window splits: {} chunk(s) were over the model's context window and became {} more \
+             request(s); {} file(s) were split by line ranges",
+            maps.splits.chunks_split, maps.splits.parts_added, maps.splits.files_split_by_lines
+        )
+        .ok();
+    }
+    for f in &maps.fallbacks {
+        writeln!(
+            out,
+            "  repo map FALLBACK: {} has {} files, and its path-only tree (about {} tokens) \
+             exceeds the {} token budget, so calls carried a directory outline (disclosed in the \
+             report as a coverage limitation)",
+            f.repo, f.files, f.tree_tokens, f.budget
+        )
+        .ok();
     }
 }
 

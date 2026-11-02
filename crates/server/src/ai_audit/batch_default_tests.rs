@@ -319,7 +319,7 @@ async fn run(api: &FakeBatch, meter: &UsageMeter) -> (Vec<Finding>, usize, Vec<P
     let (findings, _proposed, _requested, ok, failures) = run_passes_batch(
         api,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &adopted,
         None,
@@ -698,7 +698,7 @@ async fn a_failed_real_time_pass_is_disclosed_too() {
     let (_f, _p, _r, ok, failures) = run_passes(
         &llm,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &HashSet::new(),
         None,
@@ -809,7 +809,7 @@ async fn a_failed_submit_is_the_only_failure_that_may_be_resubmitted() {
     let (_f, _p, _r, ok, failures) = run_passes_batch(
         &api,
         REPO,
-        REPO_MAP,
+        &RepoMap::whole_text(REPO_MAP),
         &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &HashSet::new(),
         None,

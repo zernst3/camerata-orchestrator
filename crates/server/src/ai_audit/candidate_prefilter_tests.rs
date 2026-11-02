@@ -99,7 +99,7 @@ async fn run_with(
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);
-    let repo_map = build_repo_map(files, &run_nonce());
+    let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, _ok, err) = run_routed_passes(
@@ -498,7 +498,7 @@ async fn a_fallback_still_sends_whole_files_when_no_meter_is_attached() {
     let files = supabase_files(true);
     let rec = Recorder::default();
     let plan = plan_routes(&rules, &files, true);
-    let repo_map = build_repo_map(&files, &run_nonce());
+    let repo_map = RepoMap::new(&files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, ok, failures) = run_routed_passes(
@@ -703,7 +703,7 @@ async fn run_batch(
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);
-    let repo_map = build_repo_map(files, &run_nonce());
+    let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, _ok, failures) = run_routed_passes_batch(

@@ -1198,6 +1198,21 @@ impl UsageMeter {
             .record_candidate(rule_id, locator, outcome, whole_bytes, sent_bytes);
     }
 
+    /// Record what one call's repo map held (M1).
+    pub fn record_repo_map(&self, call: crate::stage_telemetry::RepoMapCall) {
+        self.stages.record_repo_map(call);
+    }
+
+    /// Add one call's request splits to the run's total (M1).
+    pub fn record_request_splits(&self, splits: crate::stage_telemetry::RequestSplits) {
+        self.stages.record_request_splits(splits);
+    }
+
+    /// Record that a repo's file tree fell back to a directory outline (M1).
+    pub fn record_tree_fallback(&self, fallback: crate::stage_telemetry::RepoTreeFallback) {
+        self.stages.record_tree_fallback(fallback);
+    }
+
     /// Record one chunk's candidate-prefilter fallback to whole files (rank 8).
     pub fn record_candidate_fallback(&self, fallback: crate::stage_telemetry::CandidateFallback) {
         self.stages.record_candidate_fallback(fallback);
@@ -1430,20 +1445,96 @@ fn number_lines_from<'a>(lines: impl Iterator<Item = &'a str>, first: usize) -> 
     s
 }
 
-/// The digests a pass call sends: `digests_override` when a candidate pass set supplies them
-/// (rank 8), else each chunk's whole-file [`build_digest`].
-fn pass_digests(
-    chunks: &[&[(String, String)]],
-    digests_override: Option<&[String]>,
-    nonce: &crate::prompt_frame::FrameNonce,
-) -> Vec<String> {
-    match digests_override {
-        Some(d) => {
-            debug_assert_eq!(d.len(), chunks.len(), "one candidate digest per chunk");
-            d.to_vec()
-        }
-        None => chunks.iter().map(|c| build_digest(c, nonce)).collect(),
+/// The segment that follows the cached repo-map prefix: the chunk's symbols section (empty when
+/// the whole map is the prefix, which already carries every symbol) and then its digest. Both
+/// differ per chunk, so both sit after the cache breakpoint.
+fn chunk_segment<'a>(symbols: &str, digest: &'a str) -> std::borrow::Cow<'a, str> {
+    if symbols.is_empty() {
+        std::borrow::Cow::Borrowed(digest)
+    } else {
+        std::borrow::Cow::Owned(format!("{symbols}{digest}"))
     }
+}
+
+/// Record on the meter what one call's repo map held. `chunk` is 0-based.
+fn note_map_use(
+    meter: Option<&UsageMeter>,
+    repo: &str,
+    group: &str,
+    chunk: usize,
+    s: &repo_map::SymbolsSection,
+) {
+    if let Some(m) = meter {
+        m.record_repo_map(crate::stage_telemetry::RepoMapCall {
+            repo: repo.to_string(),
+            group: group.to_string(),
+            chunk: chunk + 1,
+            files_in_map: s.files_in_map,
+            files_with_symbols: s.files_with_symbols,
+            outlined_files: s.outlined_files,
+        });
+    }
+}
+
+/// Plan the inputs of one scan call so that no request of it is over the model's context window:
+/// each chunk is one part when its digest fits what the window leaves after the fixed parts of the
+/// request, else several parts that together cover every line ([`request_budget::fit_chunks`]).
+/// Returns the planned chunks (a part's files), their digests and what was split. The ONE
+/// planner for the real-time and the batch scan, so the two cannot disagree.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn plan_scan_inputs<'a>(
+    repo: &str,
+    repo_map: &RepoMap,
+    chunks: &[&'a [(String, String)]],
+    digests_override: Option<&[String]>,
+    batches: &[&[(String, String)]],
+    nonce: &crate::prompt_frame::FrameNonce,
+    audit_model: Option<&str>,
+    label: &str,
+    meter: Option<&UsageMeter>,
+) -> (
+    Vec<&'a [(String, String)]>,
+    Vec<String>,
+    request_budget::FitReport,
+) {
+    let model = resolve_audit_model(audit_model);
+    let system = crate::prompt_frame::with_untrusted_clause(
+        audit_system_prompt_with(terse_output_of(meter)),
+        nonce,
+    );
+    let schema_len = reply_schemas::scan_reply_schema().to_string().len();
+    let rules_len = batches
+        .iter()
+        .map(|b| build_rules_block(b).len())
+        .max()
+        .unwrap_or(0);
+    let max_rules = batches.iter().map(|b| b.len()).max().unwrap_or(0);
+    let fixed = system.len()
+        + schema_len
+        + repo.len()
+        + 16
+        + repo_map.prefix().len()
+        + repo_map.symbols_reserve_bytes()
+        + rules_len;
+    let budget = request_budget::digest_budget_tokens(&model, scan_max_tokens(max_rules), fixed);
+    let (parts, report) = request_budget::fit_chunks(chunks, digests_override, nonce, budget);
+    if report.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} {label}: {} chunk(s) were over the model's context window \
+             and were split into {} more part(s) ({} file(s) split by line ranges)",
+            report.chunks_split, report.parts_added, report.files_split_by_lines
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: report.chunks_split as u64,
+                parts_added: report.parts_added as u64,
+                files_split_by_lines: report.files_split_by_lines as u64,
+            });
+        }
+    }
+    let planned = parts.iter().map(|p| p.files).collect();
+    let digests = parts.into_iter().map(|p| p.digest).collect();
+    (planned, digests, report)
 }
 
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
@@ -4792,20 +4883,78 @@ async fn recommend_alternatives(
     if alternatives.is_empty() {
         return Ok((Vec::new(), None));
     }
-    let repo_map = build_repo_map(map_files, nonce);
+    // The same map as the scan's: same files, same run token, same tree budget (the scan model's
+    // window), so its leading tree is the same bytes and the same cache entry.
+    let repo_map = RepoMap::new(
+        map_files,
+        nonce,
+        repo_map::tree_budget_for_window(request_budget::context_window_tokens(
+            &resolve_audit_model(audit_model),
+        )),
+    );
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     // M7: a rule judged "not applicable" on the first chunk's digest is asked again on each
     // further chunk, because the code that makes it applicable may sit in any of them. Rules
     // already judged applicable (or with no convention) are not asked again, so the common case
     // is still ONE call per rule batch. A rule is "not applicable" only when EVERY chunk says so.
-    let total_chunks = file_chunks.len().max(1);
-    let digests: Vec<String> = if file_chunks.is_empty() {
+    //
+    // A chunk over the model's window is split (M1) into parts that each fit; the digests read are
+    // the first `ALTERNATIVES_MAX_FILE_CHUNKS` of those parts, and the "judged over N of M"
+    // disclosure counts parts.
+    let read_chunks = &file_chunks[..file_chunks.len().min(ALTERNATIVES_MAX_FILE_CHUNKS)];
+    let fixed_bytes = {
+        let system =
+            crate::prompt_frame::with_untrusted_clause(alternatives_system_prompt(), nonce);
+        let schema_len = reply_schemas::alternatives_reply_schema().to_string().len();
+        let block_len = alternatives
+            .chunks(ALTERNATIVES_BATCH_SIZE)
+            .map(|c| build_alternatives_block(c).len())
+            .max()
+            .unwrap_or(0);
+        system.len()
+            + schema_len
+            + repo.len()
+            + 16
+            + repo_map.prefix().len()
+            + repo_map.symbols_reserve_bytes()
+            + block_len
+    };
+    let digest_budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        alternatives_max_tokens(ALTERNATIVES_BATCH_SIZE.min(alternatives.len())),
+        fixed_bytes,
+    );
+    let (parts, fit) = request_budget::fit_chunks(read_chunks, None, nonce, digest_budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} alternatives: {} chunk(s) were over the model's context \
+             window and were split into {} more part(s)",
+            fit.chunks_split, fit.parts_added
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let total_chunks = (file_chunks.len() + fit.parts_added).max(1);
+    // Per digest, the symbols of its chunk's files and their neighbours; they sit with the digest,
+    // after the cached repo-map prefix.
+    let symbols: Vec<repo_map::SymbolsSection> = parts
+        .iter()
+        .take(ALTERNATIVES_MAX_FILE_CHUNKS)
+        .map(|p| repo_map.symbols_for(p.files, nonce))
+        .collect();
+    let digests: Vec<String> = if parts.is_empty() {
         vec![String::new()]
     } else {
-        file_chunks
+        parts
             .iter()
+            .zip(&symbols)
             .take(ALTERNATIVES_MAX_FILE_CHUNKS)
-            .map(|c| build_digest(c, nonce))
+            .map(|(p, sy)| chunk_segment(&sy.text, &p.digest).into_owned())
             .collect()
     };
     let chunks_read = digests.len();
@@ -4877,10 +5026,13 @@ async fn recommend_alternatives(
                     String::new()
                 }
             );
+            if let Some(sy) = symbols.get(digest_idx) {
+                note_map_use(meter, repo, "alternatives", digest_idx, sy);
+            }
             let ask = AlternativesAsk {
                 llm,
                 repo,
-                repo_map: &repo_map,
+                repo_map: repo_map.prefix(),
                 digest,
                 n_rule_batches: n_chunks,
                 n_digests: digests.len(),
@@ -5166,6 +5318,8 @@ impl AlternativesAsk<'_> {
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
+        // Never send what the model's window cannot take (M1).
+        request_budget::ensure_request_fits(&req)?;
         note_request(meter, &req);
         // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
         // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
@@ -6919,7 +7073,7 @@ pub fn representative_scan_sample(
     let model_files = crate::onboard::redact::files_for_model(files);
     // A token of the real length, so the counted size is the real size.
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[&model_files]);
-    let repo_map = build_repo_map(&model_files, &nonce);
+    let repo_map = RepoMap::new(&model_files, &nonce, repo_map::REPO_TREE_TOKEN_BUDGET);
     let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
     let first_chunk = chunks.first()?;
     let (_, batch_size) = mode.tuning(efficiency);
@@ -6929,11 +7083,15 @@ pub fn representative_scan_sample(
     } else {
         selected.chunks(batch_size.max(1)).collect()
     };
-    let digest = build_digest(first_chunk, &nonce);
+    let first_digest = build_digest(first_chunk, &nonce);
+    let digest = chunk_segment(
+        &repo_map.symbols_for(first_chunk, &nonce).text,
+        &first_digest,
+    );
     let (prompt, bps) = build_pass_prompt_with(
         efficiency.label_after_prefix,
         repo,
-        &repo_map,
+        repo_map.prefix(),
         "pass",
         0,
         chunks.len(),
@@ -7451,6 +7609,8 @@ async fn send_audit_request(
     session: &str,
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<crate::llm::LlmResponse> {
+    // Never send what the model's window cannot take (M1).
+    request_budget::ensure_request_fits(&req)?;
     // What this request could cost joins the spend limit's reserve before it is sent.
     note_request(meter, &req);
     if let Some((store, key)) = feedback {
@@ -7526,22 +7686,13 @@ fn extract_public_symbols(content: &str) -> Vec<String> {
 /// not in this pass. The map gives every chunk that architecture without every file body,
 /// so chunking doesn't reintroduce cross-file misses. (Bodies still only appear in their
 /// own chunk — a rule needing the full body of a type in another chunk is the known limit.)
+#[cfg(test)]
 fn build_repo_map(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
-    let mut out = String::from(
-        "REPO MAP — every file in the repo and the public symbols it defines. Only SOME file \
-         bodies appear in THIS pass; use this map for cross-file architectural context (which \
-         directories are repositories vs services vs controllers, where a named type lives):\n",
-    );
-    // Paths and symbol names come from the client's files: framed like a file body.
-    let mut listing = String::new();
-    for (path, content) in files {
-        listing.push_str(&repo_map_line(path, content));
-    }
-    out.push_str(&crate::prompt_frame::frame_untrusted(
-        nonce, "repo map", &listing,
-    ));
-    out.push('\n');
-    out
+    let listing: String = files
+        .iter()
+        .map(|(path, content)| repo_map_line(path, content))
+        .collect();
+    repo_map::whole_map_text(&listing, nonce)
 }
 
 /// One file's line of the repo map: its path and the public symbols it defines. ONE definition
@@ -7660,7 +7811,7 @@ impl ScanMode {
 async fn run_passes(
     llm: &dyn LlmPort,
     repo: &str,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -7677,7 +7828,29 @@ async fn run_passes(
     meter: Option<&UsageMeter>,
     advisory_disabled: bool,
 ) -> PassesOut {
-    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
+    // Chunks over the model's window become several parts that are all sent (M1).
+    let (planned_chunks, digests, fit) = plan_scan_inputs(
+        repo,
+        repo_map,
+        chunks,
+        digests_override,
+        batches,
+        nonce,
+        audit_model,
+        label,
+        meter,
+    );
+    let chunks: &[&[(String, String)]] = &planned_chunks;
+    if fit.parts_added > 0 {
+        if let Some((jstore, jid)) = job {
+            jstore.add_total(jid, fit.parts_added * batches.len());
+        }
+    }
+    // Per chunk, the symbols of its files and their neighbours (after the cache breakpoint).
+    let symbols: Vec<repo_map::SymbolsSection> = chunks
+        .iter()
+        .map(|c| repo_map.symbols_for(c, nonce))
+        .collect();
     let n_c = chunks.len();
     let n_b = batches.len();
     // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
@@ -7706,7 +7879,8 @@ async fn run_passes(
     // the job's progress.
     let second_try = std::sync::atomic::AtomicBool::new(false);
     let run_one = |(ci, bi): (usize, usize)| {
-        let digest = &digests[ci];
+        let digest = chunk_segment(&symbols[ci].text, &digests[ci]);
+        let sym = &symbols[ci];
         let batch = batches[bi];
         let second_try = &second_try;
         async move {
@@ -7780,15 +7954,16 @@ async fn run_passes(
             let (prompt, cache_bps) = build_pass_prompt_with(
                 eff.label_after_prefix,
                 repo,
-                repo_map,
+                repo_map.prefix(),
                 label,
                 ci,
                 n_c,
-                digest,
+                &digest,
                 n_b,
                 &task_line,
                 &rb,
             );
+            note_map_use(meter, repo, label, ci, sym);
             let session = format!("{session_prefix}-c{ci}-b{bi}");
             if let Some((store, key)) = feedback {
                 store.register(
@@ -8035,7 +8210,7 @@ where
 async fn run_passes_batch(
     llm: &dyn batch_mode::BatchApi,
     repo: &str,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -8066,13 +8241,29 @@ async fn run_passes_batch(
 
     let model = resolve_audit_model(audit_model);
 
-    let digests: Vec<String> = pass_digests(chunks, digests_override, nonce);
+    let (planned_chunks, digests, _fit) = plan_scan_inputs(
+        repo,
+        repo_map,
+        chunks,
+        digests_override,
+        batches,
+        nonce,
+        audit_model,
+        label,
+        meter,
+    );
+    let chunks: &[&[(String, String)]] = &planned_chunks;
+    let symbols: Vec<repo_map::SymbolsSection> = chunks
+        .iter()
+        .map(|c| repo_map.symbols_for(c, nonce))
+        .collect();
     let n_c = chunks.len();
     let n_b = batches.len();
 
     // The full cartesian product of (chunk, rule-batch) items, each with the request it sends.
     let mut work: Vec<BatchWork> = Vec::with_capacity(n_c * n_b);
     for (ci, digest) in digests.iter().enumerate() {
+        let digest = chunk_segment(&symbols[ci].text, digest);
         for (bi, batch) in batches.iter().enumerate() {
             let rb = build_rules_block(batch);
             // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
@@ -8087,15 +8278,16 @@ async fn run_passes_batch(
             let (prompt, cache_bps) = build_pass_prompt_with(
                 eff.label_after_prefix,
                 repo,
-                repo_map,
+                repo_map.prefix(),
                 label,
                 ci,
                 n_c,
-                digest,
+                &digest,
                 n_b,
                 &task_line,
                 &rb,
             );
+            note_map_use(meter, repo, label, ci, &symbols[ci]);
             let req = with_stage_effort(
                 LlmRequest::new(prompt)
                     .with_system(crate::prompt_frame::with_untrusted_clause(
@@ -8109,6 +8301,8 @@ async fn run_passes_batch(
                     .with_temperature(AUDIT_TEMPERATURE),
                 Stage::ScanPass,
             );
+            // Never submit what the model's window cannot take (M1).
+            request_budget::ensure_request_fits(&req)?;
             work.push(BatchWork {
                 custom_id: format!("c{ci}-b{bi}"),
                 ci,
@@ -8180,6 +8374,7 @@ async fn run_passes_batch(
         job,
         meter,
         per_item_usd,
+        max_body_bytes: batch_mode::max_batch_body_bytes(),
         fatal_errors: !eff.batch_default,
     };
     let all: Vec<&BatchWork> = work.iter().collect();
@@ -11148,7 +11343,7 @@ async fn run_routed_passes(
     files: &[(String, String)],
     selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -11289,7 +11484,7 @@ async fn run_routed_passes_batch(
     files: &[(String, String)],
     selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -11972,9 +12167,6 @@ pub async fn audit_repo(
         files,
         map_files.unwrap_or(files),
     ]);
-    // Cross-file context for every chunk (which dirs are which layer, where types live). On an
-    // incremental scan this is built from the whole repo, not just the changed files.
-    let repo_map = build_repo_map(map_files.unwrap_or(files), &nonce);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
@@ -11987,6 +12179,21 @@ pub async fn audit_repo(
     // reported one model and called another, and when the other was unpriced the spend limit
     // could not count its calls and refused the rest of the run (2026-10-29).
     let audit_model: Option<String> = Some(resolve_audit_model(model));
+    // Cross-file context for every chunk (which dirs are which layer, where types live): the
+    // complete file tree leads every call, and the symbols of a call's chunk files and their
+    // neighbours follow it. On an incremental scan this is built from the whole repo, not just the
+    // changed files. The tree budget follows the scan model's window, so one run has one tree.
+    let repo_map = RepoMap::new(
+        map_files.unwrap_or(files),
+        &nonce,
+        repo_map::tree_budget_for_window(
+            audit_model
+                .as_deref()
+                .map_or(request_budget::DEFAULT_CONTEXT_WINDOW_TOKENS, |m| {
+                    request_budget::context_window_tokens(m)
+                }),
+        ),
+    );
     // Calibration model: the user's calibration pick wins; else the SCAN model, so the audit is end to end on one model by default (no silent
     // default-model calibration). The UI exposes this as its own picker. The same resolution
     // the pre-flight lists the calibration model by.
@@ -12008,6 +12215,28 @@ pub async fn audit_repo(
     // W6: any pass that fails/times out for this repo, captured so the export can disclose it
     // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
     let mut failed_passes: Vec<FailedPass> = Vec::new();
+    // M1: a file tree too large to send in full is a coverage limitation. It is recorded in the
+    // run's telemetry and disclosed in the report's Coverage, never silent.
+    if let Some(fallback) = repo_map.tree_fallback() {
+        if let Some(m) = meter {
+            m.record_tree_fallback(crate::stage_telemetry::RepoTreeFallback {
+                repo: repo.to_string(),
+                files: fallback.files,
+                tree_tokens: fallback.tree_tokens,
+                budget: fallback.budget,
+            });
+        }
+        failed_passes.push(FailedPass {
+            repo: repo.to_string(),
+            pass: "full file list in model calls".to_string(),
+            reason: fallback.disclosure(),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: true,
+        });
+    }
     // Pass-1 W2 (A5.4): one `Finding` per rule whose DECIDED option (forced or model-
     // recommended) is marked `violates` — see `apply_alternative_decision`'s doc comment. These
     // are spliced into the finding set AFTER calibration (below, past the P7 not-applicable
@@ -13139,15 +13368,112 @@ async fn run_prose_lens(
     llm: &dyn LlmPort,
     lens: DeepLens,
     repo: &str,
-    repo_map: &str,
-    digest: &str,
+    repo_map: &RepoMap,
+    files: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
     system: String,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
 ) -> DeepLensResult {
+    // The lens reads the whole repo. When that is more than the model's window takes it is read
+    // in parts, split by files and then by line ranges (M1), each part its own request, and the
+    // results are merged; nothing is cut off silently.
+    let budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        DEEP_LENS_MAX_TOKENS,
+        system.len() + repo.len() + 16 + repo_map.prefix().len() + lens.title().len() + 200,
+    );
+    let (parts, fit) = request_budget::fit_chunks(&[files], None, nonce, budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} {}: the repository is over the model's context window and \
+             is read in {} parts",
+            lens.title(),
+            parts.len()
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let n = parts.len();
+    let mut merged = DeepLensResult::empty(lens);
+    let mut errors: Vec<String> = Vec::new();
+    let mut summaries: Vec<String> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let r = run_prose_part(
+            llm,
+            lens,
+            repo,
+            repo_map.prefix(),
+            &part.digest,
+            &system,
+            (i, n),
+            audit_model,
+            feedback,
+            meter,
+        )
+        .await;
+        merged.soc2_gaps.extend(r.soc2_gaps);
+        merged.threats.extend(r.threats);
+        if !r.summary.trim().is_empty() {
+            summaries.push(r.summary);
+        }
+        if let Some(e) = r.error {
+            errors.push(if n > 1 {
+                format!("part {} of {n}: {e}", i + 1)
+            } else {
+                e
+            });
+        }
+    }
+    merged.summary = summaries.join("\n\n");
+    if n > 1 {
+        let note = format!(
+            "The repository is larger than the model's context window, so this lens read it in \
+             {n} parts and the results are merged; a pattern that spans parts may be incomplete."
+        );
+        merged.summary = if merged.summary.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", merged.summary)
+        };
+    }
+    if !errors.is_empty() {
+        merged.error = Some(errors.join("; "));
+    }
+    merged
+}
+
+/// The reply ceiling of one deep-tier lens request.
+const DEEP_LENS_MAX_TOKENS: u32 = 8192;
+
+/// One request of a prose lens over `digest`: part `part.0` of `part.1` (a lens that fits is part
+/// 0 of 1, and its prompt is exactly what it always was).
+#[allow(clippy::too_many_arguments)]
+async fn run_prose_part(
+    llm: &dyn LlmPort,
+    lens: DeepLens,
+    repo: &str,
+    repo_map: &str,
+    digest: &str,
+    system: &str,
+    part: (usize, usize),
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> DeepLensResult {
+    let part_label = if part.1 > 1 {
+        format!(" (part {}/{})", part.0 + 1, part.1)
+    } else {
+        String::new()
+    };
     let prompt = format!(
-        "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
+        "Repository: {repo}{part_label}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
     // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
@@ -13161,7 +13487,11 @@ async fn run_prose_lens(
         }
         Ok(permit) => permit,
     };
-    let session = format!("deep-{}-{repo}", lens.id());
+    let session = if part.1 > 1 {
+        format!("deep-{}-{repo}-p{}", lens.id(), part.0)
+    } else {
+        format!("deep-{}-{repo}", lens.id())
+    };
     if let Some((store, key)) = feedback {
         store.register(
             key,
@@ -13175,10 +13505,19 @@ async fn run_prose_lens(
         );
     }
     let req = LlmRequest::new(prompt)
-        .with_system(system)
+        .with_system(system.to_string())
         // Whole-repo structured output can be sizable (many controls / many threats).
-        .with_max_tokens(8192)
+        .with_max_tokens(DEEP_LENS_MAX_TOKENS)
         .with_model(stage_model(audit_model));
+    // Never send what the model's window cannot take (M1): refused here, disclosed on the lens.
+    if let Err(e) = request_budget::ensure_request_fits(&req) {
+        let mut result = DeepLensResult::empty(lens);
+        result.error = Some(e.to_string());
+        if let Some((store, key)) = feedback {
+            store.set_status(key, &session, "blocked");
+        }
+        return result;
+    }
     // What this request may cost joins the spend limit's reserve, as for every other stage.
     note_request(meter, &req);
     let resp = if let Some((store, key)) = feedback {
@@ -13240,7 +13579,7 @@ async fn run_security_lens(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     audit_model: Option<&str>,
     mode: ScanMode,
@@ -13321,7 +13660,7 @@ async fn run_security_lens(
 async fn run_security_passes(
     llm: &dyn LlmPort,
     repo: &str,
-    repo_map: &str,
+    repo_map: &RepoMap,
     nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
@@ -13332,7 +13671,42 @@ async fn run_security_passes(
     meter: Option<&UsageMeter>,
 ) -> PassesOut {
     use futures::stream::StreamExt;
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
+    // Chunks over the model's window are read in parts (M1), each its own request.
+    let budget = request_budget::digest_budget_tokens(
+        &resolve_audit_model(audit_model),
+        DEEP_LENS_MAX_TOKENS,
+        crate::prompt_frame::with_untrusted_clause(
+            deep_security_system_prompt_with(terse_output_of(meter)),
+            nonce,
+        )
+        .len()
+            + repo.len()
+            + 32
+            + repo_map.prefix().len()
+            + repo_map.symbols_reserve_bytes()
+            + 400,
+    );
+    let (parts, fit) = request_budget::fit_chunks(chunks, None, nonce, budget);
+    if fit.parts_added > 0 {
+        eprintln!(
+            "[camerata-server] {repo} deep security: {} chunk(s) were over the model's context \
+             window and were split into {} more part(s)",
+            fit.chunks_split, fit.parts_added
+        );
+        if let Some(m) = meter {
+            m.record_request_splits(crate::stage_telemetry::RequestSplits {
+                chunks_split: fit.chunks_split as u64,
+                parts_added: fit.parts_added as u64,
+                files_split_by_lines: fit.files_split_by_lines as u64,
+            });
+        }
+    }
+    let chunk_slices: Vec<&[(String, String)]> = parts.iter().map(|p| p.files).collect();
+    let chunks: &[&[(String, String)]] = &chunk_slices;
+    let symbols: Vec<repo_map::SymbolsSection> = chunks
+        .iter()
+        .map(|c| repo_map.symbols_for(c, nonce))
+        .collect();
     let n_c = chunks.len();
     let n_b = batches.len().max(1);
     let work: Vec<usize> = (0..n_c).collect();
@@ -13342,7 +13716,8 @@ async fn run_security_passes(
     );
     let results: Vec<PassOut> = futures::stream::iter(work)
         .map(|ci| {
-            let digest = &digests[ci];
+            let digest = chunk_segment(&symbols[ci].text, &parts[ci].digest);
+            let repo_map = repo_map.prefix();
             async move {
                 // SPEND CAP: each deep-security pass is admitted like a scan pass.
                 let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
@@ -13380,12 +13755,14 @@ async fn run_security_passes(
                         deep_security_system_prompt_with(terse_output_of(meter)),
                         nonce,
                     ))
-                    .with_max_tokens(8192)
+                    .with_max_tokens(DEEP_LENS_MAX_TOKENS)
                     .with_temperature(AUDIT_TEMPERATURE)
                     .with_model(stage_model(audit_model));
-                // What this request may cost joins the spend limit's reserve.
-                note_request(meter, &req);
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
+                    // Never send what the model's window cannot take (M1).
+                    request_budget::ensure_request_fits(&req)?;
+                    // What this request may cost joins the spend limit's reserve.
+                    note_request(meter, &req);
                     let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
                         llm.complete_streaming(req, &mut on_delta).await
@@ -13500,21 +13877,26 @@ pub async fn run_deep_tier(
     let files = model_files.as_slice();
     // One delimiter token for all three lenses (see `crate::prompt_frame`).
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[files]);
-    let repo_map = build_repo_map(files, &nonce);
-    // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
-    let digest = build_digest(files, &nonce);
-
     // Resolve the model the same way the standard audit does: explicit pick wins, else the
     // built-in default (the transport has no default of its own: see `stage_model`). The deep tier is meant to run on the strong (Opus) model; the caller
     // passes that through `audit_model`.
     let model = Some(resolve_audit_model(audit_model));
+    // The same map as the standard audit's: the complete file tree, with symbols per call.
+    let repo_map = RepoMap::new(
+        files,
+        &nonce,
+        repo_map::tree_budget_for_window(request_budget::context_window_tokens(
+            model.as_deref().unwrap_or_default(),
+        )),
+    );
 
     let threat = run_prose_lens(
         llm,
         DeepLens::ThreatModel,
         repo,
         &repo_map,
-        &digest,
+        files,
+        &nonce,
         crate::prompt_frame::with_untrusted_clause(threat_model_system_prompt(), &nonce),
         model.as_deref(),
         feedback,
@@ -13539,7 +13921,8 @@ pub async fn run_deep_tier(
             DeepLens::Soc2Gap,
             repo,
             &repo_map,
-            &digest,
+            files,
+            &nonce,
             crate::prompt_frame::with_untrusted_clause(soc2_gap_system_prompt(), &nonce),
             model.as_deref(),
             feedback,
@@ -13615,8 +13998,27 @@ mod applies_to_routing_tests;
 
 mod candidate_passes;
 
+mod repo_map;
+mod request_budget;
+pub(crate) use repo_map::RepoMap;
+
 #[cfg(test)]
 mod candidate_prefilter_tests;
+
+#[cfg(test)]
+mod repo_map_tests;
+
+#[cfg(test)]
+mod request_budget_tests;
+
+#[cfg(test)]
+mod batch_split_tests;
+
+#[cfg(test)]
+mod scale_tests;
+
+#[cfg(test)]
+mod deep_tier_budget_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;
@@ -18309,7 +18711,8 @@ mod tests {
         let batch1: Vec<(String, String)> = vec![("RULE-B".to_string(), "rule B desc".to_string())];
         let batches: Vec<&[(String, String)]> = vec![&batch0, &batch1];
 
-        let repo_map = "REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n".to_string();
+        let repo_map =
+            RepoMap::whole_text("REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n");
         let adopted = std::collections::HashSet::new();
 
         let (_findings, _proposed, _requested, ok, err) = run_passes(
@@ -18417,7 +18820,8 @@ mod tests {
         let batch0: Vec<(String, String)> = vec![("RULE-A".to_string(), "rule A desc".to_string())];
         let batches: Vec<&[(String, String)]> = vec![&batch0]; // n_b == 1
 
-        let repo_map = "REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n".to_string();
+        let repo_map =
+            RepoMap::whole_text("REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n");
         let adopted = std::collections::HashSet::new();
 
         let (_findings, _proposed, _requested, ok, err) = run_passes(

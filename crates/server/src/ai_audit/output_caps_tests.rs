@@ -161,7 +161,7 @@ async fn a_reply_cut_off_at_its_cap_with_no_text_is_recorded_as_wasted_in_the_te
     run_passes(
         &llm,
         REPO,
-        "REPO MAP:\na.rs: fn a()\n",
+        &RepoMap::whole_text("REPO MAP:\na.rs: fn a()\n"),
         &crate::prompt_frame::FrameNonce::generate(),
         &adopted,
         None,
@@ -248,7 +248,7 @@ async fn the_truncation_retry_raises_the_cap_and_is_never_the_same_request_twice
         run_passes(
             &llm,
             REPO,
-            "REPO MAP:\na.rs: fn a()\n",
+            &RepoMap::whole_text("REPO MAP:\na.rs: fn a()\n"),
             &crate::prompt_frame::FrameNonce::generate(),
             &adopted,
             None,
