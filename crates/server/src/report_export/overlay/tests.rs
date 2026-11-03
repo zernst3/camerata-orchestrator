@@ -417,7 +417,7 @@ fn split_moves_the_key_and_the_tree_rebuilds_without_losing_a_member() {
     assert_eq!(new_node.label, "Test fixtures");
     assert_ne!(new_node.id, from.id, "the key moved");
     assert_eq!(new_node.members, vec![b.site_key.clone()]);
-    assert_eq!(new_node.cause.as_deref(), Some("these live in test code"));
+    assert_eq!(new_node.cause.as_deref(), Some("Test fixtures"));
     assert_eq!(new_node.parent, from.parent, "it stays under the same rule");
     if let Some(old) = tree.nodes.iter().find(|n| n.id == from.id) {
         assert!(!old.members.contains(&b.site_key));
@@ -488,4 +488,125 @@ fn a_restored_thrown_out_row_returns_marked_and_held() {
     assert!(tree.nodes.iter().any(|n| n.members.contains(&key)));
     // The sealed report still holds it as thrown out.
     assert_eq!(sealed.discarded.len(), 1);
+}
+
+#[test]
+fn a_reviewer_added_finding_whose_key_a_rerun_takes_is_reported_superseded_not_dropped() {
+    let ctx = EditCtx {
+        run_id: "insp-1",
+        now: NOW,
+    };
+    let req = camerata_api_types::edits::AddFindingReq {
+        repo: "acme/app".into(),
+        path: "src/c.rs".into(),
+        line: 30,
+        rule_id: "SEC-2".into(),
+        severity: "high".into(),
+        snippet: "let c = other_c();".into(),
+        headline: "REVIEWER-HEADLINE".into(),
+        detail: "REVIEWER-DETAIL the reviewer's own explanation.".into(),
+        fix: "REVIEWER-FIX do this instead.".into(),
+        kind: Some(FindingKind::Defect),
+        category: None,
+        reason: "the scan missed it".into(),
+        by: "zach".into(),
+    };
+    // The rerun's engine row is at the same place with the same rule and snippet, so it has the
+    // very key the reviewer's finding was given.
+    let sealed = three();
+    let files = vec![(
+        "src/c.rs".to_string(),
+        "\n".repeat(29) + "let c = other_c();\n",
+    )];
+    let (mut added, _) = added_finding_from_request(&req, &[], &files, None, ctx).unwrap();
+    let engine_key = at(&sealed, "src/c.rs").site_key;
+    added.finding.site_key = engine_key.clone();
+
+    let reviewed = apply_overlay(&sealed, &[], &[], std::slice::from_ref(&added));
+    assert_eq!(
+        reviewed.report().findings.len(),
+        3,
+        "the engine's row is shown"
+    );
+    let notes = reviewed.superseded();
+    assert_eq!(
+        notes.len(),
+        1,
+        "the reviewer's finding is reported, not dropped"
+    );
+    assert_eq!(notes[0].engine_key, engine_key);
+    assert_eq!(notes[0].added.reason, "the scan missed it");
+    assert!(notes[0].added.finding.detail.contains("REVIEWER-DETAIL"));
+    assert_eq!(
+        notes[0].added.finding.fix_specific.as_deref(),
+        Some("REVIEWER-FIX do this instead.")
+    );
+    // Never applied silently: the engine's row carries none of the reviewer's text.
+    let shown = at(reviewed.report(), "src/c.rs");
+    assert!(!shown.detail.contains("REVIEWER-DETAIL"));
+    assert!(!is_reviewer_edited(&shown));
+
+    // The same finding added twice is a duplicate, not a supersession.
+    let fresh = three();
+    let (own, _) = added_finding_from_request(&req, &[], &files, None, ctx).unwrap();
+    let mut own = own;
+    own.finding.site_key = "acme/app\u{0}src/own.rs\u{0}ff\u{0}0".to_string();
+    let twice = apply_overlay(&fresh, &[], &[], &[own.clone(), own]);
+    assert!(twice.superseded().is_empty());
+}
+
+#[test]
+fn a_split_reason_never_becomes_the_subgroup_cause() {
+    let sealed = sealed(vec![
+        row("SEC-1", "src/a.rs", 10, "let a = secret_a();"),
+        row("SEC-1", "src/b.rs", 20, "let b = secret_b();"),
+    ]);
+    let b = at(&sealed, "src/b.rs");
+    let mut split = edit(1, &b, EditField::Subgroup, "", "Test fixtures");
+    split.reason = "SECRET-SPLIT-REASON typed by the reviewer".to_string();
+    let reviewed = apply_overlay(&sealed, &[], &[split], &[]);
+    let tree = reviewed.report().tree.as_ref().unwrap();
+    let node = tree
+        .nodes
+        .iter()
+        .find(|n| n.label == "Test fixtures")
+        .unwrap();
+    assert_eq!(node.cause.as_deref(), Some("Test fixtures"));
+    let json = serde_json::to_string(tree).unwrap();
+    assert!(!json.contains("SECRET-SPLIT-REASON"), "{json}");
+}
+
+#[test]
+fn a_bound_note_is_not_printed_beside_a_severity_the_reviewer_set() {
+    let sealed = three();
+    let a = at(&sealed, "src/a.rs");
+    let mut with_note = a.clone();
+    with_note.captures.insert(
+        crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+        "Severity lowered from high to info: no file or line was identified".to_string(),
+    );
+    assert!(
+        !crate::severity_bounds::severity_adjustment_lines(&with_note, None).is_empty(),
+        "an engine-set severity keeps its note"
+    );
+    let mut e = edit(1, &a, EditField::Severity, "high", "critical");
+    e.reason = "reviewed by hand".to_string();
+    let mut sealed_with_note = sealed.as_scan_report().clone();
+    for f in &mut sealed_with_note.findings {
+        if f.site_key == a.site_key {
+            f.captures.extend(
+                with_note
+                    .captures
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+        }
+    }
+    let reviewed = apply_overlay(&sealed_with_note.seal(), &[], &[e], &[]);
+    let edited = at(reviewed.report(), "src/a.rs");
+    assert_eq!(edited.severity, "critical");
+    assert!(
+        crate::severity_bounds::severity_adjustment_lines(&edited, None).is_empty(),
+        "no bound note beside the reviewer's severity"
+    );
 }

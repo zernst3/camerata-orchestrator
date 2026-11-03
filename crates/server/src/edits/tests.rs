@@ -117,10 +117,6 @@ fn an_edit_needs_a_key_a_valid_value_and_a_reason_where_it_makes_a_claim() {
         store.record_edit("p", no_reason, ctx()),
         Err(EditStoreError::ReasonRequired(_))
     ));
-    // Rewording owes no reason.
-    let mut reword = draft("k", EditField::Headline, "a", "b");
-    reword.reason = String::new();
-    assert!(store.record_edit("p", reword, ctx()).is_ok());
     assert!(matches!(
         store.record_edit(
             "p",
@@ -378,4 +374,32 @@ async fn a_damaged_edit_store_answers_503_and_is_never_replaced() {
         EditStoreError::Corrupt
     ));
     assert!(!state.edits.is_corrupt("some-other-project"));
+}
+
+#[test]
+fn every_edit_field_requires_a_reason() {
+    let store = EditStore::new();
+    for field in EditField::ALL {
+        let new = match field {
+            EditField::Severity => "low",
+            EditField::FixType => "Tailored fix",
+            EditField::Kind => "defect",
+            _ => "a new value",
+        };
+        let mut blank = draft("k", field, "an old value", new);
+        blank.reason = "  ".to_string();
+        assert!(
+            matches!(
+                store.record_edit("p", blank, ctx()),
+                Err(EditStoreError::ReasonRequired(_))
+            ),
+            "{field:?} was accepted without a reason"
+        );
+        assert!(
+            store
+                .record_edit("p", draft("k", field, "an old value", new), ctx())
+                .is_ok(),
+            "{field:?} with a reason"
+        );
+    }
 }

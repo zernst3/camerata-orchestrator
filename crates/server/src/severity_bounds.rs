@@ -124,6 +124,14 @@ pub(crate) fn severity_adjustment_lines(
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<String> {
+    // A severity the reviewer set carries no bound note: the note would contradict the severity
+    // beside it (see [`bounded_severity`]).
+    if crate::report_export::overlay::reviewer_edited_field(
+        f,
+        camerata_api_types::edits::EditField::Severity,
+    ) {
+        return Vec::new();
+    }
     let mut notes = recorded_adjustments(f);
     let (_, now) = camerata_rules::severity_bounds::bounded_severity_explained(
         f,

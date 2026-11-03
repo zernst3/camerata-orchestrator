@@ -532,18 +532,10 @@ fn make_edit(existing: &[Edit], draft: EditDraft, ctx: EditCtx<'_>, from: Option
     }
 }
 
-/// Whether a field's change is a claim beyond the wording that the reviewer must justify. A
-/// reviewer rewording a headline owes no reason; one changing the severity, the rule, the kind,
-/// the category or the sub-group does.
-pub fn field_needs_reason(field: EditField) -> bool {
-    matches!(
-        field,
-        EditField::Severity
-            | EditField::RuleId
-            | EditField::Kind
-            | EditField::Category
-            | EditField::Subgroup
-    )
+/// Whether a field's change needs a reason. Every editable field does: an edit is the reviewer's
+/// claim that the engine's value was wrong, and the record has to say why.
+pub fn field_needs_reason(_field: EditField) -> bool {
+    true
 }
 
 fn validate_draft(d: &EditDraft) -> Result<(), EditStoreError> {
@@ -552,7 +544,7 @@ fn validate_draft(d: &EditDraft) -> Result<(), EditStoreError> {
     }
     if field_needs_reason(d.field) && d.reason.trim().is_empty() {
         return Err(EditStoreError::ReasonRequired(
-            "changing the severity, rule, kind, category or sub-group of a finding needs a reason",
+            "changing any field of a finding needs a reason",
         ));
     }
     validate_value(d.field, &d.new)?;

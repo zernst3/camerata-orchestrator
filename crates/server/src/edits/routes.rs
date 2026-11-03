@@ -609,7 +609,17 @@ pub struct ReviewedReportResp {
     pub held: Vec<String>,
     pub applied_edit_ids: Vec<String>,
     pub stale: Vec<StaleEditView>,
+    /// Findings the reviewer added whose key an engine row has since taken. Kept whole so the
+    /// screen can offer to reapply them as edits or discard them.
+    pub superseded: Vec<SupersededView>,
     pub merges: Vec<ReviewedMerge>,
+}
+
+/// One reviewer-added finding an engine row took the key of.
+#[derive(Debug, serde::Serialize)]
+pub struct SupersededView {
+    pub added: super::AddedFinding,
+    pub engine_key: String,
 }
 
 /// One merge, as the screen shows it.
@@ -655,6 +665,14 @@ pub(crate) async fn get_reviewed_report(
                 current_key: moved_key(&state, &id, &latest, &s.edit),
                 current_value: s.current_value.clone(),
                 edit: s.edit.clone(),
+            })
+            .collect(),
+        superseded: reviewed
+            .superseded()
+            .iter()
+            .map(|s| SupersededView {
+                added: s.added.clone(),
+                engine_key: s.engine_key.clone(),
             })
             .collect(),
         merges: reviewed

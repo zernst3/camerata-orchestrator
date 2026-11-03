@@ -96,6 +96,17 @@ pub struct StaleEditNote {
     pub current_value: String,
 }
 
+/// A finding the reviewer added whose site key an engine row now holds (a rerun found the same
+/// place). The engine's row is shown; the reviewer's text is kept here, never dropped and never
+/// applied silently, so the UI can offer to reapply it as edits or discard it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupersededNote {
+    /// The finding as the reviewer added it (headline, detail and fix in `finding`, and `reason`).
+    pub added: AddedFinding,
+    /// The site key of the engine row that took its key.
+    pub engine_key: String,
+}
+
 /// One merge: the merged row, the row it points to and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeNote {
@@ -115,6 +126,7 @@ pub struct ReviewedReport {
     history: Vec<Decision>,
     applied: Vec<AppliedEdit>,
     stale: Vec<StaleEditNote>,
+    superseded: Vec<SupersededNote>,
     merges: Vec<MergeNote>,
     /// Dispositions that came from an export request rather than the store (an older client
     /// while the store is empty). They answer the gate's question too.
@@ -151,6 +163,11 @@ impl ReviewedReport {
     /// The edits that were NOT applied because their site is gone or changed.
     pub fn stale_edits(&self) -> &[StaleEditNote] {
         &self.stale
+    }
+
+    /// The reviewer-added findings an engine row took the key of. Not in the rows; kept here.
+    pub fn superseded(&self) -> &[SupersededNote] {
+        &self.superseded
     }
 
     /// The merges applied.
@@ -211,6 +228,7 @@ pub fn apply_overlay(
     let mut applied: Vec<AppliedEdit> = Vec::new();
     let mut stale: Vec<StaleEditNote> = Vec::new();
     let mut merges: Vec<MergeNote> = Vec::new();
+    let mut superseded: Vec<SupersededNote> = Vec::new();
 
     let report = sealed.overlaid(|r| {
         let reinstated = r.reinstate_restored(&restored);
@@ -221,7 +239,8 @@ pub fn apply_overlay(
                 .entry(crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string())
                 .or_insert_with(|| "restored by the reviewer".to_string());
         }
-        let added_rows = add_findings(&mut r.findings, added);
+        let (added_rows, taken) = add_findings(&mut r.findings, added);
+        superseded = taken;
 
         let outcome = apply_edits(&mut r.findings, &edits);
         applied = outcome.applied;
@@ -249,6 +268,7 @@ pub fn apply_overlay(
         history: decisions.to_vec(),
         applied,
         stale,
+        superseded,
         merges,
         legacy: false,
     }
@@ -257,11 +277,14 @@ pub fn apply_overlay(
 // ── added findings ────────────────────────────────────────────────────────────────────────
 
 /// Add the reviewer's findings to `rows`. A finding whose key a row already has (the engine
-/// found it too, since, or it was added twice) is not added again. A finding with no key yet
-/// gets the normal one. Returns how many were added.
-fn add_findings(rows: &mut Vec<Finding>, added: &[AddedFinding]) -> usize {
-    let mut have: HashSet<String> = rows.iter().map(|f| f.site_key.clone()).collect();
+/// found it too, since, or it was added twice) is not added again; the engine's case is returned
+/// as a [`SupersededNote`] so nothing the reviewer wrote is lost. A finding with no key yet gets
+/// the normal one. Returns how many were added and the superseded ones.
+fn add_findings(rows: &mut Vec<Finding>, added: &[AddedFinding]) -> (usize, Vec<SupersededNote>) {
+    let engine: HashSet<String> = rows.iter().map(|f| f.site_key.clone()).collect();
+    let mut have = engine.clone();
     let mut count = 0;
+    let mut superseded = Vec::new();
     for a in added {
         let mut f = a.finding.clone();
         f.captures.insert(
@@ -271,6 +294,15 @@ fn add_findings(rows: &mut Vec<Finding>, added: &[AddedFinding]) -> usize {
         if f.site_key.is_empty() {
             f.site_key = free_site_key(&f, &have);
         } else if have.contains(&f.site_key) {
+            // An engine row took the key (a rerun found the same place): the engine's row is
+            // shown and the reviewer's finding is reported beside it, never dropped. A finding
+            // added twice is only a duplicate.
+            if engine.contains(&f.site_key) {
+                superseded.push(SupersededNote {
+                    engine_key: f.site_key.clone(),
+                    added: a.clone(),
+                });
+            }
             continue;
         }
         f.group_path.clear();
@@ -278,7 +310,7 @@ fn add_findings(rows: &mut Vec<Finding>, added: &[AddedFinding]) -> usize {
         rows.push(f);
         count += 1;
     }
-    count
+    (count, superseded)
 }
 
 /// The first site key for `f` (lowest ordinal) that is not in `taken`.
@@ -307,7 +339,6 @@ pub fn key_for_added(rows: &[Finding], f: &Finding) -> String {
 struct SplitMove {
     key: String,
     label: String,
-    reason: String,
 }
 
 struct EditOutcome {
@@ -362,7 +393,6 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
             EditField::Subgroup => out.splits.push(SplitMove {
                 key: e.key.clone(),
                 label: e.new.trim().to_string(),
-                reason: e.reason.clone(),
             }),
             field => {
                 apply_field(f, field, &e.new);
@@ -641,7 +671,9 @@ fn apply_splits(tree: &mut ReviewTree, rows: &mut [Finding], moves: &[SplitMove]
                         label: m.label.clone(),
                         rule_ids: from.rule_ids.clone(),
                         kind: from.kind,
-                        cause: Some(m.reason.clone()),
+                        // The label, never the reviewer's reason: a sub-group's cause is read by whoever reads
+                        // the tree (and exported), and the reason stays on the edit record.
+                        cause: Some(m.label.clone()),
                         members: vec![key.to_string()],
                         outliers: moved_outliers,
                         summary: None,

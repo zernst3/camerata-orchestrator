@@ -6133,7 +6133,7 @@ pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 pub mod overlay;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, AppliedEdit, MergeNote,
-    ReviewedReport, StaleEditNote,
+    ReviewedReport, StaleEditNote, SupersededNote,
 };
 
 #[cfg(test)]
