@@ -345,3 +345,95 @@ fn changing_the_rate_after_a_run_re_marks_without_a_model_call() {
         "re-marking never drops a candidate"
     );
 }
+
+#[test]
+fn the_projects_over_budget_reason_set_decides_what_goes_past_the_line() {
+    // One critical unauthenticated reach and one critical secret exposure, both past a budget of
+    // zero. The project allows only secret exposure past the line.
+    let (mut tree, mut rows) = tree_of(2, |_, _| "critical");
+    let reach = rows[0].clone();
+    let secret = rows[2].clone();
+    rule_node_of(&mut tree, &reach).escalations.push(esc(
+        &reach,
+        EscalationReason::UnauthenticatedReach,
+        1,
+    ));
+    rule_node_of(&mut tree, &secret).escalations.push(esc(
+        &secret,
+        EscalationReason::SecretExposure,
+        1,
+    ));
+    let only_secrets = RankSettings {
+        over_budget_reasons: vec![EscalationReason::SecretExposure],
+        ..settings(0)
+    };
+    let ranked = rank_candidates(&tree.nodes, &rows, &only_secrets);
+    let of = |key: &str| ranked.candidates.iter().find(|c| c.key == key).unwrap();
+    assert!(of(&secret.site_key).escalated);
+    assert_eq!(
+        of(&secret.site_key).over_budget_reason,
+        Some(EscalationReason::SecretExposure)
+    );
+    assert!(
+        !of(&reach.site_key).escalated,
+        "unauthenticated reach is not in this project's set"
+    );
+    assert_eq!(of(&reach.site_key).over_budget_reason, None);
+    assert_eq!(ranked.budget.escalated, 1);
+    assert_eq!(ranked.budget.over_budget, 1);
+    // The same holds when the line is moved again over the stored candidates.
+    tree.budget = ranked.budget;
+    tree.candidates = ranked.candidates;
+    tree.re_mark(&only_secrets, &mut rows);
+    let state = |key: &str| {
+        rows.iter()
+            .find(|f| f.site_key == key)
+            .unwrap()
+            .review
+            .escalation_state
+    };
+    assert_eq!(state(&secret.site_key), EscalationState::Escalated);
+    assert_eq!(state(&reach.site_key), EscalationState::BelowTheLine);
+}
+
+#[test]
+fn an_empty_over_budget_set_lets_nothing_past_the_budget_not_even_unverified_evidence() {
+    let (mut tree, mut rows) = tree_of(2, |_, _| "critical");
+    rows[4].captures.insert(
+        EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found".to_string(),
+    );
+    let reach = rows[0].clone();
+    let secret = rows[2].clone();
+    rule_node_of(&mut tree, &reach).escalations.push(esc(
+        &reach,
+        EscalationReason::UnauthenticatedReach,
+        1,
+    ));
+    rule_node_of(&mut tree, &secret).escalations.push(esc(
+        &secret,
+        EscalationReason::SecretExposure,
+        1,
+    ));
+    let none_allowed = RankSettings {
+        over_budget_reasons: Vec::new(),
+        ..settings(0)
+    };
+    let ranked = rank_candidates(&tree.nodes, &rows, &none_allowed);
+    assert_eq!(
+        ranked.candidates.len(),
+        3,
+        "the unverified row is a candidate"
+    );
+    assert!(
+        ranked.candidates.iter().all(|c| !c.escalated),
+        "{:?}",
+        ranked.candidates
+    );
+    assert!(ranked
+        .candidates
+        .iter()
+        .all(|c| c.over_budget_reason.is_none()));
+    assert_eq!(ranked.budget.escalated, 0);
+    assert_eq!(ranked.budget.over_budget, 0);
+}

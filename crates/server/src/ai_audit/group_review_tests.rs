@@ -2250,3 +2250,39 @@ async fn a_reviewer_edited_subgroup_summary_is_kept_on_a_rerun_when_its_members_
         Some("The model's second words.")
     );
 }
+
+#[tokio::test]
+async fn an_outlier_mark_in_the_stage_2_reply_never_makes_an_escalation() {
+    let mut report = report_of(&[(SQL, 4)]);
+    // The reply marks two outliers and escalates nothing, and records no disagreement.
+    let llm = Reviewer::new(|call| {
+        Ok(reply(
+            "Raw SQL.",
+            &[("All", "one cause", call.indices.clone())],
+            &[
+                (1, "different_object", "A different table."),
+                (2, "could_be_intentional", "Looks deliberate."),
+            ],
+            &[],
+            &[],
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    assert!(node(&report, &rule).escalations.is_empty());
+    assert!(tree(&report).candidates.is_empty());
+    for f in sites_of(&report, SQL) {
+        assert_eq!(f.review.escalation_state, EscalationState::NotACandidate);
+        assert_eq!(f.review.escalation_reason, None);
+    }
+    // The outliers themselves are recorded.
+    let rows = sites_of(&report, SQL);
+    assert_eq!(
+        rows[1].review.outlier_reason,
+        Some(OutlierReason::DifferentObject)
+    );
+    assert_eq!(
+        rows[2].review.outlier_reason,
+        Some(OutlierReason::CouldBeIntentional)
+    );
+}
