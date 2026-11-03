@@ -2,7 +2,8 @@
 //! (review-tree design, sections 3.5 and 3.6; amendment A6 step 2).
 //!
 //! A decision is what the reviewer ruled on a site: confirmed, ignored, false positive, tech debt
-//! or merged into another site. It lives on the server, in one file per project beside the
+//! or merged into another site. One more record is not a ruling: an engine restore puts a
+//! thrown-out finding back into review. It lives on the server, in one file per project beside the
 //! sealed report, never inside it. The server (`camerata_server::decisions`) and the review UI
 //! share these types, so a route's real JSON output is the UI's input by construction; the
 //! round-trip and wire-shape tests in the server pin that.
@@ -35,6 +36,12 @@ pub enum DecisionState {
     TechDebtLater,
     /// The same problem as the site with this key. The row is kept and exports with a pointer.
     MergedInto(String),
+    /// The reviewer put back a finding the engine threw out (an Engine Check No on a thrown-out
+    /// finding, design A10 item 2 and A12 item 2). It is NOT a ruling on the finding: the row
+    /// returns to normal review and is held from the client export until the reviewer decides it.
+    /// Every step that throws a finding out skips a row whose key carries one, so a rerun or a
+    /// re-seal never throws it out again.
+    EngineRestored,
 }
 
 /// Whether a decision was made on one site or at a tree node.
@@ -149,9 +156,45 @@ pub fn live_by_key(decisions: &[Decision]) -> HashMap<&str, Vec<&Decision>> {
 /// The decision each site key currently has: the LATEST of its live records (see
 /// [`live_by_key`]). The server and the UI both work out a site's decision with this function.
 pub fn effective_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
+    latest_by_key(decisions)
+        .into_iter()
+        // A restore is not a ruling (see [`DecisionState::EngineRestored`]): a key whose latest
+        // record is one has no decision yet.
+        .filter(|(_, d)| d.state != DecisionState::EngineRestored)
+        .collect()
+}
+
+/// The LATEST live record of each key, whatever its state (a restore included).
+fn latest_by_key(decisions: &[Decision]) -> HashMap<&str, &Decision> {
     live_by_key(decisions)
         .into_iter()
         .filter_map(|(key, records)| records.last().map(|d| (key, *d)))
+        .collect()
+}
+
+/// The keys the reviewer put back after the engine threw them out and has not ruled on since:
+/// the latest live record of the key is an [`DecisionState::EngineRestored`]. The row is back in
+/// review and held from the client export until it is decided.
+pub fn restored_undecided_keys(decisions: &[Decision]) -> HashSet<&str> {
+    latest_by_key(decisions)
+        .into_iter()
+        .filter(|(_, d)| d.state == DecisionState::EngineRestored)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Every key the reviewer ever restored and has not revoked the restore of, decided since or not.
+/// A throw-out step skips these keys for good: a rerun or a re-seal must not throw the row out
+/// again.
+pub fn restored_keys(decisions: &[Decision]) -> HashSet<&str> {
+    live_by_key(decisions)
+        .into_iter()
+        .filter(|(_, records)| {
+            records
+                .iter()
+                .any(|d| d.state == DecisionState::EngineRestored)
+        })
+        .map(|(key, _)| key)
         .collect()
 }
 
@@ -641,6 +684,71 @@ mod tests {
         assert!(
             map.is_empty(),
             "a record of a revoked group decision is dead"
+        );
+    }
+
+    fn record(id: &str, key: &str, state: DecisionState) -> Decision {
+        Decision {
+            id: id.into(),
+            key: key.into(),
+            state,
+            scope: Scope::Site,
+            applies_to: Vec::new(),
+            except: Vec::new(),
+            inherited_from: None,
+            ..sample()
+        }
+    }
+
+    /// A restore is not a ruling: the key has no effective decision, so every reader (the apply
+    /// step, the release gate, the export) sees it as undecided. It is held until a ruling is
+    /// recorded after it, and it keeps protecting the row from a second throw-out either way.
+    #[test]
+    fn an_engine_restore_is_not_a_ruling_and_is_held_until_decided() {
+        let restored = record("d1", "a", DecisionState::EngineRestored);
+        let only = [restored.clone()];
+        assert!(
+            effective_by_key(&only).is_empty(),
+            "a restore decides nothing"
+        );
+        assert!(restored_undecided_keys(&only).contains("a"));
+        assert!(restored_keys(&only).contains("a"));
+
+        let ruled = [
+            restored.clone(),
+            record("d2", "a", DecisionState::Confirmed),
+        ];
+        assert_eq!(effective_by_key(&ruled)["a"].id, "d2");
+        assert!(
+            restored_undecided_keys(&ruled).is_empty(),
+            "a later ruling releases the hold"
+        );
+        assert!(
+            restored_keys(&ruled).contains("a"),
+            "the row stays protected from a second throw-out"
+        );
+
+        // A restore after a ruling puts the row back to undecided: the ruling was about the
+        // engine's earlier answer.
+        let again = [
+            record("d1", "a", DecisionState::Confirmed),
+            record("d2", "a", DecisionState::EngineRestored),
+        ];
+        assert!(effective_by_key(&again).is_empty());
+        assert!(restored_undecided_keys(&again).contains("a"));
+
+        // A revoked restore protects nothing.
+        let mut revoked = restored;
+        revoked.revoked_at = Some("t".into());
+        assert!(restored_keys(&[revoked.clone()]).is_empty());
+        assert!(restored_undecided_keys(&[revoked]).is_empty());
+    }
+
+    #[test]
+    fn the_restore_state_wire_name_is_pinned() {
+        assert_eq!(
+            serde_json::to_value(DecisionState::EngineRestored).unwrap(),
+            serde_json::json!("engine_restored")
         );
     }
 }

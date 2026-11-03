@@ -478,7 +478,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 29] = [
+const FINDING_HEADERS: [&str; 31] = [
     "Severity",
     "Headline",
     "Repo",
@@ -508,9 +508,11 @@ const FINDING_HEADERS: [&str; 29] = [
     "Severity adjustments",
     "Carried from",
     "Fix type",
+    "Reviewer edited",
+    "Edit ids",
 ];
 
-const FINDING_RENDERED: [&str; 27] = [
+const FINDING_RENDERED: [&str; 29] = [
     "severity",
     "headline",
     "repo",
@@ -538,6 +540,8 @@ const FINDING_RENDERED: [&str; 27] = [
     "severity_adjustments",
     "carried_from",
     "fix_type",
+    "reviewer_edited",
+    "edit_ids",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -568,7 +572,7 @@ const FINDING_EXTRA_KEYS: [&str; 13] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 31] = [
+const FINDING_BASE_KEYS: [&str; 33] = [
     "severity",
     "headline",
     "repo",
@@ -598,6 +602,8 @@ const FINDING_BASE_KEYS: [&str; 31] = [
     "severity_adjustments",
     "carried_from",
     "fix_type",
+    "reviewer_edited",
+    "edit_ids",
     "is_fp",
     "fp_reason",
 ];
@@ -675,6 +681,16 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
         text(row, "severity_adjustments"),
         text(row, "carried_from"),
         text(row, "fix_type"),
+        yes_or_blank(row, "reviewer_edited"),
+        row["edit_ids"]
+            .as_array()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));

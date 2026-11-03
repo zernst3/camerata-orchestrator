@@ -1460,6 +1460,31 @@ impl ScanReport {
             && crate::engine_discard::tally(&self.discarded) == self.ledger.discarded().by_reason
     }
 
+    /// Put the rows the reviewer restored back among the kept rows: each leaves
+    /// [`Self::discarded`], loses its mark and carries
+    /// [`crate::engine_discard::ENGINE_RESTORED_CAPTURE`]. The ledger's discarded tally is
+    /// brought back in step, so the report still reconciles. Returns how many rows were put
+    /// back. Rows that were never thrown out are untouched.
+    pub fn reinstate_restored(&mut self, restored: &crate::engine_discard::RestoredKeys) -> usize {
+        if restored.is_empty() || self.discarded.is_empty() {
+            return 0;
+        }
+        let thrown = std::mem::take(&mut self.discarded);
+        let (stay, back) = crate::engine_discard::reinstate(thrown, restored);
+        self.discarded = stay;
+        let count = back.len();
+        for mut f in back {
+            // It was never in the tree: it is placed again with the rows around it.
+            f.group_path.clear();
+            f.group_role = crate::review_tree::GroupRole::Primary;
+            self.findings.push(f);
+        }
+        if count > 0 {
+            self.ledger.set_discarded(&self.discarded);
+        }
+        count
+    }
+
     /// Rebuild [`Self::tree`] from the rows: every row in exactly one sub-group, nodes above them.
     /// A node that is still there keeps what the previous tree knew about it. The rows' own
     /// `group_path` and `group_role` are rewritten to agree with the tree.
@@ -1508,11 +1533,26 @@ impl ScanReport {
     /// gate appended to a private clone INSIDE `build_report_json` while the xlsx/JSON siblings
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
-    pub fn seal(mut self) -> SealedReport {
+    pub fn seal(self) -> SealedReport {
+        self.seal_with_restored(&crate::engine_discard::RestoredKeys::default())
+    }
+
+    /// [`Self::seal`] for a project whose reviewer has put thrown-out findings back
+    /// ([`crate::decisions::DecisionState::EngineRestored`]): a row the reviewer restored is
+    /// never thrown out again by the safety net below, and a restored row that an earlier step
+    /// already moved to [`Self::discarded`] is put back first ([`Self::reinstate_restored`]).
+    /// With nothing restored it is exactly [`Self::seal`].
+    pub fn seal_with_restored(
+        mut self,
+        restored: &crate::engine_discard::RestoredKeys,
+    ) -> SealedReport {
+        // A reviewer's restore first: a row an earlier step moved aside comes back before the
+        // safety net below looks at the rows.
+        self.reinstate_restored(restored);
         // A10: the safety net behind the engine's own throw-out steps. A row that reached the seal
         // marked thrown out, or as a row that is not a finding (a carried row from an older run),
         // is moved aside, kept, and counted. Nothing is deleted.
-        let thrown = crate::junk_finding::take_thrown_out(&mut self.findings);
+        let thrown = crate::junk_finding::take_thrown_out(&mut self.findings, restored);
         if !thrown.is_empty() {
             self.ledger.record_discarded(&thrown);
             self.discarded.extend(thrown);
@@ -1561,6 +1601,17 @@ impl SealedReport {
     /// reads more clearly with an explicit method call.
     pub fn as_scan_report(&self) -> &ScanReport {
         &self.0
+    }
+
+    /// A COPY of this report with the reviewer's overlay applied by `change`, wrapped as sealed
+    /// again WITHOUT re-sealing. The original is untouched. Only the overlay
+    /// ([`crate::report_export::apply_overlay`]) calls this: the copy's row set is the sealed set
+    /// plus the reviewer's own changes, which is the final set an export reads, and re-running the
+    /// seal over it would throw a restored row out again.
+    pub(crate) fn overlaid(&self, change: impl FnOnce(&mut ScanReport)) -> SealedReport {
+        let mut copy = self.0.clone();
+        change(&mut copy);
+        SealedReport(copy)
     }
 
     /// Unwrap back into an owned [`ScanReport`]. Only ever needed by code that must hand the

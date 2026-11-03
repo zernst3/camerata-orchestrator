@@ -19,6 +19,7 @@
 mod archive;
 mod consistency;
 pub mod evidence;
+pub mod held;
 pub mod junk;
 mod report;
 mod secrets;
@@ -27,7 +28,7 @@ pub mod unsynced;
 use std::collections::HashMap;
 
 use crate::onboard::SealedReport;
-use crate::report_export::{AuditReportJson, DispositionWire, ReportOptions};
+use crate::report_export::{AuditReportJson, DispositionWire, ReportOptions, ReviewedReport};
 use crate::xlsx_export::FindingsExport;
 use crate::ManifestProvenance;
 
@@ -73,6 +74,12 @@ pub struct ProductPackage {
     /// Changes the review screen made that the decision store does not hold yet, one problem
     /// each (from the export request's `unsynced_changes`).
     pub unsynced_reviewer_changes: Vec<Problem>,
+    /// Merged rows with no merge decision behind them, and group decisions missing a per-site
+    /// record, one problem each (design 5.3). Worked out where the decision records are in hand.
+    pub merged_without_decision: Vec<Problem>,
+    /// Findings the reviewer restored after the engine threw them out that carry no decision
+    /// since, one problem each (A12 item 2).
+    pub restored_without_decision: Vec<Problem>,
     /// M4: the rows marked as junk (`junk_finding::JUNK_CONTENT_CAPTURE`) that carry no reviewer
     /// decision in the export request, one problem each. Worked out beside the evidence check, for
     /// the same reason, and recorded by [`release`] under the content check.
@@ -95,8 +102,22 @@ pub async fn build_product_package(
     corpus: Option<&camerata_rules::RuleSet>,
     options: &ReportOptions,
 ) -> anyhow::Result<ProductPackage> {
-    let stem = crate::report_filename_stem_for(report, &options.project_title);
-    build_product_package_with_stem(report, dispositions, corpus, options, &stem).await
+    // A caller that holds no stores still goes through the overlay (an overlay of nothing), so no
+    // export path reads a sealed report directly.
+    let reviewed = ReviewedReport::unreviewed(report, dispositions);
+    build_product_package_reviewed(&reviewed, corpus, options).await
+}
+
+/// [`build_product_package`] over a [`ReviewedReport`]: the sealed report with the reviewer's
+/// decisions, edits, additions, merges and splits applied
+/// ([`crate::report_export::apply_overlay`]). The HTTP export reads the stores and calls this.
+pub async fn build_product_package_reviewed(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    options: &ReportOptions,
+) -> anyhow::Result<ProductPackage> {
+    let stem = crate::report_filename_stem_for(reviewed.report(), &options.project_title);
+    build_product_package_with_stem_reviewed(reviewed, corpus, options, &stem).await
 }
 
 /// [`build_product_package`] under an explicit filename stem (the sample generator ships
@@ -108,6 +129,18 @@ pub async fn build_product_package_with_stem(
     options: &ReportOptions,
     stem: &str,
 ) -> anyhow::Result<ProductPackage> {
+    let reviewed = ReviewedReport::unreviewed(report, dispositions);
+    build_product_package_with_stem_reviewed(&reviewed, corpus, options, stem).await
+}
+
+/// [`build_product_package_with_stem`] over a [`ReviewedReport`].
+pub async fn build_product_package_with_stem_reviewed(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    options: &ReportOptions,
+    stem: &str,
+) -> anyhow::Result<ProductPackage> {
+    let report = reviewed.report();
     // Confidentiality (2026-10-24 decision): no package without a client name to mark it
     // with. Checked first, before anything is built or compiled. Callers surface the error's
     // message unchanged (it is a `report_export::ClientNameRequired`).
@@ -117,15 +150,14 @@ pub async fn build_product_package_with_stem(
     // And no client package for a run that did not run to completion.
     crate::report_export::require_complete_run(report, options)?;
     let report_json =
-        crate::report_export::build_report_json(report, dispositions, corpus, options);
+        crate::report_export::build_report_json(report, reviewed.dispositions(), corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
     // The secrets check over the PDF's data runs BEFORE the compile: Typst gets a temp dir, and
     // a value that would be refused must never be written to disk, let alone compiled.
     check_pdf_data(stem, &data_json).map_err(ReleaseError::Blocked)?;
     let pdf = crate::report_export::compile_pdf_from_data(&data_json).await?;
-    assemble_package(
-        report,
-        dispositions,
+    assemble_package_reviewed(
+        reviewed,
         corpus,
         options,
         stem,
@@ -137,14 +169,30 @@ pub async fn build_product_package_with_stem(
 /// can build a real package (real workbook, real datasets, real provenance) with a stand-in
 /// PDF when Typst is not installed; production reaches it only through
 /// [`build_product_package_with_stem`].
+#[cfg(test)]
 pub(crate) fn assemble_package(
     report: &SealedReport,
     dispositions: &HashMap<String, DispositionWire>,
     corpus: Option<&camerata_rules::RuleSet>,
     options: &ReportOptions,
     stem: &str,
+    parts: (AuditReportJson, String, Vec<u8>),
+) -> anyhow::Result<ProductPackage> {
+    let reviewed = ReviewedReport::unreviewed(report, dispositions);
+    assemble_package_reviewed(&reviewed, corpus, options, stem, parts)
+}
+
+/// [`assemble_package`] over a [`ReviewedReport`]: every artifact is built from the reviewed
+/// rows and the reviewer's decisions, and the gate's reviewer-decision checks read the same.
+pub(crate) fn assemble_package_reviewed(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    options: &ReportOptions,
+    stem: &str,
     (report_json, data_json, pdf): (AuditReportJson, String, Vec<u8>),
 ) -> anyhow::Result<ProductPackage> {
+    let report = reviewed.report();
+    let dispositions = reviewed.dispositions();
     let xlsx = crate::xlsx_export::build_workbook(report, dispositions, corpus, options)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -196,10 +244,15 @@ pub(crate) fn assemble_package(
         provenance,
         undecided_unverified_evidence: evidence::unverified_without_decision(
             &report.findings,
-            dispositions,
+            reviewed,
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
-        undecided_junk_content: junk::junk_without_decision(&report.findings, dispositions),
+        merged_without_decision: held::merged_without_decision(
+            &report.findings,
+            reviewed.all_records(),
+        ),
+        restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
+        undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         internal: options.internal,
     })
 }
@@ -541,6 +594,20 @@ fn release_checked(
             package.undecided_unverified_evidence.clone()
         },
     );
+    // A merge with no decision behind it is a structural defect whoever receives the package, so
+    // it is checked for an internal package too.
+    report.record(
+        CheckId::MergedWithoutDecision,
+        package.merged_without_decision.clone(),
+    );
+    report.record(
+        CheckId::RestoredWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.restored_without_decision.clone()
+        },
+    );
     report.record(
         CheckId::UnsyncedReviewerChanges,
         package.unsynced_reviewer_changes.clone(),
@@ -637,6 +704,9 @@ mod junk_content_tests;
 
 #[cfg(test)]
 mod evidence_tests;
+
+#[cfg(test)]
+mod held_tests;
 
 #[cfg(test)]
 mod internal_held_tests;

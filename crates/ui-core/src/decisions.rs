@@ -36,7 +36,7 @@ pub fn disposition_of(d: &Decision) -> Option<Disposition> {
         DecisionState::FalsePositive => (TriageState::FalsePositive, TechDebtBucket::Later),
         DecisionState::TechDebtNow => (TriageState::TechDebt, TechDebtBucket::Now),
         DecisionState::TechDebtLater => (TriageState::TechDebt, TechDebtBucket::Later),
-        DecisionState::MergedInto(_) => return None,
+        DecisionState::MergedInto(_) | DecisionState::EngineRestored => return None,
     };
     Some(Disposition {
         state,
@@ -122,6 +122,9 @@ pub fn state_of(d: &Disposition) -> Option<DecisionState> {
         TriageState::Confirmed => Some(DecisionState::Confirmed),
         TriageState::Ignored => Some(DecisionState::Ignored),
         TriageState::FalsePositive => Some(DecisionState::FalsePositive),
+        // A merge needs its target site, which the merge route takes; the table's write-through
+        // never posts one.
+        TriageState::MergedInto => None,
         TriageState::TechDebt => Some(match d.bucket {
             TechDebtBucket::Now => DecisionState::TechDebtNow,
             TechDebtBucket::Later => DecisionState::TechDebtLater,
@@ -673,6 +676,25 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map["site-key"].state, TriageState::Ignored);
         assert_eq!(map["site-key"].reason, "fixture");
+    }
+
+    /// A merge needs its target, which only the merge route takes: the table's write-through
+    /// never posts one, and never revokes one the table shows as merged.
+    #[test]
+    fn the_write_through_never_posts_or_revokes_a_merge() {
+        let merged = Disposition {
+            state: TriageState::MergedInto,
+            reason: "same cause".to_string(),
+            bucket: TechDebtBucket::Later,
+        };
+        assert_eq!(state_of(&merged), None);
+        let mut desired = HashMap::new();
+        desired.insert("k1".to_string(), merged);
+        let bridge = DecisionBridge::from_decisions(&[]);
+        assert!(
+            bridge.next_ops(&desired).is_empty(),
+            "nothing to post for a merge"
+        );
     }
 
     fn disp(state: TriageState, reason: &str) -> Disposition {

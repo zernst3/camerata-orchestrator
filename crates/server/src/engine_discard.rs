@@ -71,8 +71,79 @@ pub fn is_discarded(f: &Finding) -> bool {
 }
 
 /// Clear the mark: the row goes back into normal review. Returns the reason it had.
+///
+/// Clearing the mark is not enough on its own: the seal re-reads a row's text and would throw it
+/// out again. A restore is therefore also a decision in the store
+/// ([`crate::decisions::DecisionState::EngineRestored`], A12 item 2), and every throw-out step
+/// skips a row whose key carries one ([`RestoredKeys`]).
 pub fn restore(f: &mut Finding) -> Option<String> {
     f.captures.remove(ENGINE_DISCARDED_CAPTURE)
+}
+
+/// The `captures` key a row carries once the reviewer has put it back after the engine threw it
+/// out (the value is why it was thrown out). The row is held until the reviewer decides it. A
+/// bookkeeping key (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`).
+pub const ENGINE_RESTORED_CAPTURE: &str = "engine_restored";
+
+/// The site keys of the rows the reviewer restored after the engine threw them out, with the
+/// ordinal left off. Every throw-out step asks [`Self::covers`] before it marks or moves a row.
+///
+/// The ordinal is left off because a throw-out step can run before the rows have their final
+/// keys (a fresh scan keys its rows at the seal): a row is recognised by its repo, file and the
+/// fingerprint of its rule and snippet. If a file holds the same code twice, restoring one
+/// protects both, which only ever keeps a row, never loses one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoredKeys(std::collections::HashSet<String>);
+
+impl RestoredKeys {
+    /// The restored keys of `keys` (full site keys, ordinal included).
+    pub fn from_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(keys.into_iter().map(without_ordinal).collect())
+    }
+
+    /// Whether the reviewer restored this row.
+    pub fn covers(&self, f: &Finding) -> bool {
+        if self.0.is_empty() {
+            return false;
+        }
+        let key = if f.site_key.is_empty() {
+            camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0)
+        } else {
+            f.site_key.clone()
+        };
+        self.0.contains(&without_ordinal(&key))
+    }
+
+    /// Nothing is restored.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// A site key without its trailing ordinal (`{repo}\0{path}\0{fingerprint}\0{ordinal}`).
+fn without_ordinal(key: &str) -> String {
+    key.rsplit_once('\0')
+        .map_or(key, |(head, _)| head)
+        .to_string()
+}
+
+/// Put the rows of `thrown` that the reviewer restored back among the kept rows: the mark is
+/// cleared and the row carries [`ENGINE_RESTORED_CAPTURE`] (the reason it had). Returns the rows
+/// that stay thrown out and the rows put back, each in its original order. No row is lost.
+pub fn reinstate(thrown: Vec<Finding>, restored: &RestoredKeys) -> (Vec<Finding>, Vec<Finding>) {
+    let mut stay = Vec::new();
+    let mut back = Vec::new();
+    for mut f in thrown {
+        if restored.covers(&f) {
+            let reason = restore(&mut f).unwrap_or_default();
+            f.captures
+                .insert(ENGINE_RESTORED_CAPTURE.to_string(), reason);
+            back.push(f);
+        } else {
+            stay.push(f);
+        }
+    }
+    (stay, back)
 }
 
 /// Split `rows` into `(thrown_out, kept)`, each in its original order. No row is lost: the two

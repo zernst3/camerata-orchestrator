@@ -124,6 +124,14 @@ pub(crate) fn severity_adjustment_lines(
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<String> {
+    // A severity the reviewer set carries no bound note: the note would contradict the severity
+    // beside it (see [`bounded_severity`]).
+    if crate::report_export::overlay::reviewer_edited_field(
+        f,
+        camerata_api_types::edits::EditField::Severity,
+    ) {
+        return Vec::new();
+    }
     let mut notes = recorded_adjustments(f);
     let (_, now) = camerata_rules::severity_bounds::bounded_severity_explained(
         f,
@@ -156,6 +164,14 @@ fn finish_sentence(note: &str) -> String {
 /// (`report_export::build_report_json`) and the workbook / CSV / JSON partition
 /// (`xlsx_export::partition_rows`) all share, so the surfaces cannot drift.
 pub(crate) fn bounded_severity(f: &Finding, corpus: Option<&camerata_rules::RuleSet>) -> String {
+    // A severity the reviewer set is theirs: no bound moves it (the reviewer has seen the bound's
+    // own note and overruled it, and the edit carries their reason).
+    if crate::report_export::overlay::reviewer_edited_field(
+        f,
+        camerata_api_types::edits::EditField::Severity,
+    ) {
+        return crate::report_export::normalize_severity(&f.severity);
+    }
     camerata_rules::severity_bounds::bounded_severity(f, corpus_rule_for(&f.rule_id, corpus))
 }
 

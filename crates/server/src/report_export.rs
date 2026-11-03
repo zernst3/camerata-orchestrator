@@ -1235,6 +1235,11 @@ pub struct CuratedSiteJson {
     /// `also_locations` entry at a different place. A member absorbed at the row's own line is
     /// not another site. `1` for an un-merged row.
     pub site_count: usize,
+    /// WO8: whether the reviewer edited any field of this site's row. The PDF prints nothing for
+    /// it; the data carries it so the PDF's rows agree with `findings.json`'s.
+    pub reviewer_edited: bool,
+    /// The ids of the edits applied to this site's row, in the order they were applied.
+    pub edit_ids: Vec<String>,
     /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
     /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
     /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
@@ -3028,13 +3033,24 @@ pub(crate) fn client_headline_and_detail(
     fallback_title: &str,
     chosen_option: Option<&str>,
 ) -> (String, String) {
-    match resolve_floor_finding_text(&finding.rule_id, corpus, finding, chosen_option) {
-        Some((headline, detail)) => (headline, detail),
-        None => (
-            defect_headline(&finding.detail, fallback_title),
-            finding.detail.clone(),
-        ),
-    }
+    let (headline, detail) =
+        match resolve_floor_finding_text(&finding.rule_id, corpus, finding, chosen_option) {
+            Some((headline, detail)) => (headline, detail),
+            None => (
+                defect_headline(&finding.detail, fallback_title),
+                finding.detail.clone(),
+            ),
+        };
+    // A headline or detail the reviewer edited is theirs: a corpus template must not rewrite it.
+    let reviewer_text = |field| {
+        overlay::reviewer_text(finding, field)
+            .filter(|_| overlay::reviewer_edited_field(finding, field))
+    };
+    (
+        reviewer_text(camerata_api_types::edits::EditField::Headline)
+            .map_or(headline, str::to_string),
+        reviewer_text(camerata_api_types::edits::EditField::Detail).map_or(detail, str::to_string),
+    )
 }
 
 /// The readable, never-internal-sounding generic noun phrase substituted for a placeholder
@@ -3338,7 +3354,7 @@ const CATEGORY_DISPLAY_OVERRIDES: &[(&str, &str)] = &[
 /// Render a category KEY (a corpus rule's `domain`, or a closed-taxonomy class) as the label a
 /// client reads: an explicit override where the mechanical prettification would leak internal
 /// vocabulary, otherwise [`prettify_category_key`].
-fn category_display_label(key: &str) -> String {
+pub(crate) fn category_display_label(key: &str) -> String {
     if let Some((_, label)) = CATEGORY_DISPLAY_OVERRIDES.iter().find(|(k, _)| *k == key) {
         return (*label).to_string();
     }
@@ -3393,7 +3409,13 @@ pub(crate) fn category_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+    // The reviewer's category wins over the rule's own domain.
+    let reviewer_category =
+        overlay::reviewer_edited_field(finding, camerata_api_types::edits::EditField::Category);
+    if let Some(rule) = corpus
+        .and_then(|c| c.get_by_id(&finding.rule_id))
+        .filter(|_| !reviewer_category)
+    {
         return category_display_label(&rule.domain);
     }
     if let Some(cat) = finding.category.as_deref() {
@@ -3807,6 +3829,10 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
         || finding
             .captures
             .contains_key(crate::junk_finding::JUNK_CONTENT_CAPTURE)
+        // A12 item 2: put back by the reviewer after the engine threw it out, not ruled on yet.
+        || finding
+            .captures
+            .contains_key(crate::engine_discard::ENGINE_RESTORED_CAPTURE)
 }
 
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
@@ -5016,11 +5042,8 @@ pub fn build_report_json(
                     // "held for a human reviewer's judgment call" framing instead of printing
                     // "high"/blank next to a row that is, by construction, not curated.
                     confidence: hedge_confidence(f, bucket),
-                    disposition: disposition_label(
-                        *disposition,
-                        reason,
-                        bucket,
-                        confirmed_by_client,
+                    disposition: overlay::merged_label(f).map(str::to_string).unwrap_or_else(
+                        || disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     ),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
@@ -5088,6 +5111,8 @@ pub fn build_report_json(
                         f, corpus,
                     ),
                     site_count: f.distinct_site_count(),
+                    reviewer_edited: overlay::is_reviewer_edited(f),
+                    edit_ids: overlay::edit_ids_of(f),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
@@ -6104,6 +6129,12 @@ async fn run_typst_within(
 pub mod coverage_gaps;
 pub(crate) mod fix_text;
 pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
+
+pub mod overlay;
+pub use overlay::{
+    apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, AppliedEdit, MergeNote,
+    ReviewedReport, StaleEditNote, SupersededNote,
+};
 
 #[cfg(test)]
 mod coverage_gaps_tests;

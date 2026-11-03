@@ -88,6 +88,9 @@ pub const DATA_DIR_ENTRIES: &[(&str, Treatment)] = &[
     // The reviewer's decisions on sites: site keys (repo, path, fingerprint), states and the
     // reviewer's reasons, no excerpts. Review state, like the draft's dispositions it replaces.
     ("decisions", Treatment::Kept),
+    // The reviewer's edits and the findings they added: headline, detail and fix text they wrote,
+    // and an added finding's quoted snippet (an excerpt), like the inspection it overlays.
+    ("edits", Treatment::Kept),
     // A copy of client excerpts the engine used to skip unchanged files. PURGED per repo.
     ("scan-cache.json", Treatment::Purged),
     // Identity, paths, ids, descriptions and rule ids only.

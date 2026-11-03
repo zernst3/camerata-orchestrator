@@ -36,6 +36,8 @@ mod migrate;
 pub(crate) mod routes;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wo8_tests;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,8 +46,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 pub use apply::{
-    apply_decisions, apply_to, effective_dispositions, read_key_links, AppliedDecisions,
-    DispositionDisagreement, EffectiveDispositions, StoreDecisions,
+    apply_decisions, apply_to, effective_dispositions, read_key_links, wire_dispositions,
+    AppliedDecisions, DispositionDisagreement, EffectiveDispositions, StoreDecisions,
 };
 pub use camerata_api_types::decisions::*;
 pub use migrate::{
@@ -87,6 +89,12 @@ pub enum DecisionStoreError {
     NotFound(String),
     #[error("decision {0} is already revoked")]
     AlreadyRevoked(String),
+    #[error("only an Ignored decision can be acknowledged by the client, and {0} is not one")]
+    AckNeedsIgnored(String),
+    #[error("a client acknowledgement names who acknowledged it")]
+    AckNeedsWho,
+    #[error("decision {0} was already acknowledged by the client")]
+    AlreadyAcknowledged(String),
     #[error(
         "the decision file for this project is damaged and was moved aside; nothing was changed"
     )]
@@ -107,6 +115,9 @@ impl DecisionStoreError {
             Self::EmptyNode(_) => "empty_node",
             Self::NotFound(_) => "not_found",
             Self::AlreadyRevoked(_) => "already_revoked",
+            Self::AckNeedsIgnored(_) => "ack_needs_ignored",
+            Self::AckNeedsWho => "ack_needs_who",
+            Self::AlreadyAcknowledged(_) => "already_acknowledged",
             Self::Corrupt => "store_corrupt",
             Self::Persist(_) => "persist_failed",
         }
@@ -266,11 +277,15 @@ impl DecisionStore {
         // and scheduling tech debt (now or later) disagree with nothing and need none.
         let needs_reason = matches!(
             req.state,
-            DecisionState::Ignored | DecisionState::FalsePositive | DecisionState::MergedInto(_)
+            DecisionState::Ignored
+                | DecisionState::FalsePositive
+                | DecisionState::MergedInto(_)
+                | DecisionState::EngineRestored
         );
         if needs_reason && req.reason.trim().is_empty() {
             return Err(DecisionStoreError::ReasonRequired(
-                "ignoring a finding, calling it a false positive or merging it needs a reason",
+                "ignoring a finding, calling it a false positive, merging it or putting back a \
+                 finding the engine threw out needs a reason",
             ));
         }
         self.mutate(project_id, |pd| {
@@ -421,6 +436,60 @@ impl DecisionStore {
         })
     }
 
+    /// Record that the client acknowledged an Ignored decision after delivery (design 5.4):
+    /// stamp `confirmed_by_client` on it and, for a node decision, on every per-site record it
+    /// wrote. Nothing else about the record changes. Returns the record and how many further
+    /// records were acknowledged with it.
+    pub fn ack_client(
+        &self,
+        project_id: &str,
+        decision_id: &str,
+        ack: ClientAck,
+    ) -> Result<(Decision, usize), DecisionStoreError> {
+        if ack.by.trim().is_empty() {
+            return Err(DecisionStoreError::AckNeedsWho);
+        }
+        self.mutate(project_id, |pd| {
+            let Some(target) = pd.decisions.iter().find(|d| d.id == decision_id) else {
+                return Err(DecisionStoreError::NotFound(decision_id.to_string()));
+            };
+            if target.revoked_at.is_some() {
+                return Err(DecisionStoreError::AlreadyRevoked(decision_id.to_string()));
+            }
+            if target.state != DecisionState::Ignored {
+                return Err(DecisionStoreError::AckNeedsIgnored(decision_id.to_string()));
+            }
+            if target.confirmed_by_client.is_some() {
+                return Err(DecisionStoreError::AlreadyAcknowledged(
+                    decision_id.to_string(),
+                ));
+            }
+            let ack = ClientAck {
+                by: ack.by.trim().to_string(),
+                at: ack.at,
+                note: ack.note.trim().to_string(),
+            };
+            let mut also = 0;
+            let mut out = None;
+            for d in pd.decisions.iter_mut().filter(|d| {
+                d.revoked_at.is_none()
+                    && d.confirmed_by_client.is_none()
+                    && (d.id == decision_id || d.inherited_from.as_deref() == Some(decision_id))
+            }) {
+                d.confirmed_by_client = Some(ack.clone());
+                if d.id == decision_id {
+                    out = Some(d.clone());
+                } else {
+                    also += 1;
+                }
+            }
+            match out {
+                Some(d) => Ok((d, also)),
+                None => Err(DecisionStoreError::NotFound(decision_id.to_string())),
+            }
+        })
+    }
+
     /// Write the records a draft migration produced and remember that it has run. Nothing is
     /// written, and `Ok(false)` returned, when the project was migrated before.
     pub fn record_migration(
@@ -518,9 +587,14 @@ struct StoredFileRef<'a> {
 }
 
 /// The site keys a batch decision never covers: rows held for a ruling of their own. A row is
-/// held when its quoted evidence could not be verified, when its text is junk (M4), or when it
-/// was merged into another site. This is THE hold list: a new kind of hold (the Engine Check's
-/// pending correction) is added here and nowhere else.
+/// held when its quoted evidence could not be verified, when its text is junk (M4), when it was
+/// merged into another site, or when the reviewer put it back after the engine threw it out and
+/// has not ruled on it since (A12 item 2).
+///
+/// This is THE hold list: every hold reason lives in this function, a batch decision on a node
+/// and the decision route both leave out exactly these keys, and a new kind of hold is added here
+/// and nowhere else. The Engine Check's pending No (a wrong finding held until a correction or a
+/// decision is recorded, design A2b) is the next one: see [`engine_check_holds`].
 pub fn held_keys(
     rows: &[crate::onboard::Finding],
     active: &[Decision],
@@ -541,7 +615,30 @@ pub fn held_keys(
             .filter(|(_, d)| matches!(d.state, DecisionState::MergedInto(_)))
             .map(|(k, _)| k.to_string()),
     );
+    // Put back by the reviewer and not ruled on since.
+    held.extend(
+        camerata_api_types::decisions::restored_undecided_keys(active)
+            .into_iter()
+            .map(str::to_string),
+    );
+    held.extend(engine_check_holds(active));
     held
+}
+
+/// The rows the Engine Check's pending No holds from the client export. THE PLACE for that hold:
+/// the Engine Check (WO11) records a No on a row with no correction yet, and this function
+/// returns that row's key until a correction or a decision is recorded. Until the Engine Check
+/// exists nothing writes such a record, so this holds nothing.
+fn engine_check_holds(_active: &[Decision]) -> Vec<String> {
+    Vec::new()
+}
+
+/// The keys of the findings the reviewer put back after the engine threw them out, for the
+/// throw-out steps to skip ([`crate::engine_discard::RestoredKeys`]).
+pub fn restored_keys_of(records: &[Decision]) -> crate::engine_discard::RestoredKeys {
+    crate::engine_discard::RestoredKeys::from_keys(camerata_api_types::decisions::restored_keys(
+        records,
+    ))
 }
 
 /// The time a queued change was decided at when it is a real RFC3339 time, otherwise `now`.

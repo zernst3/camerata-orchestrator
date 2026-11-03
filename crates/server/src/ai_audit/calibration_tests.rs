@@ -910,7 +910,11 @@ fn a_real_no_verdict_keeps_the_row_with_no_discard_mark_or_discard_shaped_text()
         .contains("Discard"));
     // The step that marks model-invented rows the model's own text says to discard reads the
     // row's explanation and headline only, never the stage 1 record, so it marks neither.
-    let marked = mark_discarded_invented_rows("acme/app", &mut rows);
+    let marked = mark_discarded_invented_rows(
+        "acme/app",
+        &mut rows,
+        &crate::engine_discard::RestoredKeys::default(),
+    );
     assert_eq!(marked, 0, "a real: no verdict throws nothing out");
     assert_eq!(rows.len(), 2, "both sites stay in findings");
     assert!(
@@ -923,6 +927,31 @@ fn a_real_no_verdict_keeps_the_row_with_no_discard_mark_or_discard_shaped_text()
     }
     assert!(BOOKKEEPING_CAPTURE_KEYS.contains(&crate::review_flags::REVIEW_FLAGS_CAPTURE));
     assert!(BOOKKEEPING_CAPTURE_KEYS.contains(&crate::junk_finding::JUNK_CONTENT_CAPTURE));
+}
+
+/// A12 item 2: a model-invented row the reviewer put back is never marked again, however its text
+/// reads, and the step still marks the rows nobody restored.
+#[test]
+fn a_restored_invented_row_is_not_marked_thrown_out_again() {
+    let discard_shaped = |path: &str| Finding {
+        repo: "acme/app".to_string(),
+        path: path.to_string(),
+        line: 3,
+        rule_id: "AI-NOTE".to_string(),
+        severity: "low".to_string(),
+        snippet: format!("db.query({path})"),
+        detail: "A title \u{2014} Discard this finding.".to_string(),
+        ..Finding::default()
+    };
+    let restored_row = discard_shaped("src/restored.rs");
+    let other = discard_shaped("src/other.rs");
+    let key = crate::report_export::finding_key(&restored_row);
+    let restored = crate::engine_discard::RestoredKeys::from_keys([key.as_str()]);
+    let mut rows = vec![restored_row, other];
+    let marked = mark_discarded_invented_rows("acme/app", &mut rows, &restored);
+    assert_eq!(marked, 1, "only the row nobody restored is marked");
+    assert!(!crate::engine_discard::is_discarded(&rows[0]));
+    assert!(crate::engine_discard::is_discarded(&rows[1]));
 }
 
 // ── One call per site must not re-pay for the instructions ─────────────────────────────────

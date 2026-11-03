@@ -17,8 +17,9 @@ use axum::Json;
 
 use super::{
     apply_to, disposition_state, translate_draft, Decision, DecisionCtx, DecisionError,
-    DecisionRecorded, DecisionStoreError, DecisionsResp, DraftDisposition, MigrateDraftReq,
-    MigrationOutcome, NewDecisionReq, PostDecisionsReq, RevokeReq, RevokeResp, Scope, MIGRATED_BY,
+    DecisionRecorded, DecisionState, DecisionStoreError, DecisionsResp, DraftDisposition,
+    MigrateDraftReq, MigrationOutcome, NewDecisionReq, PostDecisionsReq, RevokeReq, RevokeResp,
+    Scope, MIGRATED_BY,
 };
 use crate::AppState;
 
@@ -43,13 +44,15 @@ fn store_refusal(e: &DecisionStoreError) -> Response {
         DecisionStoreError::ReasonRequired(_)
         | DecisionStoreError::KeyRequired
         | DecisionStoreError::MergeTargetInvalid
-        | DecisionStoreError::NodeMerge => StatusCode::UNPROCESSABLE_ENTITY,
+        | DecisionStoreError::NodeMerge
+        | DecisionStoreError::AckNeedsWho => StatusCode::UNPROCESSABLE_ENTITY,
         DecisionStoreError::UnknownNode(_) | DecisionStoreError::NotFound(_) => {
             StatusCode::NOT_FOUND
         }
-        DecisionStoreError::EmptyNode(_) | DecisionStoreError::AlreadyRevoked(_) => {
-            StatusCode::CONFLICT
-        }
+        DecisionStoreError::EmptyNode(_)
+        | DecisionStoreError::AlreadyRevoked(_)
+        | DecisionStoreError::AckNeedsIgnored(_)
+        | DecisionStoreError::AlreadyAcknowledged(_) => StatusCode::CONFLICT,
         DecisionStoreError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
         DecisionStoreError::Corrupt => StatusCode::SERVICE_UNAVAILABLE,
     };
@@ -172,6 +175,24 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
     let Some(latest) = state.inspections.latest(id) else {
         return no_inspection();
     };
+    // Putting back a finding is only for a finding the engine threw out: there must be a row
+    // under that key in the inspection's thrown-out list (A12 item 2).
+    if req.state == DecisionState::EngineRestored {
+        let thrown_out = matches!(req.scope, Scope::Site)
+            && latest
+                .report
+                .discarded
+                .iter()
+                .any(|f| f.site_key == req.key.trim());
+        if !thrown_out {
+            return refusal(
+                StatusCode::CONFLICT,
+                "not_thrown_out",
+                "Only a finding the engine threw out can be put back, and this one is not in the \
+                 inspection's thrown-out list.",
+            );
+        }
+    }
     let when = now();
     let ctx = DecisionCtx {
         run_id: &latest.id,

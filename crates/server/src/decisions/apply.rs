@@ -170,6 +170,7 @@ fn blank(key: &str) -> SiteStanding {
 
 /// The release gate's question, answered from the store: has the reviewer decided this row? A
 /// row is decided when a decision applies to its site key. The gate does not read this yet.
+#[derive(Debug, Clone)]
 pub struct StoreDecisions {
     decided: HashSet<String>,
 }
@@ -177,8 +178,13 @@ pub struct StoreDecisions {
 impl StoreDecisions {
     /// The decided keys of `project_id` as of now.
     pub fn for_project(store: &DecisionStore, project_id: &str) -> Self {
-        let all = store.active(project_id);
-        let decided = effective_by_key(&all)
+        Self::from_records(&store.active(project_id))
+    }
+
+    /// The decided keys of `records` (revoked ones are ignored). A restore of a thrown-out
+    /// finding decides nothing; a merge does.
+    pub fn from_records(records: &[Decision]) -> Self {
+        let decided = effective_by_key(records)
             .keys()
             .map(|k| (*k).to_string())
             .collect();
@@ -211,25 +217,25 @@ pub struct DispositionDisagreement {
 }
 
 /// The dispositions an export should use. For one release the export request still carries
-/// `dispositions`. The store's records win for every key the store has one for; the request's
-/// disposition is used only for a key the store has no live record for (the UI's changes that
-/// have not been stored yet). Every key both decided differently is reported.
+/// `dispositions`, for an older client: they are used only while the store holds no live record
+/// for the project. Once it does, the decisions come from the store only, a key the store has no
+/// record for is undecided, and every key both decided differently is reported.
 pub fn effective_dispositions(
     store: &DecisionStore,
     project_id: &str,
     from_request: &HashMap<String, DispositionWire>,
 ) -> EffectiveDispositions {
     let all = store.active(project_id);
-    let from_store: HashMap<String, DispositionWire> = effective_by_key(&all)
-        .into_iter()
-        .filter_map(|(key, d)| wire_of(d).map(|w| (key.to_string(), w)))
-        .collect();
-    // The store first; the request's disposition only for a key the store has no record for.
-    let mut map = from_request.clone();
-    // A key the store holds a merge for has no wire disposition but is not "unknown" to it.
+    let from_store = wire_dispositions(&all);
+    // Once the store holds a live record, the decisions are the store's alone: a key the store
+    // has no record for (or revoked) is undecided, whatever an older client's request says. The
+    // request's own dispositions are read only while the store holds nothing for the project.
     let store_keys: HashSet<&str> = effective_by_key(&all).into_keys().collect();
-    map.retain(|k, _| !store_keys.contains(k.as_str()));
-    map.extend(from_store.clone());
+    let map = if all.iter().any(Decision::is_active) {
+        from_store.clone()
+    } else {
+        from_request.clone()
+    };
 
     // A disagreement is a key both sides decided, differently.
     let mut keys: Vec<&String> = from_store.keys().collect();
@@ -276,6 +282,16 @@ impl EffectiveDispositions {
     }
 }
 
+/// The dispositions the exporters read, by site key, from decision records (revoked ones are
+/// ignored). A merge and a restore have no wire disposition: the overlay gives a merged row its
+/// pointer, and a restore decides nothing.
+pub fn wire_dispositions(records: &[Decision]) -> HashMap<String, DispositionWire> {
+    effective_by_key(records)
+        .into_iter()
+        .filter_map(|(key, d)| wire_of(d).map(|w| (key.to_string(), w)))
+        .collect()
+}
+
 /// A disposition as the export reads a decision: its state, and the bucket when it is tech debt.
 /// `None` for an entry that is not a decision (Unresolved, empty or unknown).
 fn decision_label(w: &DispositionWire) -> Option<(String, String)> {
@@ -302,7 +318,7 @@ fn wire_of(d: &Decision) -> Option<DispositionWire> {
         DecisionState::FalsePositive => ("FalsePositive", "Later"),
         DecisionState::TechDebtNow => ("TechDebt", "Now"),
         DecisionState::TechDebtLater => ("TechDebt", "Later"),
-        DecisionState::MergedInto(_) => return None,
+        DecisionState::MergedInto(_) | DecisionState::EngineRestored => return None,
     };
     Some(DispositionWire {
         state: state.to_string(),

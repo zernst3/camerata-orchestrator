@@ -68,13 +68,35 @@ pub enum TriageState {
     Ignored,
     TechDebt,
     FalsePositive,
+    /// MERGED INTO ANOTHER FINDING (review-tree design 5.1, WO8): the curator ruled this row the
+    /// same problem as another row. The row is kept and exports with a pointer ("Merged into
+    /// <target>"); nothing is deleted.
+    ///
+    /// ### Where the target lives
+    ///
+    /// Not here. This enum is `Copy` and a disposition holds only a state, a reason and a bucket;
+    /// the target site is stored by the server with the decision
+    /// (`DecisionState::MergedInto(target)`, written by `POST /api/projects/:id/merge`). The
+    /// screen's state names the row as merged; the server's record says into what.
+    ///
+    /// ### Why it is not one of [`TriageState::all`]
+    ///
+    /// `all()` is the set of triage TABLES a row is filed into by a gesture on the row. A merge
+    /// is not filed into a table: it needs a second site, picked on the merge screen, so there is
+    /// no table to put it in. It is decided (the Process gate does not block on it), needs a
+    /// reason (it claims the two rows are one problem) and has no hotkey.
+    MergedInto,
 }
 
 /// The names serde writes for the variants (unit variants are written by NAME), for reading a
 /// draft leniently ([`crate::lenient`]). A test pins this to what serde actually writes.
 impl crate::lenient::WireEnum for TriageState {
     fn from_wire(name: &str) -> Option<Self> {
-        Self::all().into_iter().find(|s| s.wire_name() == name)
+        // `MergedInto` is not one of the tables ([`TriageState::all`]) but a draft may name it.
+        Self::all()
+            .into_iter()
+            .chain([Self::MergedInto])
+            .find(|s| s.wire_name() == name)
     }
 }
 
@@ -86,6 +108,7 @@ impl TriageState {
             Self::Ignored => "Ignored",
             Self::TechDebt => "TechDebt",
             Self::FalsePositive => "FalsePositive",
+            Self::MergedInto => "MergedInto",
         }
     }
 
@@ -96,6 +119,7 @@ impl TriageState {
             Self::Ignored => "Ignored",
             Self::TechDebt => "Tech debt",
             Self::FalsePositive => "False positive",
+            Self::MergedInto => "Merged",
         }
     }
 
@@ -138,7 +162,8 @@ impl TriageState {
     /// dropping it would be cheapest and least visible, which is exactly why the rule is the
     /// enum's own answer rather than a condition repeated at each gesture.
     pub fn requires_reason(self) -> bool {
-        matches!(self, Self::Ignored | Self::FalsePositive)
+        // A merge claims two rows are one problem, and the report has to say why.
+        matches!(self, Self::Ignored | Self::FalsePositive | Self::MergedInto)
     }
 }
 
@@ -1238,6 +1263,18 @@ impl TriageModel {
         }
     }
 
+    /// Mark each finding as MERGED into another: set state = MergedInto AND record the
+    /// (required) reason together, mirroring `ignore`'s require-reason invariant. The target
+    /// site is not held here (see [`TriageState::MergedInto`]): the server stores it with the
+    /// decision when the merge route is called.
+    pub fn merge(&mut self, findings: &[FindingView], reason: &str) {
+        for f in findings {
+            let e = self.dispositions.entry(finding_key(f)).or_default();
+            e.state = TriageState::MergedInto;
+            e.reason = reason.to_string();
+        }
+    }
+
     /// Bucket each tech-debt finding (resolve later / now). Leaves the state unchanged; only the
     /// Bucket flag moves.
     pub fn set_bucket(&mut self, findings: &[FindingView], bucket: TechDebtBucket) {
@@ -1305,6 +1342,7 @@ impl TriageModel {
                 TriageState::Ignored => counts.ignored += 1,
                 TriageState::TechDebt => counts.tech_debt += 1,
                 TriageState::FalsePositive => counts.false_positive += 1,
+                TriageState::MergedInto => counts.merged += 1,
             }
         }
         counts
@@ -1326,6 +1364,9 @@ pub struct TriageCounts {
     pub ignored: usize,
     pub tech_debt: usize,
     pub false_positive: usize,
+    /// Rows merged into another row. Decided, so never outstanding; not a triage table (see
+    /// [`TriageState::MergedInto`]).
+    pub merged: usize,
 }
 
 impl TriageCounts {
@@ -1339,12 +1380,18 @@ impl TriageCounts {
             TriageState::Ignored => self.ignored,
             TriageState::TechDebt => self.tech_debt,
             TriageState::FalsePositive => self.false_positive,
+            TriageState::MergedInto => self.merged,
         }
     }
 
     /// Every row counted.
     pub fn total(self) -> usize {
-        self.unresolved + self.confirmed + self.ignored + self.tech_debt + self.false_positive
+        self.unresolved
+            + self.confirmed
+            + self.ignored
+            + self.tech_debt
+            + self.false_positive
+            + self.merged
     }
 
     /// Rows the curator has NOT decided yet — the ONLY thing the Process gate blocks on.
@@ -1618,6 +1665,8 @@ pub fn state_hotkey(state: TriageState) -> Option<&'static str> {
         TriageState::Ignored => Some("i"),
         TriageState::TechDebt => Some("t"),
         TriageState::FalsePositive => Some("f"),
+        // A merge needs a second site, picked on the merge screen: no key reaches it.
+        TriageState::MergedInto => None,
     }
 }
 
@@ -1852,6 +1901,7 @@ impl TriageModel {
             TriageState::Confirmed => self.confirm(rows),
             TriageState::Ignored => self.ignore(rows, reason),
             TriageState::FalsePositive => self.mark_false_positive(rows, reason),
+            TriageState::MergedInto => self.merge(rows, reason),
             other => self.move_to(rows, other),
         }
         Some(UndoEntry {
@@ -2181,6 +2231,91 @@ mod tests {
         assert_eq!(m.state_of(&item), TriageState::Unresolved);
     }
 
+    // ── WO8: MergedInto ───────────────────────────────────────────────────────
+
+    /// A merge is a decision (the Process gate does not wait on it), claims two rows are one
+    /// problem (so it needs a reason), and no key reaches it: it needs a second site.
+    #[test]
+    fn a_merge_is_decided_needs_a_reason_and_has_no_hotkey() {
+        let merged = TriageState::MergedInto;
+        assert!(merged.is_decided());
+        assert!(merged.requires_reason());
+        assert_eq!(state_hotkey(merged), None);
+        assert_eq!(merged.label(), "Merged");
+        // The keyboard cannot reach it, in any case.
+        for key in ["m", "M"] {
+            assert_eq!(pane_command(PaneFocus::Cursor, key, KeyMods::none()), None);
+        }
+        // It is not a table a row is filed into by a gesture on the row.
+        assert!(!TriageState::all().contains(&merged));
+    }
+
+    #[test]
+    fn merging_records_the_reason_with_the_state_and_undo_puts_the_row_back() {
+        let mut m = TriageModel::new();
+        let item = f("r", 1, "low", "active");
+        // No reason: refused, nothing written, no undo offered.
+        assert!(m
+            .dispose_with_undo(
+                std::slice::from_ref(&item),
+                TriageState::MergedInto,
+                "  ",
+                0
+            )
+            .is_none());
+        assert_eq!(m.state_of(&item), TriageState::Unresolved);
+
+        let mut undo = m
+            .dispose_with_undo(
+                std::slice::from_ref(&item),
+                TriageState::MergedInto,
+                "the same unsafe read as the row above",
+                0,
+            )
+            .expect("a merge with a reason applies");
+        assert_eq!(m.state_of(&item), TriageState::MergedInto);
+        let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
+        assert_eq!(d.reason, "the same unsafe read as the row above");
+        assert_eq!(undo.message, "Marked 1 finding as Merged.");
+        assert_eq!(m.undo(&mut undo, 1_000), UndoOutcome::Reverted(1));
+        assert_eq!(m.state_of(&item), TriageState::Unresolved);
+    }
+
+    #[test]
+    fn merged_rows_are_tallied_apart_and_are_never_outstanding() {
+        let mut m = TriageModel::new();
+        let a = f("r", 1, "low", "active");
+        let b = f("r", 2, "low", "active");
+        let c = f("r", 3, "low", "active");
+        m.merge(std::slice::from_ref(&b), "same cause");
+        m.confirm(std::slice::from_ref(&c));
+        let counts = m.counts(&[a, b, c]);
+        assert_eq!(counts.merged, 1);
+        assert_eq!(counts.unresolved, 1);
+        assert_eq!(counts.confirmed, 1);
+        assert_eq!(counts.of(TriageState::MergedInto), 1);
+        assert_eq!(counts.total(), 3, "every row is counted once");
+        assert_eq!(counts.outstanding(), 1, "a merged row is decided");
+    }
+
+    #[test]
+    fn the_merged_state_round_trips_the_draft_and_the_lenient_reader() {
+        use crate::lenient::WireEnum;
+        let d = Disposition {
+            state: TriageState::MergedInto,
+            reason: "same cause".to_string(),
+            bucket: TechDebtBucket::Later,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"MergedInto\""), "{json}");
+        let back: Disposition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(
+            TriageState::from_wire("MergedInto"),
+            Some(TriageState::MergedInto)
+        );
+    }
+
     #[test]
     fn ignore_sets_state_and_reason_together() {
         let mut m = TriageModel::new();
@@ -2261,6 +2396,7 @@ mod tests {
                 ignored: 1,
                 tech_debt: 1,
                 false_positive: 1,
+                merged: 0,
             }
         );
         assert_eq!(m.counts(&all).total(), 5);
