@@ -1369,6 +1369,7 @@ impl LlmPort for Fixed {
 const GOOD_STAGE2_REPLY: &str = r#"{"summary":"s","subgroups":[{"label":"a","cause":"b","members":[0]}],"outliers":[],"escalations":[],"disagreements":[]}"#;
 
 #[test]
+#[serial_test::serial(process_env)]
 fn a_group_review_pass_name_maps_to_the_group_review_part() {
     assert_eq!(
         PartKind::of_pass_name("group review"),
