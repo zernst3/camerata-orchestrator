@@ -1092,6 +1092,40 @@ async fn every_runtime_row_passes_the_evidence_check() {
 }
 
 #[tokio::test]
+async fn a_scan_holds_a_runtime_row_whose_declaration_is_not_at_its_line() {
+    let dir = repo(&THREE_FILES);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    assert_eq!(eol_findings(&audit).len(), 3);
+    // The Dockerfile no longer declares the version where the row says it does.
+    std::fs::write(
+        dir.path().join("Dockerfile"),
+        "# nothing declared here\nFROM scratch\n",
+    )
+    .unwrap();
+    let mut report = empty_report();
+    fold_runtime_audit(
+        &mut report,
+        &[("acme/app".to_string(), dir.path().to_path_buf())],
+        audit,
+        0,
+    );
+    let held: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| {
+            f.captures
+                .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+        })
+        .collect();
+    assert_eq!(held.len(), 1, "{:?}", report.findings);
+    assert_eq!(held[0].path, "Dockerfile");
+    let counts = report.ledger.evidence_check();
+    assert_eq!(counts.checked, report.findings.len(), "{counts:?}");
+    assert_eq!((counts.verified, counts.unverified), (2, 1), "{counts:?}");
+    assert!(counts.reconciles());
+}
+
+#[tokio::test]
 async fn the_ledger_stage_for_a_multi_site_finding_reconciles() {
     let dir = repo(&THREE_FILES);
     let audit = run(&dir, &Fixture::online(), None).await;

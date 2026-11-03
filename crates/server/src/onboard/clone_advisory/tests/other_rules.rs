@@ -169,6 +169,17 @@ async fn module_rollup_finding_lists_every_pair() {
     );
     assert!(f.detail.contains("Keep one module"), "{}", f.detail);
     assert_eq!(outcome.findings.len(), 4, "four function sites: four rows");
+    let mut paths: Vec<&str> = outcome.findings.iter().map(|r| r.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        [
+            "lib/format.ts",
+            "lib/format.ts",
+            "utils/format.ts",
+            "utils/format.ts"
+        ]
+    );
     assert!(outcome.findings.iter().all(|r| r.also_locations.is_empty()));
     let sent = &stub.request(0).prompt;
     assert!(
@@ -251,6 +262,16 @@ async fn same_mechanism_verdict_becomes_a_low_finding_counting_components() {
         .detail
         .contains("Make it one hook or component in the shared UI module"));
     assert!(outcome.findings.iter().all(|r| r.also_locations.is_empty()));
+    let mut paths: Vec<&str> = outcome.findings.iter().map(|r| r.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        [
+            "app/(shop)/Carts.tsx",
+            "components/Orders.tsx",
+            "features/filters/Invoices.tsx"
+        ]
+    );
     assert_eq!(
         f.captures.get("mechanism").map(String::as_str),
         Some("the loading spinner")
@@ -298,6 +319,21 @@ async fn one_scan_asks_each_armed_rule_its_own_question() {
         by_rule(CloneRule::SharedPrimitive),
         3,
         "one candidate, three components, three rows"
+    );
+    let mut ui_paths: Vec<&str> = outcome
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == CloneRule::SharedPrimitive.id())
+        .map(|f| f.path.as_str())
+        .collect();
+    ui_paths.sort_unstable();
+    assert_eq!(
+        ui_paths,
+        [
+            "app/(shop)/Carts.tsx",
+            "components/Orders.tsx",
+            "features/filters/Invoices.tsx"
+        ]
     );
     assert_eq!(by_rule(CloneRule::NamingOneConcept), 0);
     assert_eq!(

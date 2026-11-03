@@ -342,21 +342,9 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Test-only files by name: a `tests` directory, a `*tests.rs` file or a test-support module.
-fn is_test_file(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    text.contains("/tests/")
-        || name.ends_with("tests.rs")
-        || name.ends_with("_test.rs")
-        || name == "test_support.rs"
-}
-
-/// The files `source` (at `path`) declares as test-only modules: `#[cfg(test)] mod name;`.
-fn cfg_test_modules(path: &Path, source: &str) -> Vec<PathBuf> {
+/// The out-of-line modules `source` (at `path`) declares, as `(gated, files)`: `gated` is true when
+/// the declaration is under `#[cfg(test)]`, and `files` are the paths the module may live at.
+fn declared_modules(path: &Path, source: &str) -> Vec<(bool, Vec<PathBuf>)> {
     let lines: Vec<&str> = source.lines().collect();
     let stem = path
         .file_stem()
@@ -370,27 +358,92 @@ fn cfg_test_modules(path: &Path, source: &str) -> Vec<PathBuf> {
         dir.join(&stem)
     };
     let mut out = Vec::new();
+    // The inline modules the line sits in: (indent, name, whether it is `#[cfg(test)]`).
+    let mut open: Vec<(usize, String, bool)> = Vec::new();
+    let attrs_above = |i: usize| {
+        let mut j = i;
+        let mut attrs = Vec::new();
+        while j > 0 && lines[j - 1].trim_start().starts_with("#[") {
+            j -= 1;
+            attrs.push(lines[j].trim());
+        }
+        attrs
+    };
     for (i, line) in lines.iter().enumerate() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            continue;
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        if trimmed.starts_with('}') {
+            while open.last().is_some_and(|(at, _, _)| *at >= indent) {
+                open.pop();
+            }
         }
-        let mut j = i + 1;
-        while j < lines.len() && lines[j].trim_start().starts_with("#[") {
-            j += 1;
-        }
-        let Some(decl) = lines.get(j).map(|l| l.trim()) else {
+        let bare = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+        let Some(rest) = bare.strip_prefix("mod ") else {
             continue;
         };
-        let decl = decl
-            .strip_prefix("pub(crate) ")
-            .or_else(|| decl.strip_prefix("pub "))
-            .unwrap_or(decl);
-        if let Some(name) = decl.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) {
-            out.push(home.join(format!("{}.rs", name.trim())));
-            out.push(home.join(name.trim()).join("mod.rs"));
+        let attrs = attrs_above(i);
+        let own_gate = attrs.iter().any(|a| a.starts_with("#[cfg(test)]"));
+        if let Some(name) = rest.strip_suffix('{') {
+            open.push((indent, name.trim().to_string(), own_gate));
+            continue;
         }
+        let Some(name) = rest.strip_suffix(';') else {
+            continue;
+        };
+        let name = name.trim().to_string();
+        let gated = own_gate || open.iter().any(|(_, _, g)| *g);
+        let mut folder = home.clone();
+        for (_, inline, _) in &open {
+            folder = folder.join(inline);
+        }
+        let explicit = attrs.iter().find_map(|a| {
+            a.strip_prefix("#[path = \"")
+                .and_then(|r| r.strip_suffix("\"]"))
+                .map(|f| dir.join(f))
+        });
+        let files = match explicit {
+            Some(file) => vec![file],
+            None => vec![
+                folder.join(format!("{name}.rs")),
+                folder.join(&name).join("mod.rs"),
+            ],
+        };
+        out.push((gated, files));
     }
     out
+}
+
+/// The files that exist only under `#[cfg(test)]`: a module declared `#[cfg(test)]` where it is
+/// declared, and every module those files declare in turn. A file is never test-only because of
+/// what it is called or where it sits.
+fn test_only_files(sources: &[(PathBuf, String)]) -> BTreeSet<PathBuf> {
+    let text_of: std::collections::BTreeMap<&Path, &str> = sources
+        .iter()
+        .map(|(p, t)| (p.as_path(), t.as_str()))
+        .collect();
+    let mut test_only: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut work: Vec<PathBuf> = Vec::new();
+    for (path, text) in sources {
+        for (gated, files) in declared_modules(path, text) {
+            if gated {
+                work.extend(files);
+            }
+        }
+    }
+    while let Some(file) = work.pop() {
+        if !test_only.insert(file.clone()) {
+            continue;
+        }
+        if let Some(text) = text_of.get(file.as_path()) {
+            for (_, children) in declared_modules(&file, text) {
+                work.extend(children);
+            }
+        }
+    }
+    test_only
 }
 
 /// Lines that copy a row's `also_locations` into a view of it for an exporter. They read the
@@ -419,13 +472,16 @@ fn no_producer_source_writes_also_locations() {
         .iter()
         .map(|p| (p.clone(), std::fs::read_to_string(p).unwrap()))
         .collect();
-    let test_modules: BTreeSet<PathBuf> = sources
-        .iter()
-        .flat_map(|(p, text)| cfg_test_modules(p, text))
-        .collect();
+    let test_only = test_only_files(&sources);
+    assert!(
+        test_only
+            .iter()
+            .any(|p| p.ends_with("clone_advisory/tests/mod.rs")),
+        "the scan found the gated test modules"
+    );
     let mut offences = Vec::new();
     for (path, source) in &sources {
-        if is_test_file(path) || test_modules.contains(path) {
+        if test_only.contains(path) {
             continue;
         }
         for (line, text) in producer_writes(source, ALLOWED) {
@@ -487,4 +543,21 @@ fn late() {
 }
 ";
     assert_eq!(producer_writes(after_tests, &[]).len(), 1);
+}
+
+#[test]
+fn a_file_is_test_only_only_when_it_is_gated_where_it_is_declared() {
+    let root = PathBuf::from("/src");
+    let lib = (
+        root.join("lib.rs"),
+        "mod export_tests;\n#[cfg(test)]\nmod gated;\n#[cfg(test)]\nmod outer {\n    mod inner;\n}\n"
+            .to_string(),
+    );
+    let gated = (root.join("gated.rs"), "mod child;\n".to_string());
+    let only = test_only_files(&[lib, gated]);
+    // A name that says "tests" proves nothing when the declaration is not gated.
+    assert!(!only.contains(&root.join("export_tests.rs")));
+    assert!(only.contains(&root.join("gated.rs")));
+    assert!(only.contains(&root.join("gated/child.rs")));
+    assert!(only.contains(&root.join("outer/inner.rs")));
 }

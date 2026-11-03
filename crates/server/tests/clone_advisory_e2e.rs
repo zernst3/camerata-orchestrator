@@ -866,6 +866,12 @@ async fn ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_
     );
     assert!(f.detail.contains("apart from variable names and strings"));
     assert!(ui.iter().all(|r| r.also_locations.is_empty()));
+    let mut ui_paths: Vec<&str> = ui.iter().map(|r| r.path.as_str()).collect();
+    ui_paths.sort_unstable();
+    assert_eq!(
+        ui_paths,
+        ["src/forms/CityForm.jsx", "src/forms/NameForm.jsx"]
+    );
     assert!(!f.detail.contains('\u{2014}'));
     assert_eq!(
         f.captures.get("mechanism").map(String::as_str),

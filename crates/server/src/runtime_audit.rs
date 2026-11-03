@@ -907,7 +907,42 @@ pub async fn run_runtime_audit(report: &mut ScanReport, sources: &[(String, Path
             }
         }
     };
-    report.findings.extend(outcome.findings);
+    fold_runtime_audit(report, sources, outcome, rows_in);
+}
+
+/// Add one pass's outcome to `report`: its rows, notes, feed stamps and ledger stage.
+/// `rows_in` is the report's row count before the pass.
+fn fold_runtime_audit(
+    report: &mut ScanReport,
+    sources: &[(String, PathBuf)],
+    outcome: RuntimeAudit,
+    rows_in: usize,
+) {
+    // M5: the rows join the report after each repo's own evidence check has run, so they get
+    // the same check here, repo by repo, with the same window and the same ledger tally. The
+    // files are read from the repo folder.
+    let mut rows = outcome.findings;
+    for (repo, dir) in sources {
+        let mut mine: Vec<Finding> = Vec::new();
+        let mut rest: Vec<Finding> = Vec::new();
+        for f in rows {
+            if f.repo == *repo {
+                mine.push(f);
+            } else {
+                rest.push(f);
+            }
+        }
+        crate::onboard::evidence_check::verify_and_record(
+            &mut report.ledger,
+            &mut mine,
+            &[],
+            Some(dir),
+        );
+        report.findings.extend(mine);
+        rows = rest;
+    }
+    // A row for a repo not among the sources cannot be opened; it is kept unchecked.
+    report.findings.extend(rows);
     report.coverage_notes.extend(outcome.notes);
     let mut stamp = report
         .provenance
