@@ -417,6 +417,11 @@ pub struct StageLedgerEntry {
     #[serde(default)]
     pub added: Vec<(String, usize)>,
     pub unaccounted: usize,
+    /// The model this stage ran on, resolved (never the caller's raw pick), for a stage that makes
+    /// model calls: stage 1 calibration records it here. `None` for a stage with no model call or
+    /// a ledger written before stages named their model. `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl StageLedgerEntry {
@@ -1589,6 +1594,7 @@ impl ScanLedger {
             other: accounting.other,
             added: accounting.added,
             unaccounted,
+            model: None,
         });
         self.stages.last().expect("just pushed")
     }
@@ -2037,16 +2043,24 @@ pub struct StageSample {
     pub rows_in: usize,
     pub rows_out: usize,
     pub accounting: StageAccounting,
+    /// The resolved model the stage ran on, when it made model calls (see
+    /// [`StageLedgerEntry::model`]).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl ScanLedger {
     pub fn record_stage_sample(&mut self, sample: StageSample) -> &StageLedgerEntry {
+        let model = sample.model;
         self.record_stage(
             sample.stage,
             sample.rows_in,
             sample.rows_out,
             sample.accounting,
-        )
+        );
+        let entry = self.stages.last_mut().expect("just pushed");
+        entry.model = model;
+        entry
     }
 }
 

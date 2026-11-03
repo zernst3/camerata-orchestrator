@@ -89,6 +89,7 @@ pub fn consensus_findings(passes: &[Vec<Finding>], quorum: usize) -> (Vec<Findin
             other: vec![("consensus_minority_dropped".to_string(), minority_dropped)],
             ..StageAccounting::default()
         },
+        model: None,
     };
     (kept, sample)
 }

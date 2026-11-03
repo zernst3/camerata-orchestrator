@@ -131,7 +131,6 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             mode,
             &models,
             RunFlags {
-                thorough: false,
                 deep: false,
                 backend: inputs.backend,
                 terse_output: inputs.terse_output,

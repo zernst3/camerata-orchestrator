@@ -243,8 +243,7 @@ async fn calibration_frames_each_findings_evidence() {
         None,
         None,
         None,
-        false,
-        "",
+        &Stage1Inputs::new(""),
     )
     .await;
     let reqs = stub.requests();
@@ -339,8 +338,7 @@ async fn every_audit_verify_calibration_fix_and_regeneration_call_carries_the_sh
         None,
         None,
         None,
-        false,
-        "",
+        &Stage1Inputs::new(""),
     )
     .await;
     let fix_stub = Recorder::new(

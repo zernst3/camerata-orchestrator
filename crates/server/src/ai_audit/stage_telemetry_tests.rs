@@ -159,8 +159,7 @@ async fn calibration_is_recorded_under_the_calibration_stage() {
         None,
         None,
         Some(&meter),
-        false,
-        "",
+        &Stage1Inputs::new(""),
     )
     .await;
     assert_eq!(stages_seen(&meter), vec![Stage::Calibration]);
@@ -295,7 +294,7 @@ struct CutOffCalibration;
 impl LlmPort for CutOffCalibration {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: r#"{"verdicts":[{"index":0,"sever"#.to_string(),
+            text: r#"{"severity":"hi"#.to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
             cost_usd: Some(0.5),
@@ -321,8 +320,8 @@ impl LlmPort for CutOffCalibration {
 
 #[tokio::test]
 async fn cut_off_calibration_replies_that_answered_nothing_are_all_wasted_calls() {
-    // Three chunks of findings, each answered with a reply cut off at the output limit: none
-    // produced a verdict, so all three calls bought nothing.
+    // Every site answered with a reply cut off at the output limit: none produced a verdict, so
+    // every call bought nothing.
     let findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE * 2 + 1)
         .map(|i| {
             let mut f = fixture_finding();
@@ -338,16 +337,15 @@ async fn cut_off_calibration_replies_that_answered_nothing_are_all_wasted_calls(
         None,
         None,
         Some(&meter),
-        false,
-        "",
+        &Stage1Inputs::new(""),
     )
     .await;
     assert_eq!(out.len(), findings.len(), "no finding is dropped");
     let usage = usage_of(&meter, Stage::Calibration);
-    // Each cut-off reply answered nothing, so its whole chunk is asked again once (P8) and that
-    // re-ask is cut off too: three chunks, six calls, and every one of them bought nothing.
-    assert_eq!(usage.calls, 6);
-    assert_eq!(usage.wasted_calls, 6, "{usage:?}");
+    // Each cut-off reply answered nothing, so its site is asked again once (P8) and that re-ask is
+    // cut off too: two calls per site, and every one of them bought nothing.
+    assert_eq!(usage.calls, 2 * findings.len() as u64);
+    assert_eq!(usage.wasted_calls, 2 * findings.len() as u64, "{usage:?}");
     assert_eq!(usage.wasted_input_tokens, usage.input_tokens);
     assert_eq!(usage.wasted_output_tokens, usage.output_tokens);
 }
@@ -355,8 +353,7 @@ async fn cut_off_calibration_replies_that_answered_nothing_are_all_wasted_calls(
 #[tokio::test]
 async fn a_complete_calibration_reply_is_not_counted_as_waste() {
     let llm = UsageStub {
-        text: r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"x"}]}"#
-            .to_string(),
+        text: r#"{"severity":"high","real":"yes","effort":"low","reason":"x"}"#.to_string(),
     };
     let meter = UsageMeter::default();
     let _ = verify_findings(
@@ -366,8 +363,7 @@ async fn a_complete_calibration_reply_is_not_counted_as_waste() {
         None,
         None,
         Some(&meter),
-        false,
-        "",
+        &Stage1Inputs::new(""),
     )
     .await;
     assert_eq!(usage_of(&meter, Stage::Calibration).wasted_calls, 0);

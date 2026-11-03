@@ -59,10 +59,8 @@ if "CONFORMANCE audit" in system:
         for p in labels if p != "repo map"
     ]
     out = {"findings": findings, "proposed_rules": [], "needs_files": []}
-elif "calibrating an automated audit" in system:
-    n = len([l for l in prompt.splitlines() if l.startswith("[") and "(severity" in l])
-    out = {"verdicts": [{"index": i, "severity": "medium", "confidence": "high",
-                         "reason": "checked", "effort": "low"} for i in range(n)]}
+elif "first reviewer of an automated audit" in system:
+    out = {"severity": "medium", "real": "yes", "reason": "checked", "effort": "low"}
 elif "ONE concrete, codebase-specific fix" in system:
     out = {"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
                      for l in labels if l.startswith("finding ")]}

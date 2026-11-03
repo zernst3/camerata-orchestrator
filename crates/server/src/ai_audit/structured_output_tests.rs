@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use super::reply_schemas::check::{limit_violations, violation};
 use super::reply_schemas::{
-    alternatives_reply_schema, calibration_reply_schema, detail_reply_schema, fix_reply_schema,
-    scan_reply_schema,
+    alternatives_reply_schema, detail_reply_schema, fix_reply_schema, scan_reply_schema,
+    stage1_reply_schema,
 };
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
@@ -73,7 +73,7 @@ pub(super) fn stage_of(req: &LlmRequest) -> &'static str {
         "detail"
     } else if system.starts_with("You write ONE concrete") {
         "fix"
-    } else if system.starts_with("You are calibrating") {
+    } else if system.starts_with("You are the first reviewer") {
         "calibration"
     } else if system.starts_with("You are a senior software architect helping") {
         "alternatives"
@@ -189,7 +189,7 @@ fn every_reply_schema_respects_the_apis_limits() {
     for (name, schema) in [
         ("scan", scan_reply_schema()),
         ("alternatives", alternatives_reply_schema()),
-        ("calibration", calibration_reply_schema(40)),
+        ("calibration", stage1_reply_schema()),
         ("detail", detail_reply_schema(&ids)),
         ("fix", fix_reply_schema(&ids)),
     ] {
@@ -243,18 +243,30 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
     assert!(!recs[0].hallucinated);
 
     // Calibration.
-    let cal = serde_json::json!({"verdicts": [{
-        "index": 0, "severity": "low", "confidence": "high", "effort": "low",
+    let cal = serde_json::json!({
+        "severity": "low", "real": "yes", "effort": "low",
         "category": "input-validation", "reason": "contained"
-    }]});
-    assert_eq!(violation(&calibration_reply_schema(3), &cal), None);
-    let out = apply_verdicts(&cal.to_string(), vec![finding("a.ts", 1, "d", "s")]);
+    });
+    assert_eq!(violation(&stage1_reply_schema(), &cal), None);
+    let out = apply_verdicts(
+        &serde_json::json!({"verdicts": [{
+            "index": 0, "severity": "low", "real": "yes", "effort": "low",
+            "category": "input-validation", "reason": "contained"
+        }]})
+        .to_string(),
+        vec![finding("a.ts", 1, "d", "s")],
+    );
     assert_eq!(out[0].effort.as_deref(), Some("low"));
-    // An index outside the batch is not a reply the schema allows.
-    let outside = serde_json::json!({"verdicts": [{
-        "index": 3, "severity": "low", "confidence": "high", "effort": "low", "reason": "x"
-    }]});
-    assert!(violation(&calibration_reply_schema(3), &outside).is_some());
+    // A `real` answer outside yes, no and unclear is not a reply the schema allows, and neither
+    // is the old confidence field.
+    let outside = serde_json::json!({
+        "severity": "low", "real": "maybe", "effort": "low", "reason": "x"
+    });
+    assert!(violation(&stage1_reply_schema(), &outside).is_some());
+    let old = serde_json::json!({
+        "severity": "low", "real": "yes", "confidence": "high", "effort": "low", "reason": "x"
+    });
+    assert!(violation(&stage1_reply_schema(), &old).is_some());
 
     // Detail.
     let ids = vec!["a1b2c3".to_string(), "d4e5f6".to_string()];
@@ -357,21 +369,30 @@ async fn the_alternatives_requests_carry_one_schema_for_every_batch() {
     }
 }
 
-/// Calibration sends a schema whose `index` enum is exactly the batch's positions.
+/// Calibration sends the per-site schema with every call: one request per site, each asking for
+/// one verdict object.
 #[tokio::test]
-async fn the_calibration_request_carries_the_batch_size_in_its_schema() {
+async fn the_calibration_request_carries_the_per_site_schema() {
     let llm = Recorder::new();
     let findings: Vec<Finding> = (1..=3)
         .map(|i| finding("src/work.ts", i, "d", "doWork(raw)"))
         .collect();
-    let _ = verify_findings(&llm, "o/r", findings, None, None, None, false, "").await;
+    let _ = verify_findings(
+        &llm,
+        "o/r",
+        findings,
+        None,
+        None,
+        None,
+        &Stage1Inputs::new(""),
+    )
+    .await;
     let reqs = llm.requests();
-    assert_eq!(reqs.len(), 1);
-    assert_eq!(stage_of(&reqs[0]), "calibration");
-    assert_eq!(reqs[0].response_schema, Some(calibration_reply_schema(3)));
-    let indices = &reqs[0].response_schema.as_ref().unwrap()["properties"]["verdicts"]["items"]
-        ["properties"]["index"]["enum"];
-    assert_eq!(indices, &serde_json::json!([0, 1, 2]));
+    assert_eq!(reqs.len(), 3, "one request per site");
+    for req in &reqs {
+        assert_eq!(stage_of(req), "calibration");
+        assert_eq!(req.response_schema, Some(stage1_reply_schema()));
+    }
 }
 
 /// D4: the detail schema has one REQUIRED property per id of the batch, so a reply that answers
@@ -648,7 +669,7 @@ fn the_tolerant_parsers_still_read_replies_the_schema_would_not_allow() {
     assert_eq!(f[0].line, 7);
     assert_eq!(f[0].severity, "high");
     let verdicts =
-        "```json\n{\"verdicts\":[{\"index\":0,\"severity\":\"low\",\"confidence\":\"low\"}]}\n```";
+        "```json\n{\"verdicts\":[{\"index\":0,\"severity\":\"low\",\"real\":\"unclear\"}]}\n```";
     let out = apply_verdicts(verdicts, vec![finding("a.ts", 1, "d", "s")]);
     assert_eq!(out[0].confidence.as_deref(), Some("needs-review"));
     let details = "{\"details\":[{\"id\":\"a1b2c3\",\"path\":\"p\",\"line\":1,\"detail\":\"Because.\"}]} trailing";

@@ -496,9 +496,9 @@ fn a_floor_earned_critical_on_a_cors_named_rule_is_not_clamped() {
 // ── M2: every severity move is on the record ────────────────────────────────────────────────
 
 #[test]
-fn a_verdict_downgrade_records_the_old_severity_and_the_reason() {
+fn a_verdict_downgrade_records_the_old_severity_and_a_fixed_basis_never_the_reason() {
     let f = finding("AI-X-1", "high", "d");
-    let raw = r#"{"verdicts":[{"index":0,"severity":"low","confidence":"high","reason":"only reachable from tests"}]}"#;
+    let raw = r#"{"verdicts":[{"index":0,"severity":"low","real":"yes","reason":"only reachable from tests"}]}"#;
     let out = apply_verdicts(raw, vec![f]).remove(0);
     assert_eq!(out.severity, "low");
     let adj = adjustments(&out);
@@ -508,13 +508,20 @@ fn a_verdict_downgrade_records_the_old_severity_and_the_reason() {
         "{}",
         adj[0]
     );
-    assert!(adj[0].contains("only reachable from tests"), "{}", adj[0]);
+    // The sentence is a fixed template (the two severities and the rule's severity basis): the
+    // model's reason is client-invisible and lives in the stage 1 record only.
+    assert!(
+        adj[0].contains("severity basis of rule AI-X-1"),
+        "{}",
+        adj[0]
+    );
+    assert!(!adj[0].contains("only reachable from tests"), "{}", adj[0]);
 }
 
 #[test]
 fn an_unchanged_verdict_records_nothing() {
     let f = finding("AI-X-1", "high", "d");
-    let raw = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"fine"}]}"#;
+    let raw = r#"{"verdicts":[{"index":0,"severity":"high","real":"yes","reason":"fine"}]}"#;
     assert!(adjustments(&apply_verdicts(raw, vec![f]).remove(0)).is_empty());
 }
 
@@ -574,14 +581,14 @@ fn a_capitalised_scan_severity_is_not_flattened_to_medium() {
 #[test]
 fn an_unknown_verdict_severity_keeps_the_current_severity() {
     let f = finding("AI-X-1", "high", "d");
-    let raw = r#"{"verdicts":[{"index":0,"severity":"urgent","confidence":"high","reason":"r"}]}"#;
+    let raw = r#"{"verdicts":[{"index":0,"severity":"urgent","real":"yes","reason":"r"}]}"#;
     assert_eq!(apply_verdicts(raw, vec![f]).remove(0).severity, "high");
 }
 
 #[test]
 fn a_capitalised_verdict_severity_is_honoured() {
     let f = finding("AI-X-1", "medium", "d");
-    let raw = r#"{"verdicts":[{"index":0,"severity":"High","confidence":"high","reason":"r"}]}"#;
+    let raw = r#"{"verdicts":[{"index":0,"severity":"High","real":"yes","reason":"r"}]}"#;
     assert_eq!(apply_verdicts(raw, vec![f]).remove(0).severity, "high");
 }
 
@@ -1205,8 +1212,10 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 16] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 18] = [
     "severity_adjustments",
+    "stage1_verdict",
+    "outlier_reasons",
     "carried_from",
     "history-status",
     "produced_tier",
