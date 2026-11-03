@@ -22,7 +22,8 @@ async fn cached_verdict_is_reused_without_a_model_call() {
     let first = StubJudge::answering("same_decision", "the premium discount calculation");
     let a = judge_with(Some(&first), &all, &mut cache, JUDGE).await;
     assert_eq!(first.call_count(), 1);
-    assert_eq!(a.findings.len(), 1);
+    // One cluster of two copies: one verdict, two rows.
+    assert_eq!(a.findings.len(), 2);
     assert_eq!(cache.len(), 1);
 
     // A re-scan of the unchanged tree: the same finding, no call, no spend.
@@ -30,7 +31,7 @@ async fn cached_verdict_is_reused_without_a_model_call() {
     let b = judge_with(Some(&second), &all, &mut cache, JUDGE).await;
     assert_eq!(second.call_count(), 0);
     assert_eq!(b.model_calls, 0);
-    assert_eq!(b.findings.len(), 1);
+    assert_eq!(b.findings.len(), 2);
     assert_eq!(
         b.findings[0].detail, a.findings[0].detail,
         "the same concept, from the cache"
@@ -63,7 +64,7 @@ async fn an_unsure_verdict_is_not_cached_and_is_retried_next_scan() {
     let second = StubJudge::answering("same_decision", "the discount");
     let b = judge_with(Some(&second), &all, &mut cache, JUDGE).await;
     assert_eq!(second.call_count(), 1, "asked again");
-    assert_eq!(b.findings.len(), 1);
+    assert_eq!(b.findings.len(), 2);
 }
 
 #[tokio::test]
@@ -88,7 +89,7 @@ async fn a_judge_model_change_invalidates_every_cached_verdict() {
         1,
         "a different judge model is a different question"
     );
-    assert_eq!(b.findings.len(), 1);
+    assert_eq!(b.findings.len(), 2);
     // Both verdicts live side by side; going back to model-a hits again.
     assert_eq!(cache.len(), 2);
     let again = StubJudge::new(|_, _| panic!("model-a is cached"));
@@ -265,7 +266,7 @@ async fn the_cache_repro_a_rename_in_both_copies_forces_a_re_judge() {
     let mut cache = VerdictCache::default();
     let first = StubJudge::answering("same_decision", "the premium discount");
     let a = judge_with(Some(&first), &before, &mut cache, JUDGE).await;
-    assert_eq!((a.findings.len(), first.call_count()), (1, 1));
+    assert_eq!((a.findings.len(), first.call_count()), (2, 1));
 
     let second = StubJudge::answering("different", "");
     let b = judge_with(Some(&second), &after, &mut cache, JUDGE).await;

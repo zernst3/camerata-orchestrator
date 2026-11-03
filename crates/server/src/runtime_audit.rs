@@ -53,7 +53,7 @@ use std::time::Duration;
 use chrono::{DateTime, NaiveDate, Utc};
 use futures::future::join_all;
 
-use crate::onboard::{CoverageNote, Finding, MergedLocation, ScanReport};
+use crate::onboard::{CoverageNote, Finding, ScanReport};
 use crate::vuln_intel::feeds::{self, FeedState};
 use crate::vuln_intel::{
     FeedFetcher, FeedStamp, HttpFetcher, Unreachable, VulnDataStamp, CVE_IDS_CAPTURE,
@@ -262,21 +262,6 @@ impl Tally {
 
 // ─── findings ────────────────────────────────────────────────────────────────
 
-fn merged_locations(
-    repo: &str,
-    rule_id: &str,
-    severity: &str,
-    snippet: &str,
-    rest: &[&Declaration],
-) -> Vec<MergedLocation> {
-    rest.iter()
-        .map(|d| {
-            MergedLocation::site(repo, &d.path, d.line, rule_id, snippet, false)
-                .with_rating(severity, snippet)
-        })
-        .collect()
-}
-
 fn also_declared(rest: &[&Declaration]) -> String {
     if rest.is_empty() {
         return String::new();
@@ -285,28 +270,38 @@ fn also_declared(rest: &[&Declaration]) -> String {
     format!(" It is also declared in {}.", join_capped(&places))
 }
 
+/// One row for one declaration of the thing (design amendment A11). The row's place is the
+/// declaration's own file and line and its snippet is the declaration as written there, so the
+/// evidence check can find it. The detail is the finding's shared text and names every place the
+/// thing is declared; the fix and the declared-as capture are the row's own. The shared captures
+/// (the runtime name, the CVE list) link the rows to each other in the tree.
 #[allow(clippy::too_many_arguments)]
 fn finding(
     repo: &str,
     rule_id: &str,
     severity: &str,
-    primary: &Declaration,
-    rest: &[&Declaration],
-    snippet: String,
-    detail: String,
+    site: &Declaration,
+    name: &str,
+    detail: &str,
     fix: String,
-    captures: BTreeMap<String, String>,
+    captures: &BTreeMap<String, String>,
 ) -> Finding {
+    let mut captures = captures.clone();
+    captures.insert(DECLARED_CAPTURE.to_string(), site.raw.clone());
+    let snippet = if site.raw.is_empty() {
+        name.to_string()
+    } else {
+        site.raw.clone()
+    };
     let mut f = Finding {
         repo: repo.to_string(),
-        path: primary.path.clone(),
-        line: primary.line,
+        path: site.path.clone(),
+        line: site.line,
         rule_id: rule_id.to_string(),
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         severity: severity.to_string(),
-        also_locations: merged_locations(repo, rule_id, severity, &snippet, rest),
         snippet,
-        detail,
+        detail: detail.to_string(),
         fix_specific: Some(fix),
         captures,
         ..Finding::default()
@@ -330,7 +325,7 @@ fn eol_finding(
     standing: &eol::Standing,
     next: Option<&str>,
     decls: &[&Declaration],
-) -> Option<Finding> {
+) -> Vec<Finding> {
     let (primary, rest) = split_primary(decls);
     let name = format!("{} {}", product.label(), cycle.cycle);
     let next_clause = next
@@ -371,37 +366,31 @@ fn eol_finding(
             ),
             on.clone(),
         ),
-        eol::Standing::Supported => return None,
+        eol::Standing::Supported => return Vec::new(),
     };
     let mut captures = BTreeMap::new();
     captures.insert(RUNTIME_CAPTURE.to_string(), name.clone());
-    captures.insert(DECLARED_CAPTURE.to_string(), primary.raw.clone());
     if !eol_date.is_empty() {
         captures.insert(EOL_DATE_CAPTURE.to_string(), eol_date);
     }
-    let fix = match next {
-        Some(n) => format!(
-            "Move {} to {} {n} or a later release line and update {}.",
-            name,
-            product.label(),
-            where_declared(primary)
-        ),
-        None => format!(
-            "Move {name} to a release line that still receives security fixes and update {}.",
-            where_declared(primary)
-        ),
-    };
-    Some(finding(
-        repo,
-        EOL_RULE_ID,
-        severity,
-        primary,
-        &rest,
-        format!("{name} ({})", primary.raw),
-        detail,
-        fix,
-        captures,
-    ))
+    std::iter::once(primary)
+        .chain(rest.iter().copied())
+        .map(|site| {
+            let fix = match next {
+                Some(n) => format!(
+                    "Move {} to {} {n} or a later release line and update {}.",
+                    name,
+                    product.label(),
+                    where_declared(site)
+                ),
+                None => format!(
+                    "Move {name} to a release line that still receives security fixes and update {}.",
+                    where_declared(site)
+                ),
+            };
+            finding(repo, EOL_RULE_ID, severity, site, &name, &detail, fix, &captures)
+        })
+        .collect()
 }
 
 fn vuln_finding(
@@ -410,7 +399,7 @@ fn vuln_finding(
     version: &str,
     result: &NvdResult,
     decls: &[&Declaration],
-) -> Finding {
+) -> Vec<Finding> {
     let (primary, rest) = split_primary(decls);
     let name = format!("{} {version}", product.label());
     let mut cves = result.cves.clone();
@@ -479,7 +468,6 @@ fn vuln_finding(
     );
     let mut captures = BTreeMap::new();
     captures.insert(RUNTIME_CAPTURE.to_string(), name.clone());
-    captures.insert(DECLARED_CAPTURE.to_string(), primary.raw.clone());
     captures.insert(
         CVE_IDS_CAPTURE.to_string(),
         cves.iter()
@@ -487,27 +475,31 @@ fn vuln_finding(
             .collect::<Vec<_>>()
             .join(","),
     );
-    let fix = format!(
-        "Upgrade {name} to the latest patch release of its line, or to a supported release line, \
-         and update {}.",
-        where_declared(primary)
-    );
-    let mut f = finding(
-        repo,
-        VULN_RULE_ID,
-        &severity,
-        primary,
-        &rest,
-        format!("{name} ({})", primary.raw),
-        detail,
-        fix,
-        captures,
-    );
-    if !rated {
-        f.needs_review = true;
-        f.confidence = Some("needs-review".to_string());
-    }
-    f
+    std::iter::once(primary)
+        .chain(rest.iter().copied())
+        .map(|site| {
+            let fix = format!(
+                "Upgrade {name} to the latest patch release of its line, or to a supported release \
+                 line, and update {}.",
+                where_declared(site)
+            );
+            let mut f = finding(
+                repo,
+                VULN_RULE_ID,
+                &severity,
+                site,
+                &name,
+                &detail,
+                fix,
+                &captures,
+            );
+            if !rated {
+                f.needs_review = true;
+                f.confidence = Some("needs-review".to_string());
+            }
+            f
+        })
+        .collect()
 }
 
 fn severity_rank(severity: &str) -> u8 {
@@ -824,7 +816,7 @@ pub async fn audit_runtimes(
         if data.cves.is_empty() {
             continue;
         }
-        findings.push(vuln_finding(repo, *product, version, data, decls));
+        findings.extend(vuln_finding(repo, *product, version, data, decls));
     }
     let nvd_stamp = if lookups.is_empty() {
         FeedStamp::NotChecked {
@@ -915,7 +907,42 @@ pub async fn run_runtime_audit(report: &mut ScanReport, sources: &[(String, Path
             }
         }
     };
-    report.findings.extend(outcome.findings);
+    fold_runtime_audit(report, sources, outcome, rows_in);
+}
+
+/// Add one pass's outcome to `report`: its rows, notes, feed stamps and ledger stage.
+/// `rows_in` is the report's row count before the pass.
+fn fold_runtime_audit(
+    report: &mut ScanReport,
+    sources: &[(String, PathBuf)],
+    outcome: RuntimeAudit,
+    rows_in: usize,
+) {
+    // M5: the rows join the report after each repo's own evidence check has run, so they get
+    // the same check here, repo by repo, with the same window and the same ledger tally. The
+    // files are read from the repo folder.
+    let mut rows = outcome.findings;
+    for (repo, dir) in sources {
+        let mut mine: Vec<Finding> = Vec::new();
+        let mut rest: Vec<Finding> = Vec::new();
+        for f in rows {
+            if f.repo == *repo {
+                mine.push(f);
+            } else {
+                rest.push(f);
+            }
+        }
+        crate::onboard::evidence_check::verify_and_record(
+            &mut report.ledger,
+            &mut mine,
+            &[],
+            Some(dir),
+        );
+        report.findings.extend(mine);
+        rows = rest;
+    }
+    // A row for a repo not among the sources cannot be opened; it is kept unchecked.
+    report.findings.extend(rows);
     report.coverage_notes.extend(outcome.notes);
     let mut stamp = report
         .provenance

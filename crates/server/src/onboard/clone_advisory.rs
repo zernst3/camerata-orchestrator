@@ -107,7 +107,8 @@ impl JudgeCounts {
 /// What a judged scan hands back.
 #[derive(Debug, Clone, Default)]
 pub struct JudgeOutcome {
-    /// One finding per confirmed candidate.
+    /// One finding per site of each confirmed candidate (a candidate written in four places
+    /// is four rows).
     pub findings: Vec<Finding>,
     /// At most one `not_assessed` row per rule that left candidates undecided.
     pub not_assessed: Vec<Finding>,
@@ -237,7 +238,7 @@ pub async fn judge_clone_candidates(
             if let Some(verdict) = judged.get(&candidate.id) {
                 if verdict.word == rule.affirmative_word() {
                     counts.confirmed += 1;
-                    outcome.findings.push(findings::confirmed_finding(
+                    outcome.findings.extend(findings::confirmed_findings(
                         req.repo,
                         candidate,
                         &verdict.concept,
@@ -538,7 +539,8 @@ fn finish_transcript(
 /// A rule is `ran` only when every candidate the producer found got a definite verdict (a rule
 /// with nothing found ran clean). Otherwise it is recorded as not run with the reason, and the
 /// matching coverage note is queued so the disclosure survives whichever later pass settles
-/// `ran` (the semantic pass reads every rule too). Findings counted are the confirmed ones.
+/// `ran` (the semantic pass reads every rule too). Findings counted are the rows emitted, one
+/// per site of each confirmed candidate, so the count agrees with the rows the report holds.
 pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutcome) {
     for (rule, counts) in &outcome.counts {
         let id = rule.id();
@@ -557,6 +559,7 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutc
                 counts.found
             ))
         };
+        let rows = outcome.findings.iter().filter(|f| f.rule_id == id).count();
         ledger.record_rule(
             repo,
             id,
@@ -564,7 +567,7 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutc
             fully,
             skip_reason,
             outcome.files_read as usize,
-            counts.confirmed as usize,
+            rows,
         );
     }
 }

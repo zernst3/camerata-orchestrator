@@ -18,6 +18,7 @@ mod ledger;
 mod other_rules;
 mod redaction;
 mod repros;
+mod rows;
 mod seam;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;

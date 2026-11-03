@@ -1,5 +1,5 @@
-//! A clone finding quotes the first line of each copy and the strings the copies differ in; both
-//! are client code, so both are redacted at construction (docs/design/2026-10-23, path A15).
+//! A clone finding quotes the first line of each copy (one row per copy) and the strings the copies
+//! differ in; both are client code, so both are redacted at construction (docs/design/2026-10-23, path A15).
 
 use camerata_secrets::fixtures::planted;
 use camerata_secrets::SecretShape;
@@ -36,7 +36,7 @@ fn with_line_replaced(
 }
 
 #[tokio::test]
-async fn clone_confirmed_finding_redacts_first_line_and_also_locations() {
+async fn clone_confirmed_finding_redacts_the_first_line_of_every_site() {
     let clean = discount_repo("0.2", "0.15");
     let stub = StubJudge::answering("same_decision", "the discount");
     let baseline = judge(
@@ -47,7 +47,8 @@ async fn clone_confirmed_finding_redacts_first_line_and_also_locations() {
     .await;
     let f = &baseline.findings[0];
     let (primary_path, primary_line) = (f.path.clone(), f.line);
-    let (other_path, other_line) = (f.also_locations[0].path.clone(), f.also_locations[0].line);
+    let other = &baseline.findings[1];
+    let (other_path, other_line) = (other.path.clone(), other.line);
 
     // The judge is handed the same candidates, but the files the finding quotes now carry a
     // secret on the line each site starts at.
@@ -85,7 +86,8 @@ async fn the_judge_prompt_carries_no_secret_value() {
     .await;
     let f = &baseline.findings[0];
     let (primary_path, primary_line) = (f.path.clone(), f.line);
-    let (other_path, other_line) = (f.also_locations[0].path.clone(), f.also_locations[0].line);
+    let other = &baseline.findings[1];
+    let (other_path, other_line) = (other.path.clone(), other.line);
 
     let p = planted(SecretShape::StripeLiveSecretKey);
     let tainted = with_line_replaced(&clean, &primary_path, primary_line, &p.text);

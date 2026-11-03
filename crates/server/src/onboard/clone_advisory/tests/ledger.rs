@@ -65,7 +65,8 @@ async fn a_fully_judged_rule_ran_and_counts_its_confirmed_findings() {
     record_in_ledger(&mut ledger, "", &outcome);
     let entry = ledger.rule(RULE.id()).unwrap();
     assert!(entry.ran);
-    assert_eq!(entry.findings_emitted, 1);
+    // One confirmed cluster of two copies is two rows, and the ledger counts rows.
+    assert_eq!(entry.findings_emitted, 2);
     assert!(!entry.verified_clean());
 }
 
