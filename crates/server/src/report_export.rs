@@ -6156,6 +6156,7 @@ mod coverage_gaps_tests;
 #[cfg(test)]
 mod wo9 {
     mod decisions_file_tests;
+    mod plan_tests;
     mod review_level_tests;
     mod row_set_tests;
     mod signature_tests;

@@ -19152,7 +19152,7 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
         "Codebase Inspection - Product Export\n\
          =====================================\n\
          \n\
-         This ZIP contains three artifacts derived from the SAME inspection scan:\n\
+         This ZIP contains the artifacts below, all derived from the SAME inspection scan:\n\
          \n\
          {stem}.pdf\n\
          \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
@@ -19166,7 +19166,9 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
          \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
          \x20 (every rule inspected this run, found or not), and a False Positives sheet\n\
          \x20 (with the reviewer's exclusion reasons, nothing is silently dropped). Intended\n\
-         \x20 for the engineers doing remediation.\n\
+         \x20 for the engineers doing remediation. The Remediation plan sheet comes first: one\n\
+         \x20 row for each sub-group, in the order to fix them. The Sites sheet lists every\n\
+         \x20 site, and the Tree sheet shows how the sites are grouped.\n\
          \n\
          findings.json\n\
          \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data: the same\n\
@@ -19175,6 +19177,30 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
          \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
          \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
          \x20 from the same pass over the scan.\n\
+         \n\
+         decisions.json\n\
+         \x20 Every decision record the report was reviewed with: what was ruled on which\n\
+         \x20 site or group of sites, and whether a reason was recorded. The Decisions sheet\n\
+         \x20 of the workbook is the same list.\n\
+         \n\
+         csv/tickets.csv\n\
+         \x20 One ticket for each sub-group (one kind of violation with one cause) that still\n\
+         \x20 has sites to fix. A site marked a false positive or accepted as a risk is on no\n\
+         \x20 ticket. Columns: Title, Description, Priority, Labels, Estimate, Group id, Site\n\
+         \x20 count and Sites (the first 50 sites, then a pointer to the Sites sheet filtered\n\
+         \x20 on the Group id). To import the file:\n\
+         \x20 - Jira: map Title to Summary, Description to Description, Priority to Priority\n\
+         \x20   (Highest, High, Medium or Low), Labels to Labels (split on commas) and Sites to\n\
+         \x20   a text field of your choice. Estimate is text, not a duration.\n\
+         \x20 - Linear: Title, Description and Labels map to the fields of the same name.\n\
+         \x20   Priority maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
+         \x20   Low.\n\
+         \x20 - GitHub Issues: map Title to Title, Description to Body and Labels to Labels\n\
+         \x20   (comma separated). Priority and Estimate have no field there, so put them in\n\
+         \x20   the body or drop them.\n\
+         \x20 Keep Group id in a custom field or in the body: it is the value to filter the\n\
+         \x20 Sites sheet on.\n\
+         \n\
          \n\
          {}\
          {}\

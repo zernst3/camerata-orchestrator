@@ -478,7 +478,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 31] = [
+const FINDING_HEADERS: [&str; 38] = [
     "Severity",
     "Headline",
     "Repo",
@@ -510,9 +510,16 @@ const FINDING_HEADERS: [&str; 31] = [
     "Fix type",
     "Reviewer edited",
     "Edit ids",
+    "Site id",
+    "Review level",
+    "Group",
+    "Sub-group",
+    "Sub-group cause",
+    "Escalated",
+    "Merged into",
 ];
 
-const FINDING_RENDERED: [&str; 29] = [
+const FINDING_RENDERED: [&str; 36] = [
     "severity",
     "headline",
     "repo",
@@ -542,6 +549,13 @@ const FINDING_RENDERED: [&str; 29] = [
     "fix_type",
     "reviewer_edited",
     "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -572,7 +586,7 @@ const FINDING_EXTRA_KEYS: [&str; 13] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 33] = [
+const FINDING_BASE_KEYS: [&str; 40] = [
     "severity",
     "headline",
     "repo",
@@ -604,6 +618,13 @@ const FINDING_BASE_KEYS: [&str; 33] = [
     "fix_type",
     "reviewer_edited",
     "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
     "is_fp",
     "fp_reason",
 ];
@@ -691,6 +712,13 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
                     .join(", ")
             })
             .unwrap_or_default(),
+        text(row, "site_id"),
+        text(row, "review_level"),
+        text(row, "group"),
+        text(row, "sub_group"),
+        text(row, "sub_group_cause"),
+        yes_or_blank(row, "escalated"),
+        text(row, "merged_into"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));
@@ -942,8 +970,20 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "repo",
             "fixed_version",
             "action",
+            "path",
+            "site_id",
+            "review_level",
+            "group",
         ],
-        &["ownership"],
+        // The sub-group's label and cause, the escalation and the merge pointer are on the
+        // Sites, Tree and Remediation plan sheets; the Dependencies worksheet has no such column.
+        &[
+            "ownership",
+            "sub_group",
+            "sub_group_cause",
+            "escalated",
+            "merged_into",
+        ],
     );
     let headers = [
         "Package",
@@ -952,6 +992,10 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         "Repo",
         "Fixed in",
         "Recommended action",
+        "File",
+        "Site id",
+        "Review level",
+        "Group",
     ];
     let mut expected: Vec<Vec<String>> = rows
         .iter()
@@ -968,6 +1012,10 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
                 text(r, "repo"),
                 fixed.unwrap_or("(no patch yet)").to_string(),
                 action,
+                text(r, "path"),
+                text(r, "site_id"),
+                text(r, "review_level"),
+                text(r, "group"),
             ]
         })
         .collect();

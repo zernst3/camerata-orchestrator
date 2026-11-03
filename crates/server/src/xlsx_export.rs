@@ -2193,12 +2193,20 @@ fn write_dependencies_sheet(
         "Repo",
         "Fixed in",
         "Recommended action",
+        // WO9: where the advisory was found, how closely it was reviewed and its sub-group.
+        "File",
+        "Site id",
+        "Review level",
+        "Group",
     ];
     for (c, h) in headers.iter().enumerate() {
         ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
-    for (c, w) in [30.0, 60.0, 12.0, 18.0, 14.0, 48.0].iter().enumerate() {
+    for (c, w) in [30.0, 60.0, 12.0, 18.0, 14.0, 48.0, 30.0, 18.0, 30.0, 30.0]
+        .iter()
+        .enumerate()
+    {
         ws.set_column_width(c as u16, *w)?;
     }
 
@@ -2233,6 +2241,15 @@ fn write_dependencies_sheet(
             row.action.clone()
         };
         ws.write_text_with_format(r, 5, &action, &fmts.cell(None, true, false))?;
+        ws.write_text_with_format(r, 6, &row.path, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(r, 7, &row.facts.site_id, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(
+            r,
+            8,
+            &row.facts.review_level,
+            &fmts.cell(None, false, false),
+        )?;
+        ws.write_text_with_format(r, 9, &row.facts.group, &fmts.cell(None, false, false))?;
     }
 
     let last_row = sorted.len() as u32;
@@ -3341,10 +3358,15 @@ pub fn build_workbook(
     // "Sites" takes the suffix and the pointer in a capped cell stays true.
     used_names.insert(SITES_SHEET.to_string());
     // WO9: the review sheets are named before any area too.
+    used_names.insert(review_sheets::PLAN_SHEET.to_string());
     used_names.insert(review_sheets::TREE_SHEET.to_string());
     used_names.insert(review_sheets::DECISIONS_SHEET.to_string());
     let tree_nodes = crate::report_export::tree_view::tree_view(reviewed, opts.internal);
     let decision_rows = crate::report_export::decisions_file::decision_rows(reviewed);
+    // One row per sub-group with something to fix, in plan order (design 3B item 2).
+    let plan_rows = subgroups::in_plan_order(subgroups::subgroup_facts(
+        reviewed, &rows, &dep_rows, corpus,
+    ));
 
     let mut sheet_plan: Vec<SheetSummary> = Vec::new();
     let all_findings_name = sanitize_sheet_name("All Findings", &mut used_names);
@@ -3458,6 +3480,15 @@ pub fn build_workbook(
     }
 
     sheet_plan.push(SheetSummary {
+        display_name: review_sheets::PLAN_SHEET.to_string(),
+        sheet_name: review_sheets::PLAN_SHEET.to_string(),
+        count: plan_rows.len(),
+        worst_severity: plan_rows
+            .first()
+            .map(|g| g.severity.clone())
+            .unwrap_or_default(),
+    });
+    sheet_plan.push(SheetSummary {
         display_name: review_sheets::TREE_SHEET.to_string(),
         sheet_name: review_sheets::TREE_SHEET.to_string(),
         count: tree_nodes.len(),
@@ -3505,6 +3536,8 @@ pub fn build_workbook(
     // WO9 (design 3B): the review sheets lead the workbook, in this order: Sites (every site, in
     // full), Tree, Decisions. The Remediation plan sheet is before them. The Index and the
     // sheets that follow keep their order after these.
+    review_sheets::write_plan_sheet(&mut wb, &plan_rows, &fmts)
+        .context("writing the Remediation plan sheet")?;
     write_sites_sheets(
         &mut wb,
         &site_sheet_names,
@@ -3874,6 +3907,11 @@ pub fn build_csv_exports(
             Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
         })
         .collect::<anyhow::Result<_>>()?;
+    // WO9b: one ticket per sub-group, for a client's Jira, Linear or GitHub Issues importer.
+    csv.push((
+        tickets::TICKETS_CSV.to_string(),
+        tickets::tickets_csv(reviewed, corpus, &opts.chosen_options)?,
+    ));
     // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
     // not one of the eight `DATASETS`; the release gate admits it as an optional member).
     if triage_log::wanted(opts) {
@@ -3887,6 +3925,8 @@ pub fn build_csv_exports(
 }
 
 pub mod review_sheets;
+mod subgroups;
+pub mod tickets;
 pub mod triage_log;
 
 #[cfg(test)]
@@ -4289,10 +4329,12 @@ mod tests {
             "csv/false-positives.csv",
             "csv/coverage.csv",
             "csv/rules-applied.csv",
+            // WO9b: the ticket file rides with the eight datasets (it has no JSON sibling).
+            "csv/tickets.csv",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
-        assert_eq!(exports.len(), 8);
+        assert_eq!(exports.len(), 9);
 
         // Parse all-findings.csv back and confirm the nasty detail survived as one field.
         let all = &exports

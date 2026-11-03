@@ -65,6 +65,8 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
         expected.insert(format!("csv/{dataset}.csv"));
         expected.insert(format!("json/{dataset}.json"));
     }
+    // The ticket file is a CSV with no JSON sibling (one ticket per sub-group, for an importer).
+    expected.insert(crate::xlsx_export::tickets::TICKETS_CSV.to_string());
     // H4: the optional triage log is admitted when present (it is off by default, so a package
     // without it is complete). Its content is still scanned by the secrets check like every
     // other member.
