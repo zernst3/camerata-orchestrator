@@ -6139,8 +6139,11 @@ pub mod coverage_gaps;
 pub(crate) mod fix_text;
 pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
+pub mod decisions_file;
 pub mod overlay;
+pub mod prose_checks;
 pub mod row_facts;
+pub mod tree_view;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, AppliedEdit, MergeNote,
     ReviewedReport, StaleEditNote, SupersededNote,
@@ -6152,12 +6155,14 @@ mod coverage_gaps_tests;
 
 #[cfg(test)]
 mod wo9 {
+    mod decisions_file_tests;
     mod review_level_tests;
     mod row_set_tests;
     mod signature_tests;
     mod sites_tests;
     mod stage2_tests;
     pub(super) mod support;
+    mod tree_tests;
 }
 
 #[cfg(test)]

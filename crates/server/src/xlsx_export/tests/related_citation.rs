@@ -115,13 +115,13 @@ async fn keyword_matched_ai_finding_cites_a_related_standard_in_every_artifact()
         &empty_opts(),
     )
     .expect("workbook builds");
-    let citation_cell = cell_text(&xlsx, "xl/worksheets/sheet2.xml", "P2");
+    let citation_cell = cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "P2");
     assert!(
         citation_cell.starts_with(RELATED_STANDARD_LABEL_PREFIX),
         "xlsx citation cell must say related standard, got {citation_cell:?}"
     );
     assert_eq!(
-        cell_text(&xlsx, "xl/worksheets/sheet2.xml", "O2"),
+        cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "O2"),
         "AI-advisory",
         "a keyword-matched AI row's provenance must never read Deterministic"
     );

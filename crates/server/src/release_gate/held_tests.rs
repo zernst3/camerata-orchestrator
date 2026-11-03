@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use camerata_api_types::decisions::{Decision, DecisionState, Scope};
 use camerata_api_types::edits::{Edit, EditField};
 
-use super::held::{merged_without_decision, restored_without_decision};
+use super::held::restored_without_decision;
 use super::tests::{client_options, scan_report};
 use super::*;
 use crate::onboard::{Finding, ScanReport};
@@ -81,6 +81,21 @@ fn check_problems(failure: &GateFailure, check: CheckId) -> Vec<&Problem> {
         .collect()
 }
 
+/// The merge-and-group-decision problems the gate finds in the package made from `reviewed`,
+/// read from the package's own files.
+fn merge_problems(reviewed: &ReviewedReport) -> Vec<Problem> {
+    match release(package_of(reviewed)) {
+        Ok(_) => Vec::new(),
+        Err(ReleaseError::Blocked(failure)) => {
+            check_problems(&failure, CheckId::MergedWithoutDecision)
+                .into_iter()
+                .cloned()
+                .collect()
+        }
+        Err(other) => panic!("the package must assemble: {other}"),
+    }
+}
+
 fn at(report: &ScanReport, path: &str) -> Finding {
     report
         .findings
@@ -138,7 +153,7 @@ fn release_gate_refuses_a_merged_row_without_a_decision_record() {
     let mut no_reason = merge;
     no_reason.reason = "  ".to_string();
     let rows = apply_overlay(&sealed, std::slice::from_ref(&no_reason), &[], &[]);
-    let problems = merged_without_decision(&rows.report().findings, &[no_reason]);
+    let problems = merge_problems(&rows);
     assert_eq!(problems.len(), 1, "{problems:?}");
 }
 
@@ -170,9 +185,7 @@ fn release_gate_refuses_a_node_decision_missing_a_member_record() {
             .map(|(i, k)| member("dec-000001", i, k)),
     );
     let reviewed = apply_overlay(&sealed, &whole, &[], &[]);
-    assert!(
-        merged_without_decision(&reviewed.report().findings, reviewed.all_records()).is_empty()
-    );
+    assert!(merge_problems(&reviewed).is_empty());
     assert!(release(package_of(&reviewed)).is_ok());
 
     // One site's record is missing: the group decision names a site nothing holds a ruling for.
@@ -201,9 +214,7 @@ fn release_gate_refuses_a_node_decision_missing_a_member_record() {
     let mut undone = whole;
     undone[1].revoked_at = Some(NOW.to_string());
     let reviewed = apply_overlay(&sealed, &undone, &[], &[]);
-    assert!(
-        merged_without_decision(&reviewed.report().findings, reviewed.all_records()).is_empty()
-    );
+    assert!(merge_problems(&reviewed).is_empty());
 }
 
 #[test]

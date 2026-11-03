@@ -3340,6 +3340,11 @@ pub fn build_workbook(
     // M8: the Sites sheet is named before any area, so a category that happens to be called
     // "Sites" takes the suffix and the pointer in a capped cell stays true.
     used_names.insert(SITES_SHEET.to_string());
+    // WO9: the review sheets are named before any area too.
+    used_names.insert(review_sheets::TREE_SHEET.to_string());
+    used_names.insert(review_sheets::DECISIONS_SHEET.to_string());
+    let tree_nodes = crate::report_export::tree_view::tree_view(reviewed, opts.internal);
+    let decision_rows = crate::report_export::decisions_file::decision_rows(reviewed);
 
     let mut sheet_plan: Vec<SheetSummary> = Vec::new();
     let all_findings_name = sanitize_sheet_name("All Findings", &mut used_names);
@@ -3452,6 +3457,19 @@ pub fn build_workbook(
         });
     }
 
+    sheet_plan.push(SheetSummary {
+        display_name: review_sheets::TREE_SHEET.to_string(),
+        sheet_name: review_sheets::TREE_SHEET.to_string(),
+        count: tree_nodes.len(),
+        worst_severity: String::new(),
+    });
+    sheet_plan.push(SheetSummary {
+        display_name: review_sheets::DECISIONS_SHEET.to_string(),
+        sheet_name: review_sheets::DECISIONS_SHEET.to_string(),
+        count: decision_rows.len(),
+        worst_severity: String::new(),
+    });
+
     let dep_coverage_notes: Vec<String> = report
         .coverage_notes
         .iter()
@@ -3484,6 +3502,21 @@ pub fn build_workbook(
     }
     let fmts = Formats::new();
 
+    // WO9 (design 3B): the review sheets lead the workbook, in this order: Sites (every site, in
+    // full), Tree, Decisions. The Remediation plan sheet is before them. The Index and the
+    // sheets that follow keep their order after these.
+    write_sites_sheets(
+        &mut wb,
+        &site_sheet_names,
+        &site_rows,
+        SITES_SHEET_MAX_ROWS,
+        &fmts,
+    )
+    .context("writing the Sites sheet")?;
+    review_sheets::write_tree_sheet(&mut wb, &tree_nodes, opts.internal, &fmts)
+        .context("writing the Tree sheet")?;
+    review_sheets::write_decisions_sheet(&mut wb, &decision_rows, &fmts)
+        .context("writing the Decisions sheet")?;
     write_index_sheet(
         &mut wb,
         report,
@@ -3577,16 +3610,6 @@ pub fn build_workbook(
             .context("writing the Triage Log sheet")?;
     }
 
-    // M8: after every other sheet, so each keeps its position.
-    write_sites_sheets(
-        &mut wb,
-        &site_sheet_names,
-        &site_rows,
-        SITES_SHEET_MAX_ROWS,
-        &fmts,
-    )
-    .context("writing the Sites sheet")?;
-
     // A10: the rows the engine threw out, for the operator. INTERNAL workbook only: a client
     // package has no such sheet and none of these rows.
     if opts.internal {
@@ -3653,6 +3676,16 @@ pub struct FindingsExport {
     /// carries no severity and is in no count. The key is absent for a one-repo project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patterns_across_services: Option<crate::report_export::PatternsAcrossServicesJson>,
+    /// The review tree: category, rule and sub-group nodes with their label, cause, summary and
+    /// counts from the rows (design 3B). A client package carries only what the client reads; an
+    /// internal one adds the architect's triage of each node.
+    pub tree: TreeJson,
+}
+
+/// The tree in `findings.json`.
+#[derive(Serialize)]
+pub struct TreeJson {
+    pub nodes: Vec<crate::report_export::tree_view::TreeNodeView>,
 }
 
 /// Build the `findings.json` payload — the JSON sibling of [`build_workbook`]. Takes the
@@ -3677,6 +3710,9 @@ pub fn build_findings_export(
         findings,
         coverage: report_json.coverage_gaps.clone(),
         patterns_across_services: report_json.patterns_across_services.clone(),
+        tree: TreeJson {
+            nodes: crate::report_export::tree_view::tree_view(reviewed, report_json.internal),
+        },
     }
 }
 
@@ -3850,6 +3886,7 @@ pub fn build_csv_exports(
     Ok(csv)
 }
 
+pub mod review_sheets;
 pub mod triage_log;
 
 #[cfg(test)]
@@ -5025,11 +5062,11 @@ mod tests {
         )
         .unwrap();
         for cell in ["V2", "W2"] {
-            let text = cell_text(&xlsx, "xl/worksheets/sheet2.xml", cell);
+            let text = cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), cell);
             assert!(!text.contains('`'), "{cell}: {text:?}");
         }
         assert_eq!(
-            cell_text(&xlsx, "xl/worksheets/sheet2.xml", "W2"),
+            cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "W2"),
             generic.to_string()
         );
 
@@ -5401,7 +5438,7 @@ mod tests {
 
         // "All Findings" is the second worksheet added (after Index) -> sheet2.xml.
         // `<row ` appears once per row, including the header — subtract 1 for it.
-        let sheet_xml = read_zip_entry(&xlsx_bytes, "xl/worksheets/sheet2.xml");
+        let sheet_xml = read_zip_entry(&xlsx_bytes, &sheet_entry_for(&xlsx_bytes, "All Findings"));
         let row_count = sheet_xml.matches("<row ").count();
         assert_eq!(
             row_count.saturating_sub(1),
@@ -5743,7 +5780,11 @@ mod tests {
         // U is "Detail" (index 20) per the `HEADERS` array. Resolve through the shared-string
         // pool (`cell_text`) rather than a whole-workbook substring search, so this pins which
         // COLUMN the rewrite landed in.
-        let headline_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "B2");
+        let headline_cell = cell_text(
+            &xlsx_bytes,
+            &sheet_entry_for(&xlsx_bytes, "All Findings"),
+            "B2",
+        );
         assert_eq!(
             headline_cell, AUTHORED_HEADLINE,
             "xlsx Headline column must carry the same plain-language rewrite, got: {headline_cell:?}"
@@ -5752,7 +5793,11 @@ mod tests {
             !headline_cell.starts_with("Deny"),
             "xlsx Headline column must never be the raw gate directive verbatim"
         );
-        let detail_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "U2");
+        let detail_cell = cell_text(
+            &xlsx_bytes,
+            &sheet_entry_for(&xlsx_bytes, "All Findings"),
+            "U2",
+        );
         assert_eq!(
             detail_cell, AUTHORED_DETAIL,
             "xlsx Detail column must carry the same plain-language rewrite as the PDF, got: \
@@ -6316,9 +6361,17 @@ mod tests {
 
         // The xlsx row must carry the SAME citation label and category, in the columns the
         // design doc assigns them (Category = col G, index 6; Citation = col P, index 15).
-        let category_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "G2");
+        let category_cell = cell_text(
+            &xlsx_bytes,
+            &sheet_entry_for(&xlsx_bytes, "All Findings"),
+            "G2",
+        );
         assert_eq!(category_cell, "RLS Policy");
-        let citation_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "P2");
+        let citation_cell = cell_text(
+            &xlsx_bytes,
+            &sheet_entry_for(&xlsx_bytes, "All Findings"),
+            "P2",
+        );
         assert_eq!(citation_cell, group.citation.label);
     }
 
@@ -6611,7 +6664,7 @@ mod tests {
             let xlsx_row = if site.severity == "critical" { 2 } else { 3 };
             let citation_cell = cell_text(
                 &xlsx_bytes,
-                "xl/worksheets/sheet2.xml",
+                &sheet_entry_for(&xlsx_bytes, "All Findings"),
                 &format!("P{xlsx_row}"),
             );
             assert_eq!(
@@ -6620,7 +6673,7 @@ mod tests {
             );
             let detail_cell = cell_text(
                 &xlsx_bytes,
-                "xl/worksheets/sheet2.xml",
+                &sheet_entry_for(&xlsx_bytes, "All Findings"),
                 &format!("U{xlsx_row}"),
             );
             assert_eq!(
@@ -6629,7 +6682,7 @@ mod tests {
             );
             let needs_review_cell = cell_text(
                 &xlsx_bytes,
-                "xl/worksheets/sheet2.xml",
+                &sheet_entry_for(&xlsx_bytes, "All Findings"),
                 &format!("M{xlsx_row}"),
             );
             assert_eq!(
@@ -6725,7 +6778,11 @@ mod tests {
             &opts,
         )
         .unwrap();
-        let also_matches_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "R2");
+        let also_matches_cell = cell_text(
+            &xlsx_bytes,
+            &sheet_entry_for(&xlsx_bytes, "All Findings"),
+            "R2",
+        );
         assert_eq!(
             also_matches_cell, row.also_matches,
             "the xlsx Also matches column must be byte-identical to findings.json"

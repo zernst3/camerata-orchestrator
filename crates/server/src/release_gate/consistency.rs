@@ -53,7 +53,12 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
     let xlsx = format!("{stem}-findings.xlsx");
     expected.insert(pdf.clone());
     expected.insert(xlsx.clone());
-    for fixed in ["findings.json", "README.txt", "manifest.json"] {
+    for fixed in [
+        "findings.json",
+        "decisions.json",
+        "README.txt",
+        "manifest.json",
+    ] {
         expected.insert(fixed.to_string());
     }
     for dataset in DATASETS {
@@ -97,7 +102,12 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
             ));
         }
     }
-    for fixed in ["findings.json", "README.txt", "manifest.json"] {
+    for fixed in [
+        "findings.json",
+        "decisions.json",
+        "README.txt",
+        "manifest.json",
+    ] {
         if entries.get(fixed).is_some_and(Vec::is_empty) {
             problems.push(problem(fixed, DATASET_SET, "the file is empty"));
         }

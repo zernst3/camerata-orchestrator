@@ -71,9 +71,6 @@ pub struct ProductPackage {
     /// Changes the review screen made that the decision store does not hold yet, one problem
     /// each (from the export request's `unsynced_changes`).
     pub unsynced_reviewer_changes: Vec<Problem>,
-    /// Merged rows with no merge decision behind them, and group decisions missing a per-site
-    /// record, one problem each (design 5.3). Worked out where the decision records are in hand.
-    pub merged_without_decision: Vec<Problem>,
     /// Findings the reviewer restored after the engine threw them out that carry no decision
     /// since, one problem each (A12 item 2).
     pub restored_without_decision: Vec<Problem>,
@@ -174,6 +171,12 @@ pub(crate) fn assemble_package(
         .map_err(|e| anyhow::anyhow!("could not build the machine-readable exports: {e}"))?;
     let mut datasets = csv;
     datasets.extend(json);
+    // The decisions the report was reviewed with. The gate reads this file, not the records the
+    // package was built from, to check that a merge has its decision (design 5.3).
+    datasets.push((
+        crate::report_export::decisions_file::DECISIONS_FILE.to_string(),
+        crate::report_export::decisions_file::decisions_json(reviewed)?,
+    ));
 
     // Commit per repo, the corpus digest and the rules-last-reviewed date all come from the one
     // sanctioned provenance bridge (`client_provenance`).
@@ -204,10 +207,6 @@ pub(crate) fn assemble_package(
             reviewed,
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
-        merged_without_decision: held::merged_without_decision(
-            &report.findings,
-            reviewed.all_records(),
-        ),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         internal: options.internal,
@@ -335,6 +334,13 @@ fn audit_zip_with(
     }
     report.record(CheckId::Manifest, manifest_problems);
     report.record(CheckId::Provenance, provenance_problems(&entries));
+    // A merge with no decision behind it, or a group decision missing a site's record, is a
+    // structural defect whoever receives the package, so it is checked for an internal package
+    // too. Read from the package's own decisions.json.
+    report.record(
+        CheckId::MergedWithoutDecision,
+        held::merged_without_decision_in_archive(&entries),
+    );
     report.sorted()
 }
 
@@ -550,12 +556,6 @@ fn release_checked(
         } else {
             package.undecided_unverified_evidence.clone()
         },
-    );
-    // A merge with no decision behind it is a structural defect whoever receives the package, so
-    // it is checked for an internal package too.
-    report.record(
-        CheckId::MergedWithoutDecision,
-        package.merged_without_decision.clone(),
     );
     report.record(
         CheckId::RestoredWithoutDecision,

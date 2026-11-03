@@ -806,9 +806,11 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
+    // WO9: 8 -> 9. The merge check now reads the package's own decisions.json, so a standalone
+    // audit of a zip runs it too.
     assert_eq!(
         report.checks.len(),
-        8,
+        9,
         "row parity needs the in-memory rows"
     );
 }

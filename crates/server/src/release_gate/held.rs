@@ -15,81 +15,87 @@
 //! M5) already refuses every `evidence_unverified` row that carries no decision, which is exactly
 //! that check.
 //!
-//! The package has no `decisions.json` yet (the Decisions sheet and file are a later work order),
-//! so both checks read the live decision records the package was assembled from, in memory, the
-//! way [`super::evidence`] reads the decisions. They are mechanical and hard.
-
-use std::collections::{HashMap, HashSet};
-
-use camerata_api_types::decisions::{live_by_key, Decision, DecisionState, Scope};
+//! The merge check reads the package itself: the merged rows of `findings.json` and the records of
+//! `decisions.json`, so what is checked is what the client receives. They are mechanical and hard.
 
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::engine_discard::ENGINE_RESTORED_CAPTURE;
 use crate::onboard::Finding;
-use crate::report_export::overlay::{MERGED_INTO_CAPTURE, MERGED_LABEL_CAPTURE};
+use crate::report_export::decisions_file::{DecisionRowJson, DECISIONS_FILE};
 
 /// One problem per merged row that has no decision record naming it, that state and a reason,
-/// and one per site a live group decision covers that has no per-site record.
-pub fn merged_without_decision(findings: &[Finding], records: &[Decision]) -> Vec<Problem> {
-    let live = live_by_key(records);
+/// and one per site a live group decision covers that has no per-site record. Read from the
+/// package's own files: the merged rows of `findings.json` and the records of `decisions.json`.
+/// A merged row is one whose `merged_into` names the row it points to.
+pub fn merged_without_decision_in_archive(
+    entries: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Vec<Problem> {
     let mut problems = Vec::new();
+    let findings: Option<serde_json::Value> = entries
+        .get("findings.json")
+        .and_then(|b| serde_json::from_slice(b).ok());
+    let records: Vec<DecisionRowJson> = entries
+        .get(DECISIONS_FILE)
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| serde_json::from_value(v["decisions"].clone()).ok())
+        .unwrap_or_default();
 
-    for f in findings {
-        let Some(target) = f.captures.get(MERGED_INTO_CAPTURE) else {
+    let rows = findings
+        .as_ref()
+        .and_then(|f| f["findings"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    for row in &rows {
+        let target = row["merged_into"].as_str().unwrap_or_default();
+        if target.is_empty() {
             continue;
-        };
-        let record = live.get(f.site_key.as_str()).and_then(|rs| {
-            rs.iter().rev().find(|d| {
-                matches!(&d.state, DecisionState::MergedInto(t) if t == target)
-                    && !d.reason.trim().is_empty()
-            })
+        }
+        let id = row["site_id"].as_str().unwrap_or_default();
+        let backed = records.iter().any(|d| {
+            !d.revoked
+                && d.scope == "site"
+                && d.site_id == id
+                && d.state == "merged_into"
+                && d.merged_into == target
+                && d.has_reason
         });
-        if record.is_none() {
+        if !backed {
             problems.push(Problem::new(
                 "findings.json",
-                format!("{} line {}", f.path, f.line),
                 format!(
-                    "this finding exports as \"{}\" but no merge decision with a reason is \
-                     recorded for it. Merge it again, with the reason",
-                    f.captures
-                        .get(MERGED_LABEL_CAPTURE)
-                        .map_or("merged", String::as_str)
+                    "{} line {}",
+                    row["path"].as_str().unwrap_or_default(),
+                    row["line"]
                 ),
-                Some(f.rule_id.clone()),
+                format!(
+                    "this finding exports as \"{}\" but decisions.json holds no merge decision \
+                     with a reason for it. Merge it again, with the reason",
+                    row["disposition_label"]
+                        .as_str()
+                        .or_else(|| row["status"].as_str())
+                        .unwrap_or("merged")
+                ),
+                row["rule_id"].as_str().map(str::to_string),
             ));
         }
     }
 
-    // Every live group decision has one per-site record for each site it covers.
-    let per_site: HashMap<&str, HashSet<&str>> = {
-        let mut m: HashMap<&str, HashSet<&str>> = HashMap::new();
-        // A per-site record the reviewer revoked on its own (an undo of one site of a batch) is
-        // still a record: the site was accounted for, and it is simply undecided again.
-        for d in records.iter().filter(|d| !d.is_node_record()) {
-            if let Some(parent) = d.inherited_from.as_deref() {
-                m.entry(parent).or_default().insert(d.key.as_str());
-            }
-        }
-        m
-    };
-    for node in records
-        .iter()
-        .filter(|d| d.is_active() && d.is_node_record())
-    {
-        let have = per_site.get(node.id.as_str());
-        let Scope::Node(node_id) = &node.scope else {
-            continue;
-        };
-        for key in &node.applies_to {
-            if !have.is_some_and(|keys| keys.contains(key.as_str())) {
+    // Every live group decision has one per-site record for each site it covers. A per-site
+    // record the reviewer revoked on its own (an undo of one site of a batch) is still a record:
+    // the site was accounted for, and it is simply undecided again.
+    for node in records.iter().filter(|d| d.scope == "node" && !d.revoked) {
+        for covered in &node.applies_to {
+            let has_record = records
+                .iter()
+                .any(|d| d.scope == "site" && d.inherited_from == node.id && d.site_id == *covered);
+            if !has_record {
                 problems.push(Problem::new(
-                    "decisions",
-                    format!("group decision {} on {node_id}", node.id),
+                    DECISIONS_FILE,
+                    format!("group decision {} on {}", node.id, node.node_id),
                     format!(
-                        "the group decision covers a site with no record of its own for it ({}). \
-                         Decide the group again so every site it covers holds the decision",
-                        key.replace('\u{0}', " ")
+                        "the group decision covers a site with no record of its own for it ({covered}). \
+                         Decide the group again so every site it covers holds the decision"
                     ),
                     None,
                 ));
