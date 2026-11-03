@@ -1344,7 +1344,7 @@ impl StageItems for DetailRound<'_> {
                 })
                 .collect();
             llm.note_rejected_reply(
-                &request_key,
+                request_key,
                 &format!(
                     "{} of {} detail(s) turned down: {}",
                     lines.len(),

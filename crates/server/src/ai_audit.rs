@@ -5635,7 +5635,7 @@ impl stage_batch::StageItems for FixRound<'_> {
                 batch.len(),
                 turned_down.join("; ")
             );
-            llm.note_rejected_reply(&request_key, &why, turned_down.len() == batch.len());
+            llm.note_rejected_reply(request_key, &why, turned_down.len() == batch.len());
         }
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
