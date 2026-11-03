@@ -107,7 +107,7 @@ impl EscalationReason {
 /// review flags map onto `precondition_added`, `unverified_name`, `fix_ungrounded`,
 /// `contradiction` and `methodology_leak` (a flag only, never a hold); the group reviewer may
 /// write any of them. An outlier never escalates a site on its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutlierReason {
     SeverityRaiseHeld,

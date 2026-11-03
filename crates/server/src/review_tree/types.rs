@@ -73,7 +73,7 @@ pub enum NodeKind {
 }
 
 /// Who put a site on a node's outlier list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutlierBy {
     Engine,
@@ -166,6 +166,46 @@ pub struct ReviewTree {
 }
 
 impl ReviewTree {
+    /// Write the stored candidates onto the rows' columns (the escalation state, rank and
+    /// reasons), and clear the columns of rows that are not candidates.
+    pub fn sync_rows(&self, rows: &mut [crate::onboard::Finding]) {
+        let by_key: std::collections::HashMap<
+            &str,
+            &camerata_api_types::review::EscalationCandidate,
+        > = self
+            .candidates
+            .iter()
+            .map(|c| (c.key.as_str(), c))
+            .collect();
+        for f in rows {
+            match by_key.get(f.site_key.as_str()) {
+                Some(c) => f.review.set_escalation(c),
+                None => f.review.clear_escalation(),
+            }
+        }
+    }
+
+    /// Move the line again over the stored candidates with new settings: no model call, no
+    /// candidate added or dropped. Rewrites the budget, the candidates' marks and the rows'
+    /// columns.
+    pub fn re_mark(
+        &mut self,
+        settings: &super::RankSettings,
+        rows: &mut [crate::onboard::Finding],
+    ) {
+        self.budget = camerata_api_types::review::EscalationBudget::compute(
+            settings.rate_per_kloc,
+            settings.floor,
+            settings.counted_lines,
+        );
+        camerata_api_types::review::re_mark(
+            &mut self.candidates,
+            &mut self.budget,
+            &settings.over_budget_reasons,
+        );
+        self.sync_rows(rows);
+    }
+
     /// The node with this id.
     pub fn node(&self, id: &str) -> Option<&TreeNode> {
         self.nodes.iter().find(|n| n.id == id)

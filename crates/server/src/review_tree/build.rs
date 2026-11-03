@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::grouping::residual_sub_id;
 use super::mapping::{category_label, place_row, RulePlacement, ToolMap};
-use super::types::{GroupRole, NodeKind, NodeLevel, Outlier, ReviewTree, TextSource, TreeNode};
+use super::types::{
+    GroupRole, NodeKind, NodeLevel, Outlier, OutlierReason, ReviewTree, TextSource, TreeNode,
+};
 use crate::ai_audit::{finding_class, primary_rank, FindingClass};
 use crate::onboard::Finding;
 
@@ -70,6 +72,79 @@ fn valid_path(f: &Finding) -> Option<&[String; 3]> {
         && path[1].starts_with("rule:")
         && sub_belongs_to(&path[2], &path[1]))
     .then_some(path)
+}
+
+/// The outlier reasons the engine reads off a row: stage 1's `severity_raise_held` capture, M4's
+/// review flags (wording problems, never holds) and M5's unverified-evidence mark (design
+/// section 8). None of them escalates a site on its own; the group reviewer may cite them.
+pub fn engine_outlier_reasons(f: &Finding) -> Vec<OutlierReason> {
+    let mut out = crate::ai_audit::outlier_reasons_of(f);
+    for flag in crate::review_flags::flags_of(f) {
+        let reason = match crate::review_flags::kind_of(&flag) {
+            crate::review_flags::PRECONDITION_ADDED => OutlierReason::PreconditionAdded,
+            crate::review_flags::UNVERIFIED_NAME => OutlierReason::UnverifiedName,
+            crate::review_flags::FIX_UNGROUNDED => OutlierReason::FixUngrounded,
+            crate::review_flags::CONTRADICTION => OutlierReason::Contradiction,
+            crate::review_flags::METHODOLOGY_LEAK => OutlierReason::MethodologyLeak,
+            _ => continue,
+        };
+        out.push(reason);
+    }
+    if f.captures
+        .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+    {
+        out.push(OutlierReason::EvidenceUnverified);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether the engine derives `reason` from a row's captures (so a rebuild recomputes it).
+fn is_derived_from_captures(reason: OutlierReason) -> bool {
+    matches!(
+        reason,
+        OutlierReason::SeverityRaiseHeld
+            | OutlierReason::PreconditionAdded
+            | OutlierReason::UnverifiedName
+            | OutlierReason::FixUngrounded
+            | OutlierReason::Contradiction
+            | OutlierReason::MethodologyLeak
+            | OutlierReason::EvidenceUnverified
+    )
+}
+
+/// The outliers of a sub-group: what the previous tree knew about members that are still there
+/// (the grouping pass's `different_object` marks and the group reviewer's marks), without the
+/// marks derived from captures, which are read again from the rows so a cleared flag goes.
+fn merged_outliers<'a>(
+    old: Option<&TreeNode>,
+    members: &BTreeSet<&str>,
+    rows: impl Iterator<Item = &'a Finding>,
+) -> Vec<Outlier> {
+    let mut out: Vec<Outlier> = old
+        .map(|o| {
+            o.outliers
+                .iter()
+                .filter(|x| members.contains(x.key.as_str()))
+                .filter(|x| {
+                    !(x.by == super::types::OutlierBy::Engine && is_derived_from_captures(x.reason))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for f in rows {
+        for reason in engine_outlier_reasons(f) {
+            out.push(Outlier {
+                key: f.site_key.clone(),
+                reason,
+                by: super::types::OutlierBy::Engine,
+                why: String::new(),
+            });
+        }
+    }
+    out
 }
 
 /// The ordinal of a sub-group id (`sub:SEC-1/3` is 3).
@@ -179,15 +254,7 @@ pub fn build_tree(
             kind: kind_of(members.iter().map(|&i| &findings[i])),
             cause,
             members: keys.clone(),
-            outliers: old
-                .map(|o| {
-                    o.outliers
-                        .iter()
-                        .filter(|x| key_set.contains(x.key.as_str()))
-                        .cloned()
-                        .collect::<Vec<Outlier>>()
-                })
-                .unwrap_or_default(),
+            outliers: merged_outliers(old, &key_set, members.iter().map(|&i| &findings[i])),
             summary: old.and_then(|o| o.summary.clone()),
             summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
             escalations: Vec::new(),

@@ -164,8 +164,6 @@ pub const OUTLIER_REASONS_CAPTURE: &str = "outlier_reasons";
 /// The stage 1 verdict kept on a row for the group reviewer. The severity and effort are the
 /// row's own fields; what has no field of its own is kept here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Read by the group reviewer (stage 2), the next work order; tested here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct Stage1Record {
     pub real: Real,
     /// Stage 1's one-line reason, redacted and with cross-finding pointers removed.
@@ -173,8 +171,6 @@ pub struct Stage1Record {
 }
 
 /// The stage 1 verdict recorded on `f`, when there is one.
-// Read by the group reviewer (stage 2), the next work order; tested here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn stage1_of(f: &Finding) -> Option<Stage1Record> {
     let v: serde_json::Value = serde_json::from_str(f.captures.get(STAGE1_CAPTURE)?).ok()?;
     Some(Stage1Record {
@@ -184,8 +180,6 @@ pub fn stage1_of(f: &Finding) -> Option<Stage1Record> {
 }
 
 /// The outlier reasons stage 1 recorded on `f` (today only `severity_raise_held`).
-// Read by the tree builder when stage 2 lands; tested here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn outlier_reasons_of(f: &Finding) -> Vec<crate::review_tree::OutlierReason> {
     f.captures
         .get(OUTLIER_REASONS_CAPTURE)

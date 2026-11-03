@@ -12505,7 +12505,8 @@ pub use batch_mode::{
 pub(crate) use calibration::mentions_exploit_precondition;
 use calibration::*;
 pub use calibration::{
-    apply_verdicts, verify_findings, verify_system_prompt, OUTLIER_REASONS_CAPTURE, STAGE1_CAPTURE,
+    apply_verdicts, outlier_reasons_of, stage1_of, verify_findings, verify_system_prompt, Real,
+    Stage1Record, OUTLIER_REASONS_CAPTURE, STAGE1_CAPTURE,
 };
 
 #[cfg(test)]
