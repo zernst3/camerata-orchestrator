@@ -19,7 +19,8 @@ mod types;
 mod unfold;
 
 pub use build::{
-    build_tree, is_thrown_out_id, kind_of, resolve_rule_categories, THROWN_OUT_SUFFIX,
+    build_tree, engine_outlier_reasons, is_thrown_out_id, kind_of, resolve_rule_categories,
+    unplaced_summary, THROWN_OUT_SUFFIX,
 };
 pub use collapse::{collapse_identical, mark_located, same_place, CollapseOutcome, CollapsedRow};
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};

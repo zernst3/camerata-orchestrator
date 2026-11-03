@@ -54,7 +54,7 @@ elif "architect's first reader of this rule group" in system:
     note("group_review")
     idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
     out = json.dumps({"summary": "The fixture's sites share one cause.",
-                      "subgroups": [{"label": "All", "cause": "one shared cause", "members": idx}],
+                      "subgroups": [{"label": "All", "cause": "one shared cause", "summary": "One cause.", "members": idx}],
                       "outliers": [], "escalations": [], "disagreements": []})
 elif "ONE concrete, codebase-specific fix" in system:
     note("fix")

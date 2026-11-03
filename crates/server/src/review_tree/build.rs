@@ -273,6 +273,16 @@ pub fn build_tree(
             None if *ordinal == u32::MAX => (UNPLACED_LABEL.to_string(), None),
             None => (format!("Sub-group {ordinal}"), None),
         };
+        // The `unplaced` sub-group has no model summary: its summary is a fixed sentence naming
+        // how many sites are in it, so it always agrees with the rows (A15).
+        let (summary, summary_source) = if *ordinal == u32::MAX {
+            (Some(unplaced_summary(keys.len())), TextSource::Model)
+        } else {
+            (
+                old.and_then(|o| o.summary.clone()),
+                old.map_or(TextSource::Model, |o| o.summary_source),
+            )
+        };
         sub_nodes.push(TreeNode {
             id: id.clone(),
             level: NodeLevel::Subgroup,
@@ -283,10 +293,10 @@ pub fn build_tree(
             cause,
             members: keys.clone(),
             outliers: merged_outliers(old, &key_set, members.iter().map(|&i| &findings[i])),
-            summary: old.and_then(|o| o.summary.clone()),
-            summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
+            summary,
+            summary_source,
             escalations: Vec::new(),
-            flags: Vec::new(),
+            flags: old.map(|o| o.flags.clone()).unwrap_or_default(),
         });
     }
 
@@ -571,4 +581,19 @@ fn thrown_out_nodes(
         });
     }
     out
+}
+
+/// The summary of a rule's `unplaced` sub-group: a fixed sentence that names how many sites are in
+/// it. The group reviewer never writes it (A15).
+pub fn unplaced_summary(count: usize) -> String {
+    if count == 1 {
+        "1 site in this rule group was not placed in a sub-group by the group reviewer; it is kept \
+         here for the architect to review."
+            .to_string()
+    } else {
+        format!(
+            "{count} sites in this rule group were not placed in a sub-group by the group \
+             reviewer; they are kept together here for the architect to review."
+        )
+    }
 }

@@ -237,7 +237,9 @@ impl Default for StepModels {
     fn default() -> Self {
         Self {
             audit: DEFAULT_MODEL.to_string(),
-            calibration: DEFAULT_MODEL.to_string(),
+            // Stage 1 has a default of its own (A13/A15): a new project seeds it, an existing
+            // project keeps whatever pick it stored.
+            calibration: STAGE1_DEFAULT_MODEL.to_string(),
             fix: String::new(),
             research_chat: DEFAULT_MODEL.to_string(),
             story_authoring: DEFAULT_MODEL.to_string(),

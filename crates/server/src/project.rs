@@ -153,7 +153,12 @@ impl ProjectStore {
                 // `Project::client_engagement`); the operator turns it off for their own development.
                 client_engagement: true,
                 client_tooling_opt_in: false,
-                review: ReviewSettings::default(),
+                // Stage 2 has a default of its own too; a new project seeds it (A15).
+                review: ReviewSettings {
+                    group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                        .to_string(),
+                    ..ReviewSettings::default()
+                },
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -821,12 +826,16 @@ mod tests {
     // ── StepModels (per-project, per-step model config) ────────────────────────
 
     #[test]
-    fn new_project_seeds_every_step_to_default_model() {
-        // (a) A freshly created project carries DEFAULT_MODEL in every step slot.
+    fn new_project_seeds_every_step_to_its_own_default() {
+        // (a) A freshly created project carries each step's own default: DEFAULT_MODEL in every
+        // step slot but calibration, which is stage 1 and has its own default (A13/A15).
         let store = ProjectStore::new();
         let p = store.create("SM", vec![]).unwrap();
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
-        assert_eq!(p.step_models.calibration, DEFAULT_MODEL);
+        assert_eq!(
+            p.step_models.calibration,
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL
+        );
         assert_eq!(p.step_models.research_chat, DEFAULT_MODEL);
         assert_eq!(p.step_models.story_authoring, DEFAULT_MODEL);
         assert_eq!(p.step_models.decomposition, DEFAULT_MODEL);
@@ -835,9 +844,12 @@ mod tests {
         // The one exception: the fix step starts unset, so the `fix_on_haiku` switch decides.
         assert_eq!(p.model_for_step(StepKind::Fix), "");
         // model_for_step agrees with the field for every kind.
+        assert_eq!(
+            p.model_for_step(StepKind::Calibration),
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL
+        );
         for step in [
             StepKind::Audit,
-            StepKind::Calibration,
             StepKind::ResearchChat,
             StepKind::StoryAuthoring,
             StepKind::Decomposition,
@@ -850,6 +862,30 @@ mod tests {
                 "new project defaults step {step:?} to DEFAULT_MODEL"
             );
         }
+    }
+
+    #[test]
+    fn a_new_project_seeds_each_calibration_stage_with_its_own_default() {
+        let store = ProjectStore::new();
+        let p = store.create("Stages", vec![]).unwrap();
+        // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
+        assert_eq!(p.step_models.calibration, "claude-opus-5-5");
+        assert_eq!(p.review.group_review_model, "claude-fable-5-1");
+        // The scan keeps its own default.
+        assert_eq!(p.step_models.audit, DEFAULT_MODEL);
+        // The rest of the review settings are the design values.
+        assert_eq!(p.review.escalation_floor, 20);
+        // A project that already stored explicit picks keeps them.
+        let json = serde_json::json!({
+            "id": "old", "name": "Old",
+            "step_models": { "calibration": "claude-sonnet-5-5" },
+        });
+        let old: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(old.step_models.calibration, "claude-sonnet-5-5");
+        assert_eq!(
+            old.review.group_review_model, "",
+            "unset: the run default applies"
+        );
     }
 
     #[test]
@@ -884,7 +920,7 @@ mod tests {
                 .get(&a.id)
                 .unwrap()
                 .model_for_step(StepKind::Calibration),
-            DEFAULT_MODEL,
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL,
             "setting A's audit model must not touch A's calibration model"
         );
     }
@@ -946,8 +982,12 @@ mod tests {
             let store = ProjectStore::load_or_new(path.clone());
             let a = store.create("A", vec![]).unwrap();
             let b = store.create("B", vec![]).unwrap();
-            // A new project carries the design values.
-            assert_eq!(a.review, ReviewSettings::default());
+            // A new project carries the design values, and stage 2's own default model.
+            let seeded = ReviewSettings {
+                group_review_model: "claude-fable-5-1".to_string(),
+                ..ReviewSettings::default()
+            };
+            assert_eq!(a.review, seeded);
             let set = ReviewSettings {
                 escalation_rate_per_kloc: 0.5,
                 escalation_floor: 7,
@@ -960,7 +1000,7 @@ mod tests {
                 .expect("valid settings");
             assert_eq!(updated.review, set);
             // B is untouched.
-            assert_eq!(store.get(&b.id).unwrap().review, ReviewSettings::default());
+            assert_eq!(store.get(&b.id).unwrap().review, seeded);
             // A bad rate is refused and changes nothing.
             for bad in [-1.0_f32, f32::NAN, f32::INFINITY] {
                 let refused = store
@@ -984,8 +1024,8 @@ mod tests {
         assert_eq!(a.review.escalation_floor, 7);
         assert_eq!(a.review.group_review_model, "claude-opus-5-5");
         assert_eq!(
-            reloaded.get(&b_id).unwrap().review,
-            ReviewSettings::default()
+            reloaded.get(&b_id).unwrap().review.group_review_model,
+            "claude-fable-5-1"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

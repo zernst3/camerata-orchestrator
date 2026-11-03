@@ -45,7 +45,7 @@ impl Scripted {
             .collect();
         serde_json::json!({
             "summary": "These sites share one cause.",
-            "subgroups": [{"label": "All", "cause": "one shared cause", "members": indices}],
+            "subgroups": [{"label": "All", "cause": "one shared cause", "summary": "One cause.", "members": indices}],
             "outliers": [],
             "escalations": escalations,
             "disagreements": [],

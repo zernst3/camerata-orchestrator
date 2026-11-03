@@ -53,9 +53,9 @@ pub const MAX_CHUNK_MEMBERS: usize = 150;
 /// The ledger stage name of the group review.
 pub const STAGE_SAMPLE_NAME: &str = "ai-group-review";
 
-/// Output tokens budgeted per member of a chunk: the member's index in a sub-group, and its share
-/// of the outlier, escalation and disagreement entries.
-const OUTPUT_TOKENS_PER_MEMBER: u32 = 24;
+/// Output tokens budgeted per member of a chunk: the member's index in a sub-group, its share of
+/// the sub-group summaries and of the outlier, escalation and disagreement entries.
+pub(super) const OUTPUT_TOKENS_PER_MEMBER: u32 = 40;
 
 /// The longest stage 1 reason a member line carries, in characters.
 const REASON_CHARS: usize = 200;
@@ -72,6 +72,10 @@ pub const STAGE2_FIELD_HOMES: &[(&str, &str)] = &[
     (
         "subgroups[].cause",
         "TreeNode.cause of the sub-group, and Finding.review.subgroup_cause of its members",
+    ),
+    (
+        "subgroups[].summary",
+        "TreeNode.summary of the sub-group, the text the architect reads at it (A15)",
     ),
     (
         "subgroups[].members[]",
@@ -159,26 +163,32 @@ pub fn group_review_system_prompt() -> String {
          once, so you can see what it could not: which sites share a cause, which do not belong \
          with the rest, and which differ.\n\n\
          Decide what in this group needs his attention most and why, in his words: a summary he \
-         can read at this node, the sub-groups by shared cause, the sites that do not belong with \
+         can read at the rule, the sub-groups by shared cause, each with a summary of its own \
+         (the sub-group is the unit he reviews), the sites that do not belong with \
          the rest and the sites he must look at himself, each with one reason from the closed \
          list. You may disagree with the per-site reviewer and must say why. You cannot remove a \
          site.\n\n\
          Answer with one JSON object and nothing else:\n\
          {\"summary\": \"...\",\n \
-         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"members\": [index, ...]}],\n \
+         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"summary\": \"...\", \"members\": [index, ...]}],\n \
          \"outliers\": [{\"index\": i, \"reason\": \"<outlier reason>\", \"why\": \"...\"}],\n \
          \"escalations\": [{\"index\": i, \"reason\": \"<escalation reason>\", \"rank\": n, \"why\": \"...\"}],\n \
          \"disagreements\": [{\"index\": i, \"field\": \"severity\" or \"real\", \"stage1\": \"...\", \"mine\": \"...\", \"why\": \"...\"}]}\n\n\
          Rules for each part.\n\
-         - summary: what the architect reads at this node. Say what the sites have in common, \
-         what is wrong, and what he should do about it. In the summary, name every site that does \
-         not share the cause you state, by its `path:line` exactly as listed, and mark each one \
-         as an outlier. Do not state how many sites there are, or how many share a cause: the \
-         report counts them itself, and a count in your prose is checked against it.\n\
+         - summary: what the architect reads at the rule, across its sub-groups. Say what the \
+         sites have in common, what is wrong, and what he should do about it. In the summary, \
+         name every site that does not share the cause you state, by its `path:line` exactly as \
+         listed, and mark each one as an outlier. Do not state how many sites there are, or how \
+         many share a cause: the report counts them itself, and a count in your prose is \
+         checked against it.\n\
          - subgroups: sort the sites by shared cause. Every index you were given goes in exactly \
          one sub-group. The hint sub-groups below are a starting point from simple shared-cause \
          tests; keep them, merge them or split them as the code warrants. `label` is a few words, \
-         `cause` is one sentence that says why these sites belong together.\n\
+         `cause` is one sentence that says why these sites belong together. `summary` is what he \
+         reads at this sub-group: what its sites share, the fix once, and the sites that differ \
+         from the rest of it, each named by its `path:line` exactly as listed and marked as an \
+         outlier. The same rule holds: name every site that does not share the stated cause, and \
+         do not state how many sites there are.\n\
          - outliers: the sites that do not belong with the rest of their sub-group, each with a \
          reason from the outlier list and a one-line why. An outlier mark alone never puts a \
          site in the architect's queue.\n\
@@ -282,6 +292,7 @@ pub struct Stage2Reply {
 pub struct ReplySubgroup {
     pub label: String,
     pub cause: String,
+    pub summary: String,
     pub members: Vec<usize>,
 }
 
@@ -382,7 +393,7 @@ impl Stage2Reply {
         let mut subgroups = Vec::new();
         for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
             let at = format!("subgroups[{i}]");
-            let o = exact_object(v, &["label", "cause", "members"], &at)?;
+            let o = exact_object(v, &["label", "cause", "summary", "members"], &at)?;
             let members = array_of(o, "members")
                 .map_err(|e| format!("{at}: {e}"))?
                 .iter()
@@ -395,6 +406,7 @@ impl Stage2Reply {
             subgroups.push(ReplySubgroup {
                 label: text_of(o, "label", &at)?,
                 cause: text_of(o, "cause", &at)?,
+                summary: text_of(o, "summary", &at)?,
                 members,
             });
         }
@@ -1091,6 +1103,7 @@ fn apply_rule(
     struct NewSub {
         label: String,
         cause: String,
+        summary: String,
         idxs: Vec<usize>,
     }
     let mut new_subs: Vec<NewSub> = Vec::new();
@@ -1114,6 +1127,7 @@ fn apply_rule(
                 new_subs.push(NewSub {
                     label: sg.label.clone(),
                     cause: sg.cause.clone(),
+                    summary: sg.summary.clone(),
                     idxs,
                 });
             }
@@ -1133,13 +1147,50 @@ fn apply_rule(
     let mut sub_of: HashMap<usize, String> = HashMap::new();
     let mut new_nodes: Vec<TreeNode> = Vec::new();
     let mut label_cause_of: HashMap<usize, (String, String)> = HashMap::new();
+    // A sub-group whose summary the architect edited keeps its node (and so the edit) when the
+    // new sub-group has exactly its members; an edit never vanishes silently (A15).
+    let edited: Vec<(BTreeSet<&str>, &TreeNode)> = tree
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.level == NodeLevel::Subgroup
+                && n.parent.as_deref() == Some(rule_id)
+                && n.summary_source == TextSource::Reviewer
+                && !n.members.is_empty()
+        })
+        .map(|n| (n.members.iter().map(String::as_str).collect(), n))
+        .collect();
+    let mut sub_members: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut kept_edits: HashMap<String, (String, TextSource)> = HashMap::new();
     for (n, sg) in new_subs.iter().enumerate() {
-        let id = crate::review_tree::sub_id(rule_id, base + 1 + n as u32);
+        let keys: BTreeSet<&str> = sg
+            .idxs
+            .iter()
+            .map(|&i| work.members[i].key.as_str())
+            .collect();
+        let reused = edited.iter().find(|(members, _)| *members == keys);
+        let id = match reused {
+            Some((_, old)) => {
+                kept_edits.insert(
+                    old.id.clone(),
+                    (old.summary.clone().unwrap_or_default(), old.summary_source),
+                );
+                old.id.clone()
+            }
+            None => crate::review_tree::sub_id(rule_id, base + 1 + n as u32),
+        };
         for &i in &sg.idxs {
             sub_of.insert(i, id.clone());
             label_cause_of.insert(i, (sg.label.clone(), sg.cause.clone()));
         }
-        new_nodes.push(sub_node(&id, rule_id, &sg.label, &sg.cause));
+        sub_members.insert(id.clone(), sg.idxs.clone());
+        let mut node = sub_node(&id, rule_id, &sg.label, &sg.cause);
+        node.summary = Some(sg.summary.clone());
+        if let Some((text, source)) = kept_edits.get(&id) {
+            node.summary = Some(text.clone());
+            node.summary_source = *source;
+        }
+        new_nodes.push(node);
     }
     if !unplaced.is_empty() {
         let id = unplaced_sub_id(rule_id);
@@ -1299,6 +1350,14 @@ fn apply_rule(
         if let Some(outliers) = outliers_by_sub.remove(&node.id) {
             node.outliers = outliers;
         }
+        // A9, per sub-group: its summary against the sub-group's own data. An edited summary is
+        // the architect's and is not checked.
+        if node.summary_source != TextSource::Reviewer {
+            if let (Some(text), Some(idxs)) = (&node.summary, sub_members.get(&node.id)) {
+                node.flags =
+                    sub_summary_flags(text, work, idxs, &node.outliers, &escalations, findings);
+            }
+        }
         match tree.nodes.iter_mut().find(|n| n.id == node.id) {
             Some(existing) => *existing = node,
             None => tree.nodes.push(node),
@@ -1363,6 +1422,53 @@ fn sub_node(id: &str, rule_id: &str, label: &str, cause: &str) -> TreeNode {
         escalations: Vec::new(),
         flags: Vec::new(),
     }
+}
+
+/// The flags a sub-group's summary earns against its own members: a count it states that the
+/// sub-group's data contradicts, and a member that differs in cause (a model outlier) that it does
+/// not name.
+fn sub_summary_flags(
+    summary: &str,
+    work: &RuleWork,
+    idxs: &[usize],
+    outliers: &[Outlier],
+    escalations: &[NodeEscalation],
+    findings: &[Finding],
+) -> Vec<String> {
+    let keys: BTreeSet<&str> = idxs.iter().map(|&i| work.members[i].key.as_str()).collect();
+    let mut outlier_keys: BTreeSet<&str> = outliers.iter().map(|o| o.key.as_str()).collect();
+    for &i in idxs {
+        if !crate::review_tree::engine_outlier_reasons(&findings[work.members[i].row]).is_empty() {
+            outlier_keys.insert(work.members[i].key.as_str());
+        }
+    }
+    let by_cause: BTreeSet<&str> = outliers
+        .iter()
+        .filter(|o| o.reason.differs_in_cause())
+        .map(|o| o.key.as_str())
+        .collect();
+    let facts = SummaryFacts {
+        sites: idxs.len(),
+        subgroup_sizes: vec![idxs.len()],
+        outliers: outlier_keys.len(),
+        escalations: escalations
+            .iter()
+            .filter(|e| keys.contains(e.key.as_str()))
+            .count(),
+        files: idxs
+            .iter()
+            .map(|&i| work.members[i].path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        unplaced: 0,
+        must_name: idxs
+            .iter()
+            .map(|&i| &work.members[i])
+            .filter(|m| by_cause.contains(m.key.as_str()))
+            .map(|m| (m.key.clone(), m.path.clone(), m.line, m.idx))
+            .collect(),
+    };
+    check_summary(summary, &facts)
 }
 
 /// The flags a rule group's summary earns against the final placement.
@@ -1979,7 +2085,12 @@ pub fn stand_in_reply(system: Option<&str>, prompt: &str) -> Option<String> {
     Some(
         serde_json::json!({
             "summary": "The sites of this rule share one cause.",
-            "subgroups": [{ "label": "All", "cause": "one shared cause", "members": members }],
+            "subgroups": [{
+                "label": "All",
+                "cause": "one shared cause",
+                "summary": "These sites share one cause.",
+                "members": members,
+            }],
             "outliers": [],
             "escalations": [],
             "disagreements": [],

@@ -168,7 +168,11 @@ fn reply(
         "summary": summary,
         "subgroups": subgroups
             .iter()
-            .map(|(l, c, m)| serde_json::json!({"label": l, "cause": c, "members": m}))
+            .map(|(l, c, m)| {
+                serde_json::json!({
+                    "label": l, "cause": c, "summary": format!("About {l}."), "members": m
+                })
+            })
             .collect::<Vec<_>>(),
         "outliers": outliers
             .iter()
@@ -1631,6 +1635,19 @@ async fn stage2_prompt_size_per_node_on_the_scripted_fixture() {
     for (node, bytes) in &outcome.prompt_bytes {
         eprintln!("stage 2 prompt size: {node}: user {bytes} bytes (+ system {system})");
     }
+    for (call, req) in llm.calls().iter().zip(llm.requests()) {
+        eprintln!(
+            "stage 2 reply budget: {} {}: max_tokens {} ({} sites)",
+            call.node_id,
+            if call.summary_call {
+                "rule summary"
+            } else {
+                "chunk"
+            },
+            req.max_tokens,
+            call.indices.len()
+        );
+    }
     assert!(!outcome.prompt_bytes.is_empty());
     // A 150-member node stays far under the window.
     for (_, bytes) in &outcome.prompt_bytes {
@@ -1834,7 +1851,7 @@ fn the_estimators_figures_cover_the_real_prompt() {
     // The reply budget per site is the one the request's cap is built from.
     assert_eq!(
         camerata_ui_core::scan::GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE as u32,
-        24
+        OUTPUT_TOKENS_PER_MEMBER
     );
     assert_eq!(
         camerata_ui_core::scan::GROUP_REVIEW_MAX_CHUNK_SITES as usize,
@@ -1901,4 +1918,335 @@ async fn what_stage_2_wrote_survives_the_seal_and_a_row_thrown_out_since_is_no_l
         .nodes
         .iter()
         .any(|n| crate::review_tree::is_thrown_out_id(&n.id) && n.members.contains(&thrown_key)));
+}
+
+#[tokio::test]
+async fn a_failed_group_review_is_named_in_the_operator_failure_report() {
+    let mut report = report_of(&[(SQL, 3), (SECRETS, 2)]);
+    // The reviewer answers the secrets group, and fails the SQL group twice (the runner's retry
+    // included).
+    let llm = Reviewer::new(|call| {
+        if call.node_id.contains("SQL") {
+            Ok(r#"{"summary":"s","confidence":"high"}"#.to_string())
+        } else {
+            Ok(one_group(call, "Keys."))
+        }
+    });
+    run(&mut report, &llm).await;
+    let failure = crate::failure_report::build(&report);
+    let entries: Vec<&crate::failure_report::FailureEntry> = failure
+        .entries
+        .iter()
+        .filter(|e| e.part == "group review")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one entry per failed rule group: {failure:#?}"
+    );
+    let e = entries[0];
+    assert!(
+        e.message.contains("rule:SEC-NO-RAW-SQL-CONCAT-1"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("schema does not have"), "{}", e.message);
+    assert_eq!(e.files.len(), 3, "the files of the sites left unread");
+    assert!(failure.unresolved().any(|u| u.part == "group review"));
+    let md = failure.render_md();
+    assert!(md.contains("group review"), "{md}");
+    // The run is incomplete, so the client export is refused.
+    assert!(!report.incomplete_reasons().is_empty());
+}
+
+// ── A15: every sub-group has its own summary ───────────────────────────────────────────────
+
+/// A reply with a summary of its own for each sub-group: `(label, cause, summary, members)`.
+fn reply_with_summaries(
+    summary: &str,
+    subgroups: &[(&str, &str, &str, Vec<usize>)],
+    outliers: &[(usize, &str, &str)],
+) -> String {
+    serde_json::json!({
+        "summary": summary,
+        "subgroups": subgroups
+            .iter()
+            .map(|(l, c, s, m)| serde_json::json!({
+                "label": l, "cause": c, "summary": s, "members": m
+            }))
+            .collect::<Vec<_>>(),
+        "outliers": outliers
+            .iter()
+            .map(|(i, r, w)| serde_json::json!({"index": i, "reason": r, "why": w}))
+            .collect::<Vec<_>>(),
+        "escalations": [],
+        "disagreements": [],
+    })
+    .to_string()
+}
+
+fn sub_by_label<'a>(report: &'a ScanReport, rule: &str, label: &str) -> &'a TreeNode {
+    subgroups_of(report, rule)
+        .into_iter()
+        .find(|n| n.label == label)
+        .unwrap_or_else(|| panic!("no sub-group {label}"))
+}
+
+#[tokio::test]
+async fn every_subgroup_has_its_own_summary_stored_on_its_node() {
+    let mut report = report_of(&[(SQL, 6)]);
+    let llm = Reviewer::new(|_| {
+        Ok(reply_with_summaries(
+            "Raw SQL built from input.",
+            &[
+                (
+                    "Params",
+                    "a query parameter",
+                    "Built from a query parameter. Bind it instead.",
+                    vec![0, 1, 2],
+                ),
+                (
+                    "Headers",
+                    "a header",
+                    "Built from a header. Validate and bind it.",
+                    vec![3, 4, 5],
+                ),
+            ],
+            &[],
+        ))
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(outcome.rules_reviewed, 1);
+    let rule = rule_node(&report, SQL);
+    assert_eq!(
+        sub_by_label(&report, &rule, "Params").summary.as_deref(),
+        Some("Built from a query parameter. Bind it instead.")
+    );
+    assert_eq!(
+        sub_by_label(&report, &rule, "Headers").summary.as_deref(),
+        Some("Built from a header. Validate and bind it.")
+    );
+    // The rule node keeps its own, different summary.
+    assert_eq!(
+        node(&report, &rule).summary.as_deref(),
+        Some("Raw SQL built from input.")
+    );
+    // The counts beside a sub-group come from the tree.
+    let params = sub_by_label(&report, &rule, "Params").id.clone();
+    assert_eq!(tree(&report).counts(&params).sites, 3);
+
+    // A sub-group with no summary is not a reply: the schema requires it.
+    let mut no_summary: serde_json::Value =
+        serde_json::from_str(&reply("s", &[("a", "b", vec![0])], &[], &[], &[])).unwrap();
+    no_summary["subgroups"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("summary");
+    assert!(Stage2Reply::parse(&no_summary.to_string()).is_err());
+    assert!(
+        reply_schemas::check::violation(&reply_schemas::stage2_reply_schema(), &no_summary)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_chunked_node_gives_each_chunks_subgroups_their_own_summaries() {
+    let mut report = report_of(&[(SQL, 200)]);
+    let llm = Reviewer::new(|call| {
+        if call.summary_call {
+            Ok(summary_reply("The whole rule."))
+        } else {
+            Ok(reply_with_summaries(
+                "A part of the rule.",
+                &[(
+                    "Part",
+                    "a part",
+                    &format!("Covers {} sites of one part.", call.indices.len()),
+                    call.indices.clone(),
+                )],
+                &[],
+            ))
+        }
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    assert_eq!(
+        node(&report, &rule).summary.as_deref(),
+        Some("The whole rule.")
+    );
+    let subs = subgroups_of(&report, &rule);
+    assert_eq!(subs.len(), 2);
+    let mut summaries: Vec<&str> = subs.iter().filter_map(|n| n.summary.as_deref()).collect();
+    summaries.sort_unstable();
+    assert_eq!(
+        summaries,
+        vec![
+            "Covers 150 sites of one part.",
+            "Covers 50 sites of one part."
+        ]
+    );
+    // The rule-level call returns a rule summary only.
+    assert_eq!(
+        llm.requests()
+            .iter()
+            .filter(|r| r.response_schema == Some(reply_schemas::rule_summary_reply_schema()))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_subgroup_summary_count_mismatch_is_flagged() {
+    let mut report = report_of(&[(SQL, 4)]);
+    let llm = Reviewer::new(|_| {
+        Ok(reply_with_summaries(
+            "Raw SQL.",
+            &[
+                (
+                    "Wrong",
+                    "c",
+                    "The same flaw appears in 40 sites.",
+                    vec![0, 1],
+                ),
+                (
+                    "Right",
+                    "c",
+                    "Both of these 2 sites build SQL from input.",
+                    vec![2, 3],
+                ),
+            ],
+            &[],
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    let wrong = sub_by_label(&report, &rule, "Wrong");
+    assert!(
+        wrong
+            .flags
+            .iter()
+            .any(|f| f.starts_with("summary_count_mismatch")),
+        "{:?}",
+        wrong.flags
+    );
+    assert!(sub_by_label(&report, &rule, "Right").flags.is_empty());
+}
+
+#[tokio::test]
+async fn a_subgroup_summary_that_omits_a_differing_member_is_flagged() {
+    let mut report = report_of(&[(SQL, 4)]);
+    let rows = sites_of(&report, SQL);
+    let named = format!("{}:{}", rows[1].path, rows[1].line);
+    let (key0, key1) = (rows[0].site_key.clone(), rows[1].site_key.clone());
+    let llm = Reviewer::new(move |_| {
+        Ok(reply_with_summaries(
+            "Raw SQL.",
+            &[(
+                "Mixed",
+                "c",
+                &format!("Built from input, except {named}."),
+                vec![0, 1, 2, 3],
+            )],
+            &[
+                (0, "different_object", "A different table."),
+                (1, "different_construct", "A procedure call."),
+            ],
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    let mixed = sub_by_label(&report, &rule, "Mixed");
+    // Site 1 is named by path and line; site 0 is not.
+    assert_eq!(
+        mixed.flags,
+        vec![format!("summary_omits_member:{key0}")],
+        "{key1} is named"
+    );
+}
+
+#[tokio::test]
+async fn the_unplaced_subgroup_summary_is_mechanical() {
+    let mut report = report_of(&[(SQL, 4)]);
+    // The reply places 0 and 1 only.
+    let llm = Reviewer::new(|_| {
+        Ok(reply_with_summaries(
+            "Raw SQL.",
+            &[("Placed", "c", "These two are placed.", vec![0, 1])],
+            &[],
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    let unplaced = node(&report, &unplaced_sub_id(&rule));
+    assert_eq!(
+        unplaced.summary.as_deref(),
+        Some(
+            "2 sites in this rule group were not placed in a sub-group by the group reviewer; \
+             they are kept together here for the architect to review."
+        )
+    );
+    assert!(unplaced.flags.is_empty());
+    // It follows the rows: after the seal throws one of them out, the sentence says 1.
+    let thrown = unplaced.members[0].clone();
+    let row = report
+        .findings
+        .iter_mut()
+        .find(|f| f.site_key == thrown)
+        .unwrap();
+    crate::engine_discard::mark(row, crate::engine_discard::DISCARD_VERDICT);
+    let sealed = report.seal();
+    let t = sealed.tree.as_ref().unwrap();
+    assert_eq!(
+        t.node(&unplaced_sub_id(&rule))
+            .and_then(|n| n.summary.as_deref()),
+        Some(
+            "1 site in this rule group was not placed in a sub-group by the group reviewer; \
+             it is kept here for the architect to review."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_reviewer_edited_subgroup_summary_is_kept_on_a_rerun_when_its_members_are_unchanged() {
+    let mut report = report_of(&[(SQL, 4)]);
+    let reply_text = |summary: &'static str| {
+        Reviewer::new(move |_| {
+            Ok(reply_with_summaries(
+                "Raw SQL.",
+                &[
+                    ("One", "c", summary, vec![0, 1]),
+                    ("Two", "c", summary, vec![2, 3]),
+                ],
+                &[],
+            ))
+        })
+    };
+    run(&mut report, &reply_text("The model's first words.")).await;
+    let rule = rule_node(&report, SQL);
+    let one_id = sub_by_label(&report, &rule, "One").id.clone();
+    {
+        let n = report
+            .tree
+            .as_mut()
+            .unwrap()
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == one_id)
+            .unwrap();
+        n.summary = Some("The architect's words for One.".to_string());
+        n.summary_source = crate::review_tree::TextSource::Reviewer;
+    }
+    run(&mut report, &reply_text("The model's second words.")).await;
+    let one = sub_by_label(&report, &rule, "One");
+    assert_eq!(
+        one.summary.as_deref(),
+        Some("The architect's words for One.")
+    );
+    assert_eq!(one.summary_source, crate::review_tree::TextSource::Reviewer);
+    assert_eq!(one.id, one_id, "the same node, so the edit is keyed to it");
+    // The other sub-group takes the new model summary.
+    assert_eq!(
+        sub_by_label(&report, &rule, "Two").summary.as_deref(),
+        Some("The model's second words.")
+    );
 }

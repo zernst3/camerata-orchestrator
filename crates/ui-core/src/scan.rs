@@ -250,14 +250,15 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
 /// headline), and writes the summary, the sub-groups by index and the few escalations. No batch
 /// discount and no cache breakpoint: the architect is waiting on it. Pinned to the real prompt by
 /// `group_review_tests::the_estimators_figures_cover_the_real_prompt`.
-pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_700.0;
+pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_800.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: the repository line, the rule text and the hint header.
 pub const GROUP_REVIEW_CALL_OVERHEAD_TOKENS: f64 = 400.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: one site's line, at full width (an 80-character path, a
 /// 160-character headline and a 200-character stage 1 reason).
 pub const GROUP_REVIEW_INPUT_TOKENS_PER_SITE: f64 = 140.0;
-/// The reply's budget per site; the server's cap per call is built from the same figure.
-pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE: f64 = 24.0;
+/// The reply's budget per site (its index in a sub-group and its share of the sub-group summaries
+/// and the other entries); the server's cap per call is built from the same figure.
+pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE: f64 = 40.0;
 /// Estimator assumption: sites in one rule group. Before the scan nobody knows how many rules
 /// fire; a group of 8 is the middle of what the scripted fixtures and the recorded runs show.
 pub const GROUP_REVIEW_SITES_PER_GROUP: f64 = 8.0;

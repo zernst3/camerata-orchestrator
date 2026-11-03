@@ -179,9 +179,9 @@ pub(crate) fn stage1_reply_schema() -> Value {
     )
 }
 
-/// The group reviewer's reply for one rule group, or one chunk of a large one (design 4.2): the
-/// summary the architect reads at the node, the sub-groups by shared cause (every member index in
-/// exactly one), the sites that do not belong with the rest, the sites he must look at himself
+/// The group reviewer's reply for one rule group, or one chunk of a large one (design 4.2 and A15):
+/// the summary the architect reads at the rule, the sub-groups by shared cause (every member index
+/// in exactly one), each with a summary of its own, the sites that do not belong with the rest, the sites he must look at himself
 /// (each with one reason from the closed list) and the points where the group reviewer disagrees
 /// with the per-site reviewer. Every field has a home on a row or in the node's summary
 /// ([`super::group_review::STAGE2_FIELD_HOMES`]); a field with no home is not in this schema, and
@@ -200,9 +200,10 @@ pub(crate) fn stage2_reply_schema() -> Value {
         &[
             ("label", string()),
             ("cause", string()),
+            ("summary", string()),
             ("members", array(integer())),
         ],
-        &["label", "cause", "members"],
+        &["label", "cause", "summary", "members"],
     );
     let outlier = object(
         &[
