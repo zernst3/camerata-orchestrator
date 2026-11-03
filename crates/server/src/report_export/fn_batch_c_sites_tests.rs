@@ -36,8 +36,10 @@ fn report_with_absorbed_sites(n: usize) -> crate::onboard::ScanReport {
 #[test]
 fn a_curated_site_carries_its_absorbed_sites_without_raw_rule_ids() {
     let json = build_report_json(
-        &report_with_absorbed_sites(3).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &report_with_absorbed_sites(3).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -58,7 +60,11 @@ fn an_unmerged_row_has_no_also_sites() {
         vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
         vec!["SEC-NO-HARDCODED-SECRETS-1"],
     );
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(json.curated_findings[0].sites[0].also_sites.is_empty());
 }
 
@@ -74,7 +80,11 @@ fn a_rule_that_survived_only_as_an_absorbed_site_is_not_counted_clean_in_the_sco
     let mut primary = finding(a, "src/main.rs", 10, "high");
     primary.also_locations = vec![site_at(".env.production", 1, b, false)];
     let report = report_with(vec![primary], vec![a, b]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let row = json
         .scorecard
         .rows
@@ -95,8 +105,10 @@ async fn the_pdf_lists_every_absorbed_site_up_to_ten_and_counts_the_rest() {
         return;
     }
     let json = build_report_json(
-        &report_with_absorbed_sites(12).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &report_with_absorbed_sites(12).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );

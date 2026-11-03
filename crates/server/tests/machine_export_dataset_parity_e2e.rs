@@ -1135,14 +1135,29 @@ fn build(
             .collect::<HashMap<_, _>>()
     };
     Artifacts {
-        xlsx: build_workbook(report, dispositions, corpus, &opts).unwrap(),
+        xlsx: build_workbook(
+            &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+            corpus,
+            &opts,
+        )
+        .unwrap(),
         json: by_dataset(
-            build_json_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_json_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "json",
             "json",
         ),
         csv: by_dataset(
-            build_csv_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_csv_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "csv",
             "csv",
         ),

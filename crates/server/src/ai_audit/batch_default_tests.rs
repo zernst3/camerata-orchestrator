@@ -405,8 +405,7 @@ async fn an_item_that_fails_twice_is_a_failed_pass_and_the_export_says_incomplet
     report.gated = false;
     report.failed_passes = rows;
     let json = crate::report_export::build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         None,
         &crate::report_export::ReportOptions::default(),
     );

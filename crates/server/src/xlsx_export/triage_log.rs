@@ -39,8 +39,8 @@ use serde::Serialize;
 use crate::onboard::Finding;
 use crate::report_export::{
     classify, effective_bucket, finding_key, is_action_row_missing_a_fix, is_ai_tier,
-    is_held_for_review, is_informational, is_uncited_ai_finding, title_for_finding,
-    DispositionWire, ReportOptions,
+    is_held_for_review, is_informational, is_uncited_ai_finding, title_for_finding, ReportOptions,
+    ReviewedReport,
 };
 
 /// The workbook sheet's name.
@@ -79,11 +79,12 @@ pub struct TriageLogRow {
 /// The triage log for `report`, one row per rule the AI pass proposed anything under, sorted
 /// by rule id. Pure.
 pub fn build_triage_log(
-    report: &crate::onboard::ScanReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &HashMap<String, String>,
 ) -> Vec<TriageLogRow> {
+    let report: &crate::onboard::ScanReport = reviewed.report();
+    let dispositions = reviewed.dispositions();
     #[derive(Default)]
     struct Tally {
         rule: String,

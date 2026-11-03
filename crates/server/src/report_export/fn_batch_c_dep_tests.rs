@@ -91,7 +91,11 @@ fn marking_one_advisory_a_false_positive_leaves_the_other_in_the_report() {
     dispositions.insert(finding_key(&rows[0]), false_positive());
     let mut report = report_with(Vec::new(), Vec::new());
     report.findings = rows;
-    let json = build_report_json(&report.seal(), &dispositions, None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &dispositions),
+        None,
+        &empty_opts(),
+    );
     assert_eq!(
         json.dependency_snapshot.rows.len(),
         1,
@@ -127,8 +131,10 @@ fn clean_report_with_note(note: Option<CoverageNote>) -> crate::onboard::ScanRep
 #[test]
 fn no_rows_and_no_note_is_clean() {
     let json = build_report_json(
-        &clean_report_with_note(None).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &clean_report_with_note(None).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -140,8 +146,10 @@ fn no_rows_and_no_note_is_clean() {
 fn a_dependency_audit_that_did_not_run_is_not_clean() {
     let note = osv_note("dependency audit (osv-scanner) did not run: no network");
     let json = build_report_json(
-        &clean_report_with_note(Some(note)).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &clean_report_with_note(Some(note)).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -153,8 +161,10 @@ fn a_dependency_audit_that_did_not_run_is_not_clean() {
 fn a_dependency_audit_that_found_no_lockfiles_still_counts_as_checked() {
     let note = osv_note("dependency audit (osv-scanner) found no lockfiles in acme/api");
     let json = build_report_json(
-        &clean_report_with_note(Some(note)).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &clean_report_with_note(Some(note)).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -168,8 +178,10 @@ fn a_note_about_unaudited_manifests_is_not_clean() {
          lockfiles, so the packages these declare were not checked for known vulnerabilities.",
     );
     let json = build_report_json(
-        &clean_report_with_note(Some(note)).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &clean_report_with_note(Some(note)).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -204,8 +216,10 @@ async fn the_pdf_does_not_say_no_vulnerable_dependencies_when_the_audit_did_not_
     }
     let note = osv_note("dependency audit (osv-scanner) did not run: no network");
     let json = build_report_json(
-        &clean_report_with_note(Some(note)).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &clean_report_with_note(Some(note)).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );

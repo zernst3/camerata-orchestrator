@@ -40,8 +40,12 @@ fn a_finding_with_5000_sites_exports_and_every_site_is_on_the_sites_sheet() {
         vec![finding_with_sites(5_000)],
         vec!["SEC-NO-RAW-SQL-CONCAT-1"],
     );
-    let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-        .expect("a finding with 5,000 sites must not abort the export");
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("a finding with 5,000 sites must not abort the export");
 
     let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
     assert!(
@@ -78,8 +82,12 @@ fn the_pointer_counts_exactly_the_sites_the_cell_dropped() {
         vec![finding_with_sites(5_000)],
         vec!["SEC-NO-RAW-SQL-CONCAT-1"],
     );
-    let bytes =
-        build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
     let (shown, pointer) = also.rsplit_once("\nand ").expect("pointer on its own line");
     let dropped: usize = pointer
@@ -114,8 +122,12 @@ fn a_deviation_group_and_a_convention_with_thousands_of_sites_do_not_abort() {
     conv.also_locations = (0..4_000).map(site).collect();
 
     let report = report_with(vec![dev, conv], vec![]);
-    let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-        .expect("large deviation and convention groups must not abort the export");
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("large deviation and convention groups must not abort the export");
     let where_cell = cell_text(&bytes, &sheet_entry_for(&bytes, "Deviations"), "G2");
     assert!(where_cell.chars().count() < EXCEL_CELL_LIMIT);
     assert!(where_cell.contains("more sites, see Sites sheet"));
@@ -131,8 +143,12 @@ fn a_small_report_keeps_its_cells_exactly_as_before() {
     let mut f = finding_with_sites(3);
     f.also_locations = vec![site(0), site(1)];
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
-    let bytes =
-        build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
     assert_eq!(
         also,
@@ -146,8 +162,12 @@ fn any_other_oversized_text_cell_is_cut_with_a_pointer_instead_of_aborting() {
     let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 1, "high");
     f.detail = "x".repeat(60_000);
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
-    let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-        .expect("an oversized prose cell must not abort the export");
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("an oversized prose cell must not abort the export");
     let detail = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "U2");
     assert!(detail.chars().count() < EXCEL_CELL_LIMIT);
     assert!(
@@ -162,8 +182,7 @@ fn more_sites_than_one_sheet_holds_continue_on_a_second_sheet() {
     f.also_locations.truncate(6);
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
     let (rows, _) = partition_rows(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
         None,
         &HashMap::new(),
     );
@@ -188,8 +207,12 @@ fn an_area_called_sites_cannot_take_the_name_the_pointer_uses() {
     let mut f = finding_with_sites(3);
     f.category = Some("Sites".to_string());
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
-    let bytes =
-        build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let strings = sheet_cell_strings(&bytes, "Sites");
     assert!(
         strings.iter().any(|s| s.starts_with("Finding (rule @")),
@@ -246,8 +269,12 @@ fn scale_report(rows: usize, rules: usize) -> ScanReport {
 async fn export_everything(report: &ScanReport, render_pdf: bool) -> (usize, usize, Option<usize>) {
     let sealed = report.clone().seal();
     let started = std::time::Instant::now();
-    let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts())
-        .expect("the workbook must export");
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("the workbook must export");
     eprintln!(
         "scale: workbook {} bytes in {:?}",
         xlsx.len(),
@@ -260,8 +287,11 @@ async fn export_everything(report: &ScanReport, render_pdf: bool) -> (usize, usi
     );
 
     let started = std::time::Instant::now();
-    let json =
-        crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+    let json = crate::report_export::build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let data = crate::report_export::render_data_json(&json).expect("the PDF data must serialize");
     eprintln!(
         "scale: PDF data {} bytes in {:?}",

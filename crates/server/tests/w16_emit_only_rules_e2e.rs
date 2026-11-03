@@ -135,8 +135,10 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
 /// The healthy-rule ids the REAL exporter would render into the PDF's "What's healthy" block.
 fn healthy_ids_in_export(report: ScanReport, corpus: &camerata_rules::RuleSet) -> Vec<String> {
     let json = report_export::build_report_json(
-        &report.seal(),
-        &HashMap::<String, DispositionWire>::new(),
+        &report_export::ReviewedReport::unreviewed(
+            &report.seal(),
+            &HashMap::<String, DispositionWire>::new(),
+        ),
         Some(corpus),
         &ReportOptions::default(),
     );

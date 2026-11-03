@@ -311,12 +311,14 @@ async fn scan_with_corpus(corpus_dir: &Path, repo_dir: &Path, selected: Vec<Sele
     let sealed = report.seal();
     let dispositions: HashMap<String, DispositionWire> = HashMap::new();
     let opts = ReportOptions::default();
-    let report_json =
-        report_export::build_report_json(&sealed, &dispositions, corpus.as_ref(), &opts);
+    let report_json = report_export::build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
+        corpus.as_ref(),
+        &opts,
+    );
     let json_value = serde_json::to_value(&report_json).unwrap();
     let workbook = camerata_server::xlsx_export::build_workbook(
-        &sealed,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
         corpus.as_ref(),
         &opts,
     )

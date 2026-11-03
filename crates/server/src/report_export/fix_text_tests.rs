@@ -36,7 +36,11 @@ async fn the_pdf_data_joins_a_hard_wrapped_specific_fix_and_keeps_paragraph_brea
             .to_string(),
     );
     let report = report_with(vec![f], vec![SERVICE_ROLE]).seal();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let site = &json.curated_findings[0].sites[0];
     assert_eq!(
         site.fix_for_this_finding.as_deref(),
@@ -56,7 +60,11 @@ async fn an_identical_wrapped_specific_fix_is_not_repeated_as_general_guidance()
     let mut f = f0.clone();
     f.fix_specific = Some(generic.replace(". ", ".\n"));
     let report = report_with(vec![f], vec![SERVICE_ROLE]).seal();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let site = &json.curated_findings[0].sites[0];
     assert_eq!(site.fix, None, "{:?}", site.fix);
 }
@@ -104,7 +112,11 @@ async fn backtick_spans_in_fix_text_reach_typst_as_raw_and_paragraphs_split() {
             .to_string(),
     );
     let report = report_with(vec![f], vec![SERVICE_ROLE]).seal();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let data = render_data_json(&json).unwrap();
 
     let raws = typst_query(&data, "raw");

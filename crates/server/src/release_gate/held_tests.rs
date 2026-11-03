@@ -59,9 +59,9 @@ fn decision(id: &str, key: &str, state: DecisionState, reason: &str) -> Decision
 
 fn package_of(reviewed: &ReviewedReport) -> ProductPackage {
     let options = client_options();
-    let json = build_report_json(reviewed.report(), reviewed.dispositions(), None, &options);
+    let json = build_report_json(reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
-    assemble_package_reviewed(
+    assemble_package(
         reviewed,
         None,
         &options,

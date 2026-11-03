@@ -89,7 +89,11 @@ fn scenario_report() -> (crate::onboard::ScanReport, HashMap<String, Disposition
 async fn the_log_counts_what_the_ai_pass_proposed_kept_and_threw_out_per_rule_and_says_why() {
     let corpus = corpus().await;
     let (report, dispositions) = scenario();
-    let log = build_triage_log(&report, &dispositions, Some(&corpus), &HashMap::new());
+    let log = build_triage_log(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &HashMap::new(),
+    );
     assert_eq!(log.len(), 1, "only the AI pass's rule: {log:#?}");
     let r = row(&log, "SEC-NO-HARDCODED-SECRETS-1");
     assert_eq!(r.proposed, 3);
@@ -124,13 +128,23 @@ async fn the_triage_log_is_off_by_default() {
     let (report, dispositions) = scenario();
     let options = ReportOptions::default();
     assert!(!options.triage_log);
-    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     let strings = crate::release_gate::xlsx_strings(&xlsx).unwrap().join("\n");
     assert!(
         !strings.contains(TRIAGE_LOG_SHEET),
         "no triage sheet by default"
     );
-    let csv = build_csv_exports(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let csv = build_csv_exports(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     assert!(csv.iter().all(|(path, _)| path != TRIAGE_LOG_CSV));
 }
 
@@ -142,7 +156,12 @@ async fn when_asked_for_the_triage_log_rides_as_a_workbook_sheet_and_a_csv() {
         triage_log: true,
         ..ReportOptions::default()
     };
-    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, TRIAGE_LOG_SHEET)
         .expect("the workbook has a Triage Log sheet");
     let flat: Vec<String> = grid.iter().flatten().cloned().collect();
@@ -155,7 +174,12 @@ async fn when_asked_for_the_triage_log_rides_as_a_workbook_sheet_and_a_csv() {
         "{flat:?}"
     );
 
-    let csv = build_csv_exports(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let csv = build_csv_exports(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     let (_, bytes) = csv
         .iter()
         .find(|(path, _)| path == TRIAGE_LOG_CSV)
@@ -178,7 +202,12 @@ fn an_empty_triage_log_still_has_its_header() {
         triage_log: true,
         ..ReportOptions::default()
     };
-    let csv = build_csv_exports(&report, &HashMap::new(), None, &options).unwrap();
+    let csv = build_csv_exports(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &options,
+    )
+    .unwrap();
     let (_, bytes) = csv
         .iter()
         .find(|(path, _)| path == TRIAGE_LOG_CSV)
@@ -251,7 +280,12 @@ async fn the_sheet_carries_the_caption_with_the_ledgers_deduped_count() {
         triage_log: true,
         ..ReportOptions::default()
     };
-    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, TRIAGE_LOG_SHEET).expect("the sheet");
     let flat: Vec<String> = grid.iter().flatten().cloned().collect();
     assert!(
@@ -272,7 +306,12 @@ async fn every_sheet_including_the_triage_log_carries_the_footer() {
         client_name: "Example Client Ltd".to_string(),
         ..ReportOptions::default()
     };
-    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &options,
+    )
+    .unwrap();
     let sheets = crate::release_gate::xlsx_sheet_names(&xlsx).unwrap();
     assert!(
         sheets.iter().any(|s| s == TRIAGE_LOG_SHEET),

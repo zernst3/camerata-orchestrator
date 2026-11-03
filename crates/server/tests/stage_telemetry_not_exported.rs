@@ -68,8 +68,17 @@ fn report(ledger: ScanLedger) -> ScanReport {
 
 fn exported(report: ScanReport) -> (String, String) {
     let sealed = report.seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
-    let findings = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
+    let findings = build_findings_export(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &json,
+        &HashMap::new(),
+    );
     (
         serde_json::to_string(&json).unwrap(),
         serde_json::to_string(&findings).unwrap(),

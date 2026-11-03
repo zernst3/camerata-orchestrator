@@ -54,15 +54,21 @@ fn a_full_scan_has_no_incremental_note() {
         vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
         vec!["SEC-NO-HARDCODED-SECRETS-1"],
     );
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(json.cover.incremental_note.is_none());
 }
 
 #[test]
 fn the_cover_data_carries_the_note_for_an_incremental_run() {
     let json = build_report_json(
-        &incremental_report().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &incremental_report().seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
@@ -75,10 +81,13 @@ fn the_cover_data_carries_the_note_for_an_incremental_run() {
 #[test]
 fn findings_json_and_the_csv_name_the_inspection_a_row_was_carried_from() {
     let report = incremental_report().seal();
-    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
@@ -90,8 +99,12 @@ fn findings_json_and_the_csv_name_the_inspection_a_row_was_carried_from() {
     let fresh = rows.iter().find(|r| r["path"] == "src/new.rs").unwrap();
     assert_eq!(fresh["carried_from"], "", "{fresh}");
 
-    let csvs = crate::xlsx_export::build_csv_exports(&report, &HashMap::new(), None, &empty_opts())
-        .unwrap();
+    let csvs = crate::xlsx_export::build_csv_exports(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let (_, all) = csvs
         .iter()
         .find(|(n, _)| n == "csv/all-findings.csv")
@@ -104,8 +117,12 @@ fn findings_json_and_the_csv_name_the_inspection_a_row_was_carried_from() {
 #[test]
 fn the_workbook_has_a_carried_from_column() {
     let report = incremental_report().seal();
-    let bytes =
-        crate::xlsx_export::build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
@@ -120,8 +137,10 @@ async fn the_pdf_cover_says_what_was_carried_forward() {
         return;
     }
     let json = build_report_json(
-        &incremental_report().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &incremental_report().seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );

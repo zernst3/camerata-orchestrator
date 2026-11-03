@@ -28,8 +28,10 @@ use serde_json::Value;
 
 fn report_json(report: &ScanReport) -> AuditReportJson {
     build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )
@@ -37,15 +39,26 @@ fn report_json(report: &ScanReport) -> AuditReportJson {
 
 fn findings_json(report: &ScanReport) -> Value {
     let sealed = report.clone().seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
-    let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
+    let export = build_findings_export(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &json,
+        &HashMap::new(),
+    );
     serde_json::to_value(export).unwrap()
 }
 
 fn workbook(report: &ScanReport) -> Vec<u8> {
     build_workbook(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )
@@ -70,11 +83,18 @@ fn cell(grid: &[Vec<String>], header: &str, key_header: &str, key: &str) -> Stri
 
 fn dataset(report: &ScanReport, file: &str) -> Vec<Value> {
     let opts = ReportOptions::default();
-    let (_, bytes) = build_json_exports(&report.clone().seal(), &HashMap::new(), None, &opts)
-        .unwrap()
-        .into_iter()
-        .find(|(name, _)| name == file)
-        .unwrap();
+    let (_, bytes) = build_json_exports(
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
+        None,
+        &opts,
+    )
+    .unwrap()
+    .into_iter()
+    .find(|(name, _)| name == file)
+    .unwrap();
     serde_json::from_slice::<Value>(&bytes)
         .unwrap()
         .as_array()
@@ -134,8 +154,10 @@ fn two_repos_with_the_same_path_produce_distinct_sites_in_every_site_list() {
     assert_eq!(deviations[0]["repo"], WEB);
     assert_eq!(deviations[0]["locations"][0], "acme/web/src/list.ts:3");
     let csv = build_csv_exports(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )
@@ -443,7 +465,14 @@ async fn the_pdf_has_the_patterns_section_for_several_repos_and_not_for_one() {
         ..ReportOptions::default()
     };
 
-    let multi = build_report_json(&two_repo_report().seal(), &HashMap::new(), None, &opts);
+    let multi = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &two_repo_report().seal(),
+            &HashMap::new(),
+        ),
+        None,
+        &opts,
+    );
     let pdf = camerata_server::report_export::compile_pdf(&multi)
         .await
         .expect("compiles");
@@ -460,7 +489,14 @@ async fn the_pdf_has_the_patterns_section_for_several_repos_and_not_for_one() {
     assert!(at("Held for review") < at("Patterns across services"));
     assert!(at("Patterns across services") < at("Clean in acme/web"));
 
-    let single = build_report_json(&one_repo_report().seal(), &HashMap::new(), None, &opts);
+    let single = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &one_repo_report().seal(),
+            &HashMap::new(),
+        ),
+        None,
+        &opts,
+    );
     let pdf = camerata_server::report_export::compile_pdf(&single)
         .await
         .expect("compiles");
@@ -712,8 +748,7 @@ fn a_credential_note_never_cites_a_row_dismissed_as_a_false_positive() {
     );
     report.findings.push(api_row);
     let json = build_report_json(
-        &report.seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&report.seal(), &dispositions),
         None,
         &ReportOptions::default(),
     );

@@ -154,8 +154,10 @@ fn exported_severities(
         vec![rule_id],
     );
     let json = build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.seal(),
+            &HashMap::new(),
+        ),
         corpus,
         &ReportOptions::default(),
     );

@@ -18721,12 +18721,7 @@ async fn export_audit_report(
     // after the seal, before the gate, in every export.
     let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
 
-    let json = crate::report_export::build_report_json(
-        reviewed.report(),
-        reviewed.dispositions(),
-        corpus.as_ref(),
-        &req.options,
-    );
+    let json = crate::report_export::build_report_json(&reviewed, corpus.as_ref(), &req.options);
 
     let data_json = match crate::report_export::render_data_json(&json) {
         Ok(data_json) => data_json,
@@ -18979,36 +18974,35 @@ async fn export_product(
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
     let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
-    let package = match crate::release_gate::build_product_package_reviewed(
-        &reviewed,
-        corpus.as_ref(),
-        &req.options,
-    )
-    .await
-    {
-        Ok(package) => package,
-        Err(e) => {
-            // The assembly checks the PDF's data before it compiles it; a refusal there is the
-            // same blocked response as one from `release`.
-            if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
-                return release_blocked_response(failure);
+    let package =
+        match crate::release_gate::build_product_package(&reviewed, corpus.as_ref(), &req.options)
+            .await
+        {
+            Ok(package) => package,
+            Err(e) => {
+                // The assembly checks the PDF's data before it compiles it; a refusal there is the
+                // same blocked response as one from `release`.
+                if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
+                    return release_blocked_response(failure);
+                }
+                if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>()
+                {
+                    return client_name_required_response(missing);
+                }
+                if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>()
+                {
+                    return repositories_missing_response(missing);
+                }
+                if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
+                    return run_incomplete_response(incomplete);
+                }
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+                )
+                    .into_response();
             }
-            if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
-                return client_name_required_response(missing);
-            }
-            if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>() {
-                return repositories_missing_response(missing);
-            }
-            if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
-                return run_incomplete_response(incomplete);
-            }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+        };
     let released = match if req.options.internal {
         crate::release_gate::release_internal(package)
     } else {
@@ -28675,8 +28669,10 @@ mod tests {
 
         let options = crate::report_export::ReportOptions::default();
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &std::collections::HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &std::collections::HashMap::new(),
+            ),
             Some(&corpus),
             &options,
         );
@@ -29263,8 +29259,10 @@ mod tests {
     fn product_export_readme_names_the_product_and_never_says_audit() {
         let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &std::collections::HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &std::collections::HashMap::new(),
+            ),
             None,
             &crate::report_export::ReportOptions::default(),
         );
@@ -29429,20 +29427,21 @@ mod tests {
         };
 
         let json = crate::report_export::build_report_json(
-            &report,
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
             corpus.as_ref(),
             &options,
         );
         // The PDF is rendered from exactly this data (plus a static template).
         let pdf_input = serde_json::to_string(&json).expect("report json serializes");
 
-        let xlsx =
-            crate::xlsx_export::build_workbook(&report, &dispositions, corpus.as_ref(), &options)
-                .expect("workbook builds");
+        let xlsx = crate::xlsx_export::build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+            corpus.as_ref(),
+            &options,
+        )
+        .expect("workbook builds");
         let findings = crate::xlsx_export::build_findings_export(
-            &report,
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
             corpus.as_ref(),
             &json,
             &chosen,
@@ -29451,8 +29450,7 @@ mod tests {
         let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         extra.extend(
             crate::xlsx_export::build_csv_exports(
-                &report,
-                &dispositions,
+                &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
                 corpus.as_ref(),
                 &options,
             )
@@ -29460,8 +29458,7 @@ mod tests {
         );
         extra.extend(
             crate::xlsx_export::build_json_exports(
-                &report,
-                &dispositions,
+                &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
                 corpus.as_ref(),
                 &options,
             )

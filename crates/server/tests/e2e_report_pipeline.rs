@@ -245,8 +245,10 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );

@@ -764,8 +764,7 @@ async fn release_product_export(
     options.internal = internal;
 
     let package = camerata_server::release_gate::build_product_package(
-        report,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions),
         corpus,
         &options,
     )

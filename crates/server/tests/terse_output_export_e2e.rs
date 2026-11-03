@@ -224,8 +224,10 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report(merged, ledger, failed_passes).seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report(merged, ledger, failed_passes).seal(),
+            &HashMap::new(),
+        ),
         Some(&corpus),
         &opts,
     );

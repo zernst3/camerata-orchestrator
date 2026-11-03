@@ -196,19 +196,25 @@ fn export_all(mut report: onboard::ScanReport, corpus: &camerata_rules::RuleSet)
 
     let dispositions: HashMap<String, DispositionWire> = HashMap::new();
     let opts = ReportOptions::default();
-    let report_json = report_export::build_report_json(&sealed, &dispositions, Some(corpus), &opts);
+    let report_json = report_export::build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
+        Some(corpus),
+        &opts,
+    );
     let json_value = serde_json::to_value(&report_json).unwrap();
     let findings_export = camerata_server::xlsx_export::build_findings_export(
-        &sealed,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
         Some(corpus),
         &report_json,
         &HashMap::new(),
     );
     let findings_export_value = serde_json::to_value(&findings_export).unwrap();
-    let workbook =
-        camerata_server::xlsx_export::build_workbook(&sealed, &dispositions, Some(corpus), &opts)
-            .expect("the workbook must build");
+    let workbook = camerata_server::xlsx_export::build_workbook(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
+        Some(corpus),
+        &opts,
+    )
+    .expect("the workbook must build");
 
     Artifacts {
         report_json,

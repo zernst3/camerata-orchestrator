@@ -307,8 +307,10 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         Some(&corpus),
         &opts,
     );

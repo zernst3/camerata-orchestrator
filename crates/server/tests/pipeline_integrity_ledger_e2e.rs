@@ -258,8 +258,10 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );

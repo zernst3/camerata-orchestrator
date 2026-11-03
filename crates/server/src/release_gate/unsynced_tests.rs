@@ -28,11 +28,14 @@ fn package_with_unsynced(changes: Vec<UnsyncedChange>) -> (ProductPackage, Strin
         ..client_options()
     };
     let dispositions = HashMap::new();
-    let json = build_report_json(&sealed, &dispositions, None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &dispositions,
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
         None,
         &options,
         "acme-inspection",

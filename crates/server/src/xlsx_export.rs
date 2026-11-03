@@ -85,7 +85,7 @@ use crate::report_export::{
     client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
     finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
     resolve_citation, resolve_effort, sanitize_report_findings, title_for_finding, Disposition,
-    DispositionWire, ReportOptions,
+    ReportOptions, ReviewedReport,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -381,11 +381,12 @@ struct SheetSummary {
 /// `build_workbook` and `build_findings_export` (`findings.json`) consume as-is, rather than
 /// each sorting its own copy and risking two orderings silently drifting apart.
 fn partition_rows(
-    report: &ScanReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &HashMap<String, String>,
 ) -> (Vec<FindingRow>, Vec<DepRow>) {
+    let report: &ScanReport = reviewed.report();
+    let dispositions = reviewed.dispositions();
     // C4-R3: same zero-width/BOM sanitization `build_report_json` applies to the PDF's JSON —
     // see `sanitize_report_findings`'s doc comment for why this is the one shared ingestion
     // point rather than a per-artifact patch.
@@ -3158,12 +3159,17 @@ pub(crate) const ALL_FINDINGS_SHEET_KINDS: [&str; 3] = [
 /// [`crate::report_export::build_report_json`]. Pure aside from the in-memory
 /// `rust_xlsxwriter` buffer; fully unit-testable.
 pub fn build_workbook(
-    report: &crate::onboard::SealedReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<u8>> {
-    let (rows, dep_rows) = partition_rows(report, dispositions, corpus, &opts.chosen_options);
+    let report = reviewed.report();
+    let dispositions = reviewed.dispositions();
+    let (rows, dep_rows) = partition_rows(
+        &crate::report_export::ReviewedReport::unreviewed(report, dispositions),
+        corpus,
+        &opts.chosen_options,
+    );
 
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
@@ -3441,7 +3447,7 @@ pub fn build_workbook(
     // H4: the optional triage log, last so every existing sheet keeps its position. Off by
     // default; see `triage_log`.
     if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
         triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
             .context("writing the Triage Log sheet")?;
     }
@@ -3532,13 +3538,12 @@ pub struct FindingsExport {
 /// integration test `tests/generate_sample_report.rs`, which links `camerata-server` as an
 /// external crate.
 pub fn build_findings_export(
-    report: &crate::onboard::SealedReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     report_json: &crate::report_export::AuditReportJson,
     chosen_options: &HashMap<String, String>,
 ) -> FindingsExport {
-    let (rows, _dep_rows) = partition_rows(report, dispositions, corpus, chosen_options);
+    let (rows, _dep_rows) = partition_rows(reviewed, corpus, chosen_options);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
         provenance: report_json.cover.clone(),
@@ -3572,12 +3577,12 @@ pub const DATASETS: [&str; 8] = [
 /// `json/all-findings.json` is the flat sibling of `findings.json`'s `findings` array (the whole
 /// non-FP set); the other files are the partitioned sheet tables, each its own one-table file.
 pub fn build_json_exports(
-    report: &crate::onboard::SealedReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let (rows, dep_rows) = partition_rows(report, dispositions, corpus, &opts.chosen_options);
+    let report = reviewed.report();
+    let (rows, dep_rows) = partition_rows(reviewed, corpus, &opts.chosen_options);
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
     let findings_rows: Vec<&FindingRow> = live_rows
@@ -3689,12 +3694,11 @@ fn json_array_to_csv(value: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
 /// all trace to the one `partition_rows` pass and cannot disagree. Returns `(csv/<name>.csv,
 /// bytes)` pairs mirroring the eight JSON tables.
 pub fn build_csv_exports(
-    report: &crate::onboard::SealedReport,
-    dispositions: &HashMap<String, DispositionWire>,
+    reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let json = build_json_exports(report, dispositions, corpus, opts)?;
+    let json = build_json_exports(reviewed, corpus, opts)?;
     let mut csv: Vec<(String, Vec<u8>)> = json
         .into_iter()
         .map(|(path, bytes)| {
@@ -3710,7 +3714,7 @@ pub fn build_csv_exports(
     // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
     // not one of the eight `DATASETS`; the release gate admits it as an optional member).
     if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
         csv.push((
             triage_log::TRIAGE_LOG_CSV.to_string(),
             triage_log::triage_log_csv(&log)?,
@@ -3728,6 +3732,7 @@ mod triage_log_tests;
 mod tests {
     use super::*;
     use crate::onboard::{AuditedRef, Finding, ScanProvenance};
+    use crate::report_export::DispositionWire;
     use std::io::Read;
 
     mod export_scale;
@@ -4036,8 +4041,15 @@ mod tests {
     fn build_workbook_returns_a_valid_xlsx_with_pk_magic() {
         let f = finding("SEC-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-            .expect("build_workbook must succeed");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("build_workbook must succeed");
         assert!(!bytes.is_empty());
         assert_eq!(
             &bytes[0..2],
@@ -4054,7 +4066,12 @@ mod tests {
         let report = report_with(vec![critical, dep], vec!["SUPABASE-RLS-ENABLED-1"]);
         let sealed = report.clone().seal();
 
-        let exports = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let exports = build_json_exports(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let names: Vec<&str> = exports.iter().map(|(n, _)| n.as_str()).collect();
         for expected in [
             "json/all-findings.json",
@@ -4086,7 +4103,12 @@ mod tests {
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let sealed = report.clone().seal();
 
-        let exports = build_csv_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let exports = build_csv_exports(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let names: Vec<&str> = exports.iter().map(|(n, _)| n.as_str()).collect();
         for expected in [
             "csv/all-findings.csv",
@@ -4130,18 +4152,25 @@ mod tests {
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let sealed = report.clone().seal();
 
-        let report_json =
-            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let report_json = crate::report_export::build_report_json(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        );
         let fe = build_findings_export(
-            &sealed,
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
             None,
             &report_json,
             &HashMap::new(),
         );
         let expected = serde_json::to_value(&fe.findings).unwrap();
 
-        let exports = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let exports = build_json_exports(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let all_findings = &exports
             .iter()
             .find(|(n, _)| n == "json/all-findings.json")
@@ -4161,8 +4190,15 @@ mod tests {
         let mut dep = finding(DEP_AUDIT_RULE_ID, "Cargo.lock", 0, "high");
         dep.snippet = "foo@1.0.0".to_string();
         let report = report_with(vec![critical, dep], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         for expected in [
             "name=\"Index\"",
@@ -4196,8 +4232,15 @@ mod tests {
     fn index_sheet_says_inspection_never_audit() {
         let f = finding("SEC-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         // Cell text in this workbook is stored by reference into the shared-strings table, not
         // inline in the worksheet XML (see `cell_text`'s own `t="s"` + `<v>index</v>` lookup) —
         // the Index sheet's actual label text lives in `xl/sharedStrings.xml`. That table is
@@ -4272,8 +4315,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let shared_strings = read_zip_entry(&bytes, "xl/sharedStrings.xml");
         let contains = |needle: &str| {
@@ -4309,8 +4359,15 @@ mod tests {
     #[test]
     fn coverage_sheet_omits_rules_applied_appendix_when_there_are_no_recommendations() {
         let report = report_with(vec![], vec!["SEC-1"]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         assert!(
             !any_worksheet_xml_containing(&bytes, "Rules applied (alternative selection)")
                 && !read_zip_entry(&bytes, "xl/sharedStrings.xml")
@@ -4326,8 +4383,15 @@ mod tests {
         let rls = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
         let arch = finding("ARCH-1", "b.rs", 2, "medium");
         let report = report_with(vec![rls, arch], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         // A9: both tabs are named from the CATEGORY, which now comes from the closed
         // taxonomy rather than the rule id's own first two tokens — "RLS Policy" not
@@ -4363,8 +4427,15 @@ mod tests {
             ],
             vec![],
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         for slug in ["Arch No", "Legacy Unmapped"] {
             assert!(
@@ -4403,9 +4474,19 @@ mod tests {
             vec!["SEC-NO-HARDCODED-SECRETS-1"],
         );
         let sealed = report.clone().seal();
-        let first = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let first = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1_100));
-        let second = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let second = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let first_diff = first
             .iter()
@@ -4434,8 +4515,15 @@ mod tests {
             vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
             vec!["SEC-NO-HARDCODED-SECRETS-1"],
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let core = read_zip_entry(&bytes, "docProps/core.xml");
         // `report_with` stamps finished_at = 2026-07-23T00:05:00Z.
         assert!(
@@ -4461,8 +4549,15 @@ mod tests {
             vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
             vec!["SEC-NO-HARDCODED-SECRETS-1"],
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
         assert!(
             shared.contains("2026-07-23 00:05 UTC"),
@@ -4481,8 +4576,15 @@ mod tests {
         // a guard that cannot fail. The id below has a category ("RLS Policy") that WOULD
         // be a tab if the suppression broke.
         let report = report_with(vec![], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         assert!(
             !workbook_xml.contains("name=\"RLS Policy\""),
@@ -4504,8 +4606,15 @@ mod tests {
             ),
         );
         let report = report_with(vec![f], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &dispositions, None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         // `rust_xlsxwriter` pools repeated strings into `xl/sharedStrings.xml` rather than
         // inlining them per-cell, so the reason text is recoverable there (or, for a
         // constant-memory mode, inline in the sheet XML) — check both.
@@ -4533,7 +4642,14 @@ mod tests {
         f.captures
             .insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         assert!(
             rows[0]
                 .fix
@@ -4569,7 +4685,14 @@ mod tests {
         f.preview = true;
         f.preview_tool = Some("semgrep".to_string());
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
 
         assert_eq!(
             rows[0].citation_kind, "grounded",
@@ -4593,7 +4716,14 @@ mod tests {
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         assert_eq!(rows[0].provenance, "Deterministic");
     }
 
@@ -4601,7 +4731,14 @@ mod tests {
     fn recommended_fix_is_none_not_fabricated_without_a_corpus() {
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(
             rows[0].fix, None,
             "must not fabricate a fix when the corpus is absent"
@@ -4618,7 +4755,14 @@ mod tests {
         let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
         let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         assert_eq!(
             rows[0].fix, None,
             "must omit the fix, never fall back to directive, when remediation is unauthored"
@@ -4635,7 +4779,14 @@ mod tests {
                 .to_string(),
         );
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(
             rows[0].fix_specific.as_deref(),
             Some("Use safeInternalPath from lib/redirect.ts, as app/auth/signin/route.ts does.")
@@ -4646,7 +4797,14 @@ mod tests {
     fn fix_specific_column_is_none_when_never_generated() {
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(rows[0].fix_specific, None);
     }
 
@@ -4667,7 +4825,14 @@ mod tests {
             .insert("table".to_string(), "profiles".to_string());
         f.fix_specific = Some("Enable RLS directly on `profiles`.".to_string());
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         // Plain-text artifacts carry the fix without the markdown backticks.
         assert_eq!(
             rows[0].fix_specific.as_deref(),
@@ -4699,7 +4864,14 @@ mod tests {
         );
         let report = report_with(vec![f], vec![]);
         let sealed = report.clone().seal();
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         let generic = rows[0].fix.as_deref().expect("authored remediation");
         let specific = rows[0].fix_specific.as_deref().expect("specific fix");
         assert_eq!(
@@ -4713,7 +4885,12 @@ mod tests {
         assert!(generic.contains("NEXT_PUBLIC_"), "{generic:?}");
 
         // The workbook cells (V = fix_specific, W = Recommended Fix on the All Findings sheet).
-        let xlsx = build_workbook(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        let xlsx = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .unwrap();
         for cell in ["V2", "W2"] {
             let text = cell_text(&xlsx, "xl/worksheets/sheet2.xml", cell);
             assert!(!text.contains('`'), "{cell}: {text:?}");
@@ -4724,8 +4901,12 @@ mod tests {
         );
 
         // The CSV (derived from the same rows).
-        let exports =
-            build_csv_exports(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        let exports = build_csv_exports(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .unwrap();
         let all = &exports
             .iter()
             .find(|(n, _)| n == "csv/all-findings.csv")
@@ -4853,14 +5034,18 @@ mod tests {
         ];
         let report = report_with(rows, vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -4954,14 +5139,18 @@ mod tests {
         );
         let report = report_with(vec![dev, defect], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -5007,8 +5196,15 @@ mod tests {
         );
         let legacy = finding("LEGACY-1", "b.rs", 2, "high");
         let report = report_with(vec![dev, legacy], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         // Cell text is written via the shared-strings table, so that's where a rendered
         // header/cell string is observable in the raw xlsx.
         let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
@@ -5038,16 +5234,27 @@ mod tests {
         dispositions.insert(finding_key(&fp), wire("FalsePositive", "fixture"));
         let report = report_with(vec![a, b, fp], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &empty_opts(),
         );
-        let xlsx_bytes =
-            build_workbook(&report.clone().seal(), &dispositions, None, &empty_opts()).unwrap();
+        let xlsx_bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -5088,14 +5295,18 @@ mod tests {
             .insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f.clone()], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -5123,14 +5334,18 @@ mod tests {
         let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -5155,14 +5370,18 @@ mod tests {
         f.fix_specific = Some("Use `safeInternalPath` from lib/redirect.ts.".to_string());
         let report = report_with(vec![f], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -5191,14 +5410,18 @@ mod tests {
         let f = finding("SEC-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -5218,14 +5441,18 @@ mod tests {
     fn findings_export_zero_findings_is_empty_and_serializes_cleanly() {
         let report = report_with(vec![], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -5245,14 +5472,18 @@ mod tests {
         dispositions.insert(finding_key(&f2), wire("FalsePositive", "fixture"));
         let report = report_with(vec![f1, f2], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -5319,21 +5550,27 @@ mod tests {
         f.detail = RAW_GATE_TEXT.to_string();
         let report = report_with(vec![f], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
         );
         let xlsx_bytes = build_workbook(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         )
@@ -5417,14 +5654,18 @@ mod tests {
 
         let report = report_with(vec![authored, unauthored], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -5451,8 +5692,15 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.needs_review = true;
         let report = report_with(vec![f], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         assert!(
             any_worksheet_xml_containing(&bytes, "<autoFilter"),
             "at least one findings sheet must carry an autofilter"
@@ -5472,8 +5720,15 @@ mod tests {
     #[test]
     fn zero_findings_produces_a_sane_workbook_without_panicking() {
         let report = report_with(vec![], vec![]);
-        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-            .expect("zero findings must not fail the export");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("zero findings must not fail the export");
         assert_eq!(&bytes[0..2], b"PK");
     }
 
@@ -5485,8 +5740,15 @@ mod tests {
         dispositions.insert(finding_key(&f1), wire("FalsePositive", "fixture"));
         dispositions.insert(finding_key(&f2), wire("FalsePositive", "fixture"));
         let report = report_with(vec![f1, f2], vec![]);
-        let bytes = build_workbook(&report.clone().seal(), &dispositions, None, &empty_opts())
-            .expect("all-FP input must not fail the export");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("all-FP input must not fail the export");
         assert_eq!(&bytes[0..2], b"PK");
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         // No real findings survive -> no category sheet, but All Findings/False Positives/
@@ -5499,8 +5761,15 @@ mod tests {
     fn no_dependency_findings_produces_a_sane_workbook() {
         let f = finding("SEC-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-            .expect("no-dependency-findings input must not fail the export");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("no-dependency-findings input must not fail the export");
         assert_eq!(&bytes[0..2], b"PK");
     }
 
@@ -5509,8 +5778,15 @@ mod tests {
         // No corpus at all -> every rule's fix is empty; must not fail or fabricate.
         let f = finding("SEC-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-            .expect("missing-directive input must not fail the export");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("missing-directive input must not fail the export");
         assert_eq!(&bytes[0..2], b"PK");
     }
 
@@ -5576,12 +5852,21 @@ mod tests {
         let opts = empty_opts();
 
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &opts,
         );
-        let (rows, _dep) = partition_rows(&report, &dispositions, None, &opts.chosen_options);
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            None,
+            &opts.chosen_options,
+        );
         let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
 
         assert_eq!(
@@ -5720,8 +6005,10 @@ mod tests {
         let opts = empty_opts();
 
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &opts,
         );
@@ -5736,8 +6023,14 @@ mod tests {
         );
         assert_eq!(json.matrix.plan[1].rule_id, "ARCH-STANCE-DEMO-1");
 
-        let (rows, _dep) =
-            partition_rows(&report, &dispositions, Some(&corpus), &opts.chosen_options);
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            Some(&corpus),
+            &opts.chosen_options,
+        );
         let plan_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.bucket == "plan").collect();
         assert_eq!(plan_rows.len(), 2);
         assert_eq!(
@@ -5787,20 +6080,31 @@ mod tests {
         let opts = empty_opts();
 
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &opts,
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
         );
-        let xlsx_bytes =
-            build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts).unwrap();
+        let xlsx_bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            Some(&corpus),
+            &opts,
+        )
+        .unwrap();
 
         // The known grounding rule's own citation/title — the SAME real corpus entry every
         // artifact must end up citing for this finding.
@@ -5918,14 +6222,18 @@ mod tests {
         let dispositions = HashMap::new();
         let opts = empty_opts();
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &opts,
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -6017,14 +6325,18 @@ mod tests {
 
         let report = report_with(vec![authored, unauthored], vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -6085,20 +6397,31 @@ mod tests {
         let opts = empty_opts();
 
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &opts,
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
         );
-        let xlsx_bytes =
-            build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts).unwrap();
+        let xlsx_bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            Some(&corpus),
+            &opts,
+        )
+        .unwrap();
 
         assert_eq!(
             json.curated_findings.len(),
@@ -6230,14 +6553,18 @@ mod tests {
         let dispositions = HashMap::new();
         let opts = empty_opts();
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &opts,
         );
         let findings_export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -6256,8 +6583,15 @@ mod tests {
             row.also_matches
         );
 
-        let xlsx_bytes =
-            build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts).unwrap();
+        let xlsx_bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            Some(&corpus),
+            &opts,
+        )
+        .unwrap();
         let also_matches_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "R2");
         assert_eq!(
             also_matches_cell, row.also_matches,
@@ -6318,14 +6652,18 @@ mod tests {
         ];
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -6346,8 +6684,15 @@ mod tests {
 
         // The workbook renders the same sites in the "Also found at" column (path:line,
         // client-facing — no raw rule ids), with the consequence site labeled.
-        let xlsx =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let xlsx = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
         assert!(
             shared.contains("src/orders.rs:24"),
@@ -6389,14 +6734,18 @@ mod tests {
         assert_eq!(collapsed.rows.len(), 1);
         let report = report_with(collapsed.rows, vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -6413,8 +6762,15 @@ mod tests {
             row["site_count"], 2,
             "the source's line is another place: {row}"
         );
-        let xlsx =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let xlsx = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
         assert!(
             shared.contains("src/orders.rs:12"),
@@ -6444,7 +6800,14 @@ mod tests {
             vec![primary],
             vec!["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
         );
-        let (rows, _deps) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _deps) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         let coverage = build_coverage_rows(&report, &rows, None);
         let absorbed_rule = coverage
             .iter()
@@ -6476,7 +6839,14 @@ mod tests {
             vec![primary],
             vec!["SEC-NO-RAW-SQL-CONCAT-1", "ARCH-NO-DIRECT-DB-1"],
         );
-        let (rows, _deps) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _deps) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         let coverage = build_coverage_rows(&report, &rows, None);
         let demoted = coverage
             .iter()
@@ -6512,8 +6882,15 @@ mod tests {
             0,
             0,
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
         assert!(
             shared.contains("Tool coverage notes"),
@@ -6550,12 +6927,25 @@ mod tests {
         .with_rating("critical", "Any user can read any invoice")];
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let sealed = report.seal();
-        let json =
-            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
-        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let json = crate::report_export::build_report_json(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &json,
+            &HashMap::new(),
+        );
         let row = serde_json::to_value(&export.findings[0]).unwrap();
         assert_eq!(row["site_count"], 1, "{row}");
-        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let xlsx = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
         assert!(
             shared.contains("Also flagged here as Any user can read any invoice (critical)"),
@@ -6581,12 +6971,25 @@ mod tests {
         .with_rating("critical", "Second view of the same place")];
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let sealed = report.seal();
-        let json =
-            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
-        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let json = crate::report_export::build_report_json(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &json,
+            &HashMap::new(),
+        );
         let row = serde_json::to_value(&export.findings[0]).unwrap();
         assert_eq!(row["site_count"], 1, "{row}");
-        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let xlsx = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
         assert!(
             shared.contains("Also flagged here as Second view of the same place (critical)"),
@@ -6601,14 +7004,18 @@ mod tests {
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
@@ -6711,20 +7118,31 @@ mod tests {
 
         let report = report_with(rows, vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &dispositions,
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
             None,
             &json,
             &HashMap::new(),
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &dispositions, None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &dispositions,
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let headlines: Vec<String> = export.findings.iter().map(|r| r.headline.clone()).collect();
         assert_eq!(
@@ -6788,8 +7206,15 @@ mod tests {
     #[test]
     fn req_pass3_deviation_sheet_states_numerator_and_denominator() {
         let report = report_with(all_five_kinds(), vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let entry = sheet_entry_for(&bytes, "Deviations");
         assert_eq!(
@@ -6851,8 +7276,15 @@ mod tests {
             }),
         );
         let report = report_with(vec![dev], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let entry = sheet_entry_for(&bytes, "Deviations");
         assert_eq!(
@@ -6893,7 +7325,14 @@ mod tests {
             }),
         );
         let report = report_with(vec![dev], vec![]);
-        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
         let groups = build_deviation_groups(&live, None);
         assert_eq!(groups.len(), 1);
@@ -6902,8 +7341,15 @@ mod tests {
             "a group with one listed deviating site must never report 0"
         );
 
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         assert_eq!(cell_number(&bytes, "Deviations", "D2"), 1.0);
     }
 
@@ -6931,7 +7377,14 @@ mod tests {
             })
             .collect();
         let report = report_with(rows, vec![]);
-        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
         let groups = build_deviation_groups(&live, None);
         assert_eq!(groups.len(), 1);
@@ -6957,7 +7410,14 @@ mod tests {
             }),
         );
         let report = report_with(vec![dev], vec![]);
-        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &HashMap::new(),
+        );
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
         assert_eq!(build_deviation_groups(&live, None)[0].assessed_sites, None);
     }
@@ -7006,7 +7466,14 @@ mod tests {
             None
         );
         let report = report_with(vec![f], vec![]);
-        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
         let groups = build_deviation_groups(&live, Some(&corpus));
         assert_eq!(groups.len(), 1);
@@ -7057,7 +7524,14 @@ mod tests {
         let report = report_with(vec![f], vec!["ARCH-TYPED-PATH-PARAMS-1"]);
         let sealed = report.clone().seal();
 
-        let (rows, _dep) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let (rows, _dep) = partition_rows(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            Some(&corpus),
+            &HashMap::new(),
+        );
         let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
         let workbook_fix = build_deviation_groups(&live, Some(&corpus))[0]
             .recommended_fix
@@ -7065,14 +7539,12 @@ mod tests {
         assert!(!workbook_fix.is_empty());
 
         let json = crate::report_export::build_report_json(
-            &sealed,
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
             Some(&corpus),
             &empty_opts(),
         );
         let export = build_findings_export(
-            &sealed,
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
             Some(&corpus),
             &json,
             &HashMap::new(),
@@ -7124,7 +7596,12 @@ mod tests {
         let sealed = report.clone().seal();
 
         let csv_of = |sealed: &crate::onboard::SealedReport| -> Vec<(String, Vec<u8>)> {
-            build_csv_exports(sealed, &HashMap::new(), None, &empty_opts()).unwrap()
+            build_csv_exports(
+                &crate::report_export::ReviewedReport::unreviewed(sealed, &HashMap::new()),
+                None,
+                &empty_opts(),
+            )
+            .unwrap()
         };
         let exports = csv_of(&sealed);
         let bytes = &exports
@@ -7145,7 +7622,12 @@ mod tests {
         repos.sort();
         assert_eq!(repos, vec!["owner/api", "owner/web"]);
 
-        let json = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let json = build_json_exports(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let rows: serde_json::Value = serde_json::from_slice(
             &json
                 .iter()
@@ -7164,7 +7646,12 @@ mod tests {
         assert_eq!(json_repos, vec!["owner/api", "owner/web"]);
 
         // The workbook still builds, with the Service column in the Coverage section.
-        let book = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let book = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         assert_eq!(&book[0..2], b"PK");
 
         // A single-repo export is unchanged: no repo column, still valid.
@@ -7200,8 +7687,15 @@ mod tests {
     #[test]
     fn req_pass3_conventions_sheet_reports_followed_and_no_convention_distinctly() {
         let report = report_with(all_five_kinds(), vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let conventions = sheet_cell_strings(&bytes, "Conventions");
         let has = |needle: &str| conventions.iter().any(|s| s == needle);
@@ -7262,20 +7756,31 @@ mod tests {
     fn req_pass3_not_assessed_renders_on_coverage_not_among_the_findings() {
         let report = report_with(all_five_kinds(), vec![]);
         let json = crate::report_export::build_report_json(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &empty_opts(),
         );
         let export = build_findings_export(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             None,
             &json,
             &HashMap::new(),
         );
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let na_headline = export
             .findings
@@ -7372,8 +7877,10 @@ mod tests {
             vec!["SUPABASE-RLS-ENABLED-1", "SEC-NO-HARDCODED-SECRETS-1"],
         );
         let bytes = build_workbook(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         )
@@ -7542,8 +8049,15 @@ mod tests {
         )];
 
         let report = report_with(vec![dev, conv], vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
 
         let where_cell = cell_text(&bytes, &sheet_entry_for(&bytes, "Deviations"), "G2");
         for site in ["src/api/users.rs:4", "src/api/users.rs:18"] {
@@ -7592,8 +8106,15 @@ mod tests {
     #[test]
     fn req_pass3_the_four_named_sheets_exist_even_when_a_scan_finds_nothing() {
         let report = report_with(vec![], vec![]);
-        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
-            .expect("a zero-finding scan must still export");
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .expect("a zero-finding scan must still export");
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         for name in [
             "Index",
@@ -7645,8 +8166,10 @@ mod tests {
             vec!["SUPABASE-RLS-ENABLED-1", "SEC-NO-HARDCODED-SECRETS-1"],
         );
         let bytes = build_workbook(
-            &report.clone().seal(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
             Some(&corpus),
             &empty_opts(),
         )
@@ -7694,8 +8217,15 @@ mod tests {
     #[test]
     fn req_pass3_index_counts_the_statement_kinds_and_surfaces_unclassified_rows() {
         let report = report_with(all_five_kinds(), vec![]);
-        let bytes =
-            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &report.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         let index = sheet_cell_strings(&bytes, "Index");
         for label in [
             "Statement types",
@@ -7721,8 +8251,15 @@ mod tests {
             )],
             vec![],
         );
-        let clean_bytes =
-            build_workbook(&clean.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let clean_bytes = build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(
+                &clean.clone().seal(),
+                &HashMap::new(),
+            ),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
         assert!(
             !sheet_cell_strings(&clean_bytes, "Index")
                 .iter()

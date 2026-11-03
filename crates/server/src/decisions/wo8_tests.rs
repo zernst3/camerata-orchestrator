@@ -639,8 +639,7 @@ async fn confirmed_by_client_is_false_until_the_client_ack_route_is_called() {
         let sealed = entry.report.clone().seal();
         let reviewed = crate::report_export::apply_overlay(&sealed, records, &[], &[]);
         let json = crate::report_export::build_report_json(
-            reviewed.report(),
-            reviewed.dispositions(),
+            &reviewed,
             None,
             &crate::report_export::ReportOptions::default(),
         );

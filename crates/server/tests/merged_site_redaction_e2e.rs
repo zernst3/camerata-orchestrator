@@ -179,7 +179,11 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
     let sealed = scan.seal();
     let none = HashMap::new();
 
-    let json = report_export::build_report_json(&sealed, &none, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &none),
+        Some(&corpus),
+        &opts,
+    );
     let mut out = vec![
         (
             "PDF data".to_string(),
@@ -190,22 +194,41 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
             serde_json::to_string(&json).unwrap(),
         ),
     ];
-    let export =
-        xlsx_export::build_findings_export(&sealed, &none, Some(&corpus), &json, &HashMap::new());
+    let export = xlsx_export::build_findings_export(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &none),
+        Some(&corpus),
+        &json,
+        &HashMap::new(),
+    );
     out.push((
         "findings.json".to_string(),
         serde_json::to_string_pretty(&export).unwrap(),
     ));
-    for (name, bytes) in xlsx_export::build_csv_exports(&sealed, &none, Some(&corpus), &opts)
-        .unwrap()
-        .into_iter()
-        .chain(xlsx_export::build_json_exports(&sealed, &none, Some(&corpus), &opts).unwrap())
-    {
+    for (name, bytes) in xlsx_export::build_csv_exports(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &none),
+        Some(&corpus),
+        &opts,
+    )
+    .unwrap()
+    .into_iter()
+    .chain(
+        xlsx_export::build_json_exports(
+            &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &none),
+            Some(&corpus),
+            &opts,
+        )
+        .unwrap(),
+    ) {
         out.push((name, String::from_utf8_lossy(&bytes).into_owned()));
     }
     // The workbook is a zip of XML parts; the key (alphanumeric) would survive XML escaping, so
     // the decompressed parts are searched as text.
-    let workbook = xlsx_export::build_workbook(&sealed, &none, Some(&corpus), &opts).unwrap();
+    let workbook = xlsx_export::build_workbook(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &none),
+        Some(&corpus),
+        &opts,
+    )
+    .unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(workbook)).unwrap();
     for i in 0..archive.len() {
         let mut part = archive.by_index(i).unwrap();

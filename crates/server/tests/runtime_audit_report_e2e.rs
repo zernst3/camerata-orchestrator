@@ -235,7 +235,11 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
         return;
     };
     let sealed = sealed_report(&Feeds::new(&[])).await;
-    let report_json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &options());
+    let report_json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        Some(&corpus),
+        &options(),
+    );
 
     // Both rules exist in the shipped corpus with a title, sources and a fix.
     for id in [EOL_RULE_ID, VULN_RULE_ID] {
@@ -299,8 +303,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
 
     // The workbook.
     let xlsx = camerata_server::xlsx_export::build_workbook(
-        &sealed,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),
         &options(),
     )
@@ -311,8 +314,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
 
     // findings.json.
     let export = camerata_server::xlsx_export::build_findings_export(
-        &sealed,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),
         &report_json,
         &HashMap::new(),
@@ -335,7 +337,11 @@ async fn a_feed_that_could_not_be_fetched_is_disclosed_and_never_reads_as_clean(
     // endoflife.date and the NVD are both down.
     let sealed = sealed_report(&Feeds::new(&["endoflife", "nvd"])).await;
     assert!(sealed.findings.is_empty(), "{:?}", sealed.findings);
-    let report_json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &options());
+    let report_json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        Some(&corpus),
+        &options(),
+    );
     let data = squeezed(&render_data_json(&report_json).unwrap());
     assert!(
         data.contains(&squeezed(
@@ -374,8 +380,7 @@ async fn the_rendered_pdf_and_readme_carry_the_findings_and_the_stamp() {
     };
     let sealed = sealed_report(&Feeds::new(&[])).await;
     let package = camerata_server::release_gate::build_product_package(
-        &sealed,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),
         &options(),
     )

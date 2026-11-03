@@ -356,8 +356,10 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
     // The exporter takes the row as a real, actionable finding: not held for want of a fix, and
     // carrying the rule's authored Fix line.
     let json = camerata_server::report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         Some(&corpus),
         &camerata_server::report_export::ReportOptions::default(),
     );

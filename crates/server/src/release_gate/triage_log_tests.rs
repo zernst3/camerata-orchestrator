@@ -16,11 +16,14 @@ const STAND_IN_PDF: &[u8] = b"%PDF-1.7 stand-in for the gate tests";
 
 fn package_with(options: &ReportOptions) -> ProductPackage {
     let sealed = scan_report().seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         options,
         STEM,

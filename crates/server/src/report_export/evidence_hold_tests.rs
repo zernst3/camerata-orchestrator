@@ -42,6 +42,10 @@ fn a_verified_row_is_never_held_by_this_rule() {
 #[test]
 fn the_exported_row_reads_as_held_and_needs_review() {
     let report = report_with(vec![unverified()], vec!["SEC-NO-HARDCODED-SECRETS-1"]).seal();
-    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert_eq!(json.executive_summary.held_for_review, 1);
 }

@@ -40,7 +40,11 @@ fn two_repo_report(failed_repo: Option<&str>) -> crate::onboard::ScanReport {
 #[test]
 fn the_ai_tier_note_says_when_the_tier_did_not_run_for_some_repos() {
     let report = two_repo_report(Some("owner/b"));
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let note = &json.methodology.ai_tier_note;
     assert!(
         note.contains("did not run for 1 repo; see Coverage."),
@@ -52,7 +56,11 @@ fn the_ai_tier_note_says_when_the_tier_did_not_run_for_some_repos() {
 fn the_ai_tier_note_drops_the_calibrated_claim_when_the_tier_ran_nowhere() {
     let mut report = two_repo_report(None);
     report.ai_error = Some("401 unauthorized".to_string());
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let note = &json.methodology.ai_tier_note;
     assert!(
         note.contains("did not run for 2 repos; see Coverage."),
@@ -68,7 +76,11 @@ fn the_ai_tier_note_drops_the_calibrated_claim_when_the_tier_ran_nowhere() {
 fn a_blocked_ai_review_is_disclosed_like_a_failed_one() {
     let mut report = two_repo_report(None);
     report.ai_blocked_reason = Some("no Anthropic key".to_string());
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(json
         .methodology
         .ai_tier_note
@@ -78,8 +90,10 @@ fn a_blocked_ai_review_is_disclosed_like_a_failed_one() {
 #[test]
 fn a_clean_ai_run_keeps_the_original_note() {
     let json = build_report_json(
-        &two_repo_report(None).seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &two_repo_report(None).seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );
