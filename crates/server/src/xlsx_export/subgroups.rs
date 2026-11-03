@@ -296,7 +296,7 @@ pub(crate) fn subgroup_facts_with(
                 )
             })
             .collect();
-        if open.is_empty() && !(include_closed && !live.is_empty()) {
+        if open.is_empty() && (!include_closed || live.is_empty()) {
             continue;
         }
         // A sub-group with nothing left to fix describes itself from its ignored sites.

@@ -5917,9 +5917,6 @@ pub fn build_report_json(
         .map(|(f, _, _, _)| f.distinct_site_count())
         .sum();
     let reduced = site_total > FULL_PDF_SITE_LIMIT;
-    let mut matrix = matrix;
-    let mut curated_findings = curated_findings;
-    let mut held_for_review_findings = held_for_review_findings;
     let mut reduced_matrix = Vec::new();
     if reduced {
         for (bucket, list) in [

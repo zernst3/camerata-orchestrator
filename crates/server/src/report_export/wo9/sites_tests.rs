@@ -13,14 +13,14 @@ fn a_collapsed_source_has_its_own_row_on_the_sites_sheet() {
         FlaggedBy {
             rule_id: "camerata.security.sql-string-concat".to_string(),
             tool: Some("semgrep".to_string()),
-            site_key: "acme/portal\0src/a.rs\0other\00".to_string(),
+            site_key: "acme/portal\0src/a.rs\0other\x000".to_string(),
             path: "src/a.rs".to_string(),
             line: 12,
         },
         FlaggedBy {
             rule_id: "ESLINT-SQL".to_string(),
             tool: Some("eslint".to_string()),
-            site_key: "acme/portal\0src/a.rs\0third\00".to_string(),
+            site_key: "acme/portal\0src/a.rs\0third\x000".to_string(),
             path: "src/a.rs".to_string(),
             line: 10,
         },
