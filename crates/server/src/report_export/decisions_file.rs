@@ -65,7 +65,8 @@ fn row_of(d: &Decision) -> DecisionRowJson {
         Scope::Node(node) => ("node", String::new(), node.clone()),
     };
     // The reasons the client already reads: a false positive's, and an accepted risk's once the
-    // client has confirmed it.
+    // client has confirmed it. A ruling the reviewer undid is no longer one the client reads: its
+    // reason is reviewer text for nothing, so the record keeps `has_reason` and prints none.
     let shown = match &d.state {
         DecisionState::FalsePositive => true,
         DecisionState::Ignored => confirmed_by_client,
@@ -84,7 +85,7 @@ fn row_of(d: &Decision) -> DecisionRowJson {
         applies_to: d.applies_to.iter().map(|k| site_id(k)).collect(),
         inherited_from: d.inherited_from.clone().unwrap_or_default(),
         has_reason: !d.reason.trim().is_empty(),
-        reason: if shown {
+        reason: if shown && d.is_active() {
             d.reason.trim().to_string()
         } else {
             String::new()

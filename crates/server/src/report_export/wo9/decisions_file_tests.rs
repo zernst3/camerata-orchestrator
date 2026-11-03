@@ -127,3 +127,44 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     }
     assert_eq!(problems(&rebuilt(unreasoned)), 1, "the merge has no reason");
 }
+
+#[test]
+fn a_revoked_false_positive_prints_no_reason() {
+    // The reviewer undid the ruling: its reason is reviewer text for a ruling that no longer
+    // stands, so the record stays in the file (the history) without it.
+    let sealed = mixed_sealed();
+    let mut fp = decision(
+        "dec-000001",
+        &key_at(&sealed, "src/e.rs"),
+        DecisionState::FalsePositive,
+        "REVOKED-REASON the layer is allowed here",
+    );
+    let live = decision(
+        "dec-000002",
+        &key_at(&sealed, "src/d.rs"),
+        DecisionState::FalsePositive,
+        "LIVE-REASON generated code",
+    );
+    fp.revoked_at = Some(NOW.to_string());
+    let reviewed = apply_overlay(&sealed, &[fp, live], &[], &[]);
+    let entries = released_entries(&reviewed, &client_options());
+
+    let file: Value = serde_json::from_slice(&entries["decisions.json"]).unwrap();
+    let rows = file["decisions"].as_array().unwrap();
+    let revoked = rows.iter().find(|r| r["id"] == "dec-000001").unwrap();
+    assert_eq!(revoked["revoked"], true);
+    assert_eq!(revoked["has_reason"], true);
+    assert_eq!(revoked["reason"], "", "{revoked}");
+    let live = rows.iter().find(|r| r["id"] == "dec-000002").unwrap();
+    assert_eq!(live["reason"], "LIVE-REASON generated code");
+
+    // And on no sheet of the workbook.
+    let text = crate::release_gate::xlsx_strings(&workbook(&entries))
+        .unwrap()
+        .join("\n");
+    assert!(!text.contains("REVOKED-REASON"), "the workbook prints it");
+    assert!(
+        text.contains("LIVE-REASON"),
+        "a live ruling's reason prints"
+    );
+}
