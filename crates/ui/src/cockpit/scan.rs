@@ -19637,6 +19637,22 @@ mod order_preset_reload_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p1", "name": "Acme", "client_name": ""
+            })))
+            .mount(&server)
+            .await;
+        // The decision store answers (the Queue is drawn only while decisions are known).
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p1/decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "decisions": [], "standings": [], "migrated_from_draft": true,
+                "latest_run_id": "insp-1"
+            })))
+            .mount(&server)
+            .await;
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
 
         let mut vdom = VirtualDom::new(results);
@@ -19667,6 +19683,65 @@ mod order_preset_reload_tests {
             .next_back()
             .expect("the restored view saved the draft");
         assert_eq!(saved["order_preset"], "by_file", "{saved}");
+    }
+
+    /// With the decision store unreachable the Queue is not drawn (its counts would read every
+    /// finding as Unresolved), and the banner says why.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_unreachable_decision_store_hides_the_queue_and_shows_the_banner() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p1", "name": "Acme", "client_name": ""
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p1/decisions"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Decisions not loaded"), "{html}");
+        assert!(
+            !html.contains("triage-switch"),
+            "no Unresolved count is drawn while decisions are unknown"
+        );
+        // The draft saved while unknown does not overwrite the queue with an empty one.
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the draft was saved");
+        assert_eq!(saved["dispositions"], serde_json::json!({}));
+        assert!(
+            saved["last_known"].is_null(),
+            "no state was ever read: {saved}"
+        );
     }
 
     /// M1: two saves queued out of order (the second submitted while the first is still on the

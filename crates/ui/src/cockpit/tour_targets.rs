@@ -126,6 +126,14 @@ async fn scan_html() -> String {
         })))
         .mount(&server)
         .await;
+    // The decision store answers (the Queue is drawn only while decisions are known).
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "decisions": [], "standings": [], "migrated_from_draft": true, "latest_run_id": "insp-1"
+        })))
+        .mount(&server)
+        .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
 
     let mut vdom = VirtualDom::new(scan_results_screen);
