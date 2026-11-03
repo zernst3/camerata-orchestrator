@@ -111,6 +111,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls(cap: Option<f64>) -> RunControls {
     RunControls {
+        review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: cap,
         estimate_hint_usd: None,

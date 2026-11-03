@@ -656,6 +656,36 @@ impl UsageMeter {
         }
     }
 
+    /// A meter for a stage that runs after the scan's own meter was closed (the group reviewer
+    /// reads the final report): it starts from the usage the scan already made, so a spend limit
+    /// counts the whole run and not only this stage.
+    pub fn continuing(controls: crate::cost_cap::RunControls, prior: &ActualUsage) -> Self {
+        let meter = Self::with_controls(controls);
+        meter
+            .input_tokens
+            .store(prior.input_tokens, Ordering::Relaxed);
+        meter
+            .output_tokens
+            .store(prior.output_tokens, Ordering::Relaxed);
+        meter
+            .cache_read_input_tokens
+            .store(prior.cache_read_input_tokens, Ordering::Relaxed);
+        meter
+            .cache_creation_input_tokens
+            .store(prior.cache_creation_input_tokens, Ordering::Relaxed);
+        meter.cost_micro_usd.store(
+            (prior.cost_usd.max(0.0) * 1_000_000.0).round() as u64,
+            Ordering::Relaxed,
+        );
+        meter.calls.store(prior.calls, Ordering::Relaxed);
+        // Every call counted so far reported its cost only if the prior figure was complete.
+        meter.cost_calls.store(
+            if prior.cost_complete { prior.calls } else { 0 },
+            Ordering::Relaxed,
+        );
+        meter
+    }
+
     /// The efficiency switches this run executes under. A call site with no meter (a unit test
     /// of one function) uses [`efficiency_of`].
     pub fn efficiency(&self) -> crate::efficiency::EfficiencyConfig {
@@ -1113,6 +1143,7 @@ fn batch_estimate_usd(
         &RunModels {
             scan: priced,
             calibration: priced,
+            group_review: None,
             fix: None,
             clone_judge: None,
         },
@@ -1371,14 +1402,23 @@ pub fn resolve_audit_model(caller_pick: Option<&str>) -> String {
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
 }
 
-/// The model the calibration stage runs on: the caller's calibration pick, else the SCAN model (so an audit is end to end on one model by
-/// default). The one resolution the pre-flight ([`crate::cost_cap::models_the_run_will_use`])
-/// and the stage share, so the model the run names and prices is the model it calls.
-pub fn resolve_calibration_model(calibration_pick: Option<&str>, scan_model: &str) -> String {
+/// The model stage 1 (the per-site first reviewer) runs on: the caller's calibration pick (the
+/// `--calibration-model` flag or the project setting), else the built-in stage 1 default, Opus 5.5
+/// ([`camerata_api_types::project::STAGE1_DEFAULT_MODEL`], review tree design A13). The scan keeps
+/// its own default; the two are chosen separately now. Never the environment. The one resolution
+/// the pre-flight ([`crate::cost_cap::models_the_run_will_use`]) and the stage share, so the model
+/// the run names and prices is the model it calls.
+///
+/// `_scan_model` is no longer the fallback; it stays in the signature so the callers that resolve
+/// the scan model first read the same.
+pub fn resolve_calibration_model(calibration_pick: Option<&str>, _scan_model: &str) -> String {
     calibration_pick
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| scan_model.to_string())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || camerata_api_types::project::STAGE1_DEFAULT_MODEL.to_string(),
+            str::to_string,
+        )
 }
 
 /// The model a stage's request NAMES: the stage's pick when it has one, else the run's default
@@ -3188,6 +3228,7 @@ pub(crate) fn stage_effort(stage: Stage) -> Option<&'static str> {
         Stage::ScanPass => Some(s::SCAN_EFFORT),
         Stage::DetailRegeneration => Some(s::DETAIL_EFFORT),
         Stage::Calibration => Some(s::CALIBRATION_EFFORT),
+        Stage::GroupReview => Some(s::GROUP_REVIEW_EFFORT),
         Stage::Alternatives => Some(s::ALTERNATIVES_EFFORT),
         Stage::FixGeneration => Some(s::FIX_EFFORT),
         Stage::DeepTier | Stage::CloneJudge => None,
@@ -12496,6 +12537,9 @@ mod batch_mode;
 mod calibration;
 #[cfg(test)]
 mod calibration_tests;
+pub mod group_review;
+#[cfg(test)]
+mod group_review_tests;
 pub mod stage_batch;
 #[cfg(test)]
 mod stage_batch_tests;
@@ -16537,21 +16581,32 @@ mod tests {
     /// (`CAMERATA_LLM_MODEL`), not the model the pre-flight prices, the ledger records or the
     /// batch path sends (`resolve_audit_model`); a run reported one model and called another, and
     /// with an unpriced process default the spend limit refused the whole run. With nothing
-    /// pinned, scan and calibration now both resolve to the registry default, and the audit is
-    /// end to end on ONE model that the run can name and price.
+    /// pinned, each stage now resolves to a built-in default that is a real, priced id the run can
+    /// name and price. Since review tree design A13 stage 1 has a default of its own (Opus 5.5)
+    /// rather than following the scan model (Sonnet 5.5), which stays as it was.
     #[test]
-    fn bug_ai3_calibration_follows_the_resolved_scan_model_when_nothing_is_pinned() {
+    fn bug_ai3_calibration_defaults_to_the_stage1_model_when_nothing_is_pinned() {
         let scan = resolve_audit_model(None);
         assert!(!scan.trim().is_empty(), "the scan model is never empty");
         assert!(
             crate::llm::is_priced(&scan),
             "the registry default `{scan}` is priced"
         );
-        assert_eq!(resolve_calibration_model(None, &scan), scan);
-        assert_eq!(resolve_calibration_model(Some(""), &scan), scan);
+        let stage1 = resolve_calibration_model(None, &scan);
+        assert_eq!(stage1, "claude-opus-5-5");
+        assert!(
+            crate::llm::is_priced(&stage1),
+            "stage 1's default is priced"
+        );
+        assert_eq!(resolve_calibration_model(Some(""), &scan), stage1);
         assert_eq!(
             resolve_calibration_model(Some("claude-opus-5"), &scan),
             "claude-opus-5"
+        );
+        // The model the run is not told about does not change what stage 1 runs on.
+        assert_eq!(
+            resolve_calibration_model(None, "some-other-scan-model"),
+            stage1
         );
         // A stage request never leaves with an empty model.
         assert_eq!(stage_model(None), scan);

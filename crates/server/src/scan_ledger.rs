@@ -527,6 +527,11 @@ pub struct ScanLedger {
     /// reconcile against this ([`crate::onboard::ScanReport::discarded_reconciles`]).
     #[serde(default)]
     discarded: DiscardTally,
+    /// The escalation formula's outcome (design 4.7): the group reviewer's model, the budget, how
+    /// many sites were escalated, how many of those are past the budget and why, and how many
+    /// sites no sub-group named. `None` until the group reviewer has run.
+    #[serde(default)]
+    escalation: Option<EscalationBlock>,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -574,6 +579,92 @@ pub struct ScanLedger {
     /// should have been checked there and was not.
     #[serde(default)]
     rule_scopes: BTreeMap<String, Vec<String>>,
+}
+
+/// What the escalation formula did in one run (design 4.4 and 4.7). The counts are the tree's,
+/// never the model's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EscalationBlock {
+    /// The group reviewer's resolved model.
+    #[serde(default)]
+    pub model: Option<String>,
+    pub rate_per_kloc: f32,
+    pub floor: usize,
+    pub counted_lines: usize,
+    /// `max(floor, ceil(counted_lines / 1000 * rate))`.
+    pub budget: usize,
+    /// Every site the group reviewer wanted to escalate, above and below the line.
+    pub candidates: usize,
+    /// Candidates in the architect's queue: the budget's worth plus the ones past it.
+    pub escalated: usize,
+    /// `escalated - budget` when positive.
+    pub over_budget: usize,
+    /// The sites in the report, so the share below is checkable.
+    pub total_sites: usize,
+    /// `escalated / total_sites`.
+    pub share_escalated: f64,
+    /// Escalated sites by reason (wire name).
+    #[serde(default)]
+    pub by_reason: BTreeMap<String, usize>,
+    /// The escalated sites past the budget, by the reason that allowed it.
+    #[serde(default)]
+    pub over_budget_by_reason: BTreeMap<String, usize>,
+    /// Sites the group reviewer's sub-groups did not name; they sit in the rule's `unplaced`
+    /// sub-group, and are listed by site key.
+    #[serde(default)]
+    pub unplaced: Vec<String>,
+    /// Rule groups the group reviewer read.
+    #[serde(default)]
+    pub rules_reviewed: usize,
+    /// Rule groups it could not read (each is a failed part of the report).
+    #[serde(default)]
+    pub rules_failed: usize,
+}
+
+impl EscalationBlock {
+    /// The sentence the methodology section and the ledger state: "Escalated 347 of a budget of
+    /// 300 (47 over, all unauthenticated reach or secret exposure at critical)".
+    pub fn sentence(&self) -> String {
+        use camerata_api_types::review::EscalationReason;
+        if self.over_budget == 0 {
+            return format!(
+                "Escalated {} of a budget of {} (none over)",
+                self.escalated, self.budget
+            );
+        }
+        let mut reasons: Vec<EscalationReason> = self
+            .over_budget_by_reason
+            .keys()
+            .filter_map(|name| EscalationReason::parse(name))
+            .collect();
+        reasons.sort_by_key(|r| r.rank());
+        // Every reason but unverified evidence is past the budget only at critical severity.
+        let at_critical: Vec<&str> = reasons
+            .iter()
+            .filter(|r| **r != EscalationReason::EvidenceUnverified)
+            .map(|r| r.phrase())
+            .collect();
+        let mut parts: Vec<String> = Vec::new();
+        if !at_critical.is_empty() {
+            parts.push(format!("{} at critical", at_critical.join(" or ")));
+        }
+        if reasons.contains(&EscalationReason::EvidenceUnverified) {
+            parts.push(EscalationReason::EvidenceUnverified.phrase().to_string());
+        }
+        if parts.is_empty() {
+            return format!(
+                "Escalated {} of a budget of {} ({} over)",
+                self.escalated, self.budget, self.over_budget
+            );
+        }
+        format!(
+            "Escalated {} of a budget of {} ({} over, all {})",
+            self.escalated,
+            self.budget,
+            self.over_budget,
+            parts.join(" or ")
+        )
+    }
 }
 
 /// H11: what an incremental run re-audited and what it carried forward unchanged.
@@ -1229,6 +1320,16 @@ impl ScanLedger {
         self.discarded = DiscardTally {
             by_reason: crate::engine_discard::tally(rows),
         };
+    }
+
+    /// Record the escalation formula's outcome for the run, replacing an earlier one.
+    pub fn record_escalation(&mut self, block: EscalationBlock) {
+        self.escalation = Some(block);
+    }
+
+    /// The escalation formula's outcome, once the group reviewer has run.
+    pub fn escalation(&self) -> Option<&EscalationBlock> {
+        self.escalation.as_ref()
     }
 
     /// A10: the discard tally. See [`DiscardTally`].

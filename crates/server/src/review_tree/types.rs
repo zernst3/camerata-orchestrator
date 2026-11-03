@@ -145,6 +145,22 @@ pub struct TreeNode {
     pub flags: Vec<String>,
 }
 
+/// The counts shown beside a node. Every one is read from the tree and the rows, never from the
+/// group reviewer's prose (A9).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCounts {
+    /// Sites under the node (thrown-out sites only when the node is a thrown-out node).
+    pub sites: usize,
+    /// Sites under the node that are escalated.
+    pub escalated: usize,
+    /// Sites under the node that are candidates below the line.
+    pub below_the_line: usize,
+    /// Sites under the node with an outlier mark (by the engine or the group reviewer).
+    pub outliers: usize,
+    /// Sites under the node the group reviewer did not place in a sub-group.
+    pub unplaced: usize,
+}
+
 /// The review tree of one report. Sealed with it, stored in the inspection entry.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReviewTree {
@@ -204,6 +220,56 @@ impl ReviewTree {
             &settings.over_budget_reasons,
         );
         self.sync_rows(rows);
+    }
+
+    /// The counts of `node_id`, from the tree alone: its direct members and those of every node
+    /// below it, the stored candidates and the outlier lists.
+    pub fn counts(&self, node_id: &str) -> NodeCounts {
+        let members: std::collections::BTreeSet<String> =
+            self.batch_members(node_id).into_iter().collect();
+        // The node and every node below it, thrown-out nodes only when the node is one itself.
+        let from_thrown_out = super::build::is_thrown_out_id(node_id);
+        let mut below: Vec<&TreeNode> = Vec::new();
+        let mut stack: Vec<&str> = vec![node_id];
+        while let Some(id) = stack.pop() {
+            if let Some(n) = self.node(id) {
+                below.push(n);
+            }
+            stack.extend(
+                self.nodes
+                    .iter()
+                    .filter(|n| n.parent.as_deref() == Some(id))
+                    .filter(|n| from_thrown_out || !super::build::is_thrown_out_id(&n.id))
+                    .map(|n| n.id.as_str()),
+            );
+        }
+        let outliers: std::collections::BTreeSet<&str> = below
+            .iter()
+            .flat_map(|n| n.outliers.iter())
+            .map(|o| o.key.as_str())
+            .filter(|k| members.contains(*k))
+            .collect();
+        let unplaced = below
+            .iter()
+            .filter(|n| n.id.ends_with("/unplaced"))
+            .flat_map(|n| n.members.iter())
+            .count();
+        let mut escalated = 0;
+        let mut below_the_line = 0;
+        for c in self.candidates.iter().filter(|c| members.contains(&c.key)) {
+            if c.escalated {
+                escalated += 1;
+            } else {
+                below_the_line += 1;
+            }
+        }
+        NodeCounts {
+            sites: members.len(),
+            escalated,
+            below_the_line,
+            outliers: outliers.len(),
+            unplaced,
+        }
     }
 
     /// The node with this id.

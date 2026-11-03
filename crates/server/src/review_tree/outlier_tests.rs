@@ -29,12 +29,12 @@ fn with_flags(mut f: Finding, flags: &[&str]) -> Finding {
     f
 }
 
-fn tree_of(rows: &mut Vec<Finding>) -> ReviewTree {
+fn tree_of(rows: &mut [Finding]) -> ReviewTree {
     backfill_site_keys(rows);
     build_tree(rows, &mut [], None, &ToolMap::builtin(), "run-1")
 }
 
-fn outliers_of<'a>(tree: &'a ReviewTree, key: &str) -> BTreeSet<(OutlierReason, OutlierBy)> {
+fn outliers_of(tree: &ReviewTree, key: &str) -> BTreeSet<(OutlierReason, OutlierBy)> {
     tree.nodes
         .iter()
         .flat_map(|n| n.outliers.iter())

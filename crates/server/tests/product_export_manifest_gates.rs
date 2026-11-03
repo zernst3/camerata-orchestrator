@@ -79,6 +79,7 @@ fn report() -> ScanReport {
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "acme/portal".to_string(),
                 sha: Some("abcdef1234567890".to_string()),

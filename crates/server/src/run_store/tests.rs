@@ -1230,7 +1230,11 @@ fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
     let none = ModelsRecord::from_picks(None, None, &controls, "api", "parallel");
     assert!(none.resolved);
     assert_eq!(none.audit, crate::llm::DEFAULT_MODEL);
-    assert_eq!(none.calibration, crate::llm::DEFAULT_MODEL);
+    // A13: stage 1 has a default of its own (Opus 5.5); the scan keeps the built-in default.
+    assert_eq!(
+        none.calibration,
+        camerata_api_types::project::STAGE1_DEFAULT_MODEL
+    );
     assert_eq!(none.fix, camerata_api_types::project::FIX_STAGE_HAIKU_MODEL);
 
     // Picks are kept; a blank pick is no pick; an explicit fix model wins.
@@ -1248,8 +1252,18 @@ fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
     assert_eq!(picked.audit, "claude-opus-5-5");
     assert_eq!(
         picked.calibration, "claude-opus-5-5",
-        "blank follows the scan"
+        "blank is no pick: stage 1 runs on its default, which is also Opus 5.5 (A13)"
     );
+    // A blank pick no longer follows the scan model.
+    let other_scan = ModelsRecord::from_picks(
+        Some("claude-haiku-5-5"),
+        Some("  "),
+        &crate::cost_cap::RunControls::default(),
+        "cli",
+        "batch",
+    );
+    assert_eq!(other_scan.audit, "claude-haiku-5-5");
+    assert_eq!(other_scan.calibration, "claude-opus-5-5");
     assert_eq!(picked.fix, "claude-opus-5");
     assert_eq!(
         (picked.backend.as_str(), picked.mode.as_str()),

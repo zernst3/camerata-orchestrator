@@ -179,6 +179,82 @@ pub(crate) fn stage1_reply_schema() -> Value {
     )
 }
 
+/// The group reviewer's reply for one rule group, or one chunk of a large one (design 4.2): the
+/// summary the architect reads at the node, the sub-groups by shared cause (every member index in
+/// exactly one), the sites that do not belong with the rest, the sites he must look at himself
+/// (each with one reason from the closed list) and the points where the group reviewer disagrees
+/// with the per-site reviewer. Every field has a home on a row or in the node's summary
+/// ([`super::group_review::STAGE2_FIELD_HOMES`]); a field with no home is not in this schema, and
+/// the object is closed, so an extra one fails the structured-output check. There are no counts:
+/// the report's counts come from its data.
+pub(crate) fn stage2_reply_schema() -> Value {
+    let outlier_reasons: Vec<&str> = camerata_api_types::review::OutlierReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    let escalation_reasons: Vec<&str> = camerata_api_types::review::EscalationReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    let subgroup = object(
+        &[
+            ("label", string()),
+            ("cause", string()),
+            ("members", array(integer())),
+        ],
+        &["label", "cause", "members"],
+    );
+    let outlier = object(
+        &[
+            ("index", integer()),
+            ("reason", one_of(&outlier_reasons)),
+            ("why", string()),
+        ],
+        &["index", "reason", "why"],
+    );
+    let escalation = object(
+        &[
+            ("index", integer()),
+            ("reason", one_of(&escalation_reasons)),
+            ("rank", integer()),
+            ("why", string()),
+        ],
+        &["index", "reason", "rank", "why"],
+    );
+    let disagreement = object(
+        &[
+            ("index", integer()),
+            ("field", one_of(&["severity", "real"])),
+            ("stage1", string()),
+            ("mine", string()),
+            ("why", string()),
+        ],
+        &["index", "field", "stage1", "mine", "why"],
+    );
+    object(
+        &[
+            ("summary", string()),
+            ("subgroups", array(subgroup)),
+            ("outliers", array(outlier)),
+            ("escalations", array(escalation)),
+            ("disagreements", array(disagreement)),
+        ],
+        &[
+            "summary",
+            "subgroups",
+            "outliers",
+            "escalations",
+            "disagreements",
+        ],
+    )
+}
+
+/// The reply of the rule-level summary call, made when a rule group was read in more than one
+/// chunk: the one summary the architect reads at the rule node.
+pub(crate) fn rule_summary_reply_schema() -> Value {
+    object(&[("summary", string())], &["summary"])
+}
+
 /// The detail regeneration reply for a batch whose findings carry the opaque `ids`: ONE REQUIRED
 /// PROPERTY PER ID, each an entry with the explanation (`why`) apart from the direction of the
 /// fix (`fix_direction`). An array cannot say "one item per id" (the API allows `minItems` of 0

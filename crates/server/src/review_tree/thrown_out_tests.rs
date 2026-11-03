@@ -64,7 +64,7 @@ fn fixture() -> (Vec<Finding>, Vec<Finding>) {
     (kept, thrown)
 }
 
-fn build(kept: &mut Vec<Finding>, discarded: &mut Vec<Finding>) -> ReviewTree {
+fn build(kept: &mut [Finding], discarded: &mut [Finding]) -> ReviewTree {
     let tools = ToolMap::builtin();
     backfill_site_keys(kept);
     backfill_site_keys(discarded);
@@ -127,7 +127,7 @@ fn there_is_one_thrown_out_node_per_category_with_a_sub_group_per_reason() {
     );
     let mut ids: Vec<&str> = thrown_out.iter().map(|n| n.id.as_str()).collect();
     ids.sort_unstable();
-    let mut want = vec![
+    let mut want = [
         format!("{sql_category}/thrown-out"),
         format!("{rls_category}/thrown-out"),
     ];

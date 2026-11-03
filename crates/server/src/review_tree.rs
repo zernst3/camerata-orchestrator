@@ -28,8 +28,8 @@ pub use mapping::{
     UNCATEGORISED,
 };
 pub use types::{
-    DuplicateLink, FlaggedBy, GroupRole, NodeEscalation, NodeKind, NodeLevel, Outlier, OutlierBy,
-    OutlierReason, ReviewTree, TextSource, TreeNode,
+    DuplicateLink, FlaggedBy, GroupRole, NodeCounts, NodeEscalation, NodeKind, NodeLevel, Outlier,
+    OutlierBy, OutlierReason, ReviewTree, TextSource, TreeNode,
 };
 pub use unfold::unfold_also_locations;
 

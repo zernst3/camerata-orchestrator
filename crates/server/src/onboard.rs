@@ -895,6 +895,10 @@ pub struct ScanProvenance {
     pub audit_model: Option<String>,
     /// The model resolved for the calibration pass. `None` when calibration never ran.
     pub calibration_model: Option<String>,
+    /// The model the group reviewer (stage 2) ran on, resolved. `None` when it never ran (no AI
+    /// review, no findings, or a report from before the group reviewer existed).
+    #[serde(default)]
+    pub group_review_model: Option<String>,
     /// The model the clone-candidate judge (`clone_advisory`, Wave C) ran on, resolved by
     /// `resolve_clone_judge_model`: the explicit pick, else
     /// the fast tier's built-in primary (Haiku 5.5). `None` when the judge never made a model call this scan (no
@@ -3750,6 +3754,7 @@ pub async fn audit_repos_with_llm_controlled(
     // what a reader always assumed it meant.
     let ai_ran = ai_ran_for_ledger;
     report.provenance = ScanProvenance {
+        group_review_model: None,
         audited_refs,
         audit_model: ai_ran.then(|| crate::ai_audit::resolve_audit_model(model)),
         calibration_model: calibration_model.map(str::to_string),
@@ -7380,6 +7385,7 @@ mod tests {
     #[test]
     fn scan_provenance_round_trip_including_dirty_flag() {
         let prov = ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![
                 AuditedRef {
                     repo: "me/api".to_string(),

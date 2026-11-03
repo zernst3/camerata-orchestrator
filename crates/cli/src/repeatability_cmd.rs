@@ -303,6 +303,7 @@ pub async fn run_repeatability_with(
         false,
         None,
         None,
+        None,
     );
     if let Some(why) =
         camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models)
@@ -374,9 +375,12 @@ pub async fn run_repeatability_with(
         // The measurement command prices the audit passes only; its limit is the per-run budget.
         fix_model: None,
         clone_judge_model: None,
-        calibration_model: calibration_model
-            .map(str::to_string)
-            .unwrap_or_else(|| audit_model.clone()),
+        calibration_model: camerata_server::ai_audit::resolve_calibration_model(
+            calibration_model,
+            &audit_model,
+        ),
+        // The measurement runs the scan and stage 1 only, not the group reviewer.
+        group_review_model: String::new(),
         model: audit_model,
         repos: &facts,
         incremental: false,
@@ -411,6 +415,7 @@ pub async fn run_repeatability_with(
         }
     }
     let controls = camerata_server::cost_cap::RunControls {
+        review: Default::default(),
         efficiency,
         max_cost_usd: Some(per_run),
         estimate_hint_usd: pf.estimate_usd,

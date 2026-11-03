@@ -80,6 +80,7 @@ impl LlmPort for StubLlm {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
@@ -378,6 +379,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
 
 fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
         estimate_hint_usd: hint,
@@ -490,6 +492,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
     // so reaching the network at all would fail this test with a transport error.
     let llm = crate::llm::Llm::for_backend(crate::llm::Backend::Api, Some("sk-test".to_string()));
     let meter = UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(1.0),
         estimate_hint_usd: Some(50.0),
@@ -995,6 +998,7 @@ fn the_batch_fallback_estimate_is_the_run_estimate() {
             &RunModels {
                 scan: priced,
                 calibration: priced,
+                group_review: None,
                 fix: None,
                 clone_judge: None,
             },

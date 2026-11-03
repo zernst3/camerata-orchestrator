@@ -113,6 +113,9 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         // registry prices, so the limit is enforceable and the run is admitted.
         fix_model: None,
         clone_judge_model: None,
+        group_review_model: None,
+        escalation_rate: None,
+        escalation_floor: None,
         full: true,
         verbose: false,
         max_cost_usd: cap,

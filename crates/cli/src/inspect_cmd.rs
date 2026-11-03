@@ -98,6 +98,17 @@ pub struct InspectArgs {
     /// `--fix-model`: the fix stage's explicit model. `None`/blank = not set, and the fix stage
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
+    /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
+    /// default, Fable 5.1 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// Never the environment.
+    #[serde(default)]
+    pub group_review_model: Option<String>,
+    /// `--escalation-rate`: escalations per 1,000 counted lines. `None` = 1.0.
+    #[serde(default)]
+    pub escalation_rate: Option<f32>,
+    /// `--escalation-floor`: the fewest escalations a run may carry. `None` = 20.
+    #[serde(default)]
+    pub escalation_floor: Option<usize>,
     /// `--clone-judge-model`: the duplicate-code checker's model. `None`/blank = the built-in
     /// fast default (Haiku 5.5, `camerata_server::onboard::clone_advisory::resolve_clone_judge_model`).
     pub clone_judge_model: Option<String>,
@@ -247,7 +258,24 @@ impl InspectArgs {
             .max_cost_usd
             .map(camerata_server::cost_cap::RunControls::validate_cap)
             .transpose()?;
+        let defaults = camerata_api_types::project::ReviewSettings::default();
+        let escalation_rate_per_kloc = match self.escalation_rate {
+            None => defaults.escalation_rate_per_kloc,
+            Some(rate) if rate.is_finite() && rate >= 0.0 => rate,
+            Some(rate) => {
+                return Err(format!(
+                    "--escalation-rate must be zero or a positive number of escalations per \
+                     1,000 lines (got {rate})"
+                ))
+            }
+        };
         Ok(camerata_server::cost_cap::RunControls {
+            review: camerata_api_types::project::ReviewSettings {
+                escalation_rate_per_kloc,
+                escalation_floor: self.escalation_floor.unwrap_or(defaults.escalation_floor),
+                over_budget_reasons: defaults.over_budget_reasons,
+                group_review_model: self.group_review_model.clone().unwrap_or_default(),
+            },
             efficiency,
             max_cost_usd,
             estimate_hint_usd: None,
@@ -520,6 +548,7 @@ pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
         false,
         args.fix_model.as_deref(),
         args.clone_judge_model.as_deref(),
+        args.group_review_model.as_deref(),
     );
     match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
         None => Ok(()),
@@ -1057,9 +1086,11 @@ pub async fn run_inspect_pipeline_with(
                 controls.fix_model_for(model, calibration_model),
             )),
             clone_judge_model: judge_selected.then(|| controls.clone_judge_model_for()),
-            calibration_model: calibration_model
-                .map(str::to_string)
-                .unwrap_or_else(|| audit_model.clone()),
+            calibration_model: camerata_server::ai_audit::resolve_calibration_model(
+                calibration_model,
+                &audit_model,
+            ),
+            group_review_model: controls.group_review_model_for(),
             model: audit_model,
             repos: &facts,
             incremental: incremental_prior.is_some(),
@@ -1119,41 +1150,43 @@ pub async fn run_inspect_pipeline_with(
     // questions as the run it resumes and a stored reply still matches its prompt.
     let token_seed = store.as_ref().map(|s| s.nonce_seed());
 
+    // The model this run asks: the scripted one a test hands in, else the real client for the
+    // resolved transport (EXACTLY the resolution's Cli/Api choice, as `audit_repos_controlled`
+    // builds it; every `claude -p` it spawns is remembered so source deletion can find the
+    // session files). Held for the whole run: the audit uses it, and so does the group reviewer
+    // once every row-adding pass is done.
+    let sessions = camerata_server::llm::SessionSink::new();
+    let ai_review_blocked = matches!(&backend_resolution, BackendResolution::Blocked { .. });
+    let llm_backend = match &backend_resolution {
+        BackendResolution::Api => camerata_server::llm::Backend::Api,
+        BackendResolution::Cli | BackendResolution::Blocked { .. } => {
+            camerata_server::llm::Backend::Cli
+        }
+    };
+    let real = match seams.llm {
+        Some(_) => None,
+        None => Some(
+            camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
+                .with_session_sink(sessions.clone()),
+        ),
+    };
+    let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
+        (Some(llm), _) => llm,
+        (None, Some(real)) => real,
+        (None, None) => {
+            return Err(InspectError::Failed(
+                "no model client could be built for this run".to_string(),
+            ))
+        }
+    };
+    let journaled = store
+        .as_ref()
+        .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
+    let model_seam: &dyn camerata_server::llm::LlmPort = match &journaled {
+        Some(j) => j.as_ref(),
+        None => base,
+    };
     let (mut report, manifest) = {
-        // The model this run asks: the scripted one a test hands in, else the real client for the
-        // resolved transport (EXACTLY the resolution's Cli/Api choice, as `audit_repos_controlled`
-        // builds it; every `claude -p` it spawns is remembered so source deletion can find the
-        // session files).
-        let sessions = camerata_server::llm::SessionSink::new();
-        let llm_backend = match &backend_resolution {
-            BackendResolution::Api => camerata_server::llm::Backend::Api,
-            BackendResolution::Cli | BackendResolution::Blocked { .. } => {
-                camerata_server::llm::Backend::Cli
-            }
-        };
-        let real = match seams.llm {
-            Some(_) => None,
-            None => Some(
-                camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
-                    .with_session_sink(sessions.clone()),
-            ),
-        };
-        let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
-            (Some(llm), _) => llm,
-            (None, Some(real)) => real,
-            (None, None) => {
-                return Err(InspectError::Failed(
-                    "no model client could be built for this run".to_string(),
-                ))
-            }
-        };
-        let journaled = store
-            .as_ref()
-            .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
-        let model_seam: &dyn camerata_server::llm::LlmPort = match &journaled {
-            Some(j) => j.as_ref(),
-            None => base,
-        };
         let (mut report, manifest) = camerata_server::prompt_frame::with_seed(
             token_seed,
             camerata_server::onboard::audit_repos_with_llm_controlled(
@@ -1253,6 +1286,28 @@ pub async fn run_inspect_pipeline_with(
         &mut report.findings,
         corpus.as_ref(),
     );
+
+    // ── Stage 2, the group reviewer: the architect's first reader of each rule group ───────
+    // Runs on the final row set (the preview, dependency and evidence-gate rows included) and on
+    // a meter that continues the scan's, so `--max-cost-usd` counts the whole run. Never runs
+    // where the compliance gate blocked the AI review. Its failed parts join the report's.
+    if !ai_review_blocked {
+        let rules: Vec<(String, String)> = selected
+            .iter()
+            .map(|r| (r.id.clone(), r.directive.clone()))
+            .collect();
+        camerata_server::prompt_frame::with_seed(
+            token_seed,
+            camerata_server::ai_audit::group_review::review_scan_report(
+                &mut report,
+                model_seam,
+                &controls,
+                &rules,
+                llm_backend == camerata_server::llm::Backend::Cli,
+            ),
+        )
+        .await;
+    }
 
     // The incremental baseline becomes reusable only when the scan is complete: a run with a
     // failed or unrun part leaves the previous baseline in place, and its own stored replies are
@@ -1562,6 +1617,38 @@ pub fn render_ledger_summary(
         }
     }
 
+    // The escalation formula's outcome: how many sites the group reviewer put in the architect's
+    // queue against the budget, and which reasons took any past it.
+    if let Some(block) = ledger.escalation() {
+        writeln!(out, "\n== ESCALATION ==").ok();
+        writeln!(out, "  {}", block.sentence()).ok();
+        writeln!(
+            out,
+            "  {} candidate(s) in all, {} below the line; group review model {}",
+            block.candidates,
+            block.candidates.saturating_sub(block.escalated),
+            block.model.as_deref().unwrap_or("(none recorded)")
+        )
+        .ok();
+        if !block.unplaced.is_empty() {
+            writeln!(
+                out,
+                "  {} site(s) no sub-group named were kept together as unplaced",
+                block.unplaced.len()
+            )
+            .ok();
+        }
+        if block.rules_failed > 0 {
+            writeln!(
+                out,
+                "  !! {} rule group(s) could not be read by the group reviewer (see the failed \
+                 passes)",
+                block.rules_failed
+            )
+            .ok();
+        }
+    }
+
     writeln!(out, "\n== DETECTION FAMILIES ==").ok();
     for tier in RuleTier::all() {
         let rules: Vec<&RuleLedgerEntry> =
@@ -1852,6 +1939,9 @@ mod tests {
             calibration_model: None,
             fix_model: None,
             clone_judge_model: None,
+            group_review_model: None,
+            escalation_rate: None,
+            escalation_floor: None,
             full: false,
             verbose: false,
             max_cost_usd: None,
@@ -2730,6 +2820,81 @@ mod tests {
     /// A fully healthy ledger: one rule per family, all ran, a single cleanly-reconciled
     /// stage, no not-run rules, no failed passes. No `!!` marker anywhere — a clean scan must
     /// read as unambiguously clean.
+    #[test]
+    fn the_group_review_flags_become_the_runs_review_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("out.zip"));
+        // Unset: the design values, and the built-in group review model.
+        let defaults = args.run_controls().unwrap();
+        assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+        assert_eq!(defaults.review.escalation_floor, 20);
+        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-1");
+        // The flags win.
+        args.group_review_model = Some("claude-opus-5-5".to_string());
+        args.escalation_rate = Some(0.5);
+        args.escalation_floor = Some(7);
+        let controls = args.run_controls().unwrap();
+        assert!((controls.review.escalation_rate_per_kloc - 0.5).abs() < f32::EPSILON);
+        assert_eq!(controls.review.escalation_floor, 7);
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
+        // A blank model is no model.
+        args.group_review_model = Some("  ".to_string());
+        assert_eq!(
+            args.run_controls().unwrap().group_review_model_for(),
+            "claude-fable-5-1"
+        );
+    }
+
+    #[test]
+    fn a_bad_escalation_rate_is_refused_before_anything_is_read_or_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("out.zip"));
+        for bad in [-1.0_f32, f32::NAN, f32::INFINITY] {
+            args.escalation_rate = Some(bad);
+            let err = validate_args(&args, false).expect_err("a bad rate is refused");
+            assert!(err.contains("--escalation-rate"), "{err}");
+        }
+        args.escalation_rate = Some(0.0);
+        assert!(
+            validate_args(&args, false).is_ok(),
+            "zero leaves only the floor"
+        );
+    }
+
+    #[test]
+    fn the_client_lock_checks_the_group_review_model_like_every_other_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("out.zip"));
+        args.backend = ProjectBackend::Api;
+        args.client_engagement = true;
+        args.group_review_model = Some("vendor/other-model".to_string());
+        let err = require_client_lock(&args).expect_err("a non-Anthropic stage 2 model is refused");
+        assert!(err.contains("group review"), "{err}");
+        args.group_review_model = Some("claude-opus-5-5".to_string());
+        assert!(require_client_lock(&args).is_ok());
+    }
+
+    #[test]
+    fn the_ledger_summary_states_the_escalation_sentence() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_escalation(camerata_server::scan_ledger::EscalationBlock {
+            budget: 20,
+            escalated: 24,
+            over_budget: 4,
+            over_budget_by_reason: [("secret_exposure".to_string(), 4)].into_iter().collect(),
+            ..Default::default()
+        });
+        let text = render_ledger_summary(&ledger, &[], false);
+        assert!(
+            text.contains(
+                "Escalated 24 of a budget of 20 (4 over, all secret exposure at critical)"
+            ),
+            "{text}"
+        );
+        let none = render_ledger_summary(&ScanLedger::new(), &[], false);
+        assert!(!none.contains("Escalated"), "{none}");
+    }
+
     #[test]
     fn render_ledger_summary_clean_ledger_has_no_alarms() {
         let mut ledger = ScanLedger::new();

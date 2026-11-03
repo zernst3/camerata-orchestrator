@@ -20,6 +20,9 @@ use crate::onboard::Finding;
 /// The label of every rule's residual sub-group: the rows no shared cause was found for.
 const RESIDUAL_LABEL: &str = "No shared cause found";
 
+/// The label of a rule's `unplaced` sub-group when no previous tree named it.
+const UNPLACED_LABEL: &str = "Not placed by the group reviewer";
+
 /// Whether a set of rows is read site by site or decided as a batch: a node holding a
 /// security-class row or a critical or high one is an escalation node, anything else is bulk.
 pub fn kind_of<'a>(mut rows: impl Iterator<Item = &'a Finding>) -> NodeKind {
@@ -57,11 +60,17 @@ pub fn resolve_rule_categories(placements: &[RulePlacement]) -> HashMap<String, 
         .collect()
 }
 
-/// Whether `sub` is a valid sub-group id under `rule`: `sub:<rule>/<digits>`.
+/// The last path segment of a rule's `unplaced` sub-group id (`sub:<rule>/unplaced`): the sites
+/// the group reviewer's sub-groups did not name.
+pub const UNPLACED_SEGMENT: &str = "unplaced";
+
+/// Whether `sub` is a valid sub-group id under `rule`: `sub:<rule>/<digits>`, or the rule's
+/// `unplaced` sub-group.
 fn sub_belongs_to(sub: &str, rule: &str) -> bool {
     let prefix = format!("sub:{}/", rule.strip_prefix("rule:").unwrap_or(rule));
-    sub.strip_prefix(&prefix)
-        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    sub.strip_prefix(&prefix).is_some_and(|rest| {
+        rest == UNPLACED_SEGMENT || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 /// A row's `group_path` when it is a complete, well-formed place: a category node, a rule node and
@@ -147,12 +156,13 @@ fn merged_outliers<'a>(
     out
 }
 
-/// The ordinal of a sub-group id (`sub:SEC-1/3` is 3).
+/// The ordinal of a sub-group id (`sub:SEC-1/3` is 3). The `unplaced` sub-group sorts last.
 fn sub_ordinal(sub: &str) -> u32 {
-    sub.rsplit('/')
-        .next()
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(0)
+    match sub.rsplit('/').next() {
+        Some(UNPLACED_SEGMENT) => u32::MAX,
+        Some(d) => d.parse().unwrap_or(0),
+        None => 0,
+    }
 }
 
 /// Build the tree of `findings`, and write each row's `group_path` and `group_role` so they
@@ -217,11 +227,28 @@ pub fn build_tree(
         .map(|t| t.nodes.iter().map(|n| (n.id.clone(), n.clone())).collect())
         .unwrap_or_default();
     let group_reviewed = prev.as_ref().is_some_and(|t| t.group_reviewed);
-    let budget = prev.as_ref().map(|t| t.budget).unwrap_or_default();
-    let candidates = prev
+    let mut budget = prev.as_ref().map(|t| t.budget).unwrap_or_default();
+    // The candidates the group reviewer chose, for the rows that are still kept rows: a row the
+    // seal threw out since is in a thrown-out node and is no longer asked about.
+    let kept_keys: BTreeSet<&str> = findings.iter().map(|f| f.site_key.as_str()).collect();
+    let candidates: Vec<camerata_api_types::review::EscalationCandidate> = prev
         .as_ref()
-        .map(|t| t.candidates.clone())
+        .map(|t| {
+            t.candidates
+                .iter()
+                .filter(|c| kept_keys.contains(c.key.as_str()))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
+    if prev
+        .as_ref()
+        .is_some_and(|t| t.candidates.len() != candidates.len())
+    {
+        budget.candidates = candidates.len();
+        budget.escalated = candidates.iter().filter(|c| c.escalated).count();
+        budget.over_budget = budget.escalated.saturating_sub(budget.budget);
+    }
 
     let mut sub_nodes: Vec<TreeNode> = Vec::new();
     for ((rule, ordinal, id), members) in &subs {
@@ -243,6 +270,7 @@ pub fn build_tree(
         let (label, cause) = match old {
             Some(o) => (o.label.clone(), o.cause.clone()),
             None if *ordinal == 0 => (RESIDUAL_LABEL.to_string(), None),
+            None if *ordinal == u32::MAX => (UNPLACED_LABEL.to_string(), None),
             None => (format!("Sub-group {ordinal}"), None),
         };
         sub_nodes.push(TreeNode {

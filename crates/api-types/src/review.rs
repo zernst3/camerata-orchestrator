@@ -65,6 +65,22 @@ impl EscalationReason {
         Self::ALL.into_iter().find(|r| r.as_str() == name.trim())
     }
 
+    /// The reason in words, for a sentence (`unauthenticated reach`).
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Self::UnauthenticatedReach => "unauthenticated reach",
+            Self::SecretExposure => "secret exposure",
+            Self::DataLoss => "data loss",
+            Self::CrossTenant => "cross-tenant access",
+            Self::ConflictingVerdicts => "conflicting verdicts",
+            Self::LikelyFalseAlarmAtHighSeverity => "a likely false alarm at high severity",
+            Self::OutlierInGroup => "an outlier in its group",
+            Self::RuleMisfit => "a rule misfit",
+            Self::EvidenceUnverified => "unverified evidence",
+            Self::NeedsMoreCode => "a need for more code",
+        }
+    }
+
     /// The priority rank: 0 is the first reason. A lower rank is looked at first.
     pub fn rank(self) -> u8 {
         // The variants are declared in priority order and `ALL` lists them in that order.
@@ -390,9 +406,10 @@ pub struct SiteReview {
     /// The shared cause of that sub-group.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub subgroup_cause: String,
-    /// The group reviewer's disagreement with stage 1, when it had one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage2_disagreement: Option<Stage2Disagreement>,
+    /// The group reviewer's disagreements with stage 1 about this site: at most one per field
+    /// (`severity`, `real`). Stage 1's own answers on the row are never changed by them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage2_disagreement: Vec<Stage2Disagreement>,
 }
 
 impl SiteReview {

@@ -9698,6 +9698,18 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         } else {
                             None
                         };
+                        // The group reviewer (stage 2) runs on the project's group review model,
+                        // else its built-in default; priced when the model list prices it.
+                        let group_review_id = active_project
+                            .as_ref()
+                            .map(|p| p.review.group_review_model.trim().to_string())
+                            .filter(|m| !m.is_empty())
+                            .unwrap_or_else(|| camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string());
+                        let group_review_price = if ai_on {
+                            models.as_ref().and_then(|m| m.models.iter().find(|o| o.id == group_review_id).map(|o| (o.price_in, o.price_out)))
+                        } else {
+                            None
+                        };
                         let scan_id = audit_model();
                         let calibration_id = calibration_model();
                         let sel = selected_count();
@@ -9737,6 +9749,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 &est_mode,
                                 priced(&scan_id, a_in, a_out),
                                 priced(&calibration_id, c_in, c_out),
+                                group_review_price.map(|(i, o)| priced(&group_review_id, i, o)),
                                 fix_price.map(|(i, o)| priced(fix_model_id, i, o)),
                                 flags,
                             )

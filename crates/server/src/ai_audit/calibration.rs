@@ -135,7 +135,7 @@ impl Real {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Yes => "yes",
             Self::No => "no",

@@ -91,6 +91,7 @@ async fn run_with(
 ) -> (Vec<String>, UsageMeter) {
     let rec = Recorder::default();
     let m = UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: efficiency(prefilter),
         max_cost_usd: None,
         estimate_hint_usd: None,
@@ -695,6 +696,7 @@ async fn run_batch(
         items: std::sync::Mutex::new(Vec::new()),
     };
     let m = UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: efficiency(prefilter),
         max_cost_usd: None,
         estimate_hint_usd: None,
