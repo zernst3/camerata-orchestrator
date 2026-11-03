@@ -5518,6 +5518,9 @@ pub(super) fn FindingsTable(
                         "Move to Unresolved"
                     }
                 },
+                // A merge is not a table (see `TriageState::MergedInto`): the view is never
+                // set to it, and the merge screen owns the gesture.
+                TriageState::MergedInto => rsx! {},
             }
             button {
                 class: "btn-edit-sm",
@@ -10256,6 +10259,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         // surface Pass 2 does not invent.
                                         TriageState::Confirmed => {}
                                         TriageState::Unresolved => {}
+                                        // A merged row is the same problem as another row: there
+                                        // is nothing to waive or ticket for it either.
+                                        TriageState::MergedInto => {}
                                     }
                                 }
                                 if ignore_groups.is_empty() && debt_later.is_empty() && debt_now.is_empty() { return; }
@@ -16136,6 +16142,7 @@ mod render_tests {
                 ignored: 71,
                 false_positive: 29,
                 tech_debt: 15,
+                ..TriageCounts::default()
             };
             let mut vdom =
                 VirtualDom::new_with_props(StripHarness, StripHarnessProps { counts, eta });

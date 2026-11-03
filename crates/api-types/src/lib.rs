@@ -63,6 +63,7 @@ pub mod audit;
 pub mod claude_cli;
 pub mod credentials;
 pub mod decisions;
+pub mod edits;
 pub mod feedback;
 pub mod fingerprint;
 pub mod governance;

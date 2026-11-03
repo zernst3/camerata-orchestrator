@@ -56,6 +56,15 @@ pub fn progress_text(counts: TriageCounts) -> String {
             counts.of(state)
         ));
     }
+    // Merged rows are decided and counted in the total, so the strip says so; the word only
+    // appears once there is one, which leaves every earlier strip as it was.
+    if counts.merged > 0 {
+        text.push_str(&format!(
+            " \u{b7} {} {}",
+            TriageState::MergedInto.label(),
+            counts.merged
+        ));
+    }
     text
 }
 
@@ -74,6 +83,21 @@ mod tests {
     }
 
     #[test]
+    fn a_merged_row_is_named_in_the_strip_only_when_there_is_one() {
+        let none = TriageCounts {
+            unresolved: 2,
+            confirmed: 1,
+            ..TriageCounts::default()
+        };
+        assert!(!progress_text(none).contains("Merged"));
+        let one = TriageCounts { merged: 1, ..none };
+        assert_eq!(
+            progress_text(one),
+            "Undecided 2 of 4 \u{b7} Confirmed 1 \u{b7} Ignored 0 \u{b7} FP 0 \u{b7} Tech debt 0 \u{b7} Merged 1"
+        );
+    }
+
+    #[test]
     fn the_strip_reads_like_the_work_order() {
         let counts = TriageCounts {
             unresolved: 187,
@@ -81,6 +105,7 @@ mod tests {
             ignored: 71,
             false_positive: 29,
             tech_debt: 15,
+            ..TriageCounts::default()
         };
         assert_eq!(
             progress_text(counts),

@@ -245,6 +245,7 @@ fn decision_keywords(state: TriageState) -> &'static str {
         TriageState::Ignored => "skip reason",
         TriageState::TechDebt => "debt later ticket",
         TriageState::FalsePositive => "fp wrong noise reason",
+        TriageState::MergedInto => "merge duplicate same cause",
         TriageState::Unresolved => "",
     }
 }
@@ -257,6 +258,9 @@ fn decision_label(state: TriageState) -> String {
         TriageState::TechDebt => "Save this finding as tech debt".to_string(),
         TriageState::FalsePositive => {
             "Mark this finding a false positive (asks for a reason)".to_string()
+        }
+        TriageState::MergedInto => {
+            "Merge this finding into another (asks for a reason)".to_string()
         }
         TriageState::Unresolved => "Move this finding to Unresolved".to_string(),
     }
