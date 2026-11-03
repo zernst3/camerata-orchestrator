@@ -572,3 +572,54 @@ fn each_editable_field_round_trips_into_the_exports() {
     }
     let _ = HashMap::<String, String>::new();
 }
+
+// ── the merge check refuses when it cannot read its evidence ───────────────────────────────
+
+/// The entries of a package that clears the gate.
+fn clean_entries() -> std::collections::BTreeMap<String, Vec<u8>> {
+    let reviewed = apply_overlay(&report_of_three().seal(), &[], &[], &[]);
+    let zip = release(package_of(&reviewed))
+        .expect("the package clears the gate")
+        .bytes;
+    read_zip_entries(&zip).expect("zip")
+}
+
+#[test]
+fn the_merge_check_refuses_a_package_whose_findings_or_decisions_file_is_unreadable() {
+    use super::held::merged_without_decision_in_archive;
+    // A clean package raises nothing.
+    assert!(merged_without_decision_in_archive(&clean_entries()).is_empty());
+
+    for file in ["findings.json", "decisions.json"] {
+        let key = if file == "findings.json" {
+            "findings"
+        } else {
+            "decisions"
+        };
+        let mutations: [(&str, Option<Vec<u8>>); 4] = [
+            ("absent", None),
+            ("corrupt", Some(b"{ not json".to_vec())),
+            (
+                "not an array",
+                Some(format!("{{\"{key}\": \"nope\"}}").into_bytes()),
+            ),
+            ("key missing", Some(b"{}".to_vec())),
+        ];
+        for (how, replacement) in mutations {
+            let mut entries = clean_entries();
+            match replacement {
+                None => {
+                    entries.remove(file);
+                }
+                Some(bytes) => {
+                    entries.insert(file.to_string(), bytes);
+                }
+            }
+            let problems = merged_without_decision_in_archive(&entries);
+            assert!(
+                problems.iter().any(|p| p.file == file),
+                "{file} {how}: the merge check must refuse and name the file, got {problems:?}"
+            );
+        }
+    }
+}

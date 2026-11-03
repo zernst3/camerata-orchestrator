@@ -32,20 +32,62 @@ pub fn merged_without_decision_in_archive(
     entries: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
-    let findings: Option<serde_json::Value> = entries
-        .get("findings.json")
-        .and_then(|b| serde_json::from_slice(b).ok());
-    let records: Vec<DecisionRowJson> = entries
-        .get(DECISIONS_FILE)
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-        .and_then(|v| serde_json::from_value(v["decisions"].clone()).ok())
-        .unwrap_or_default();
+    // A check that cannot read its evidence refuses (fail closed): an absent, unparseable or
+    // malformed file is one problem naming it, never "no merged rows, nothing to check".
+    let unreadable = |file: &str, why: &str| {
+        Problem::new(
+            file,
+            "merge check",
+            format!(
+                "the merge check cannot read {file} ({why}), so it cannot confirm that every \
+                 merged row has its decision. Rebuild the package"
+            ),
+            None,
+        )
+    };
+    let rows: Vec<serde_json::Value> = match entries.get("findings.json") {
+        None => {
+            problems.push(unreadable("findings.json", "it is absent"));
+            Vec::new()
+        }
+        Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Err(_) => {
+                problems.push(unreadable("findings.json", "it does not parse"));
+                Vec::new()
+            }
+            Ok(v) => match v["findings"].as_array() {
+                Some(rows) => rows.clone(),
+                None => {
+                    problems.push(unreadable("findings.json", "its findings are not a list"));
+                    Vec::new()
+                }
+            },
+        },
+    };
+    let records: Vec<DecisionRowJson> = match entries.get(DECISIONS_FILE) {
+        None => {
+            problems.push(unreadable(DECISIONS_FILE, "it is absent"));
+            Vec::new()
+        }
+        Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Err(_) => {
+                problems.push(unreadable(DECISIONS_FILE, "it does not parse"));
+                Vec::new()
+            }
+            Ok(v) if !v["decisions"].is_array() => {
+                problems.push(unreadable(DECISIONS_FILE, "its decisions are not a list"));
+                Vec::new()
+            }
+            Ok(v) => match serde_json::from_value(v["decisions"].clone()) {
+                Ok(records) => records,
+                Err(_) => {
+                    problems.push(unreadable(DECISIONS_FILE, "a decision record is malformed"));
+                    Vec::new()
+                }
+            },
+        },
+    };
 
-    let rows = findings
-        .as_ref()
-        .and_then(|f| f["findings"].as_array())
-        .cloned()
-        .unwrap_or_default();
     for row in &rows {
         let target = row["merged_into"].as_str().unwrap_or_default();
         if target.is_empty() {
