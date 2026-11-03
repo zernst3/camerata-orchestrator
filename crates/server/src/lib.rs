@@ -6487,6 +6487,17 @@ async fn onboard_audit(
     // which this function constructs fresh either way (real or synthesized), so there is
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
+    // The review tree's stage 2 reads the final report with the run's own controls, and never
+    // runs where the compliance gate blocked the AI review.
+    let review_controls = run_controls.clone();
+    let ai_review_blocked = matches!(
+        &backend_resolution,
+        crate::llm::BackendResolution::Blocked { .. }
+    );
+    let review_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        _ => crate::llm::Backend::Cli,
+    };
     let outcome = std::panic::AssertUnwindSafe(async move {
         let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
@@ -6629,6 +6640,28 @@ async fn onboard_audit(
         // Corpus severity bounds over the FINAL row set — see the block comment on the async
         // path below and `severity_bounds`.
         crate::severity_bounds::apply_scan_severity_bounds(&mut report.findings, corpus.as_ref());
+
+        // ── Stage 2, the group reviewer: the architect's first reader of each rule group ──
+        // On the final row set, with the run's own controls (see the job path).
+        if run_ai_review && !ai_review_blocked {
+            let rules: Vec<(String, String)> = selected
+                .iter()
+                .map(|r| (r.id.clone(), r.directive.clone()))
+                .collect();
+            let llm = crate::onboard::build_llm(
+                state.credential_store.as_ref(),
+                review_backend,
+                Some(state.usage_ledger.clone()),
+            );
+            crate::ai_audit::group_review::review_scan_report(
+                &mut report,
+                &llm,
+                &review_controls,
+                &rules,
+                review_backend == crate::llm::Backend::Cli,
+            )
+            .await;
+        }
 
         // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
         // After a scan completes, write one floor/catch record for each ACTIVE floor
@@ -8048,7 +8081,13 @@ impl AuditReq {
     /// operator picked one) is what the run's fix stage is told. The one place the project's
     /// fix setting becomes run controls; both audit entry points come through it.
     fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
-        self.run_controls(fix_step_model(state), clone_judge_step_model(state))
+        let mut controls = self.run_controls(fix_step_model(state), clone_judge_step_model(state));
+        // The review tree's settings (group review model, escalation rate and floor) are the
+        // active project's.
+        if let Some(project) = state.projects.active() {
+            controls.review = project.review.clone();
+        }
+        controls
     }
 }
 
@@ -8419,6 +8458,13 @@ pub(crate) async fn start_audit_job(
                 Some(j) => j.as_ref(),
                 None => &real,
             };
+            // The review tree's stage 2 reads the final report with the run's own controls, and
+            // never runs where the compliance gate blocked the AI review.
+            let review_controls = run_controls.clone();
+            let ai_review_blocked = matches!(
+                &backend_resolution,
+                crate::llm::BackendResolution::Blocked { .. }
+            );
             let (mut report, mut manifest) = crate::prompt_frame::with_seed(
                 token_seed,
                 crate::onboard::audit_repos_with_llm_controlled(
@@ -8576,6 +8622,29 @@ pub(crate) async fn start_audit_job(
                 &mut report.findings,
                 corpus.as_ref(),
             );
+
+            // ── Stage 2, the group reviewer: the architect's first reader of each rule group ──
+            // Runs on the final row set, so it sees every row the earlier passes added. Its
+            // failed parts join the report's before the run is judged complete below.
+            if run_ai_review && !ai_review_blocked {
+                let rules: Vec<(String, String)> = selected
+                    .iter()
+                    .map(|r| (r.id.clone(), r.directive.clone()))
+                    .collect();
+                // With the run's own delimiter seed in scope, like the audit above, so a resumed
+                // run asks the group reviewer the same questions and its stored replies match.
+                crate::prompt_frame::with_seed(
+                    token_seed,
+                    crate::ai_audit::group_review::review_scan_report(
+                        &mut report,
+                        model_seam,
+                        &review_controls,
+                        &rules,
+                        llm_backend == crate::llm::Backend::Cli,
+                    ),
+                )
+                .await;
+            }
 
             // The run is complete when no part failed or was left out; a scan that is not can be
             // resumed with "Run what remains". The export is the operator's own later step.
@@ -12363,6 +12432,7 @@ fn client_lock_refusal_for_scan(
         deep,
         fix_model,
         Some(project.tier_map.fast_primary()),
+        Some(project.review.group_review_model.as_str()),
     );
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
@@ -28819,6 +28889,7 @@ mod tests {
                 site_key: String::new(),
                 group_path: Vec::new(),
                 group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
                 flagged_by: Vec::new(),
                 possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),

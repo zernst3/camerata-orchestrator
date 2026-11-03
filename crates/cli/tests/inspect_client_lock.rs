@@ -27,8 +27,8 @@ impl LlmPort for Scripted {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
-            text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
-                .to_string(),
+            text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
+                .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
             backend: "stub".to_string(),
             cost_usd: Some(0.0),
@@ -107,6 +107,9 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         calibration_model: Some("claude-sonnet-5".to_string()),
         fix_model: None,
         clone_judge_model: None,
+        group_review_model: None,
+        escalation_rate: None,
+        escalation_floor: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

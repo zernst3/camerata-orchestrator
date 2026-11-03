@@ -165,6 +165,7 @@ pub fn group_semantic(
                 key: findings[i].site_key.clone(),
                 reason: OutlierReason::DifferentObject,
                 by: OutlierBy::Engine,
+                why: String::new(),
             })
             .collect();
         let mut rule_ids: Vec<String> = members
@@ -191,6 +192,8 @@ pub fn group_semantic(
             outliers,
             summary: None,
             summary_source: TextSource::Model,
+            escalations: Vec::new(),
+            flags: Vec::new(),
         });
     }
 

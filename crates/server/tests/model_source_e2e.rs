@@ -252,9 +252,15 @@ fn the_shared_resolvers_ignore_every_removed_variable() {
         camerata_server::ai_audit::resolve_audit_model(Some("picked")),
         "picked"
     );
+    // Stage 1 and stage 2 have defaults of their own (review tree design A13); neither follows
+    // the scan model and neither reads the environment.
     assert_eq!(
         camerata_server::ai_audit::resolve_calibration_model(None, "scan-model"),
-        "scan-model"
+        "claude-opus-5-5"
+    );
+    assert_eq!(
+        camerata_server::ai_audit::group_review::resolve_group_review_model(None),
+        "claude-fable-5-1"
     );
     assert_eq!(
         camerata_server::ai_audit::resolve_calibration_model(Some("picked"), "scan-model"),

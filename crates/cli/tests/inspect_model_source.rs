@@ -34,8 +34,8 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.requested.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
-            text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
-                .to_string(),
+            text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
+                .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
             backend: "stub".to_string(),
             cost_usd: Some(0.0),
@@ -101,6 +101,9 @@ fn args(
         calibration_model: calibration_model.map(str::to_string),
         fix_model: fix_model.map(str::to_string),
         clone_judge_model: None,
+        group_review_model: None,
+        escalation_rate: None,
+        escalation_floor: None,
         full: true,
         verbose: false,
         max_cost_usd: None,
@@ -170,10 +173,14 @@ async fn with_no_flags_the_built_in_default_runs_and_the_environment_is_ignored(
         return;
     };
     assert!(!requested.is_empty(), "the scan called the scripted model");
+    // The scan, the fix stage and the clone judge keep their defaults; the two reviewers have
+    // defaults of their own (stage 1 on Opus 5.5, stage 2 on Fable 5.1).
     let allowed = [
         camerata_server::llm::DEFAULT_MODEL.to_string(),
         camerata_api_types::project::FIX_STAGE_HAIKU_MODEL.to_string(),
         camerata_fleet::tier::default_fast_model(),
+        camerata_api_types::project::STAGE1_DEFAULT_MODEL.to_string(),
+        camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string(),
     ];
     for model in &requested {
         assert!(!model.trim().is_empty(), "a request named no model");
@@ -211,6 +218,8 @@ async fn explicit_flags_are_the_only_source_and_the_export_records_them() {
         "claude-sonnet-5-5".to_string(),
         camerata_api_types::project::FIX_STAGE_HAIKU_MODEL.to_string(),
         camerata_fleet::tier::default_fast_model(),
+        // No flag names the group reviewer, so it runs on its built-in default.
+        camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string(),
     ];
     assert!(!requested.is_empty(), "the scan called the scripted model");
     for model in &requested {

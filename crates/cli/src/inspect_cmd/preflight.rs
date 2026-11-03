@@ -19,7 +19,10 @@ pub struct PreflightInputs<'a> {
     pub batch: bool,
     /// The resolved audit model and calibration model ids.
     pub model: String,
+    /// Stage 1, the per-site first reviewer.
     pub calibration_model: String,
+    /// Stage 2, the group reviewer. Priced in the figure.
+    pub group_review_model: String,
     /// The model the fix stage will call (`None` when it does not run). Priced in the figure.
     pub fix_model: Option<String>,
     /// The clone judge's model, when a clone rule is selected (`None` otherwise). Priced too.
@@ -114,6 +117,10 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         .clone_judge_model
         .as_deref()
         .and_then(|id| price_of(id).map(|(price_in, price_out)| (id, price_in, price_out)));
+    // The group reviewer (stage 2) is a model call the run makes on its own model; a model with no
+    // list price leaves it out of the figure, which the figure then says.
+    let group_review_price = price_of(&inputs.group_review_model)
+        .map(|(price_in, price_out)| (inputs.group_review_model.as_str(), price_in, price_out));
     let estimate = prices.map(|((a_in, a_out), (c_in, c_out))| {
         let piece = |id, price_in, price_out| PricedModel {
             id,
@@ -123,6 +130,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         let models = RunModels {
             scan: piece(inputs.model.as_str(), a_in, a_out),
             calibration: piece(inputs.calibration_model.as_str(), c_in, c_out),
+            group_review: group_review_price.map(|(id, i, o)| piece(id, i, o)),
             fix: fix_price.map(|(id, i, o)| piece(id, i, o)),
             clone_judge: judge_price.map(|(id, i, o)| piece(id, i, o)),
         };
@@ -191,11 +199,20 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     writeln!(
         out,
         "  basis: {code_chars} characters of code in {files} file(s), {rules} rule(s) checked by the \
-         model ({multi} with alternatives), audit model {}, calibration model {}, {mode} mode, {backend} \
-         backend; characters-per-token heuristic with prompt-cache pricing modeled",
-        inputs.model, inputs.calibration_model
+         model ({multi} with alternatives), audit model {}, calibration model {}, group review model {}, \
+         {mode} mode, {backend} backend; characters-per-token heuristic with prompt-cache pricing modeled",
+        inputs.model, inputs.calibration_model, inputs.group_review_model
     )
     .ok();
+    if group_review_price.is_none() {
+        writeln!(
+            out,
+            "  the group review model {} has no known list price, so the group review is NOT in \
+             this figure",
+            inputs.group_review_model
+        )
+        .ok();
+    }
     if inputs.repos.len() > 1 {
         writeln!(out, "  per repo:").ok();
         for repo in inputs.repos {
@@ -367,6 +384,7 @@ mod tests {
             batch: false,
             model: "claude-sonnet-5".into(),
             calibration_model: "claude-sonnet-5".into(),
+            group_review_model: "claude-sonnet-5".into(),
             fix_model: None,
             clone_judge_model: None,
             repos,
@@ -572,6 +590,52 @@ mod tests {
             build(&inputs(&alone, None)).estimate_usd.unwrap(),
         );
         assert!((with - without).abs() < 1e-9, "{with} vs {without}");
+    }
+
+    /// A13: the figure counts both reviewers, each on its own model. The group reviewer is priced
+    /// at its model (Fable 5.1 is dearer than Sonnet), shows in the basis, and is left out, with
+    /// a line saying so, when its model has no list price.
+    #[test]
+    fn the_group_review_stage_is_priced_at_its_own_model_and_named_in_the_basis() {
+        let repos = [repo(26_544, 152)];
+        let mut cheap = inputs(&repos, None);
+        cheap.model = "claude-sonnet-5-5".into();
+        cheap.calibration_model = "claude-sonnet-5-5".into();
+        cheap.group_review_model = "claude-sonnet-5-5".into();
+        let cheap_p = build(&cheap);
+        let mut dear = inputs(&repos, None);
+        dear.model = "claude-sonnet-5-5".into();
+        dear.calibration_model = "claude-sonnet-5-5".into();
+        dear.group_review_model = "claude-fable-5-1".into();
+        let dear_p = build(&dear);
+        assert!(
+            dear_p.estimate_usd.unwrap() > cheap_p.estimate_usd.unwrap() + 0.01,
+            "stage 2 is priced at its own model: {:?} vs {:?}",
+            cheap_p.estimate_usd,
+            dear_p.estimate_usd
+        );
+        assert!(
+            dear_p.text.contains("group review model claude-fable-5-1"),
+            "{}",
+            dear_p.text
+        );
+        // Both stage models are named.
+        assert!(dear_p.text.contains("calibration model claude-sonnet-5-5"));
+
+        // No list price: left out of the figure, and the figure says so.
+        let mut unpriced = dear;
+        unpriced.group_review_model = "some-model-without-a-price".into();
+        let un = build(&unpriced);
+        assert!(
+            un.text.contains("group review is NOT in this figure"),
+            "{}",
+            un.text
+        );
+        assert!(
+            (un.estimate_usd.unwrap() - cheap_p.estimate_usd.unwrap()).abs() < 0.01
+                || un.estimate_usd.unwrap() < dear_p.estimate_usd.unwrap(),
+            "the unpriced stage adds nothing"
+        );
     }
 
     /// The figure counts what the run does: the fix stage (on its own model) and the clone judge

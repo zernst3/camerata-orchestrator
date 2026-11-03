@@ -61,6 +61,11 @@ if "CONFORMANCE audit" in system:
     out = {"findings": findings, "proposed_rules": [], "needs_files": []}
 elif "first reviewer of an automated audit" in system:
     out = {"severity": "medium", "real": "yes", "reason": "checked", "effort": "low"}
+elif "architect's first reader of this rule group" in system:
+    idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
+    out = {"summary": "The fixture's sites share one cause.",
+           "subgroups": [{"label": "All", "cause": "one shared cause", "summary": "One cause.", "members": idx}],
+           "outliers": [], "escalations": [], "disagreements": []}
 elif "ONE concrete, codebase-specific fix" in system:
     out = {"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
                      for l in labels if l.startswith("finding ")]}

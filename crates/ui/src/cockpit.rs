@@ -139,6 +139,11 @@ struct ProjectView {
     /// The operator's opt-in to run the client's own tooling for this engagement. Absent → off.
     #[serde(default)]
     client_tooling_opt_in: bool,
+    /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
+    /// the budget, and the group reviewer's model. Absent from an older server -> the design
+    /// values.
+    #[serde(default)]
+    review: camerata_api_types::project::ReviewSettings,
 }
 
 fn default_client_engagement() -> bool {

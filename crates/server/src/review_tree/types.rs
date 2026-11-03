@@ -73,32 +73,14 @@ pub enum NodeKind {
 }
 
 /// Who put a site on a node's outlier list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutlierBy {
     Engine,
     Model,
 }
 
-/// Why a site does not belong with the rest of its sub-group (design 4.3). The full closed set
-/// is defined here so the group reviewer (a later work order) fills in the rest; the grouping
-/// pass only ever writes [`OutlierReason::DifferentObject`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlierReason {
-    SeverityRaiseHeld,
-    DifferentObject,
-    DifferentConstruct,
-    OnlySiteInFile,
-    Stage2Outlier,
-    PreconditionAdded,
-    UnverifiedName,
-    FixUngrounded,
-    Contradiction,
-    EvidenceUnverified,
-    InTestCode,
-    CouldBeIntentional,
-}
+pub use camerata_api_types::review::OutlierReason;
 
 /// One outlier on a node: a site (by key), why, and who said so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +88,22 @@ pub struct Outlier {
     pub key: String,
     pub reason: OutlierReason,
     pub by: OutlierBy,
+    /// The group reviewer's one-line reason for marking the site; empty for an engine mark.
+    #[serde(default)]
+    pub why: String,
+}
+
+/// One site the group reviewer wants the architect to look at, as it said it on its own node.
+/// The ranking ([`super::rank_candidates`]) reads these from every node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEscalation {
+    /// The site key.
+    pub key: String,
+    pub reason: camerata_api_types::review::EscalationReason,
+    /// The group reviewer's rank inside the node (1 is first).
+    pub rank: u32,
+    /// Its one-line reason, in the architect's words.
+    pub why: String,
 }
 
 /// Where a node's summary text came from.
@@ -133,19 +131,50 @@ pub struct TreeNode {
     /// Site keys of the direct members. Only a sub-group has direct members.
     pub members: Vec<String>,
     pub outliers: Vec<Outlier>,
-    /// What the reviewer reads at this node (written by the group reviewer, a later work order).
+    /// What the reviewer reads at this node (written by the group reviewer).
     pub summary: Option<String>,
     #[serde(default)]
     pub summary_source: TextSource,
+    /// The sites the group reviewer wants escalated, from this node's stage 2 call. Rule nodes
+    /// only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalations: Vec<NodeEscalation>,
+    /// Review flags on the node's summary: a count it states that the data contradicts, or a
+    /// differing member it does not name (A9). Never shown to the client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+}
+
+/// The counts shown beside a node. Every one is read from the tree and the rows, never from the
+/// group reviewer's prose (A9).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCounts {
+    /// Sites under the node (thrown-out sites only when the node is a thrown-out node).
+    pub sites: usize,
+    /// Sites under the node that are escalated.
+    pub escalated: usize,
+    /// Sites under the node that are candidates below the line.
+    pub below_the_line: usize,
+    /// Sites under the node with an outlier mark (by the engine or the group reviewer).
+    pub outliers: usize,
+    /// Sites under the node the group reviewer did not place in a sub-group.
+    pub unplaced: usize,
 }
 
 /// The review tree of one report. Sealed with it, stored in the inspection entry.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReviewTree {
     pub run_id: String,
     pub engine_version: String,
     /// Every level, parents before children.
     pub nodes: Vec<TreeNode>,
+    /// How many escalations the run may carry and what came of it (4.4).
+    #[serde(default)]
+    pub budget: camerata_api_types::review::EscalationBudget,
+    /// Every site the group reviewer wanted to escalate, in global rank order, above and below
+    /// the line. Moving the line re-marks these with no model call.
+    #[serde(default)]
+    pub candidates: Vec<camerata_api_types::review::EscalationCandidate>,
     /// False until the group reviewer has read the tree. An old inspection unfolded on load has a
     /// tree that no group reviewer has seen.
     #[serde(default)]
@@ -153,6 +182,96 @@ pub struct ReviewTree {
 }
 
 impl ReviewTree {
+    /// Write the stored candidates onto the rows' columns (the escalation state, rank and
+    /// reasons), and clear the columns of rows that are not candidates.
+    pub fn sync_rows(&self, rows: &mut [crate::onboard::Finding]) {
+        let by_key: std::collections::HashMap<
+            &str,
+            &camerata_api_types::review::EscalationCandidate,
+        > = self
+            .candidates
+            .iter()
+            .map(|c| (c.key.as_str(), c))
+            .collect();
+        for f in rows {
+            match by_key.get(f.site_key.as_str()) {
+                Some(c) => f.review.set_escalation(c),
+                None => f.review.clear_escalation(),
+            }
+        }
+    }
+
+    /// Move the line again over the stored candidates with new settings: no model call, no
+    /// candidate added or dropped. Rewrites the budget, the candidates' marks and the rows'
+    /// columns.
+    pub fn re_mark(
+        &mut self,
+        settings: &super::RankSettings,
+        rows: &mut [crate::onboard::Finding],
+    ) {
+        self.budget = camerata_api_types::review::EscalationBudget::compute(
+            settings.rate_per_kloc,
+            settings.floor,
+            settings.counted_lines,
+        );
+        camerata_api_types::review::re_mark(
+            &mut self.candidates,
+            &mut self.budget,
+            &settings.over_budget_reasons,
+        );
+        self.sync_rows(rows);
+    }
+
+    /// The counts of `node_id`, from the tree alone: its direct members and those of every node
+    /// below it, the stored candidates and the outlier lists.
+    pub fn counts(&self, node_id: &str) -> NodeCounts {
+        let members: std::collections::BTreeSet<String> =
+            self.batch_members(node_id).into_iter().collect();
+        // The node and every node below it, thrown-out nodes only when the node is one itself.
+        let from_thrown_out = super::build::is_thrown_out_id(node_id);
+        let mut below: Vec<&TreeNode> = Vec::new();
+        let mut stack: Vec<&str> = vec![node_id];
+        while let Some(id) = stack.pop() {
+            if let Some(n) = self.node(id) {
+                below.push(n);
+            }
+            stack.extend(
+                self.nodes
+                    .iter()
+                    .filter(|n| n.parent.as_deref() == Some(id))
+                    .filter(|n| from_thrown_out || !super::build::is_thrown_out_id(&n.id))
+                    .map(|n| n.id.as_str()),
+            );
+        }
+        let outliers: std::collections::BTreeSet<&str> = below
+            .iter()
+            .flat_map(|n| n.outliers.iter())
+            .map(|o| o.key.as_str())
+            .filter(|k| members.contains(*k))
+            .collect();
+        let unplaced = below
+            .iter()
+            .filter(|n| n.id.ends_with("/unplaced"))
+            .flat_map(|n| n.members.iter())
+            .count();
+        let mut escalated = 0;
+        let mut below_the_line = 0;
+        for c in self.candidates.iter().filter(|c| members.contains(&c.key)) {
+            if c.escalated {
+                escalated += 1;
+            } else {
+                below_the_line += 1;
+            }
+        }
+        NodeCounts {
+            sites: members.len(),
+            escalated,
+            below_the_line,
+            outliers: outliers.len(),
+            unplaced,
+        }
+    }
+
     /// The node with this id.
     pub fn node(&self, id: &str) -> Option<&TreeNode> {
         self.nodes.iter().find(|n| n.id == id)
@@ -169,10 +288,14 @@ impl ReviewTree {
                 continue;
             };
             keys.extend(node.members.iter().cloned());
+            // A thrown-out node is reached only by naming it: a decision on a category or a rule
+            // never writes to a row the engine threw out (restoring one is its own decision).
+            let from_thrown_out = super::build::is_thrown_out_id(node_id);
             stack.extend(
                 self.nodes
                     .iter()
                     .filter(|n| n.parent.as_deref() == Some(id))
+                    .filter(|n| from_thrown_out || !super::build::is_thrown_out_id(&n.id))
                     .map(|n| n.id.as_str()),
             );
         }

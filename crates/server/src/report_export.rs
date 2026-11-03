@@ -6232,6 +6232,7 @@ mod tests {
             deep: None,
             coverage_notes: Vec::new(),
             provenance: ScanProvenance {
+                group_review_model: None,
                 audited_refs: vec![AuditedRef {
                     repo: "owner/repo".to_string(),
                     sha: Some("abcdef1234567890".to_string()),
@@ -15050,6 +15051,7 @@ mod export_invariants_gate {
             deep: None,
             coverage_notes: Vec::new(),
             provenance: ScanProvenance {
+                group_review_model: None,
                 audited_refs: vec![AuditedRef {
                     repo: "demo/portal".to_string(),
                     sha: Some("1234567890abcdef".to_string()),

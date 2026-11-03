@@ -158,6 +158,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls() -> RunControls {
     RunControls {
+        review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: None,
         estimate_hint_usd: None,

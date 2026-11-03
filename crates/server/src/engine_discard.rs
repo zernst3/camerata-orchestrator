@@ -208,7 +208,8 @@ mod tests {
     }
 
     /// After a rescan fold, every shipped and thrown-out row carries a site key and the tree names
-    /// exactly the shipped rows' keys (no key of a replaced row, none missing).
+    /// exactly the keys of the shipped rows and the thrown-out rows (no key of a replaced row,
+    /// none missing; A12: every row of the report is in exactly one node).
     #[test]
     fn a_rescan_fold_leaves_every_row_keyed_and_the_tree_in_step() {
         let mut report = crate::onboard::ScanReport::gated(&[]);
@@ -228,8 +229,12 @@ mod tests {
         assert!(report.findings.iter().all(|f| !f.site_key.is_empty()));
         assert_eq!(report.discarded.len(), 1);
         assert!(report.discarded.iter().all(|f| !f.site_key.is_empty()));
-        let mut row_keys: Vec<String> =
-            report.findings.iter().map(|f| f.site_key.clone()).collect();
+        let mut row_keys: Vec<String> = report
+            .findings
+            .iter()
+            .chain(report.discarded.iter())
+            .map(|f| f.site_key.clone())
+            .collect();
         row_keys.sort();
         let mut member_keys: Vec<String> = report
             .tree

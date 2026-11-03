@@ -83,7 +83,7 @@ pub fn refusal(
 }
 
 /// Every model a scan may use, by role, for the lock to check BEFORE the scan starts: the scan,
-/// calibration and fix generation passes, the deep tier when it is on, and the clone judge
+/// calibration (stage 1), group review (stage 2) and fix generation passes, the deep tier when it is on, and the clone judge
 /// (always included, because which rules are selected is only known once files have been read,
 /// and the lock must decide before that). Each is resolved exactly as the run resolves it,
 /// `fix_model` is the explicit fix-stage model (the project's fix
@@ -94,10 +94,15 @@ pub fn models_a_scan_may_use(
     deep: bool,
     fix_model: Option<&str>,
     clone_judge_model: Option<&str>,
+    group_review_model: Option<&str>,
 ) -> Vec<(String, String)> {
     let controls = crate::cost_cap::RunControls {
         fix_model: fix_model.map(str::to_string),
         clone_judge_model: clone_judge_model.map(str::to_string),
+        review: camerata_api_types::project::ReviewSettings {
+            group_review_model: group_review_model.unwrap_or_default().to_string(),
+            ..Default::default()
+        },
         ..crate::cost_cap::RunControls::from_env()
     };
     crate::cost_cap::models_the_run_will_use(

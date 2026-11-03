@@ -1648,16 +1648,22 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
         !discarded.site_key.is_empty(),
         "a discarded row has a site key"
     );
+    // A12 changed this: the tree holds the thrown-out rows too, each in its category's
+    // thrown-out node, so that every row of a report is in exactly one node.
+    let owners: Vec<&str> = entry
+        .report
+        .tree
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .filter(|n| n.members.contains(&discarded.site_key))
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(owners.len(), 1, "and is a member of exactly one node");
     assert!(
-        entry
-            .report
-            .tree
-            .as_ref()
-            .unwrap()
-            .nodes
-            .iter()
-            .all(|n| !n.members.contains(&discarded.site_key)),
-        "and is not a member of the review tree"
+        crate::review_tree::is_thrown_out_id(owners[0]),
+        "the thrown-out node: {owners:?}"
     );
 
     // A reviewer's ruling on it (the A12 restore builds on this) is stored under that key.

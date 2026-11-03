@@ -57,6 +57,7 @@ fn not_applicable(ledger: &mut ScanLedger, repo: &str, rule: &str) {
 
 fn provenance(repos: &[&str]) -> ScanProvenance {
     ScanProvenance {
+        group_review_model: None,
         audited_refs: repos
             .iter()
             .map(|r| AuditedRef {

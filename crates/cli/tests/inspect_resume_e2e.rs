@@ -141,6 +141,11 @@ impl Scripted {
                     .collect();
                 serde_json::json!({ "fixes": fixes }).to_string()
             }
+            PartKind::GroupReview => camerata_server::ai_audit::group_review::stand_in_reply(
+                req.system.as_deref(),
+                &req.prompt,
+            )
+            .unwrap_or_default(),
             _ => r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string(),
         };
         Ok(LlmResponse {
@@ -288,6 +293,9 @@ fn args(repos: &[&Path], names: &[&str], export: &Path) -> InspectArgs {
         calibration_model: None,
         fix_model: None,
         clone_judge_model: None,
+        group_review_model: None,
+        escalation_rate: None,
+        escalation_floor: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

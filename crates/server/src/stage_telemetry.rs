@@ -42,6 +42,9 @@ pub enum Stage {
     /// The skeptic pass: verification, severity/confidence calibration and hour estimates
     /// (`verify_findings`).
     Calibration,
+    /// The group reviewer (stage 2): one call per rule group, the architect's first reader
+    /// (`ai_audit::group_review`).
+    GroupReview,
     /// Codebase-specific fix generation, retries included.
     FixGeneration,
     /// The opt-in deep compliance and security tier.
@@ -52,11 +55,12 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in pipeline order (the order the table prints).
-    pub const ALL: [Stage; 7] = [
+    pub const ALL: [Stage; 8] = [
         Stage::ScanPass,
         Stage::Alternatives,
         Stage::DetailRegeneration,
         Stage::Calibration,
+        Stage::GroupReview,
         Stage::FixGeneration,
         Stage::DeepTier,
         Stage::CloneJudge,
@@ -69,6 +73,7 @@ impl Stage {
             Stage::Alternatives => "alternatives",
             Stage::DetailRegeneration => "detail",
             Stage::Calibration => "calibration",
+            Stage::GroupReview => "group-review",
             Stage::FixGeneration => "fix",
             Stage::DeepTier => "deep",
             Stage::CloneJudge => "clone-judge",

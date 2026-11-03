@@ -98,6 +98,7 @@ fn efficiency(applies_to_routing: bool) -> EfficiencyConfig {
 
 fn meter(applies_to_routing: bool) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: efficiency(applies_to_routing),
         max_cost_usd: None,
         estimate_hint_usd: None,
@@ -672,6 +673,7 @@ async fn run_routed_batch_default_off(
     let mut config = efficiency(applies_to_routing);
     config.batch_default = false;
     let m = UsageMeter::with_controls(RunControls {
+        review: Default::default(),
         efficiency: config,
         max_cost_usd: None,
         estimate_hint_usd: None,

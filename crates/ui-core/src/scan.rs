@@ -120,6 +120,11 @@ pub const DETAIL_EFFORT: &str = "medium";
 /// text, so `medium`.
 pub const CALIBRATION_EFFORT: &str = "medium";
 
+/// The effort the group-review stage (stage 2) asks for: one structured reading of a whole rule
+/// group, sorting its sites by cause and choosing what the architect should look at. `medium`
+/// until the model comparison (M10) says whether `high` earns its thinking tokens.
+pub const GROUP_REVIEW_EFFORT: &str = "medium";
+
 /// The effort the alternatives stage asks for: pick one documented option per rule from the
 /// evidence shown, so `medium`.
 pub const ALTERNATIVES_EFFORT: &str = "medium";
@@ -236,6 +241,60 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
         calls,
         input_tokens: calls as f64 * CALIBRATION_SITE_INPUT_TOKENS + prefix,
         output_tokens: calls as f64 * CALIBRATION_OUTPUT_TOKENS_PER_SITE,
+    }
+}
+
+/// Stage 2, the group reviewer (the server's `ai_audit::group_review`), is one real-time call per
+/// rule group. Each call carries the system prompt (about 5 KB of rules plus the untrusted-content
+/// clause), the rule text and one line per site (path, severity, what stage 1 said, its reason, the
+/// headline), and writes the summary, the sub-groups by index and the few escalations. No batch
+/// discount and no cache breakpoint: the architect is waiting on it. Pinned to the real prompt by
+/// `group_review_tests::the_estimators_figures_cover_the_real_prompt`.
+pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_800.0;
+/// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: the repository line, the rule text and the hint header.
+pub const GROUP_REVIEW_CALL_OVERHEAD_TOKENS: f64 = 400.0;
+/// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: one site's line, at full width (an 80-character path, a
+/// 160-character headline and a 200-character stage 1 reason).
+pub const GROUP_REVIEW_INPUT_TOKENS_PER_SITE: f64 = 140.0;
+/// The reply's budget per site (its index in a sub-group and its share of the sub-group summaries
+/// and the other entries); the server's cap per call is built from the same figure.
+pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE: f64 = 40.0;
+/// Estimator assumption: sites in one rule group. Before the scan nobody knows how many rules
+/// fire; a group of 8 is the middle of what the scripted fixtures and the recorded runs show.
+pub const GROUP_REVIEW_SITES_PER_GROUP: f64 = 8.0;
+/// The most sites one group reviewer call is asked about (`group_review::MAX_CHUNK_MEMBERS`).
+pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
+
+/// What stage 2 costs over a number of sites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupReviewEstimate {
+    /// Model calls: one per rule group, at least one per 150 sites.
+    pub calls: usize,
+    /// Input tokens at full price (nothing is cached).
+    pub input_tokens: f64,
+    /// Output tokens, before the model's own scale.
+    pub output_tokens: f64,
+}
+
+/// Stage 2 over `sites`.
+pub fn group_review_estimate(sites: f64) -> GroupReviewEstimate {
+    let sites = sites.max(0.0);
+    if sites < 1.0 {
+        return GroupReviewEstimate {
+            calls: 0,
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+        };
+    }
+    let calls = (sites / GROUP_REVIEW_SITES_PER_GROUP)
+        .ceil()
+        .max((sites / GROUP_REVIEW_MAX_CHUNK_SITES).ceil())
+        .max(1.0);
+    GroupReviewEstimate {
+        calls: calls as usize,
+        input_tokens: calls * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
+            + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE,
+        output_tokens: sites * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE,
     }
 }
 
@@ -842,12 +901,15 @@ pub struct PricedModel<'a> {
     pub price_out: f64,
 }
 
-/// Every model the run calls. `fix` is `None` when the fix stage does not run; `clone_judge` is
+/// Every model the run calls. `group_review` is `None` when the caller does not price stage 2; `fix` is `None` when the fix stage does not run; `clone_judge` is
 /// `None` when no clone rule is selected.
 #[derive(Clone, Copy, Debug)]
 pub struct RunModels<'a> {
     pub scan: PricedModel<'a>,
     pub calibration: PricedModel<'a>,
+    /// The group reviewer (stage 2). `None` leaves it out of the figure, for a caller that does
+    /// not know the model.
+    pub group_review: Option<PricedModel<'a>>,
     pub fix: Option<PricedModel<'a>>,
     pub clone_judge: Option<PricedModel<'a>>,
 }
@@ -952,8 +1014,8 @@ pub fn estimate_run_cost_by_repo(
 }
 
 /// The cockpit's pre-audit estimate: [`estimate_run_cost_by_repo`] over the repos the cockpit
-/// knows, at the scan and calibration models it shows, with the fix stage priced at `fix` when
-/// the cockpit's model list prices it. The cockpit has no file list, so it cannot run the rule
+/// knows, at the scan and calibration models it shows, with the group reviewer priced at
+/// `group_review` and the fix stage at `fix` when the cockpit's model list prices them. The cockpit has no file list, so it cannot run the rule
 /// router: each repo counts as ONE routing group (the command line's pre-flight, which has the
 /// files, counts the real groups), and the clone judge (two small calls) is not priced. Both make
 /// the cockpit's figure a little under the command line's for the same run; the arithmetic is
@@ -963,6 +1025,7 @@ pub fn cockpit_run_estimate(
     mode: &str,
     scan: PricedModel<'_>,
     calibration: PricedModel<'_>,
+    group_review: Option<PricedModel<'_>>,
     fix: Option<PricedModel<'_>>,
     flags: RunFlags,
 ) -> AuditEstimate {
@@ -972,6 +1035,7 @@ pub fn cockpit_run_estimate(
         &RunModels {
             scan,
             calibration,
+            group_review,
             fix,
             clone_judge: None,
         },
@@ -1062,6 +1126,22 @@ fn estimate_run_with_regeneration(
     let cal_in = calibration.input_tokens;
     let cal_out = calibration.output_tokens * cal_scale;
 
+    // ── Group review: stage 2 reads each rule group once, in real time, on its own model. ──
+    let (gr_in, gr_out, gr_dollars, gr_calls) = match models.group_review {
+        Some(m) => {
+            let e = group_review_estimate(sites);
+            let gr_scale = output_scale(m.id);
+            let gout = e.output_tokens * gr_scale;
+            (
+                e.input_tokens,
+                gout,
+                (e.input_tokens * m.price_in + gout * m.price_out) / 1_000_000.0,
+                e.calls,
+            )
+        }
+        None => (0.0, 0.0, 0.0, 0),
+    };
+
     // ── Alternatives: one call per batch of rules, each re-sending the digest and repo map
     // (never cached) with that batch's option sets. ──
     let multi = repo.multi_option_selected;
@@ -1139,6 +1219,7 @@ fn estimate_run_with_regeneration(
         + (deep_in * scan_in_price + deep_out * scan_out_price)
         + (regen.input_tokens * scan_in_price + regen_out * scan_out_price))
         / 1_000_000.0
+        + gr_dollars
         + fix_dollars
         + judge_dollars;
     let total_tokens = (scan_in
@@ -1153,6 +1234,8 @@ fn estimate_run_with_regeneration(
         + deep_out
         + regen.input_tokens
         + regen_out
+        + gr_in
+        + gr_out
         + fix_in
         + fix_out
         + judge_tokens) as u64;
@@ -1160,6 +1243,7 @@ fn estimate_run_with_regeneration(
         + resolution_calls
         + usize::from(alt_calls > 0) * alt_calls
         + regen.calls
+        + gr_calls
         + fix_calls
         + judge_calls
         + calibration.calls;
@@ -3035,6 +3119,65 @@ mod tests {
         }
     }
 
+    // ── Stage 2 is one call per rule group ─────────────────────────────────────────────────
+
+    #[test]
+    fn group_review_is_priced_as_one_call_per_rule_group() {
+        let none = group_review_estimate(0.0);
+        assert_eq!(
+            (none.calls, none.input_tokens, none.output_tokens),
+            (0, 0.0, 0.0)
+        );
+        // 80 sites in groups of 8 are 10 calls; each carries the system prompt and its overhead.
+        let e = group_review_estimate(80.0);
+        assert_eq!(e.calls, 10);
+        let expected_in = 10.0 * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
+            + 80.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
+        assert!((e.input_tokens - expected_in).abs() < 1e-6, "{e:?}");
+        assert!((e.output_tokens - 80.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE).abs() < 1e-6);
+        // A single site is still one call.
+        assert_eq!(group_review_estimate(1.0).calls, 1);
+        // A group is never bigger than a call takes: 3,000 sites in 8s is 375 groups, and the
+        // 150-site cap would need only 20, so the groups stand.
+        assert_eq!(group_review_estimate(3_000.0).calls, 375);
+    }
+
+    #[test]
+    fn the_run_estimate_prices_stage_2_at_its_own_model_and_leaves_it_out_when_unpriced() {
+        let sites = estimated_sites(&fixture(), "parallel");
+        let free = PricedModel {
+            id: "unmeasured-model",
+            price_in: 0.0,
+            price_out: 0.0,
+        };
+        let fable = PricedModel {
+            id: "unmeasured-model",
+            price_in: 10.0,
+            price_out: 50.0,
+        };
+        let models = |group_review| RunModels {
+            scan: free,
+            calibration: free,
+            group_review,
+            fix: None,
+            clone_judge: None,
+        };
+        let without = estimate_run_cost_bounds(&fixture(), "parallel", &models(None), flags());
+        let with = estimate_run_cost_bounds(&fixture(), "parallel", &models(Some(fable)), flags());
+        let e = group_review_estimate(sites as f64);
+        let dollars = with.expected.1 - without.expected.1;
+        let want = (e.input_tokens * 10.0 + e.output_tokens * 50.0) / 1_000_000.0;
+        assert!(want > 0.0, "{e:?}");
+        assert!((dollars - want).abs() < 1e-6, "{dollars} vs {want}");
+        assert_eq!(
+            with.expected.2,
+            without.expected.2 + e.calls,
+            "one call per rule group"
+        );
+        // The ceiling carries it too.
+        assert!(with.ceiling_usd > without.ceiling_usd);
+    }
+
     // ── Stage 1 is one call per site ───────────────────────────────────────────────────────
 
     #[test]
@@ -3089,6 +3232,7 @@ mod tests {
         let models = |calibration| RunModels {
             scan: free,
             calibration,
+            group_review: None,
             fix: None,
             clone_judge: None,
         };
@@ -3138,6 +3282,7 @@ mod tests {
             &RunModels {
                 scan: SONNET,
                 calibration: SONNET,
+                group_review: None,
                 fix: Some(HAIKU),
                 clone_judge: Some(JUDGE),
             },
@@ -3149,6 +3294,7 @@ mod tests {
             &RunModels {
                 scan: HAIKU,
                 calibration: HAIKU,
+                group_review: None,
                 fix: Some(HAIKU),
                 clone_judge: Some(JUDGE),
             },
@@ -3192,6 +3338,7 @@ mod tests {
         let models = |fix, judge| RunModels {
             scan: SONNET,
             calibration: SONNET,
+            group_review: None,
             fix,
             clone_judge: judge,
         };
@@ -3266,6 +3413,7 @@ mod tests {
                 &RunModels {
                     scan: m,
                     calibration: m,
+                    group_review: None,
                     fix: None,
                     clone_judge: None,
                 },
@@ -3286,6 +3434,7 @@ mod tests {
         let m = RunModels {
             scan: SONNET,
             calibration: SONNET,
+            group_review: None,
             fix: None,
             clone_judge: None,
         };
@@ -3320,6 +3469,7 @@ mod tests {
             "parallel",
             SONNET,
             SONNET,
+            None,
             Some(HAIKU),
             flags(),
         );
@@ -3329,6 +3479,7 @@ mod tests {
             &RunModels {
                 scan: SONNET,
                 calibration: SONNET,
+                group_review: None,
                 fix: Some(HAIKU),
                 clone_judge: None,
             },
@@ -3349,6 +3500,7 @@ mod tests {
             SONNET,
             SONNET,
             None,
+            None,
             flags(),
         );
         assert!(bare.dollars < est.dollars);
@@ -3360,6 +3512,7 @@ mod tests {
         let m = RunModels {
             scan: SONNET,
             calibration: SONNET,
+            group_review: None,
             fix: Some(HAIKU),
             clone_judge: None,
         };

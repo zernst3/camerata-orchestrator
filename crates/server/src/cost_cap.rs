@@ -94,6 +94,11 @@ pub struct RunControls {
     /// H5: the three-pass consensus option (`crate::consensus`). Off by default: about three
     /// times the AI spend, and a finding only one pass in three reports is dropped.
     pub consensus: bool,
+    /// The review tree's settings for this run: the group reviewer's model and the escalation
+    /// rate, floor and over-budget reasons (the project's `review` settings, or
+    /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
+    /// A blank `group_review_model` means the built-in default. Never the environment.
+    pub review: camerata_api_types::project::ReviewSettings,
 }
 
 impl RunControls {
@@ -116,6 +121,14 @@ impl RunControls {
                 "--max-cost-usd must be a positive dollar amount (got {cap})"
             ))
         }
+    }
+
+    /// The model this run's group reviewer (stage 2) calls: the explicit pick, else the built-in
+    /// stage 2 default ([`crate::ai_audit::group_review::resolve_group_review_model`]).
+    pub fn group_review_model_for(&self) -> String {
+        crate::ai_audit::group_review::resolve_group_review_model(Some(
+            self.review.group_review_model.as_str(),
+        ))
     }
 
     /// The model this run's clone judge calls: the explicit pick, else the built-in fast default.
@@ -141,7 +154,7 @@ impl RunControls {
 }
 
 /// Every model a run will call, with the role it plays, resolved exactly as the stages resolve
-/// them: the scan model, the calibration model, the fix model, the deep tier's model (only when
+/// them: the scan model, the calibration model (stage 1), the group review model (stage 2), the fix model, the deep tier's model (only when
 /// the deep tier is on) and the clone judge (only when a clone rule is selected). Roles that
 /// resolve to the same model appear once, with their roles joined.
 pub fn models_the_run_will_use(
@@ -162,6 +175,7 @@ pub fn models_the_run_will_use(
     let mut roles: Vec<(&str, String)> = vec![
         ("the scan", scan.clone()),
         ("calibration", calibration),
+        ("group review", controls.group_review_model_for()),
         ("fix generation", fix),
     ];
     if deep {
@@ -429,6 +443,22 @@ impl CostCapRecord {
 
     /// The failed-pass disclosures for everything the cap stopped. The text carries NO dollar
     /// figure (it reaches the client report); the amounts are in the ledger and the CLI output.
+    /// Fold in what the cap stopped in a stage that ran after this record was made (the group
+    /// reviewer reads the final report on a meter that continues the scan's). The spend and the
+    /// causes are the later meter's, which counts the whole run.
+    pub fn absorb(&mut self, later: CostCapRecord) {
+        self.spent_usd = self.spent_usd.max(later.spent_usd);
+        self.not_run_passes.extend(later.not_run_passes);
+        self.not_run_stages.extend(later.not_run_stages);
+        self.notes.extend(later.notes);
+        for repo in later.repos_not_finished {
+            if !self.repos_not_finished.contains(&repo) {
+                self.repos_not_finished.push(repo);
+            }
+        }
+        self.cost_unknown |= later.cost_unknown;
+    }
+
     pub fn failed_passes(&self) -> Vec<crate::ai_audit::FailedPass> {
         not_run_failed_passes(&self.not_run_passes, &self.not_run_stages, self.cause())
     }
@@ -551,10 +581,20 @@ mod tests {
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
         let off = fix_follows_calibration();
         let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
-        assert_eq!(all.len(), 1, "one model fills every role: {all:?}");
-        assert!(all[0].0.contains("the scan") && all[0].0.contains("calibration"));
-        assert!(all[0].0.contains("fix generation"));
-        assert!(!all[0].0.contains("clone judge") && !all[0].0.contains("deep"));
+        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.1), so
+        // the scan and the fix pass share a model and the two reviewers each have theirs.
+        let by_model: std::collections::BTreeMap<&str, &str> = all
+            .iter()
+            .map(|(roles, model)| (model.as_str(), roles.as_str()))
+            .collect();
+        assert_eq!(all.len(), 3, "three models fill the roles: {all:?}");
+        assert!(by_model["claude-sonnet-5"].contains("the scan"));
+        assert!(by_model["claude-sonnet-5"].contains("fix generation"));
+        assert_eq!(by_model["claude-opus-5-5"], "calibration");
+        assert_eq!(by_model["claude-fable-5-1"], "group review");
+        assert!(!all
+            .iter()
+            .any(|(roles, _)| roles.contains("clone judge") || roles.contains("deep")));
 
         let split = models_the_run_will_use(
             Some("claude-sonnet-5"),

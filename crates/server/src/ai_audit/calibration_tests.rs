@@ -549,24 +549,31 @@ async fn the_stage1_model_is_recorded_in_the_ledger() {
     let json = serde_json::to_string(&ledger).expect("ledger serializes");
     assert!(json.contains("claude-opus-5"));
 
-    // Without a pick the stage runs on the scan model, and the ledger says which.
+    // Without a pick the stage runs on its own default, Opus 5.5 (A13), not the scan model, and
+    // the ledger says which.
     let llm = scan_and_calibration_stub();
     let (_, samples) = audit(&llm, false, None).await;
     let sample = samples
         .iter()
         .find(|s| s.stage == "ai-calibration")
         .expect("sample");
-    assert_eq!(
+    assert_eq!(sample.model.as_deref(), Some("claude-opus-5-5"));
+    assert_ne!(
         sample.model.as_deref(),
-        Some(resolve_audit_model(None).as_str())
+        Some(resolve_audit_model(None).as_str()),
+        "the stage no longer follows the scan model"
     );
 }
 
 #[test]
 fn the_stage1_model_comes_from_the_flag_or_the_project_setting_never_the_environment() {
     assert_eq!(resolve_calibration_model(Some("pick"), "scan"), "pick");
-    assert_eq!(resolve_calibration_model(None, "scan"), "scan");
-    assert_eq!(resolve_calibration_model(Some("  "), "scan"), "scan");
+    // A13: no pick is stage 1's own default (Opus 5.5), whatever the scan model is.
+    assert_eq!(resolve_calibration_model(None, "scan"), "claude-opus-5-5");
+    assert_eq!(
+        resolve_calibration_model(Some("  "), "scan"),
+        "claude-opus-5-5"
+    );
     // The stage reads no environment variable at all.
     let source = include_str!("calibration.rs");
     let env_read = ["env", "::var"].concat();

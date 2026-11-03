@@ -53,7 +53,7 @@ fn grouped(rows: Vec<Finding>) -> (Vec<Finding>, ReviewTree) {
         ..ReviewTree::default()
     };
     backfill_site_keys(&mut rows);
-    let tree = build_tree(&mut rows, Some(prev), &tools, "run-1");
+    let tree = build_tree(&mut rows, &mut [], Some(prev), &tools, "run-1");
     (rows, tree)
 }
 
@@ -179,7 +179,7 @@ fn pipe(input: Vec<Finding>) -> Piped {
         ..ReviewTree::default()
     };
     backfill_site_keys(&mut rows);
-    let tree = build_tree(&mut rows, Some(prev), &tools, "run-1");
+    let tree = build_tree(&mut rows, &mut [], Some(prev), &tools, "run-1");
     Piped {
         input_keys,
         carried_keys,
@@ -524,10 +524,16 @@ fn also_locations_unfold_to_rows_with_their_own_site_keys_on_load() {
 #[test]
 fn rebuilding_the_tree_from_the_same_rows_gives_the_same_tree() {
     let (mut rows, tree) = grouped(mixed_rows());
-    let again = build_tree(&mut rows, Some(tree.clone()), &ToolMap::builtin(), "run-1");
+    let again = build_tree(
+        &mut rows,
+        &mut [],
+        Some(tree.clone()),
+        &ToolMap::builtin(),
+        "run-1",
+    );
     assert_eq!(again, tree);
     // And a report that never had a tree gets the same one from its rows alone.
-    let fresh = build_tree(&mut rows, None, &ToolMap::builtin(), "run-1");
+    let fresh = build_tree(&mut rows, &mut [], None, &ToolMap::builtin(), "run-1");
     assert_eq!(
         fresh.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
         tree.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>()

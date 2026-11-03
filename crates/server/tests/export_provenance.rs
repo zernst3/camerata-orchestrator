@@ -67,6 +67,7 @@ fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: refs,
             audit_model: None,
             calibration_model: None,

@@ -18,7 +18,10 @@ mod mapping;
 mod types;
 mod unfold;
 
-pub use build::{build_tree, kind_of, resolve_rule_categories};
+pub use build::{
+    build_tree, engine_outlier_reasons, is_thrown_out_id, kind_of, resolve_rule_categories,
+    unplaced_summary, THROWN_OUT_SUFFIX,
+};
 pub use collapse::{collapse_identical, mark_located, same_place, CollapseOutcome, CollapsedRow};
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
 pub use mapping::{
@@ -26,12 +29,14 @@ pub use mapping::{
     UNCATEGORISED,
 };
 pub use types::{
-    DuplicateLink, FlaggedBy, GroupRole, NodeKind, NodeLevel, Outlier, OutlierBy, OutlierReason,
-    ReviewTree, TextSource, TreeNode,
+    DuplicateLink, FlaggedBy, GroupRole, NodeCounts, NodeEscalation, NodeKind, NodeLevel, Outlier,
+    OutlierBy, OutlierReason, ReviewTree, TextSource, TreeNode,
 };
 pub use unfold::unfold_also_locations;
 
 use std::path::{Path, PathBuf};
+
+use camerata_api_types::review::{EscalationBudget, EscalationCandidate, EscalationReason};
 
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +154,208 @@ pub fn match_runs(prev: &[Finding], next: &[Finding]) -> RunMatch {
     out
 }
 
+// ── Ranking (design 4.4) ───────────────────────────────────────────────────────────────────
+
+/// What the ranking needs besides the tree: the project's escalation settings and the lines the
+/// scan counted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankSettings {
+    pub rate_per_kloc: f32,
+    pub floor: usize,
+    pub counted_lines: usize,
+    /// The reasons that may exceed the budget (at critical severity, `evidence_unverified` at
+    /// any).
+    pub over_budget_reasons: Vec<EscalationReason>,
+}
+
+impl Default for RankSettings {
+    fn default() -> Self {
+        Self {
+            rate_per_kloc: camerata_api_types::review::DEFAULT_ESCALATION_RATE_PER_KLOC,
+            floor: camerata_api_types::review::DEFAULT_ESCALATION_FLOOR,
+            counted_lines: 0,
+            over_budget_reasons: EscalationReason::default_over_budget_set(),
+        }
+    }
+}
+
+/// The ranked candidates and the budget they were marked against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ranked {
+    pub candidates: Vec<EscalationCandidate>,
+    pub budget: EscalationBudget,
+}
+
+/// The group reviewer's rank 0 means "not ranked by the group reviewer" (an escalation the engine
+/// added); it sorts after every ranked one.
+fn rank_sort_key(stage2_rank: u32) -> u32 {
+    if stage2_rank == 0 {
+        u32::MAX
+    } else {
+        stage2_rank
+    }
+}
+
+/// Rank every stage 2 escalation of `nodes` into one list and mark the line (design 4.4).
+///
+/// 1. Every escalation of every node is collected. One site has one reason: the highest-ranked
+///    reason it was given. An escalation naming a site that is not in `rows` is ignored.
+/// 2. The engine adds a candidate, reason `evidence_unverified`, for every row whose quoted
+///    evidence was not found (D5: the release gate refuses that row without a decision anyway),
+///    and lifts a `needs_more_code` escalation of such a row to it.
+/// 3. The list is sorted by reason rank, then interleaved across nodes inside one reason rank
+///    (rank 1 of every node before rank 2 of any, severity first inside a round), so one noisy
+///    rule cannot take the whole budget (D6). The same candidates always give the same list.
+/// 4. The first `budget` are escalated; past it only the D5 reasons at critical severity and
+///    `evidence_unverified` are, each recording why. The rest stay, in order, below the line.
+pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSettings) -> Ranked {
+    use std::collections::{BTreeMap, HashMap};
+
+    struct Raw {
+        node_id: String,
+        key: String,
+        reason: EscalationReason,
+        stage2_rank: u32,
+        severity: String,
+        why: String,
+    }
+
+    let by_key: HashMap<&str, &Finding> = rows.iter().map(|f| (f.site_key.as_str(), f)).collect();
+    let mut raw: BTreeMap<String, Raw> = BTreeMap::new();
+    for node in nodes {
+        for e in &node.escalations {
+            let Some(row) = by_key.get(e.key.as_str()) else {
+                continue;
+            };
+            let better = raw.get(&e.key).is_none_or(|have| {
+                (e.reason.rank(), rank_sort_key(e.rank))
+                    < (have.reason.rank(), rank_sort_key(have.stage2_rank))
+            });
+            if better {
+                raw.insert(
+                    e.key.clone(),
+                    Raw {
+                        node_id: node.id.clone(),
+                        key: e.key.clone(),
+                        reason: e.reason,
+                        stage2_rank: e.rank,
+                        severity: row.severity.clone(),
+                        why: e.why.clone(),
+                    },
+                );
+            }
+        }
+    }
+    for f in rows {
+        if !f
+            .captures
+            .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+        {
+            continue;
+        }
+        match raw.get_mut(&f.site_key) {
+            Some(have) if have.reason.rank() > EscalationReason::EvidenceUnverified.rank() => {
+                have.reason = EscalationReason::EvidenceUnverified;
+            }
+            Some(_) => {}
+            None => {
+                raw.insert(
+                    f.site_key.clone(),
+                    Raw {
+                        node_id: f.group_path.get(1).cloned().unwrap_or_default(),
+                        key: f.site_key.clone(),
+                        reason: EscalationReason::EvidenceUnverified,
+                        stage2_rank: 0,
+                        severity: f.severity.clone(),
+                        why: "The quoted evidence was not found in the scanned file, so the \
+                              release gate needs a decision on this site."
+                            .to_string(),
+                    },
+                );
+            }
+        }
+    }
+
+    // Reason rank, then node, each node's list sorted by severity and its own rank.
+    let sev = |s: &str| std::cmp::Reverse(crate::ai_audit::severity_rank(s));
+    let mut by_reason: BTreeMap<u8, BTreeMap<String, Vec<Raw>>> = BTreeMap::new();
+    for r in raw.into_values() {
+        by_reason
+            .entry(r.reason.rank())
+            .or_default()
+            .entry(r.node_id.clone())
+            .or_default()
+            .push(r);
+    }
+    let mut ordered: Vec<Raw> = Vec::new();
+    for per_node in by_reason.into_values() {
+        let mut lists: Vec<(String, std::collections::VecDeque<Raw>)> = per_node
+            .into_iter()
+            .map(|(node, mut items)| {
+                items.sort_by(|a, b| {
+                    (sev(&a.severity), rank_sort_key(a.stage2_rank), &a.key).cmp(&(
+                        sev(&b.severity),
+                        rank_sort_key(b.stage2_rank),
+                        &b.key,
+                    ))
+                });
+                (node, items.into())
+            })
+            .collect();
+        loop {
+            let mut round: Vec<Raw> = lists
+                .iter_mut()
+                .filter_map(|(_, items)| items.pop_front())
+                .collect();
+            if round.is_empty() {
+                break;
+            }
+            round.sort_by(|a, b| {
+                (
+                    sev(&a.severity),
+                    rank_sort_key(a.stage2_rank),
+                    &a.node_id,
+                    &a.key,
+                )
+                    .cmp(&(
+                        sev(&b.severity),
+                        rank_sort_key(b.stage2_rank),
+                        &b.node_id,
+                        &b.key,
+                    ))
+            });
+            ordered.extend(round);
+        }
+    }
+
+    let mut candidates: Vec<EscalationCandidate> = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| EscalationCandidate {
+            key: r.key,
+            node_id: r.node_id,
+            reason: r.reason,
+            severity: r.severity,
+            stage2_rank: r.stage2_rank,
+            global_rank: i as u32 + 1,
+            escalated: false,
+            over_budget_reason: None,
+            why: r.why,
+        })
+        .collect();
+    let mut budget = EscalationBudget::compute(
+        settings.rate_per_kloc,
+        settings.floor,
+        settings.counted_lines,
+    );
+    camerata_api_types::review::re_mark(
+        &mut candidates,
+        &mut budget,
+        &settings.over_budget_reasons,
+    );
+    Ranked { candidates, budget }
+}
+
 /// What the scan does to a repo's rows once the audit is done: collapse the rows that are
 /// mechanically identical, then group what is left. Every collapsed source stays on its survivor;
 /// nothing else is merged, dropped or hidden. For callers that want the whole step in one call
@@ -171,10 +378,16 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 }
 
 #[cfg(test)]
+mod outlier_tests;
+#[cfg(test)]
+mod rank_tests;
+#[cfg(test)]
 mod scale_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thrown_out_tests;
 #[cfg(test)]
 mod tree_tests;

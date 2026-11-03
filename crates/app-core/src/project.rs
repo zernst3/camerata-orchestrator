@@ -30,7 +30,7 @@ use camerata_fleet::tier::TierMap;
 /// resolving unchanged.
 pub use camerata_api_types::project::{
     default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, ProjectBackend,
-    ReviewOnError, ReviewTier, StallThresholds, StepModels, DEFAULT_MODEL,
+    ReviewOnError, ReviewSettings, ReviewTier, StallThresholds, StepModels, DEFAULT_MODEL,
     DEFAULT_ROUTINE_STALL_SECS,
 };
 
@@ -478,6 +478,11 @@ pub struct Project {
     /// when [`Self::client_engagement`] is off (nothing is withheld then).
     #[serde(default)]
     pub client_tooling_opt_in: bool,
+    /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
+    /// the budget, and the group reviewer's model (design D3, D5, A3). Defaults to the design
+    /// values for a project written before the settings existed.
+    #[serde(default)]
+    pub review: ReviewSettings,
 }
 
 /// The serde default for [`Project::client_engagement`]: on. See that field's doc comment.
@@ -1003,6 +1008,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -1046,6 +1052,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections,
                 cross_repo: vec![],
@@ -1144,6 +1151,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1252,6 +1260,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1297,6 +1306,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1335,6 +1345,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1505,6 +1516,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1575,6 +1587,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1667,6 +1680,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

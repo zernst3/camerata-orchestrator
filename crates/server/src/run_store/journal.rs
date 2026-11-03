@@ -273,6 +273,14 @@ fn stage_prefixes() -> &'static Vec<(PartKind, String)> {
                 PartKind::Detail,
                 head(crate::ai_audit::detail_regen::detail_regen_system_prompt()),
             ),
+            (
+                PartKind::GroupReview,
+                head(crate::ai_audit::group_review::group_review_system_prompt()),
+            ),
+            (
+                PartKind::GroupReview,
+                head(crate::ai_audit::group_review::rule_summary_system_prompt()),
+            ),
         ]
     })
 }
@@ -337,10 +345,20 @@ pub(crate) fn replays_on_resume(status: EntryStatus, kind: PartKind) -> bool {
 }
 
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
-fn reply_is_good(resp: &LlmResponse) -> bool {
-    !resp.truncated
+/// A group reviewer reply must also satisfy its closed schema ([`Stage2Reply::parse`]): the stage
+/// turns down a reply that does not, and replaying it on a resume would only be turned down again.
+///
+/// [`Stage2Reply::parse`]: crate::ai_audit::group_review::Stage2Reply::parse
+fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
+    let parses = !resp.truncated
         && crate::ai_audit::extract_json_object(&resp.text)
-            .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok())
+            .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok());
+    if kind == PartKind::GroupReview {
+        return parses
+            && (crate::ai_audit::group_review::Stage2Reply::parse(&resp.text).is_ok()
+                || crate::ai_audit::group_review::parse_rule_summary(&resp.text).is_ok());
+    }
+    parses
 }
 
 // ── The call seam ────────────────────────────────────────────────────────────────────────────
@@ -476,7 +494,7 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
     let entry = match result {
         Ok(resp) => CallEntry {
             attempt: 0,
-            status: if reply_is_good(resp) {
+            status: if reply_is_good(call.kind, resp) {
                 EntryStatus::Done
             } else {
                 EntryStatus::Unusable
@@ -486,7 +504,7 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
             error: None,
             class: None,
             cost_usd: resp.cost_usd.unwrap_or(0.0),
-            reason: unusable_reason(resp),
+            reason: unusable_reason(call.kind, resp),
             output_path: call.asked_schema.then(|| {
                 if crate::llm::structured_output_used(true, &resp.backend, &resp.model) {
                     "schema"
@@ -519,8 +537,8 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
 
 /// Why a reply that came back is not a good one, or `None` for a good one: cut off at the output
 /// limit (with the tokens it was billed for), or holding no JSON object that parses.
-fn unusable_reason(resp: &LlmResponse) -> Option<String> {
-    if reply_is_good(resp) {
+fn unusable_reason(kind: PartKind, resp: &LlmResponse) -> Option<String> {
+    if reply_is_good(kind, resp) {
         return None;
     }
     Some(if resp.truncated {
@@ -529,6 +547,8 @@ fn unusable_reason(resp: &LlmResponse) -> Option<String> {
             resp.output_tokens.unwrap_or(0),
             resp.text.chars().count()
         )
+    } else if kind == PartKind::GroupReview {
+        "the reply is not a group reviewer reply that fits the closed schema".to_string()
     } else {
         "the reply held no JSON object that parses".to_string()
     })
@@ -910,7 +930,13 @@ pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) 
     }
     let dir = store.dir().to_path_buf();
     for mut file in all_call_files(store) {
-        if matches!(file.kind, PartKind::Fix | PartKind::Detail) {
+        // A group reviewer reply that broke its schema was stored unusable when it came back, so
+        // it is asked again; the replies of the rule groups that were read are not set aside for
+        // one that was not.
+        if matches!(
+            file.kind,
+            PartKind::Fix | PartKind::Detail | PartKind::GroupReview
+        ) {
             continue;
         }
         let hit = rejected.iter().find(|f| {

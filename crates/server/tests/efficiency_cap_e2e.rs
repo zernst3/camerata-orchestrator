@@ -132,6 +132,7 @@ async fn scan(
 
 fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
     RunControls {
+        review: Default::default(),
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,

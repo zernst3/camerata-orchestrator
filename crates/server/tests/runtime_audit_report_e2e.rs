@@ -167,6 +167,7 @@ async fn sealed_report(feeds: &Feeds) -> SealedReport {
         deep: None,
         coverage_notes,
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "acme/app".to_string(),
                 sha: Some("abcdef1234567890".to_string()),

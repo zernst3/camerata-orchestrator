@@ -48,7 +48,8 @@ fn workbook_of(zip: &[u8]) -> Vec<u8> {
 }
 
 /// A stored report with a placeholder row has a tree that holds the row. Sealing throws the row
-/// out; the tree it ships with names only rows that exist.
+/// out; the tree it ships with names only rows that exist, the thrown-out one in its category's
+/// thrown-out node (A12).
 #[test]
 fn a_stored_report_with_a_placeholder_row_seals_to_a_tree_whose_members_all_exist() {
     let mut stored = scan_report();
@@ -73,6 +74,7 @@ fn a_stored_report_with_a_placeholder_row_seals_to_a_tree_whose_members_all_exis
     let keys: std::collections::HashSet<&str> = sealed
         .findings
         .iter()
+        .chain(sealed.discarded.iter())
         .map(|f| f.site_key.as_str())
         .collect();
     let tree = sealed.tree.as_ref().expect("a sealed report has a tree");
@@ -83,8 +85,8 @@ fn a_stored_report_with_a_placeholder_row_seals_to_a_tree_whose_members_all_exis
     }
     assert_eq!(
         tree.nodes.iter().map(|n| n.members.len()).sum::<usize>(),
-        sealed.findings.len(),
-        "every row is in exactly one node"
+        sealed.findings.len() + sealed.discarded.len(),
+        "every row, the thrown-out one included, is in exactly one node"
     );
 }
 

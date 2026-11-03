@@ -350,7 +350,7 @@ async fn regenerate_sample_report() {
                 message: "Advisory data reflects the scan timestamp; re-run before remediation sign-off.".to_string(),
             },
         ],
-        provenance: ScanProvenance {
+        provenance: ScanProvenance { group_review_model: None,
             audited_refs: vec![
                 AuditedRef {
                     repo: PORTAL.to_string(),
