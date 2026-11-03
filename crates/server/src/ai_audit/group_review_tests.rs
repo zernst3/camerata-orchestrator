@@ -294,6 +294,7 @@ fn cfg<'a>(rules: &'a [(String, String)]) -> GroupReviewConfig<'a> {
         rules,
         rank: RankSettings::default(),
         max_in_flight: 4,
+        job: None,
     }
 }
 
@@ -1784,7 +1785,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         ..crate::cost_cap::RunControls::default()
     };
     let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
-    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false)
+    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None)
         .await
         .expect("it ran");
     assert_eq!(outcome.rules_reviewed, 1);
@@ -1805,7 +1806,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false)
+        review_scan_report(&mut empty, &llm, &controls, &rules, false, None)
             .await
             .is_none()
     );
@@ -2285,4 +2286,52 @@ async fn an_outlier_mark_in_the_stage_2_reply_never_makes_an_escalation() {
         rows[2].review.outlier_reason,
         Some(OutlierReason::CouldBeIntentional)
     );
+}
+
+// ── Resume (design 6.2, A15) ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn resume_re_asks_only_the_failed_group_review_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let rules: Vec<(String, String)> = Vec::new();
+
+    // First process: the secrets group cannot be reached, the SQL group is read.
+    let first = Reviewer::new(|c| {
+        if c.node_id.contains(SECRETS) {
+            Err(anyhow::anyhow!("connection reset by peer"))
+        } else {
+            Ok(one_group(c, "Read."))
+        }
+    });
+    let mut report = report_of(&[(SQL, 3), (SECRETS, 3)]);
+    let meter = UsageMeter::default();
+    let out = crate::checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        review_groups(&mut report, &first, &cfg(&rules), Some(&meter)),
+    )
+    .await;
+    assert_eq!(out.rules_failed, 1, "the secrets group is a failed part");
+    assert_eq!(out.rules_reviewed, 1);
+
+    // Second process, the same checkpoint: only the chunk with no result is asked.
+    let second = Reviewer::new(|c| Ok(one_group(c, "Read.")));
+    let mut report = report_of(&[(SQL, 3), (SECRETS, 3)]);
+    let meter = UsageMeter::default();
+    let out = crate::checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        review_groups(&mut report, &second, &cfg(&rules), Some(&meter)),
+    )
+    .await;
+    let asked: Vec<String> = second.calls().iter().map(|c| c.node_id.clone()).collect();
+    assert_eq!(asked.len(), 1, "one call, not two: {asked:?}");
+    assert!(asked[0].contains(SECRETS), "{asked:?}");
+    assert_eq!(out.rules_failed, 0);
+    assert_eq!(out.rules_reviewed, 2, "both groups are read in the end");
+    assert_eq!(
+        meter.snapshot().input_tokens,
+        2_000,
+        "the usage of the chunk read before the restart is reported with the one just read"
+    );
+    // The SQL group's reply was applied from the checkpoint: its sites carry its sub-group.
+    assert!(subgroups_of(&report, &rule_node(&report, SQL)).len() == 1);
 }

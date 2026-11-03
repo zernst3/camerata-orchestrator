@@ -1309,6 +1309,7 @@ pub async fn run_inspect_pipeline_with(
                     &controls,
                     &rules,
                     llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
                 ),
             ),
         )

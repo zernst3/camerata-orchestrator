@@ -6711,6 +6711,7 @@ async fn onboard_audit(
                 &review_controls,
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
+                None,
             )
             .await;
         }
@@ -8698,6 +8699,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
+                            Some((&body_jobs, &body_jid)),
                         ),
                     ),
                 )
