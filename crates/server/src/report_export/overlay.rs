@@ -639,6 +639,11 @@ pub fn edit_ids_of(f: &Finding) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The site key of the row this one was merged into, when the reviewer merged it.
+pub(crate) fn merged_target(f: &Finding) -> Option<&str> {
+    f.captures.get(MERGED_INTO_CAPTURE).map(String::as_str)
+}
+
 /// The pointer a merged row exports with ("Merged into src/b.rs:20"), when the row was merged.
 pub(crate) fn merged_label(f: &Finding) -> Option<&str> {
     f.captures.get(MERGED_LABEL_CAPTURE).map(String::as_str)

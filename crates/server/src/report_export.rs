@@ -1568,6 +1568,11 @@ pub struct MethodologyJson {
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditReportJson {
+    /// The package is for the operator's own review. Not part of the PDF's data: the exporters
+    /// that build from this value beside the PDF (`findings.json`) read it to decide whether the
+    /// group reviewer's triage columns go in.
+    #[serde(skip)]
+    pub internal: bool,
     /// P5: `"raw"` (nobody has reviewed anything this session) or `"reviewed"` (at least one
     /// finding carries an explicit auditor disposition). Read directly by the Typst template
     /// (`d.review_state`) to gate the per-page draft banner and the Methodology section's
@@ -5811,6 +5816,7 @@ pub fn build_report_json(
     let priority_grid = build_priority_grid(&matrix);
 
     AuditReportJson {
+        internal: opts.internal,
         review_state,
         brand_mark: brand_kit_matches(cover.brand.as_deref()),
         confidentiality: confidentiality_marking(&report.provenance, opts),
@@ -6134,10 +6140,12 @@ pub(crate) mod fix_text;
 pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
 pub mod overlay;
+pub mod row_facts;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, AppliedEdit, MergeNote,
     ReviewedReport, StaleEditNote, SupersededNote,
 };
+pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
 
 #[cfg(test)]
 mod coverage_gaps_tests;
@@ -6145,7 +6153,10 @@ mod coverage_gaps_tests;
 #[cfg(test)]
 mod wo9 {
     mod review_level_tests;
+    mod row_set_tests;
     mod signature_tests;
+    mod sites_tests;
+    mod stage2_tests;
     pub(super) mod support;
 }
 

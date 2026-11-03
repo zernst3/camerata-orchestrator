@@ -365,7 +365,16 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let edited = at(sealed.as_scan_report(), "src/users.rs");
     let merged = at(sealed.as_scan_report(), "src/orders.rs");
     let target = at(sealed.as_scan_report(), "src/db.rs");
-    let mut split = edit_of(3, &edited, EditField::Subgroup, "", "SECRET-SUBGROUP");
+    // The name the reviewer gives a sub-group is the group's label and cause in the client
+    // package (design D16: the sub-group is the unit of the plan); only the reason for the split
+    // is internal.
+    let mut split = edit_of(
+        3,
+        &edited,
+        EditField::Subgroup,
+        "",
+        "Helper builds SQL by hand",
+    );
     split.reason = "SECRET-SPLIT-REASON".to_string();
     let edits = vec![
         edit_of(
@@ -389,13 +398,12 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let data_json = package.data_json.clone();
     let zip = release(package).expect("the package clears the gate").bytes;
 
-    // Reasons, reviewer names and the sub-group the reviewer typed are internal.
+    // Reasons and reviewer names are internal.
     let secrets = [
         "SECRET-REASON",
         "SECRET-REVIEWER",
         "SECRET-SPLIT-REASON",
         "SECRET-MERGE-REASON",
-        "SECRET-SUBGROUP",
     ];
     let mut outputs: Vec<(String, String)> = text_entries(&zip);
     outputs.push(("PDF data".to_string(), data_json));

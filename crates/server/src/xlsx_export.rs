@@ -245,6 +245,14 @@ pub struct FindingRow {
     /// counted. Absent for every other row.
     #[serde(skip_serializing_if = "String::is_empty")]
     same_credential_note: String,
+    /// How closely the row was reviewed and where it sits in the review tree (design 3B and A5).
+    /// On every row of every export.
+    #[serde(flatten)]
+    facts: crate::report_export::RowFacts,
+    /// The group reviewer's triage of the row. Present only in an INTERNAL package: a client
+    /// package carries no escalation reason, rank, outlier reason, disagreement or model text.
+    #[serde(flatten)]
+    internal_triage: Option<crate::report_export::InternalTriage>,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -252,6 +260,11 @@ pub struct FindingRow {
 #[derive(Clone, Serialize)]
 struct DepRow {
     package: String,
+    /// The manifest or lockfile the advisory was found in.
+    path: String,
+    /// How closely the row was reviewed and where it sits in the review tree.
+    #[serde(flatten)]
+    facts: crate::report_export::RowFacts,
     advisory: String,
     severity: String,
     repo: String,
@@ -380,13 +393,26 @@ struct SheetSummary {
 /// `report_export::build_report_json`'s matrix now uses) — the one true sort order both
 /// `build_workbook` and `build_findings_export` (`findings.json`) consume as-is, rather than
 /// each sorting its own copy and risking two orderings silently drifting apart.
+#[cfg(test)]
 fn partition_rows(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &HashMap<String, String>,
 ) -> (Vec<FindingRow>, Vec<DepRow>) {
+    partition_rows_for(reviewed, corpus, chosen_options, false)
+}
+
+/// [`partition_rows`] for a client package (`internal` false) or the operator's own (`internal`
+/// true, which adds the group reviewer's triage columns to every row).
+fn partition_rows_for(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &HashMap<String, String>,
+    internal: bool,
+) -> (Vec<FindingRow>, Vec<DepRow>) {
     let report: &ScanReport = reviewed.report();
     let dispositions = reviewed.dispositions();
+    let facts_index = crate::report_export::RowFactsIndex::new(reviewed);
     // C4-R3: same zero-width/BOM sanitization `build_report_json` applies to the PDF's JSON —
     // see `sanitize_report_findings`'s doc comment for why this is the one shared ingestion
     // point rather than a per-artifact patch.
@@ -406,6 +432,8 @@ fn partition_rows(
             let ownership = crate::ownership::ownership_of(&f.rule_id, &f.captures);
             dep_rows.push(DepRow {
                 package: f.snippet.clone(),
+                path: f.path.clone(),
+                facts: facts_index.facts(f),
                 advisory: f.detail.clone(),
                 severity: normalize_severity(&f.severity),
                 repo: f.repo.clone(),
@@ -603,6 +631,8 @@ fn partition_rows(
             same_credential_note: crate::onboard::credential_cross_ref::note(
                 &credentials.also_flagged_in(f),
             ),
+            facts: facts_index.facts(f),
+            internal_triage: internal.then(|| crate::report_export::internal_triage(f)),
         });
     }
 
@@ -866,19 +896,21 @@ struct SiteRow {
     repo: String,
     path: String,
     line: usize,
-    /// "Primary", "Also found", "Also affected" or "Also flagged here".
+    /// "Primary", "Collapsed source", "Also found", "Also affected" or "Also flagged here".
     site_type: &'static str,
     severity: String,
     snippet: String,
     /// The sheet the finding's own row is on.
     listed_on: &'static str,
     headline: String,
+    /// The finding's review level and sub-group, the same on every site of the finding.
+    facts: crate::report_export::RowFacts,
 }
 
 /// The Sites sheet's rows: for every row of the export (false positives included) its own site
 /// first, then every site a merge absorbed into it, none left out. This is the full list that
 /// the capped "Also found at" and "Where" cells point at.
-fn build_site_rows(rows: &[FindingRow]) -> Vec<SiteRow> {
+fn build_site_rows(rows: &[FindingRow], deps: &[DepRow]) -> Vec<SiteRow> {
     let mut out = Vec::new();
     for row in rows {
         let listed_on = if row.is_fp {
@@ -906,7 +938,24 @@ fn build_site_rows(rows: &[FindingRow]) -> Vec<SiteRow> {
             snippet: row.snippet.clone(),
             listed_on,
             headline: row.headline.clone(),
+            facts: row.facts.clone(),
         });
+        // Amendment A1: every source collapsed into this row keeps its own line, as its own row.
+        for source in &row.flagged_by {
+            out.push(SiteRow {
+                finding: finding.clone(),
+                rule_id: source.rule_id.clone(),
+                repo: row.repo.clone(),
+                path: source.path.clone(),
+                line: source.line,
+                site_type: "Collapsed source",
+                severity: title_case(&row.severity),
+                snippet: row.snippet.clone(),
+                listed_on,
+                headline: row.headline.clone(),
+                facts: row.facts.clone(),
+            });
+        }
         let split = crate::report_export::split_absorbed(row.place.clone(), &row.also_locations);
         let absorbed = split
             .other_sites
@@ -947,8 +996,25 @@ fn build_site_rows(rows: &[FindingRow]) -> Vec<SiteRow> {
                 snippet: cap_snippet_for_workbook(&l.snippet),
                 listed_on,
                 headline: l.headline.clone(),
+                facts: row.facts.clone(),
             });
         }
+    }
+    // A dependency advisory is a site of the report too: its own row, on the Dependencies sheet.
+    for dep in deps {
+        out.push(SiteRow {
+            finding: format!("{} @ {}", crate::dep_audit::DEP_AUDIT_RULE_ID, dep.package),
+            rule_id: crate::dep_audit::DEP_AUDIT_RULE_ID.to_string(),
+            repo: dep.repo.clone(),
+            path: dep.path.clone(),
+            line: 0,
+            site_type: "Primary",
+            severity: title_case(&dep.severity),
+            snippet: dep.package.clone(),
+            listed_on: "Dependencies",
+            headline: dep.advisory.clone(),
+            facts: dep.facts.clone(),
+        });
     }
     out
 }
@@ -962,7 +1028,7 @@ fn write_sites_sheets(
     chunk: usize,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    const HEADERS: [&str; 10] = [
+    const HEADERS: [&str; 13] = [
         "Finding (rule @ first site)",
         "Rule ID",
         "Repo",
@@ -973,8 +1039,13 @@ fn write_sites_sheets(
         "Snippet",
         "Row is on sheet",
         "Headline",
+        "Site id",
+        "Review level",
+        "Group",
     ];
-    const WIDTHS: [f64; 10] = [52.0, 28.0, 18.0, 44.0, 7.0, 18.0, 10.0, 60.0, 16.0, 50.0];
+    const WIDTHS: [f64; 13] = [
+        52.0, 28.0, 18.0, 44.0, 7.0, 18.0, 10.0, 60.0, 16.0, 50.0, 18.0, 30.0, 30.0,
+    ];
     let pages: Vec<&[SiteRow]> = if sites.is_empty() {
         vec![&[]]
     } else {
@@ -1005,6 +1076,9 @@ fn write_sites_sheets(
             ws.write_text_with_format(r, 7, &s.snippet, &wrap)?;
             ws.write_text_with_format(r, 8, s.listed_on, &text)?;
             ws.write_text_with_format(r, 9, &s.headline, &wrap)?;
+            ws.write_text_with_format(r, 10, &s.facts.site_id, &text)?;
+            ws.write_text_with_format(r, 11, &s.facts.review_level, &text)?;
+            ws.write_text_with_format(r, 12, &s.facts.group, &text)?;
         }
         ws.autofilter(0, 0, page.len() as u32, (HEADERS.len() - 1) as u16)?;
         ws.set_freeze_panes(1, 0)?;
@@ -1701,7 +1775,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 31] = [
+const HEADERS: [&str; 38] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1747,11 +1821,21 @@ const HEADERS: [&str; 31] = [
     // WO8: whether the reviewer edited this row, and the ids of their edits.
     "Reviewer edited",
     "Edit ids",
+    // WO9: how closely the row was reviewed, and where it sits in the review tree. The Sites
+    // sheet filters on the same Group value.
+    "Site id",
+    "Review level",
+    "Group",
+    "Sub-group",
+    "Sub-group cause",
+    "Escalated",
+    "Merged into",
 ];
 
-const WIDTHS: [f64; 31] = [
+const WIDTHS: [f64; 38] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0, 14.0, 22.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0, 14.0, 22.0, 18.0,
+    30.0, 30.0, 30.0, 40.0, 10.0, 18.0,
 ];
 
 /// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
@@ -1759,6 +1843,14 @@ const FP_REASON_COL: u16 = HEADERS.len() as u16;
 
 /// M4: the "Held" column of an INTERNAL workbook, after [`REVIEW_FLAGS_COL`].
 const HELD_COL: u16 = REVIEW_FLAGS_COL + 1;
+
+/// WO9: the first of the group reviewer's triage columns (escalation, outlier, disagreement and
+/// the model's own words) on an INTERNAL workbook, after [`HELD_COL`]. A client workbook has none.
+const TRIAGE_FIRST_COL: u16 = HELD_COL + 1;
+
+/// The last column an INTERNAL findings sheet writes.
+const INTERNAL_LAST_COL: u16 =
+    TRIAGE_FIRST_COL + crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS.len() as u16 - 1;
 
 /// Why a row waits for a reviewer's decision before a client may receive it: the M5 evidence
 /// mark and the M4 junk mark. Empty for a row neither holds.
@@ -1902,6 +1994,26 @@ fn write_finding_row(
         &fmts.cell(bg, false, false),
     )?;
     ws.write_text_with_format(r, 30, row.edit_ids.join(", "), &fmts.cell(bg, false, false))?;
+    let facts = &row.facts;
+    for (offset, text) in [
+        &facts.site_id,
+        &facts.review_level,
+        &facts.group,
+        &facts.sub_group,
+        &facts.sub_group_cause,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ws.write_text_with_format(r, 31 + offset as u16, text, &fmts.cell(bg, false, false))?;
+    }
+    ws.write_text_with_format(
+        r,
+        36,
+        if facts.escalated { "Yes" } else { "" },
+        &fmts.cell(bg, false, false),
+    )?;
+    ws.write_text_with_format(r, 37, &facts.merged_into, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1933,6 +2045,13 @@ fn write_findings_sheet(
     if internal {
         ws.write_text_with_format(0, REVIEW_FLAGS_COL, "Review flags", &fmts.header)?;
         ws.write_text_with_format(0, HELD_COL, "Held", &fmts.header)?;
+        for (i, h) in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS
+            .iter()
+            .enumerate()
+        {
+            ws.write_text_with_format(0, TRIAGE_FIRST_COL + i as u16, *h, &fmts.header)?;
+            ws.set_column_width(TRIAGE_FIRST_COL + i as u16, 28.0)?;
+        }
     }
     ws.set_row_height(0, 28)?;
 
@@ -1974,12 +2093,22 @@ fn write_findings_sheet(
                 &fmts.cell(None, true, false),
             )?;
             ws.write_text_with_format(r, HELD_COL, &row.held, &fmts.cell(None, true, false))?;
+            if let Some(triage) = &row.internal_triage {
+                for (i, cell) in triage.cells().into_iter().enumerate() {
+                    ws.write_text_with_format(
+                        r,
+                        TRIAGE_FIRST_COL + i as u16,
+                        cell,
+                        &fmts.cell(None, true, false),
+                    )?;
+                }
+            }
         }
     }
 
     let last_row = rows.len() as u32;
     let last_col: u16 = if internal {
-        HELD_COL
+        INTERNAL_LAST_COL
     } else if fp_reason_col {
         FP_REASON_COL
     } else {
@@ -3164,12 +3293,8 @@ pub fn build_workbook(
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<u8>> {
     let report = reviewed.report();
-    let dispositions = reviewed.dispositions();
-    let (rows, dep_rows) = partition_rows(
-        &crate::report_export::ReviewedReport::unreviewed(report, dispositions),
-        corpus,
-        &opts.chosen_options,
-    );
+    let (rows, dep_rows) =
+        partition_rows_for(reviewed, corpus, &opts.chosen_options, opts.internal);
 
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
@@ -3304,7 +3429,7 @@ pub fn build_workbook(
 
     // M8: one row per site of every row, in full. The capped "Also found at" and "Where" cells
     // point here. A report with more sites than one sheet holds continues on "Sites (2)".
-    let site_rows = build_site_rows(&rows);
+    let site_rows = build_site_rows(&rows, &dep_rows);
     let site_sheet_count = site_rows.len().div_ceil(SITES_SHEET_MAX_ROWS).max(1);
     let site_sheet_names: Vec<String> = (0..site_sheet_count)
         .map(|i| {
@@ -3543,7 +3668,8 @@ pub fn build_findings_export(
     report_json: &crate::report_export::AuditReportJson,
     chosen_options: &HashMap<String, String>,
 ) -> FindingsExport {
-    let (rows, _dep_rows) = partition_rows(reviewed, corpus, chosen_options);
+    let (rows, _dep_rows) =
+        partition_rows_for(reviewed, corpus, chosen_options, report_json.internal);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
         provenance: report_json.cover.clone(),
@@ -3582,7 +3708,8 @@ pub fn build_json_exports(
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let report = reviewed.report();
-    let (rows, dep_rows) = partition_rows(reviewed, corpus, &opts.chosen_options);
+    let (rows, dep_rows) =
+        partition_rows_for(reviewed, corpus, &opts.chosen_options, opts.internal);
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
     let findings_rows: Vec<&FindingRow> = live_rows
@@ -4018,9 +4145,15 @@ mod tests {
         // label beside each fix must be observable in the workbook).
         // WO8: 29 -> 31 — "Reviewer edited" and "Edit ids" append after "Fix type" (same
         // exception (a): an edit the reviewer made must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 31);
+        // WO9: 31 -> 38 — "Site id", "Review level", "Group", "Sub-group", "Sub-group cause",
+        // "Escalated" and "Merged into" append after "Edit ids" (same exception (a): how closely a
+        // row was reviewed and where it sits in the review tree must be observable).
+        assert_eq!(HEADERS.len(), 38);
         assert_eq!(HEADERS[29], "Reviewer edited");
         assert_eq!(HEADERS[30], "Edit ids");
+        assert_eq!(HEADERS[31], "Site id");
+        assert_eq!(HEADERS[32], "Review level");
+        assert_eq!(HEADERS[33], "Group");
         assert_eq!(HEADERS[26], "Severity adjustments");
         assert_eq!(HEADERS[27], "Carried from");
         assert_eq!(HEADERS[28], "Fix type");

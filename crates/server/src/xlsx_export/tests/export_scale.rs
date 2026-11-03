@@ -186,7 +186,7 @@ fn more_sites_than_one_sheet_holds_continue_on_a_second_sheet() {
         None,
         &HashMap::new(),
     );
-    let sites = build_site_rows(&rows);
+    let sites = build_site_rows(&rows, &[]);
     assert_eq!(sites.len(), 7);
     let mut wb = Workbook::new();
     let names = vec![
