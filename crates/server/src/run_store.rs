@@ -97,6 +97,8 @@ pub enum PartKind {
     Detail,
     /// The finding-specific fix text.
     Fix,
+    /// The group reviewer (stage 2): one call per rule group, run once for the whole report.
+    GroupReview,
     /// Any other model call (the clone judge, the deep tier).
     Other,
     /// Merging, ranking and the report, recomputed from the stored results.
@@ -109,7 +111,9 @@ impl PartKind {
     /// The kind of a failed pass, from the name it was recorded under.
     pub fn of_pass_name(pass: &str) -> Self {
         let p = pass.to_ascii_lowercase();
-        if p.contains("alternative") {
+        if p.contains("group review") {
+            Self::GroupReview
+        } else if p.contains("alternative") {
             Self::Alternatives
         } else if p.contains("hour estimation") || p.contains("calibrat") {
             Self::Calibration
@@ -139,6 +143,7 @@ impl PartKind {
             Self::Alternatives => "rule alternatives",
             Self::Detail => "finding detail",
             Self::Fix => "fix text",
+            Self::GroupReview => "group review",
             Self::Other => "other model calls",
             Self::Merge => "merge and report",
             Self::Export => "export",
@@ -767,6 +772,8 @@ fn plan_for(repos: &[(String, PathBuf)], include_alternatives: bool) -> Vec<Part
         part(name, PartKind::Detail);
         part(name, PartKind::Fix);
     }
+    // The group reviewer reads the final report once, after every repo's rows are in.
+    part("", PartKind::GroupReview);
     part("", PartKind::Merge);
     part("", PartKind::Export);
     plan
@@ -999,8 +1006,11 @@ impl RunStore {
                 .collect();
             for part in &mut state.record.plan {
                 let matches = |list: &[(String, PartKind)]| {
+                    // A part of the whole run (the group reviewer) has no repo of its own: a
+                    // failure of its kind in any repo is its.
                     list.iter().any(|(repo, kind)| {
-                        *kind == part.kind && (repo.is_empty() || *repo == part.repo)
+                        *kind == part.kind
+                            && (repo.is_empty() || part.repo.is_empty() || *repo == part.repo)
                     })
                 };
                 let status = if part.kind == PartKind::Export {
@@ -1027,7 +1037,9 @@ impl RunStore {
                         .find(|f| {
                             !f.scope_note
                                 && PartKind::of_pass_name(&f.pass) == part.kind
-                                && (f.repo.is_empty() || f.repo == part.repo)
+                                && (f.repo.is_empty()
+                                    || part.repo.is_empty()
+                                    || f.repo == part.repo)
                         })
                         .map(|f| format!("{}: {}", f.pass, f.class)),
                     _ => None,

@@ -592,6 +592,52 @@ mod tests {
         assert!((with - without).abs() < 1e-9, "{with} vs {without}");
     }
 
+    /// A13: the figure counts both reviewers, each on its own model. The group reviewer is priced
+    /// at its model (Fable 5.1 is dearer than Sonnet), shows in the basis, and is left out, with
+    /// a line saying so, when its model has no list price.
+    #[test]
+    fn the_group_review_stage_is_priced_at_its_own_model_and_named_in_the_basis() {
+        let repos = [repo(26_544, 152)];
+        let mut cheap = inputs(&repos, None);
+        cheap.model = "claude-sonnet-5-5".into();
+        cheap.calibration_model = "claude-sonnet-5-5".into();
+        cheap.group_review_model = "claude-sonnet-5-5".into();
+        let cheap_p = build(&cheap);
+        let mut dear = inputs(&repos, None);
+        dear.model = "claude-sonnet-5-5".into();
+        dear.calibration_model = "claude-sonnet-5-5".into();
+        dear.group_review_model = "claude-fable-5-1".into();
+        let dear_p = build(&dear);
+        assert!(
+            dear_p.estimate_usd.unwrap() > cheap_p.estimate_usd.unwrap() + 0.01,
+            "stage 2 is priced at its own model: {:?} vs {:?}",
+            cheap_p.estimate_usd,
+            dear_p.estimate_usd
+        );
+        assert!(
+            dear_p.text.contains("group review model claude-fable-5-1"),
+            "{}",
+            dear_p.text
+        );
+        // Both stage models are named.
+        assert!(dear_p.text.contains("calibration model claude-sonnet-5-5"));
+
+        // No list price: left out of the figure, and the figure says so.
+        let mut unpriced = dear;
+        unpriced.group_review_model = "some-model-without-a-price".into();
+        let un = build(&unpriced);
+        assert!(
+            un.text.contains("group review is NOT in this figure"),
+            "{}",
+            un.text
+        );
+        assert!(
+            (un.estimate_usd.unwrap() - cheap_p.estimate_usd.unwrap()).abs() < 0.01
+                || un.estimate_usd.unwrap() < dear_p.estimate_usd.unwrap(),
+            "the unpriced stage adds nothing"
+        );
+    }
+
     /// The figure counts what the run does: the fix stage (on its own model) and the clone judge
     /// are priced when the run uses them, and left out when it does not.
     #[test]

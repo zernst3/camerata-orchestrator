@@ -252,7 +252,7 @@ fn outlier_meaning(r: OutlierReason) -> &'static str {
 }
 
 /// The system prompt of the rule-level summary call.
-fn rule_summary_system_prompt() -> String {
+pub(crate) fn rule_summary_system_prompt() -> String {
     String::from(
         "You are the group reviewer, the architect's first reader of this rule group. The group \
          was too large to read at once, so it was read in parts. Each part has a summary and the \
@@ -472,7 +472,7 @@ impl Stage2Reply {
 }
 
 /// The rule-level summary reply: exactly `{"summary": "..."}`.
-fn parse_rule_summary(raw: &str) -> Result<String, String> {
+pub(crate) fn parse_rule_summary(raw: &str) -> Result<String, String> {
     let json = extract_json_object(raw)
         .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
         .ok_or_else(|| "the reply is not a JSON object".to_string())?;
@@ -751,7 +751,7 @@ struct PromptContext<'a> {
 }
 
 /// The stage 1 and review-flag facts about one member, as one line of the member list.
-fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
+pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     let stage1 = stage1_of(f);
     let real = stage1.as_ref().map_or("not rated", |s| s.real.as_str());
     let reason: String = stage1
@@ -1954,4 +1954,36 @@ pub async fn review_scan_report(
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);
     Some(outcome)
+}
+
+/// A stand-in for the group reviewer, for scripted models in tests (no network, no spend): when
+/// the request is a group review call (`system` is the group reviewer's prompt), a well-formed
+/// reply that puts every site of the call in one sub-group and escalates none; when it is the
+/// rule-level summary call, a summary. `None` for any other request. Deterministic, so a resumed
+/// run's stored replies match.
+pub fn stand_in_reply(system: Option<&str>, prompt: &str) -> Option<String> {
+    let system = system?;
+    if system.starts_with(&rule_summary_system_prompt()) {
+        return Some(
+            serde_json::json!({ "summary": "The sites of this rule share one cause." }).to_string(),
+        );
+    }
+    if !system.starts_with(&group_review_system_prompt()) {
+        return None;
+    }
+    let re = regex::Regex::new(r"(?m)^(\d+): ").expect("a static pattern");
+    let members: Vec<usize> = re
+        .captures_iter(prompt)
+        .filter_map(|c| c[1].parse().ok())
+        .collect();
+    Some(
+        serde_json::json!({
+            "summary": "The sites of this rule share one cause.",
+            "subgroups": [{ "label": "All", "cause": "one shared cause", "members": members }],
+            "outliers": [],
+            "escalations": [],
+            "disagreements": [],
+        })
+        .to_string(),
+    )
 }

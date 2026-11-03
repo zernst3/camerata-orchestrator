@@ -332,6 +332,28 @@ impl ProjectStore {
         self.update(id, |p| p.set_model_for_step(step, model))
     }
 
+    /// Set the review tree's settings (the escalation rate and floor, the over-budget reasons and
+    /// the group reviewer's model) for ONE project by id. A rate that is not a finite number of
+    /// zero or more is refused (`Err`), so a stored project never holds one the budget cannot
+    /// use. Returns the updated project, or `None` when no project has that id.
+    pub fn set_review_settings(
+        &self,
+        id: &str,
+        settings: ReviewSettings,
+    ) -> Option<Result<Project, String>> {
+        if !settings.escalation_rate_per_kloc.is_finite() || settings.escalation_rate_per_kloc < 0.0
+        {
+            // The project must exist for the refusal to be about the rate.
+            self.get(id)?;
+            return Some(Err(format!(
+                "the escalation rate must be zero or a positive number of escalations per \
+                 1,000 lines (got {})",
+                settings.escalation_rate_per_kloc
+            )));
+        }
+        self.update(id, |p| p.review = settings).map(Ok)
+    }
+
     /// Set the stall thresholds for a single project by id. Returns the updated project,
     /// or `None` when no project has that id.
     pub fn set_stall_thresholds(&self, id: &str, thresholds: StallThresholds) -> Option<Project> {
@@ -906,6 +928,65 @@ mod tests {
         assert_eq!(p.model_for_step(StepKind::Audit), DEFAULT_MODEL);
 
         // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_settings_are_per_project_persist_and_refuse_a_bad_rate() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-review-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+        let (a_id, b_id) = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let a = store.create("A", vec![]).unwrap();
+            let b = store.create("B", vec![]).unwrap();
+            // A new project carries the design values.
+            assert_eq!(a.review, ReviewSettings::default());
+            let set = ReviewSettings {
+                escalation_rate_per_kloc: 0.5,
+                escalation_floor: 7,
+                group_review_model: "claude-opus-5-5".to_string(),
+                ..ReviewSettings::default()
+            };
+            let updated = store
+                .set_review_settings(&a.id, set.clone())
+                .expect("the project exists")
+                .expect("valid settings");
+            assert_eq!(updated.review, set);
+            // B is untouched.
+            assert_eq!(store.get(&b.id).unwrap().review, ReviewSettings::default());
+            // A bad rate is refused and changes nothing.
+            for bad in [-1.0_f32, f32::NAN, f32::INFINITY] {
+                let refused = store
+                    .set_review_settings(
+                        &a.id,
+                        ReviewSettings {
+                            escalation_rate_per_kloc: bad,
+                            ..set.clone()
+                        },
+                    )
+                    .expect("the project exists");
+                assert!(refused.is_err(), "{bad} is refused");
+            }
+            assert_eq!(store.get(&a.id).unwrap().review, set);
+            assert!(store.set_review_settings("no-such-id", set).is_none());
+            (a.id, b.id)
+        };
+        // It survives a reload from the file.
+        let reloaded = ProjectStore::load_or_new(path);
+        let a = reloaded.get(&a_id).unwrap();
+        assert_eq!(a.review.escalation_floor, 7);
+        assert_eq!(a.review.group_review_model, "claude-opus-5-5");
+        assert_eq!(
+            reloaded.get(&b_id).unwrap().review,
+            ReviewSettings::default()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

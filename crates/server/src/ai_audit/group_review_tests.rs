@@ -1794,3 +1794,111 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     );
     assert!(llm.calls().is_empty());
 }
+
+/// The cockpit's and the pre-flight's estimate of stage 2 is built from these figures
+/// (`camerata_ui_core::scan::GROUP_REVIEW_*`). They have to cover what the stage really sends, at
+/// four characters a token, and not be wildly above it.
+#[test]
+fn the_estimators_figures_cover_the_real_prompt() {
+    use camerata_ui_core::scan::{GROUP_REVIEW_INPUT_TOKENS_PER_SITE, GROUP_REVIEW_SYSTEM_TOKENS};
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let system = crate::prompt_frame::with_untrusted_clause(group_review_system_prompt(), &nonce);
+    let system_tokens = system.len() as f64 / 4.0;
+    assert!(
+        system_tokens <= GROUP_REVIEW_SYSTEM_TOKENS,
+        "the system prompt is {system_tokens} tokens, over the estimate"
+    );
+    assert!(
+        system_tokens >= GROUP_REVIEW_SYSTEM_TOKENS * 0.7,
+        "the system prompt is {system_tokens} tokens, far under the estimate"
+    );
+    // A site at full width: an 80-character path, a 160-character headline, a 200-character
+    // stage 1 reason.
+    let mut f = site(SQL, 7, "medium");
+    f.path = format!("{}.rs", "p".repeat(76));
+    f.detail = format!("{} \u{2014} detail", "h".repeat(160));
+    f.captures.insert(
+        STAGE1_CAPTURE.to_string(),
+        stage1_capture("unclear", &"r".repeat(200)),
+    );
+    let line = member_line(&f, 7, false);
+    let line_tokens = line.len() as f64 / 4.0;
+    assert!(
+        line_tokens <= GROUP_REVIEW_INPUT_TOKENS_PER_SITE,
+        "a full-width site line is {line_tokens} tokens, over the estimate"
+    );
+    assert!(
+        line_tokens >= GROUP_REVIEW_INPUT_TOKENS_PER_SITE * 0.7,
+        "a full-width site line is {line_tokens} tokens, far under the estimate"
+    );
+    // The reply budget per site is the one the request's cap is built from.
+    assert_eq!(
+        camerata_ui_core::scan::GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE as u32,
+        24
+    );
+    assert_eq!(
+        camerata_ui_core::scan::GROUP_REVIEW_MAX_CHUNK_SITES as usize,
+        MAX_CHUNK_MEMBERS
+    );
+}
+
+#[tokio::test]
+async fn what_stage_2_wrote_survives_the_seal_and_a_row_thrown_out_since_is_no_longer_a_candidate()
+{
+    let mut report = report_of(&[(SQL, 4)]);
+    report.code_lines = 1_000;
+    let llm = Reviewer::new(|call| {
+        let escalations: Vec<(usize, &str, u32, &str)> = call
+            .indices
+            .iter()
+            .map(|&i| (i, "rule_misfit", i as u32 + 1, "Odd."))
+            .collect();
+        Ok(reply(
+            "Raw SQL built from input.",
+            &[("All", "one cause", call.indices.clone())],
+            &[],
+            &escalations,
+            &[],
+        ))
+    });
+    run(&mut report, &llm).await;
+    assert_eq!(tree(&report).candidates.len(), 4);
+    let rule = rule_node(&report, SQL);
+    // A later step throws one escalated row out (the seal moves it aside and keeps it).
+    let thrown_key = sites_of(&report, SQL)[1].site_key.clone();
+    let row = report
+        .findings
+        .iter_mut()
+        .find(|f| f.site_key == thrown_key)
+        .unwrap();
+    crate::engine_discard::mark(row, crate::engine_discard::DISCARD_VERDICT);
+
+    let sealed = report.seal();
+    let t = sealed.tree.as_ref().expect("a tree");
+    // The summary, the sub-groups and the line are what stage 2 made them.
+    assert_eq!(
+        t.node(&rule).and_then(|n| n.summary.as_deref()),
+        Some("Raw SQL built from input.")
+    );
+    assert!(t.group_reviewed);
+    assert_eq!(
+        t.nodes
+            .iter()
+            .filter(|n| n.level == NodeLevel::Subgroup && n.label == "All")
+            .count(),
+        1
+    );
+    // The thrown-out row is in the thrown-out node and is no longer a candidate; the budget's
+    // counts follow the candidates that are left.
+    assert!(t.candidates.iter().all(|c| c.key != thrown_key));
+    assert_eq!(t.candidates.len(), 3);
+    assert_eq!(t.budget.candidates, 3);
+    assert_eq!(
+        t.budget.escalated,
+        t.candidates.iter().filter(|c| c.escalated).count()
+    );
+    assert!(t
+        .nodes
+        .iter()
+        .any(|n| crate::review_tree::is_thrown_out_id(&n.id) && n.members.contains(&thrown_key)));
+}

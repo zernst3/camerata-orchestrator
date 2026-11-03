@@ -50,6 +50,12 @@ elif "first reviewer of an automated audit" in system:
     else:
         out = json.dumps({"severity": "medium", "real": "yes", "reason": "checked",
                           "effort": "low"})
+elif "architect's first reader of this rule group" in system:
+    note("group_review")
+    idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
+    out = json.dumps({"summary": "The fixture's sites share one cause.",
+                      "subgroups": [{"label": "All", "cause": "one shared cause", "members": idx}],
+                      "outliers": [], "escalations": [], "disagreements": []})
 elif "ONE concrete, codebase-specific fix" in system:
     note("fix")
     out = json.dumps({"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
@@ -785,7 +791,11 @@ async fn a_cockpit_scan_killed_mid_run_is_interrupted_and_run_what_remains_compl
         assert_eq!(job.status, "done", "{:?}", job.message);
         state.get_last_scan(&project.id).expect("the baseline scan")
     };
-    assert!(baseline.incomplete_reasons().is_empty());
+    assert!(
+        baseline.incomplete_reasons().is_empty(),
+        "{:?}",
+        baseline.failed_passes
+    );
     assert!(!baseline.findings.is_empty());
     let baseline_audit_calls = stage_calls(&baseline_log)
         .iter()

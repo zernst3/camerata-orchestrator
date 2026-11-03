@@ -1337,3 +1337,154 @@ fn a_run_saved_with_raw_picks_reads_back_and_resumes() {
     now.calibration = "claude-cal".to_string();
     assert!(old_picked.matches_for_resume(&now));
 }
+
+// ---- the group reviewer (stage 2) is a part of a run ----
+
+/// A stage 2 request: the system prompt the group reviewer sends.
+fn stage2_request(prompt: &str) -> LlmRequest {
+    LlmRequest::new(prompt).with_system(crate::ai_audit::group_review::group_review_system_prompt())
+}
+
+/// Answers every call with one fixed text.
+struct Fixed(String, AtomicUsize);
+
+#[async_trait::async_trait]
+impl LlmPort for Fixed {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        Ok(response(&self.0, 0.05))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+const GOOD_STAGE2_REPLY: &str = r#"{"summary":"s","subgroups":[{"label":"a","cause":"b","members":[0]}],"outliers":[],"escalations":[],"disagreements":[]}"#;
+
+#[test]
+fn a_group_review_pass_name_maps_to_the_group_review_part() {
+    assert_eq!(
+        PartKind::of_pass_name("group review"),
+        PartKind::GroupReview
+    );
+    // The whole-run part is in the plan, so a failed group review is remaining work.
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    assert!(
+        store
+            .record()
+            .plan
+            .iter()
+            .any(|p| p.kind == PartKind::GroupReview && p.status == PartStatus::Pending),
+        "{:?}",
+        store.record().plan
+    );
+    store.finish(&FinishOutcome {
+        scan_reached_end: true,
+        complete: false,
+        failures: vec![FinishFailure {
+            repo: "acme/api".to_string(),
+            pass: "group review".to_string(),
+            class: "content".to_string(),
+            files: Vec::new(),
+            scope_note: false,
+        }],
+        incomplete_reasons: vec!["x".to_string()],
+        ..FinishOutcome::default()
+    });
+    let record = store.record();
+    let status = |kind| record.plan.iter().find(|p| p.kind == kind).unwrap().status;
+    assert_eq!(status(PartKind::GroupReview), PartStatus::Failed);
+    assert_eq!(
+        status(PartKind::Scan),
+        PartStatus::Done,
+        "the scan is not re-run for it"
+    );
+    let remaining: Vec<PartKind> = record.remaining_parts().iter().map(|p| p.kind).collect();
+    assert_eq!(
+        remaining
+            .iter()
+            .filter(|k| **k == PartKind::GroupReview)
+            .count(),
+        1
+    );
+    assert!(!remaining.contains(&PartKind::Scan));
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_good_stage2_reply_is_replayed_and_one_that_breaks_the_schema_is_asked_again() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let good = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        // Parses as JSON, but is not a stage 2 reply (an extra field).
+        let bad = Fixed(
+            r#"{"summary":"s","subgroups":[],"outliers":[],"escalations":[],"disagreements":[],"confidence":"high"}"#.to_string(),
+            AtomicUsize::new(0),
+        );
+        {
+            assert!(JournalLlm::new(&good, store.clone()).complete(stage2_request("Repository: acme/api\ngood")).await.is_ok());
+            assert!(JournalLlm::new(&bad, store.clone()).complete(stage2_request("Repository: acme/api\nbad")).await.is_ok());
+        }
+        let store = reopen(store);
+        let (g0, b0) = (good.1.load(Ordering::SeqCst), bad.1.load(Ordering::SeqCst));
+        let j = JournalLlm::new(&good, store.clone());
+        j.complete(stage2_request("Repository: acme/api\ngood")).await.unwrap();
+        assert_eq!(good.1.load(Ordering::SeqCst), g0, "a good stage 2 reply is replayed");
+        let j = JournalLlm::new(&bad, store);
+        j.complete(stage2_request("Repository: acme/api\nbad")).await.unwrap();
+        assert_eq!(
+            bad.1.load(Ordering::SeqCst),
+            b0 + 1,
+            "a reply the closed schema turns down is not replayed: it would be turned down again"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let good = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        JournalLlm::new(&good, store.clone())
+            .complete(stage2_request("Repository: acme/api\nkept"))
+            .await
+            .unwrap();
+        store.finish(&FinishOutcome {
+            failures: vec![FinishFailure {
+                repo: "acme/api".to_string(),
+                pass: "group review".to_string(),
+                class: "content".to_string(),
+                files: Vec::new(),
+                scope_note: false,
+            }],
+            ..FinishOutcome::default()
+        });
+        let store = reopen(store);
+        let before = good.1.load(Ordering::SeqCst);
+        JournalLlm::new(&good, store)
+            .complete(stage2_request("Repository: acme/api\nkept"))
+            .await
+            .unwrap();
+        assert_eq!(
+            good.1.load(Ordering::SeqCst),
+            before,
+            "the rule groups that were read are not paid for again"
+        );
+    })
+    .await;
+}

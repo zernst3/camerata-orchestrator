@@ -8631,12 +8631,17 @@ pub(crate) async fn start_audit_job(
                     .iter()
                     .map(|r| (r.id.clone(), r.directive.clone()))
                     .collect();
-                crate::ai_audit::group_review::review_scan_report(
-                    &mut report,
-                    model_seam,
-                    &review_controls,
-                    &rules,
-                    llm_backend == crate::llm::Backend::Cli,
+                // With the run's own delimiter seed in scope, like the audit above, so a resumed
+                // run asks the group reviewer the same questions and its stored replies match.
+                crate::prompt_frame::with_seed(
+                    token_seed,
+                    crate::ai_audit::group_review::review_scan_report(
+                        &mut report,
+                        model_seam,
+                        &review_controls,
+                        &rules,
+                        llm_backend == crate::llm::Backend::Cli,
+                    ),
                 )
                 .await;
             }
