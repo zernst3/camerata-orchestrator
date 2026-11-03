@@ -1235,10 +1235,13 @@ fn assert_every_dataset_agrees(
 ) {
     let a = build(report, dispositions, corpus);
 
-    // The dataset set is exactly the eight, in BOTH text formats.
+    // The dataset set is exactly the eight, in BOTH text formats. The CSV set also holds the
+    // ticket file (WO9b), which has no JSON sibling.
     let expected: BTreeSet<String> = DATASETS.iter().map(|s| s.to_string()).collect();
+    let mut expected_csv = expected.clone();
+    expected_csv.insert("tickets".to_string());
     assert_eq!(a.json.keys().cloned().collect::<BTreeSet<_>>(), expected);
-    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected_csv);
 
     let mut rows: HashMap<&str, Vec<Value>> = HashMap::new();
     for dataset in DATASETS {

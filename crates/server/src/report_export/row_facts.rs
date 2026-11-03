@@ -7,8 +7,8 @@
 //!   label and cause, and whether the group reviewer escalated it.
 //! - [`InternalTriage`] is the group reviewer's triage of a row: why it was escalated, its rank,
 //!   the outlier mark, the disagreement with stage 1 and the model's own words for each. It is
-//!   written ONLY to an internal package; a client package carries none of it (the wave 5 review,
-//!   and A8).
+//!   written ONLY to the INTERNAL workbook's columns. It is in no JSON or CSV file of any package,
+//!   and a client package carries none of it (the wave 5 review, and A8).
 //!
 //! Neither holds reviewer text: a reviewer's reasons and names stay in the stores.
 
@@ -54,7 +54,7 @@ pub struct RowFacts {
     pub merged_into: String,
 }
 
-/// The group reviewer's triage of one row, as text. Internal packages only.
+/// The group reviewer's triage of one row, as text. The internal workbook only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct InternalTriage {
     /// `escalated`, `below_the_line` or empty.

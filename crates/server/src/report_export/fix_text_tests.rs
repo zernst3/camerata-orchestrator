@@ -160,9 +160,11 @@ async fn backtick_spans_in_fix_text_reach_typst_as_raw_and_paragraphs_split() {
         .iter()
         .filter(|p| p.contains("Redeploy afterwards."))
         .collect();
-    assert_eq!(with_redeploy.len(), 1, "{with_redeploy:?}");
+    // WO9: the fix is printed twice, once on the site's card and once as the fix of the pattern
+    // the site belongs to (old count: 1). Each rendering is its own paragraph.
+    assert_eq!(with_redeploy.len(), 2, "{with_redeploy:?}");
     assert!(
-        !with_redeploy[0].contains("VITE_KEY"),
+        with_redeploy.iter().all(|p| !p.contains("VITE_KEY")),
         "the blank line must split the paragraphs"
     );
 }

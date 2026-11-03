@@ -104,22 +104,19 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
             "the internal workbook lacks {want}"
         );
     }
-    let findings: serde_json::Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
-    let row = &findings["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["path"] == "src/a.rs")
-        .cloned()
-        .expect("the triaged row");
-    assert_eq!(row["escalation_reason"], "rule_misfit");
-    assert_eq!(row["escalation_why"], WHYS[0]);
-    assert_eq!(row["stage2_rank"], "2");
-    assert_eq!(row["outlier_why"], WHYS[1]);
-    assert!(row["stage2_disagreement"]
-        .as_str()
-        .unwrap()
-        .contains(WHYS[2]));
+    // The data files are the same in both packages: the triage is the internal WORKBOOK's.
+    let findings = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
+    for key in [
+        "escalation_reason",
+        "outlier_why",
+        "stage2_disagreement",
+        WHYS[0],
+    ] {
+        assert!(
+            !findings.contains(key),
+            "an internal findings.json carries {key}"
+        );
+    }
     // The PDF is the same document for both: it never carries the triage.
     for secret in WHYS {
         assert!(!data.contains(secret), "the PDF data carries {secret}");
@@ -130,7 +127,7 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
 /// in its cells. The map is checked against `STAGE2_FIELD_HOMES`, so a field added to the reply
 /// without a rendered home fails here.
 #[test]
-fn every_stage2_reply_field_is_rendered_in_the_internal_workbook_and_json() {
+fn every_stage2_reply_field_is_rendered_in_the_internal_workbook() {
     use crate::ai_audit::group_review::STAGE2_FIELD_HOMES;
     use crate::review_tree::{Outlier, OutlierBy, TextSource};
 
@@ -173,7 +170,6 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook_and_json() {
         .find(|(n, _)| n.ends_with(".xlsx"))
         .map(|(_, b)| xlsx_strings(b).expect("strings").join("\n"))
         .unwrap();
-    let findings = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
 
     let rendered: &[(&str, &[&str])] = &[
         ("summary", &["The rule: SQL built from input."]),
@@ -204,24 +200,9 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook_and_json() {
     for (field, wants) in rendered {
         for want in *wants {
             assert!(
-                workbook.contains(want) || findings.contains(want),
-                "{field}: the internal package does not render {want:?}"
+                workbook.contains(want),
+                "{field}: the internal workbook does not render {want:?}"
             );
         }
-    }
-    // And the JSON half: the triage columns are keys of the row in findings.json.
-    for key in [
-        "escalation_reason",
-        "escalation_why",
-        "stage2_rank",
-        "global_rank",
-        "outlier_reason",
-        "outlier_why",
-        "stage2_disagreement",
-    ] {
-        assert!(
-            findings.contains(&format!("\"{key}\"")),
-            "findings.json lacks {key}"
-        );
     }
 }

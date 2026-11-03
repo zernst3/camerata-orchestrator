@@ -249,9 +249,10 @@ pub struct FindingRow {
     /// On every row of every export.
     #[serde(flatten)]
     facts: crate::report_export::RowFacts,
-    /// The group reviewer's triage of the row. Present only in an INTERNAL package: a client
-    /// package carries no escalation reason, rank, outlier reason, disagreement or model text.
-    #[serde(flatten)]
+    /// The group reviewer's triage of the row, for the INTERNAL workbook's columns only. It is
+    /// never serialized: no JSON or CSV file of any package carries an escalation reason, rank,
+    /// outlier reason, disagreement or model text, and a client workbook has no such column.
+    #[serde(skip)]
     internal_triage: Option<crate::report_export::InternalTriage>,
 }
 
