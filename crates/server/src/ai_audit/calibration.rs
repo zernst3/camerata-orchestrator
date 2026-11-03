@@ -624,6 +624,21 @@ pub(super) const VERIFY_TOKENS_PER_FINDING: u32 = 150;
 /// not a batch (every site is its own call).
 pub(super) const CALIBRATION_BATCH_SIZE: usize = 40;
 
+/// About how much input one site's request carries, in bytes: the shared prompt, the site and the
+/// window of code around it. The batch spend gate projects a window as this many bytes a site, so
+/// a capped run with no pre-flight estimate does not refuse its first window as unenforceable.
+const SITE_INPUT_BYTES: u64 = 10_000;
+
+/// The projected input dollars of one site's request on `model`, at the batch price and three
+/// characters a token. `None` for a model the price table does not know.
+fn site_input_usd(model: &str) -> Option<f64> {
+    crate::llm::input_cost_usd(
+        model,
+        SITE_INPUT_BYTES.div_ceil(3),
+        crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+    )
+}
+
 /// `max_tokens` for the reply to `n_findings` sites: the per-verdict text budget plus the
 /// calibration stage's thinking allowance. A site's call asks for one.
 pub(crate) fn calibration_max_tokens(n_findings: usize) -> u32 {
@@ -1230,7 +1245,10 @@ pub async fn verify_findings(
         meter,
         job: inputs.job,
         checkpoint: checkpoint.as_ref(),
-        settings: StageSettings::default(),
+        settings: StageSettings {
+            per_item_usd: site_input_usd(&model),
+            ..StageSettings::default()
+        },
     };
     let outcome = run_stage(Stage::Calibration, &mut run, mode, &ctx).await;
 

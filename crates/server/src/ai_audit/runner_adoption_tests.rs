@@ -781,3 +781,148 @@ fn every_post_scan_stage_runs_through_run_stage() {
         }
     }
 }
+
+// ── A refused stage 1 window is disclosed (review wave 6, D1) ──────────────────────────────
+
+fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        review: Default::default(),
+        efficiency: crate::efficiency::EfficiencyConfig::default(),
+        max_cost_usd: Some(cap),
+        estimate_hint_usd: hint,
+        fix_model: None,
+        clone_judge_model: None,
+        consensus: false,
+    })
+}
+
+/// A body limit that puts three of the test sites in each submission, measured from the item
+/// that is actually sent so the test does not depend on the prompt's size.
+async fn body_limit_for_three_sites(files: &[(String, String)]) -> usize {
+    let probe = Arc::new(FakeBatch::new());
+    let (_, failed) = calibrate(&seam(&probe), sites(3), files, None, true).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let item = probe.first_items.lock().unwrap()[0].clone();
+    let size = serde_json::to_vec(&item).unwrap().len() + 1;
+    size * 3 + size / 2
+}
+
+/// The run report as the scan would assemble it from what the meter recorded.
+fn report_of(meter: &UsageMeter) -> crate::onboard::ScanReport {
+    let mut report = crate::onboard::ScanReport::gated(&["acme/app".to_string()]);
+    if let Some(record) = meter.cost_cap_record() {
+        report.failed_passes.extend(record.failed_passes());
+    }
+    if let Some(outage) = meter.outage_record() {
+        report
+            .failed_passes
+            .extend(crate::cost_cap::not_run_failed_passes(
+                &outage.not_run_passes,
+                &outage.not_run_stages,
+                "the provider could not be reached",
+            ));
+    }
+    report
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage1_batch_refused_by_the_spend_limit_is_a_failed_pass_and_an_incomplete_run() {
+    let files = files();
+    let limit = body_limit_for_three_sites(&files).await;
+    crate::ai_audit::batch_mode::set_test_body_limit(Some(limit));
+
+    // The estimate says the run fits ($0.02 of a $0.025 limit), so the first window goes out;
+    // its three sites bill $0.03, so the limit refuses the second window.
+    let api = Arc::new(FakeBatch::new());
+    let meter = capped_meter(0.025, Some(0.02));
+    let (out, _) = calibrate(&seam(&api), sites(6), &files, Some(&meter), true).await;
+    crate::ai_audit::batch_mode::set_test_body_limit(None);
+
+    assert_eq!(api.batch_count(), 1, "only the first window was submitted");
+    assert_eq!(out.len(), 6, "no site is dropped");
+    assert_eq!(
+        verified(&out),
+        3,
+        "the three sites of the second window have no verdict"
+    );
+
+    let record = meter.cost_cap_record().expect("a limit was set");
+    assert!(record.stopped_the_run(), "the limit stopped something");
+    let failed = record.failed_passes();
+    assert_eq!(failed.len(), 1, "one failed pass: {failed:?}");
+    assert_eq!(failed[0].repo, "acme/app");
+    assert_eq!(failed[0].class, FailureClass::SpendLimit);
+    assert!(
+        !report_of(&meter).incomplete_reasons().is_empty(),
+        "a run with a window the limit refused is not complete"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage1_batch_refused_by_an_outage_stop_is_recorded_as_not_run() {
+    let files = files();
+    let api = Arc::new(FakeBatch::new());
+    let meter = capped_meter(100.0, None);
+    // The provider refused the credentials: the run is stopped before stage 1 submits.
+    meter
+        .health()
+        .note_failure(FailureClass::AuthOrBilling, "401 invalid x-api-key");
+    let (out, _) = calibrate(&seam(&api), sites(3), &files, Some(&meter), true).await;
+
+    assert_eq!(
+        api.batch_count(),
+        0,
+        "nothing is submitted after an outage stop"
+    );
+    assert_eq!(out.len(), 3, "no site is dropped");
+    let outage = meter.outage_record().expect("the outage tripped");
+    assert_eq!(
+        outage.not_run_stages.len(),
+        1,
+        "stage 1 is recorded as not run: {:?}",
+        outage.not_run_stages
+    );
+    assert_eq!(outage.not_run_stages[0].repo, "acme/app");
+    assert_eq!(outage.not_run_stages[0].class, FailureClass::OutageStop);
+    assert!(!report_of(&meter).incomplete_reasons().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage1_in_real_time_refused_by_an_outage_stop_is_recorded_as_not_run() {
+    let files = files();
+    let llm = Realtime::new();
+    let meter = capped_meter(100.0, None);
+    meter
+        .health()
+        .note_failure(FailureClass::AuthOrBilling, "401 invalid x-api-key");
+    let (out, _) = calibrate(&llm, sites(3), &files, Some(&meter), false).await;
+
+    assert!(
+        llm.asked().is_empty(),
+        "nothing is sent after an outage stop"
+    );
+    assert_eq!(out.len(), 3, "no site is dropped");
+    let outage = meter.outage_record().expect("the outage tripped");
+    assert_eq!(
+        outage.not_run_stages.len(),
+        1,
+        "stage 1 is recorded as not run: {:?}",
+        outage.not_run_stages
+    );
+    assert_eq!(outage.not_run_stages[0].repo, "acme/app");
+    assert!(!report_of(&meter).incomplete_reasons().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_stage1_with_a_generous_limit_and_no_hint_submits_its_first_window() {
+    let files = files();
+    let api = Arc::new(FakeBatch::new());
+    let meter = capped_meter(1_000.0, None);
+    let (out, failed) = calibrate(&seam(&api), sites(5), &files, Some(&meter), true).await;
+
+    assert_eq!(api.batch_count(), 1, "the first window was submitted");
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(verified(&out), 5, "every site got its verdict");
+    let record = meter.cost_cap_record().expect("a limit was set");
+    assert!(!record.stopped_the_run(), "{:?}", record.notes);
+}

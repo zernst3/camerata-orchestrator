@@ -1082,6 +1082,9 @@ async fn run_parallel<S>(
             if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
                 let (class, why) = refusal_class(ctx);
                 book.fail(&work.id, class, why, None);
+                if let Some(m) = ctx.meter {
+                    m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+                }
                 report_progress(ctx, stage, book);
                 continue;
             }
@@ -1537,6 +1540,9 @@ where
             for w in sub {
                 book.fail(&w.id, class, why, None);
             }
+            if let Some(m) = ctx.meter {
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+            }
             continue;
         }
         if let Some(m) = ctx.meter {
@@ -1545,6 +1551,7 @@ where
             {
                 eprintln!("[camerata-server] {why}");
                 m.record_note(why.clone());
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
                 for w in sub {
                     book.fail(&w.id, FailureClass::SpendLimit, &why, None);
                 }
