@@ -1366,7 +1366,7 @@ impl LlmPort for Fixed {
     }
 }
 
-const GOOD_STAGE2_REPLY: &str = r#"{"summary":"s","subgroups":[{"label":"a","cause":"b","members":[0]}],"outliers":[],"escalations":[],"disagreements":[]}"#;
+const GOOD_STAGE2_REPLY: &str = r#"{"summary":"s","subgroups":[{"label":"a","cause":"b","summary":"c","members":[0]}],"outliers":[],"escalations":[],"disagreements":[]}"#;
 
 #[test]
 #[serial_test::serial(process_env)]
