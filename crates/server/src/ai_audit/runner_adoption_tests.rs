@@ -679,3 +679,105 @@ async fn a_lazy_stage_in_parallel_mode_builds_ahead_only_by_a_range() {
     assert!(built.len() >= 5, "built in several ranges: {built:?}");
     assert!(built.iter().all(|n| *n <= 7), "{built:?}");
 }
+
+// ── No stage loop calls the model itself ───────────────────────────────────────────────────
+
+/// The text of the function that starts at `header` in `src`, braces matched.
+fn fn_body<'s>(src: &'s str, header: &str) -> &'s str {
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("no `{header}` in the source"));
+    let open = start + src[start..].find('{').expect("a function body");
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[start..open + i + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces after `{header}`");
+}
+
+/// Source check: every post-scan stage sends its requests through `run_stage`, and no stage loop
+/// calls the model itself. A stage that grows a direct `complete` call, or loses its `run_stage`
+/// call, fails here.
+#[test]
+fn every_post_scan_stage_runs_through_run_stage() {
+    const AUDIT: &str = include_str!("../ai_audit.rs");
+    const CALIBRATION: &str = include_str!("calibration.rs");
+    const GROUP_REVIEW: &str = include_str!("group_review.rs");
+    const DETAIL: &str = include_str!("detail_regen.rs");
+
+    // (stage, the functions that drive it, source they live in)
+    let stages: [(&str, &str, &[&str]); 5] = [
+        (
+            "stage 1 calibration",
+            CALIBRATION,
+            &["pub async fn verify_findings"],
+        ),
+        (
+            "stage 2 group review",
+            GROUP_REVIEW,
+            &["pub async fn review_groups"],
+        ),
+        (
+            "detail regeneration",
+            DETAIL,
+            &["async fn run_detail_round"],
+        ),
+        (
+            "fix generation",
+            AUDIT,
+            &["async fn run_fix_specifics_round"],
+        ),
+        ("alternatives", AUDIT, &["async fn send"]),
+    ];
+    for (stage, src, headers) in stages {
+        for header in headers {
+            let body = fn_body(src, header);
+            assert!(
+                body.contains("run_stage("),
+                "{stage}: `{header}` does not send through run_stage"
+            );
+            for direct in [".complete(", ".complete_streaming("] {
+                assert!(
+                    !body.contains(direct),
+                    "{stage}: `{header}` calls the model directly (`{direct}`)"
+                );
+            }
+        }
+    }
+    // The drivers of the stages that loop over rounds hand each round to the functions above.
+    for (stage, header) in [
+        ("fix generation", "pub async fn generate_fix_specifics"),
+        ("alternatives", "async fn recommend_alternatives"),
+    ] {
+        let body = fn_body(AUDIT, header);
+        for direct in [".complete(", ".complete_streaming(", "run_stage("] {
+            assert!(
+                !body.contains(direct),
+                "{stage}: `{header}` makes model calls itself (`{direct}`); they belong in its round function"
+            );
+        }
+    }
+    // Whole-file check for the stage modules: no non-test code calls the model directly.
+    for (name, src) in [
+        ("calibration.rs", CALIBRATION),
+        ("detail_regen.rs", DETAIL),
+        ("group_review.rs", GROUP_REVIEW),
+    ] {
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for direct in [".complete(", ".complete_streaming("] {
+            assert!(
+                !code.contains(direct),
+                "{name} calls the model directly (`{direct}`)"
+            );
+        }
+    }
+}

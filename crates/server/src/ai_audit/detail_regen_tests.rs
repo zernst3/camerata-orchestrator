@@ -3001,3 +3001,66 @@ async fn the_ledger_flag_counts_reconcile_with_the_flags_on_the_rows() {
     );
     assert_eq!(on_rows.len(), 1);
 }
+
+// ── Resume (design 6.2) ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn detail_regeneration_resumes_from_its_checkpoint_without_asking_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = || {
+        vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}")), {
+            let mut f = finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"));
+            f.line = 49;
+            f
+        }]
+    };
+    let first = RoleLlm::new("{}", Regen::Writes);
+    let (out1, failed) = crate::checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        regenerate_full_details(
+            &first,
+            REPO,
+            input(),
+            &files(),
+            &selected(),
+            &nonce(),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(!first.prompts(Role::Regen).is_empty());
+
+    // The same run after a restart: the finished batch is not asked again, its usage is
+    // reported, and the explanations it wrote are on the rows.
+    let second = RoleLlm::new("{}", Regen::Writes);
+    let meter = UsageMeter::default();
+    let (out2, failed) = crate::checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        regenerate_full_details(
+            &second,
+            REPO,
+            input(),
+            &files(),
+            &selected(),
+            &nonce(),
+            None,
+            Some(&meter),
+        ),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(
+        second.prompts(Role::Regen).is_empty(),
+        "nothing already absorbed is asked again"
+    );
+    let details = |rows: &[Finding]| rows.iter().map(|f| f.detail.clone()).collect::<Vec<_>>();
+    assert_eq!(details(&out2), details(&out1));
+    assert!(out2[0].detail.contains("finding at line 9"));
+    assert_eq!(
+        meter.snapshot().input_tokens,
+        1_000,
+        "the usage is not zero"
+    );
+}

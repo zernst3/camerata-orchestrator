@@ -4253,6 +4253,47 @@ impl AlternativesGaps {
     }
 }
 
+/// One call of the recommendation pass in the shape the shared batch runner takes: a single item.
+struct AlternativesCall<'a> {
+    key: String,
+    req: Option<LlmRequest>,
+    reply: Option<crate::llm::LlmResponse>,
+    feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+    session: String,
+}
+
+impl stage_batch::StageItems for AlternativesCall<'_> {
+    type Id = String;
+
+    fn items(&self) -> Vec<(String, LlmRequest)> {
+        self.req
+            .iter()
+            .map(|r| (self.key.clone(), r.clone()))
+            .collect()
+    }
+
+    // The stage runs its own second try.
+    fn resends(&self) -> bool {
+        false
+    }
+
+    fn absorb(
+        &mut self,
+        _key: &String,
+        resp: crate::llm::LlmResponse,
+    ) -> Result<(), stage_batch::ItemReject> {
+        if let Some((store, key)) = self.feedback {
+            store.append_output_raw(key, &self.session, &resp.text);
+        }
+        self.reply = Some(resp);
+        Ok(())
+    }
+
+    fn retry(&self, _key: &String, _reject: &stage_batch::ItemReject) -> Option<LlmRequest> {
+        None
+    }
+}
+
 /// The inputs every call of the recommendation pass shares, so the first send and a retry build
 /// the same request.
 struct AlternativesAsk<'a> {
@@ -4330,39 +4371,60 @@ impl AlternativesAsk<'_> {
         );
         // Never send what the model's window cannot take (M1).
         request_budget::ensure_request_fits(&req)?;
-        note_request(meter, &req);
-        // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
-        // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
-        // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
-        // fixed 300s deadline with no partial credit for a near-complete run.
-        let resp_result = if let Some((store, key)) = feedback {
-            let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
-            llm.complete_streaming(req, &mut on_delta).await
-        } else {
-            let mut on_delta = |_: &str| {};
-            llm.complete_streaming(req, &mut on_delta).await
+        // One call through the shared batch runner: it checks the spend limit, sends through the
+        // STREAMING transport EVEN WHEN there is no live transcript to feed (the CLI leg's
+        // heartbeat resets on any progress and SALVAGES partial output on a late kill, instead
+        // of the flat path's fixed 300s deadline), records the usage, and writes the reply down
+        // in the run's checkpoint so a restart does not pay for it again.
+        let key = crate::checkpoint::batch_key(session, rules.iter().map(|r| r.rule_id.as_str()));
+        let mut call = AlternativesCall {
+            key: key.clone(),
+            req: Some(req),
+            reply: None,
+            feedback,
+            session: session.to_string(),
         };
-        if let Some((store, key)) = feedback {
+        let checkpoint = crate::checkpoint::stage_checkpoint(&format!("alternatives_{repo}"));
+        let model = stage_model(audit_model);
+        let ctx = stage_batch::StageCtx {
+            repo,
+            model: &model,
+            realtime: llm,
+            batch: None,
+            meter,
+            job: None,
+            checkpoint: checkpoint.as_ref(),
+            settings: stage_batch::StageSettings::default(),
+        };
+        let outcome = stage_batch::run_stage(
+            Stage::Alternatives,
+            &mut call,
+            stage_batch::StageMode::Parallel { max_in_flight: 1 },
+            &ctx,
+        )
+        .await;
+        if let Some((store, skey)) = feedback {
             store.set_status(
-                key,
+                skey,
                 session,
-                if resp_result.is_ok() {
+                if call.reply.is_some() {
                     "done"
                 } else {
                     "blocked"
                 },
             );
         }
-        let resp = match resp_result {
-            Ok(r) => r,
-            Err(e) => {
-                meter_failed(meter, Stage::Alternatives, &e);
-                return Err(e);
-            }
+        let Some(resp) = call.reply.take() else {
+            let failed = outcome.failed.into_iter().next();
+            return Err(match failed {
+                Some(f) => {
+                    let mut failure = camerata_llm::failure::LlmCallFailure::new(f.class, f.reason);
+                    failure.attempts = f.attempts;
+                    anyhow::Error::new(failure)
+                }
+                None => anyhow::anyhow!("the recommendation call did not run"),
+            });
         };
-        if let Some(m) = meter {
-            m.record_stage(Stage::Alternatives, &resp);
-        }
         Ok(resp)
     }
 }
@@ -5445,112 +5507,73 @@ impl FixLedger {
     }
 }
 
-/// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
-/// [`generate_fix_specifics`] so a normal `FIX_BATCH_SIZE`-batched round and the final
-/// single-finding retry share IDENTICAL request-building, streaming, and self-check logic —
-/// the only axis that varies between callers is `batch_size`). Mutates `findings[idx]
-/// .fix_specific` in place for anything that validates; returns the subset of `pending` that
-/// still needs another round. A transport/timeout failure on one chunk re-queues only THAT
-/// chunk's findings, never the whole still-pending set.
-#[allow(clippy::too_many_arguments)]
-async fn run_fix_specifics_round(
-    llm: &dyn LlmPort,
-    repo: &str,
-    system: &str,
-    nonce: &crate::prompt_frame::FrameNonce,
-    fix_model: Option<&str>,
-    meter: Option<&UsageMeter>,
-    corpus: Option<&camerata_rules::RuleSet>,
-    files: &[(String, String)],
-    repo_names: &RepoNames<'_>,
-    findings: &mut [Finding],
-    feedback: &mut std::collections::HashMap<usize, String>,
-    wording: &mut FixWording,
-    pending: &[usize],
-    batch_size: usize,
-    ledger: &mut FixLedger,
-    trail: &mut StageTrail,
-    second_try: bool,
-) -> Vec<usize> {
-    let mut still_pending = Vec::new();
-    // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent streamed
-    // call, so a failure/timeout in ONE chunk only re-queues ITS findings for the next
-    // attempt, never the whole still-pending set. `pending.chunks(..)` yields exactly one
-    // chunk (the whole set) when `batch_size >= pending.len()`, so the request/self-check
-    // shape below is unchanged from before this fix in that case.
-    for batch in pending.chunks(batch_size.max(1)) {
-        // SPEND CAP, between batches: a batch the cap refuses is re-queued like a failed one
-        // (so its findings still reach the authored-remediation fallback) and the stage is
-        // recorded as stopped part way.
-        let _permit = match admit_stage(meter, repo, STAGE_FIX).await {
-            Err(CapReached) => {
-                ledger.miss(batch, FixMiss::CapStopped);
-                still_pending.extend(batch.iter().copied());
-                continue;
-            }
-            Ok(permit) => permit,
-        };
-        // A finding that already has a fix turned down by a check is asked again in this call:
-        // its one re-ask, whose answer (or silence) settles it.
-        let reasking: Vec<bool> = batch
+/// One batch of a fix round: the findings it asks about and what its reply is read against.
+struct FixBatch {
+    batch: Vec<usize>,
+    ids: Vec<String>,
+    /// Per finding: it already has a fix turned down by a check, so this call is its one re-ask.
+    reasking: Vec<bool>,
+    request_key: String,
+    req: LlmRequest,
+}
+
+/// The calls of one fix round in the shape the shared batch runner takes: one item per batch,
+/// named by the round and the site keys of the findings it covers. The stage's own state (the
+/// findings, the ledger, the wording replies) is carried here, so reading a reply is the same
+/// code whether the reply is fresh or replayed from a checkpoint.
+struct FixRound<'a> {
+    llm: &'a dyn LlmPort,
+    meter: Option<&'a UsageMeter>,
+    files: &'a [(String, String)],
+    repo_names: &'a RepoNames<'a>,
+    findings: &'a mut [Finding],
+    feedback: &'a mut std::collections::HashMap<usize, String>,
+    wording: &'a mut FixWording,
+    ledger: &'a mut FixLedger,
+    batches: std::collections::BTreeMap<String, FixBatch>,
+    order: Vec<String>,
+    still_pending: Vec<usize>,
+}
+
+impl stage_batch::StageItems for FixRound<'_> {
+    type Id = String;
+
+    fn items(&self) -> Vec<(String, LlmRequest)> {
+        self.order
             .iter()
-            .map(|i| wording.replies.contains_key(i))
-            .collect();
-        // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
-        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
-        for &i in batch {
-            let id = detail_regen::opaque_id(repo, i, &findings[i], &ids);
-            ids.push(id);
-        }
-        let prompt = {
-            let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
-            let local_feedback: std::collections::HashMap<usize, String> = batch
-                .iter()
-                .enumerate()
-                .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
-                .collect();
-            format!(
-                "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, &ids, files, corpus, &local_feedback, nonce)
-            )
+            .map(|k| (k.clone(), self.batches[k].req.clone()))
+            .collect()
+    }
+
+    // The stage runs its own rounds and its own end-of-run second try.
+    fn resends(&self) -> bool {
+        false
+    }
+
+    fn absorb(
+        &mut self,
+        key: &String,
+        resp: crate::llm::LlmResponse,
+    ) -> Result<(), stage_batch::ItemReject> {
+        let Some(bctx) = self.batches.get(key) else {
+            return Err(stage_batch::ItemReject::new(
+                "the reply names a batch this round did not ask",
+            ));
         };
-        let req = with_stage_effort(
-            LlmRequest::new(prompt)
-                .with_system(system.to_string())
-                .with_max_tokens(fix_max_tokens(batch.len()))
-                .with_response_schema(reply_schemas::fix_reply_schema(&ids))
-                .with_model(stage_model(fix_model)),
-            Stage::FixGeneration,
-        );
-        // Routed through the STREAMING transport (not the flat `complete`) so a large
-        // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
-        // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
-        // transcript sink to feed.
-        let mut on_delta = |_: &str| {};
-        ledger.sent(batch);
-        let request_key = crate::run_store::journal::request_key(&req);
-        note_request(meter, &req);
-        let resp = match llm.complete_streaming(req, &mut on_delta).await {
-            Ok(r) => r,
-            // Transport/timeout failure: nothing to validate for this chunk this round.
-            // Re-queue exactly this chunk's findings so the next round retries them (or,
-            // on the last round, the instantiated-fallback below picks them up) — a
-            // failure never re-queues findings OUTSIDE this chunk.
-            Err(e) => {
-                meter_failed(meter, Stage::FixGeneration, &e);
-                trail.note_error(&e, second_try);
-                if second_try_allowed(&e, meter) {
-                    ledger.retryable_at_end(batch);
-                }
-                ledger.miss(batch, FixMiss::TransportFailed);
-                still_pending.extend(batch.iter().copied());
-                continue;
-            }
-        };
+        let batch = &bctx.batch[..];
+        let ids = &bctx.ids;
+        let reasking = &bctx.reasking;
+        let request_key = &bctx.request_key;
+        let findings = &mut *self.findings;
+        let files = self.files;
+        let repo_names = self.repo_names;
+        let meter = self.meter;
+        let llm = self.llm;
+        let still_pending = &mut self.still_pending;
+        let feedback = &mut *self.feedback;
+        let wording = &mut *self.wording;
+        let ledger = &mut *self.ledger;
         ledger.answered(batch);
-        if let Some(m) = meter {
-            m.record_stage(Stage::FixGeneration, &resp);
-        }
         let parsed = parse_fix_specifics(&resp.text);
         // Why each fix of THIS reply was turned down, named by place; the reply carries them.
         let mut turned_down: Vec<String> = Vec::new();
@@ -5627,7 +5650,184 @@ async fn run_fix_specifics_round(
                 );
             }
         }
+        Ok(())
     }
+
+    fn retry(&self, _key: &String, _reject: &stage_batch::ItemReject) -> Option<LlmRequest> {
+        None
+    }
+}
+
+/// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
+/// [`generate_fix_specifics`] so a normal `FIX_BATCH_SIZE`-batched round and the final
+/// single-finding retry share IDENTICAL request-building, sending, and self-check logic -
+/// the only axis that varies between callers is `batch_size`). The batches are sent through the
+/// shared batch runner (several at once); `round` names the round for the checkpoint, so a
+/// restart replays a round's finished batches and asks the rest. Mutates `findings[idx]
+/// .fix_specific` in place for anything that validates; returns the subset of `pending` that
+/// still needs another round. A transport/timeout failure on one chunk re-queues only THAT
+/// chunk's findings, never the whole still-pending set.
+#[allow(clippy::too_many_arguments)]
+async fn run_fix_specifics_round(
+    llm: &dyn LlmPort,
+    repo: &str,
+    system: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
+    fix_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    files: &[(String, String)],
+    repo_names: &RepoNames<'_>,
+    findings: &mut [Finding],
+    feedback: &mut std::collections::HashMap<usize, String>,
+    wording: &mut FixWording,
+    pending: &[usize],
+    batch_size: usize,
+    round: &str,
+    ledger: &mut FixLedger,
+    trail: &mut StageTrail,
+    second_try: bool,
+) -> Vec<usize> {
+    let site_keys = crate::inspections::site_keys_of(findings);
+    let mut batches = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) - each is an independent call, so a
+    // failure/timeout in ONE chunk only re-queues ITS findings for the next attempt, never the
+    // whole still-pending set. `pending.chunks(..)` yields exactly one chunk (the whole set) when
+    // `batch_size >= pending.len()`, so the request/self-check shape below is unchanged from
+    // before this fix in that case.
+    for batch in pending.chunks(batch_size.max(1)) {
+        // A finding that already has a fix turned down by a check is asked again in this call:
+        // its one re-ask, whose answer (or silence) settles it.
+        let reasking: Vec<bool> = batch
+            .iter()
+            .map(|i| wording.replies.contains_key(i))
+            .collect();
+        // An opaque id per finding of the batch: the reply addresses a fix by it, not by position.
+        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
+        for &i in batch {
+            let id = detail_regen::opaque_id(repo, i, &findings[i], &ids);
+            ids.push(id);
+        }
+        let prompt = {
+            let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
+            let local_feedback: std::collections::HashMap<usize, String> = batch
+                .iter()
+                .enumerate()
+                .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
+                .collect();
+            format!(
+                "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
+                build_fix_specific_block(&refs, &ids, files, corpus, &local_feedback, nonce)
+            )
+        };
+        let req = with_stage_effort(
+            LlmRequest::new(prompt)
+                .with_system(system.to_string())
+                .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_response_schema(reply_schemas::fix_reply_schema(&ids))
+                .with_model(stage_model(fix_model)),
+            Stage::FixGeneration,
+        );
+        let request_key = crate::run_store::journal::request_key(&req);
+        let key = crate::checkpoint::batch_key(round, batch.iter().map(|&i| site_keys[i].as_str()));
+        order.push(key.clone());
+        batches.insert(
+            key,
+            FixBatch {
+                batch: batch.to_vec(),
+                ids,
+                reasking,
+                request_key,
+                req,
+            },
+        );
+    }
+    let mut stage = FixRound {
+        llm,
+        meter,
+        files,
+        repo_names,
+        findings,
+        feedback,
+        wording,
+        ledger,
+        batches,
+        order,
+        still_pending: Vec::new(),
+    };
+    let checkpoint = crate::checkpoint::stage_checkpoint(&format!("fix_{repo}"));
+    let model = stage_model(fix_model);
+    let ctx = stage_batch::StageCtx {
+        repo,
+        model: &model,
+        realtime: llm,
+        batch: None,
+        meter,
+        job: None,
+        checkpoint: checkpoint.as_ref(),
+        settings: stage_batch::StageSettings::default(),
+    };
+    let outcome = stage_batch::run_stage(
+        Stage::FixGeneration,
+        &mut stage,
+        stage_batch::StageMode::Parallel {
+            max_in_flight: PARALLEL_CONCURRENCY,
+        },
+        &ctx,
+    )
+    .await;
+    // What the runner could not get a reply for: those findings stay pending. The spend limit
+    // and the outage stop record themselves on the meter; any other failure is a transport
+    // failure the end-of-run second try may send again.
+    let mut still_pending = std::mem::take(&mut stage.still_pending);
+    let outage = meter.is_some_and(UsageMeter::outage_stopped);
+    // A batch the spend limit or the outage stop refused, or the job cancelled, was never sent.
+    let never_sent: std::collections::BTreeSet<&String> = outcome
+        .failed
+        .iter()
+        .filter(|f| matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
+        .map(|f| &f.id)
+        .chain(outcome.cancelled.iter().flat_map(|c| c.not_sent.iter()))
+        .collect();
+    for (key, bctx) in &stage.batches {
+        if !never_sent.contains(key) {
+            stage.ledger.sent(&bctx.batch);
+        }
+    }
+    for f in &outcome.failed {
+        let Some(bctx) = stage.batches.get(&f.id) else {
+            continue;
+        };
+        still_pending.extend(bctx.batch.iter().copied());
+        if matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop) {
+            stage.ledger.miss(&bctx.batch, FixMiss::CapStopped);
+            continue;
+        }
+        let attempts: Vec<AttemptRecord> = f
+            .attempts
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                r.second_try = second_try;
+                r
+            })
+            .collect();
+        trail.note_failed_item(f.class, &f.reason, &attempts);
+        if f.class.is_retried_at_end() && !outage {
+            stage.ledger.retryable_at_end(&bctx.batch);
+        }
+        stage.ledger.miss(&bctx.batch, FixMiss::TransportFailed);
+    }
+    if let Some(cancelled) = &outcome.cancelled {
+        for id in &cancelled.not_sent {
+            if let Some(bctx) = stage.batches.get(id) {
+                still_pending.extend(bctx.batch.iter().copied());
+            }
+        }
+    }
+    still_pending.sort_unstable();
+    still_pending.dedup();
     still_pending
 }
 
@@ -5790,7 +5990,7 @@ pub async fn generate_fix_specifics(
     let mut feedback: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut wording = FixWording::default();
 
-    for _attempt in 0..=MAX_FIX_REGENERATIONS {
+    for attempt in 0..=MAX_FIX_REGENERATIONS {
         if pending.is_empty() {
             break;
         }
@@ -5809,6 +6009,7 @@ pub async fn generate_fix_specifics(
             &mut wording,
             &pending,
             FIX_BATCH_SIZE,
+            &format!("r{attempt}"),
             &mut ledger,
             &mut trail,
             false,
@@ -5835,6 +6036,7 @@ pub async fn generate_fix_specifics(
             &mut wording,
             &pending,
             1,
+            "solo",
             &mut ledger,
             &mut trail,
             false,
@@ -5879,6 +6081,7 @@ pub async fn generate_fix_specifics(
             &mut wording,
             &retry,
             1,
+            "second",
             &mut ledger,
             &mut trail,
             true,
@@ -21715,6 +21918,103 @@ mod tests {
         );
         assert!(!out[0].needs_review);
         assert_eq!(meter.snapshot().calls, 1);
+    }
+
+    // ── Resume (design 6.2): fix generation and alternatives keep a checkpoint per run ───────
+
+    #[tokio::test]
+    async fn fix_generation_resumes_from_its_checkpoint_without_asking_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![(
+            "app/auth/signout/route.ts".to_string(),
+            "export function safeInternalPath(p: string) {}\nexport function handler() { \
+             rawRedirect(p) }"
+                .to_string(),
+        )];
+        let mk = || {
+            fx(
+                "SEC-OPEN-REDIRECT-1",
+                "app/auth/signout/route.ts",
+                2,
+                "rawRedirect(p) is called with an unvalidated path \u{2014} an open redirect.",
+                "rawRedirect(p)",
+            )
+        };
+        let reply = r#"{"fixes":[{"index":0,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts."}]}"#;
+
+        let first = SequencedCompleter::new(&[reply]);
+        let (out1, _) = crate::checkpoint::with_run_checkpoints(
+            Some(dir.path().to_path_buf()),
+            generate_fix_specifics(&first, "o/r", vec![mk()], &files, None, None, None),
+        )
+        .await;
+        assert_eq!(first.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // The same run after a restart: the finished batch is not asked again, its usage is
+        // reported, and the fix it produced is on the row.
+        let second = SequencedCompleter::new(&[reply]);
+        let meter = UsageMeter::default();
+        let (out2, failed) = crate::checkpoint::with_run_checkpoints(
+            Some(dir.path().to_path_buf()),
+            generate_fix_specifics(&second, "o/r", vec![mk()], &files, None, Some(&meter), None),
+        )
+        .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(
+            second.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "nothing already absorbed is asked again"
+        );
+        assert_eq!(out2[0].fix_specific, out1[0].fix_specific);
+        assert!(out2[0].fix_specific.is_some());
+        assert_eq!(meter.snapshot().input_tokens, 100, "the usage is not zero");
+    }
+
+    #[tokio::test]
+    async fn alternatives_resume_from_their_checkpoint_without_asking_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp_text = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","applicable":true,"evidence":"a.rs:1"}]}"#;
+        let files = vec![("a.rs".to_string(), "fn f() {}".to_string())];
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let run = |completer: SequencedCompleter, meter: UsageMeter| {
+            let files = files.clone();
+            let alt = alt.clone();
+            let path = dir.path().to_path_buf();
+            async move {
+                let res = crate::checkpoint::with_run_checkpoints(
+                    Some(path),
+                    recommend_alternatives(
+                        &completer,
+                        "me/api",
+                        &files,
+                        &files,
+                        &crate::prompt_frame::FrameNonce::generate(),
+                        &[alt],
+                        None,
+                        None,
+                        Some(&meter),
+                    ),
+                )
+                .await;
+                (res, completer, meter)
+            }
+        };
+        let (first, c1, _) =
+            run(SequencedCompleter::new(&[resp_text]), UsageMeter::default()).await;
+        assert_eq!(c1.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let (second, c2, meter) =
+            run(SequencedCompleter::new(&[resp_text]), UsageMeter::default()).await;
+        assert_eq!(
+            c2.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "nothing already absorbed is asked again"
+        );
+        assert_eq!(
+            second.unwrap().0.len(),
+            first.unwrap().0.len(),
+            "the same recommendations"
+        );
+        assert_eq!(meter.snapshot().input_tokens, 100, "the usage is not zero");
     }
 
     /// A row that states a convention (or an assessment gap) has no defect to fix. D2: the fix

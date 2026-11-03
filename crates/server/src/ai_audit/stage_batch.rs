@@ -124,6 +124,14 @@ pub trait StageItems {
         false
     }
 
+    /// Whether the runner sends an item once more after a failure sending again can fix (a
+    /// transport failure, a row a batch left out). The default is yes. A stage that runs its own
+    /// rounds and its own end-of-run second try (detail regeneration, fix generation) says no, so
+    /// its tries are counted by the stage and not twice.
+    fn resends(&self) -> bool {
+        true
+    }
+
     /// How many requests the runner may hold built at once. `0`, the default, is an EAGER stage:
     /// it lists every request in [`Self::items`] and the runner keeps them all. A stage with
     /// thousands of items (stage 1 at 30,000 sites) overrides this together with [`Self::ids`]
@@ -326,6 +334,8 @@ struct Book<Id> {
     batches_cancelled: Vec<String>,
     /// Items neither absorbed nor failed when the stage ended cancelled.
     not_sent: Vec<Id>,
+    /// Whether a failure sending again can fix is sent once more by the runner.
+    resends: bool,
 }
 
 /// The most attempt records one failed part keeps (a long rate limit would otherwise grow it for
@@ -347,6 +357,7 @@ impl<Id: Clone + Ord> Book<Id> {
             cancelled: false,
             batches_cancelled: Vec::new(),
             not_sent: Vec::new(),
+            resends: true,
         }
     }
 
@@ -408,6 +419,7 @@ where
     S: StageItems + Send,
 {
     let mut book: Book<S::Id> = Book::new();
+    book.resends = s.resends();
     let lazy = s.build_range() > 0;
     let mut by_key: BTreeMap<String, S::Id> = BTreeMap::new();
     let mut reqs: BTreeMap<S::Id, Arc<LlmRequest>> = BTreeMap::new();
@@ -869,7 +881,7 @@ fn resend_or_fail<Id: Clone + Ord>(
     }
     book.note_attempts(&work.id, attempts);
     let outage = ctx.meter.is_some_and(UsageMeter::outage_stopped);
-    if class.is_retried_at_end() && !book.resent.contains(&work.id) && !outage {
+    if book.resends && class.is_retried_at_end() && !book.resent.contains(&work.id) && !outage {
         book.resent.insert(work.id.clone());
         return Some(work.clone());
     }

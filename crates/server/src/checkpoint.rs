@@ -296,6 +296,26 @@ pub async fn with_run_checkpoints<F: std::future::Future>(
     }
 }
 
+/// The checkpoint key of one batch of a stage's round: the round, then a digest of the site keys
+/// of the findings it covers. The same findings asked in a later round (a smaller batch, a
+/// re-ask) have a key of their own, so a restart replays a round's finished batches and never
+/// mistakes a later round for an earlier one.
+pub fn batch_key<'a>(round: &str, site_keys: impl Iterator<Item = &'a str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for key in site_keys {
+        h.update((key.len() as u64).to_le_bytes());
+        h.update(key.as_bytes());
+    }
+    let digest: String = h
+        .finalize()
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{round}:{digest}")
+}
+
 /// The checkpoint of the stage named `stage` (a file stem: a stage on two repos uses two names)
 /// in the run in scope, or `None` outside a run.
 pub fn stage_checkpoint(stage: &str) -> Option<StageCheckpoint> {
