@@ -32,6 +32,41 @@ fn with_summary(
     report.seal()
 }
 
+/// The SQL sub-group with `label` and `cause` as the group reviewer wrote them.
+fn with_label_and_cause(label: &str, cause: &str) -> crate::onboard::SealedReport {
+    let mut report = mixed_sealed().into_inner();
+    let tree = report.tree.as_mut().expect("a tree");
+    let node = tree
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
+        .expect("the SQL sub-group");
+    node.label = label.to_string();
+    node.cause = Some(cause.to_string());
+    report.seal()
+}
+
+/// Every client-visible text of a released package: data.json, each text entry, every workbook
+/// string.
+fn client_text_of(package: crate::release_gate::ProductPackage) -> (String, Value) {
+    let mut text = package.data_json.clone();
+    let entries = read_zip_entries(
+        &crate::release_gate::release(package)
+            .expect("a flagged text is a flag, not a hold")
+            .bytes,
+    )
+    .unwrap();
+    for (name, bytes) in &entries {
+        if name.ends_with(".xlsx") {
+            text.push_str(&crate::release_gate::xlsx_strings(bytes).unwrap().join("\n"));
+        } else if !name.ends_with(".pdf") {
+            text.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
+    let findings = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    (text, findings)
+}
+
 #[test]
 fn findings_json_carries_the_tree_with_counts_from_the_rows() {
     let sealed = with_summary(
@@ -152,4 +187,68 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
             row[flags_col]
         );
     }
+}
+
+#[test]
+fn a_label_or_cause_with_a_methodology_leak_reaches_no_row_and_no_sheet() {
+    // The marker rides on every row of the sub-group (findings.json, csv/, json/, the findings
+    // sheets, the Sites sheet) unless the label and the cause pass the same checks the plan, the
+    // tree, the tickets and the PDF apply.
+    for (label, cause, what) in [
+        (
+            "Raw SQL in handlers",
+            "LEAK-MARKER the scanner flagged these as regex-scan hits.",
+            "cause",
+        ),
+        (
+            "LEAK-MARKER the scanner flagged these as regex-scan hits.",
+            "the query is built from a request value",
+            "label",
+        ),
+    ] {
+        let sealed = with_label_and_cause(label, cause);
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let (text, findings) = client_text_of(package_of(&reviewed, &client_options()));
+        assert!(
+            !text.contains("LEAK-MARKER"),
+            "{what}: a client file carries the text"
+        );
+        // The rows of the sub-group still name their group, with the checked texts.
+        let rows: Vec<&Value> = findings["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["group"] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
+            .collect();
+        assert!(!rows.is_empty(), "{what}: the sub-group has rows");
+        for row in rows {
+            assert_ne!(row["sub_group"], "", "{what}: a label is always printed");
+            assert!(
+                !row["sub_group"].as_str().unwrap().contains("LEAK-MARKER"),
+                "{what}: {row}"
+            );
+            if what == "cause" {
+                assert_eq!(row["sub_group_cause"], "", "{what}: {row}");
+            }
+        }
+    }
+
+    // A text that passes is printed as written.
+    let sealed = with_label_and_cause(
+        "Raw SQL in handlers",
+        "the query is built from a request value",
+    );
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let (_, findings) = client_text_of(package_of(&reviewed, &client_options()));
+    let row = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["group"] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
+        .unwrap();
+    assert_eq!(row["sub_group"], "Raw SQL in handlers");
+    assert_eq!(
+        row["sub_group_cause"],
+        "the query is built from a request value"
+    );
 }

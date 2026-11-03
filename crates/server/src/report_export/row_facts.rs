@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use camerata_api_types::review::EscalationState;
 use serde::Serialize;
 
+use super::prose_checks::client_text;
 use super::ReviewedReport;
 use crate::onboard::Finding;
-use crate::review_tree::TreeNode;
 
 /// A short, printable name for a site key. The key itself holds NUL separators and a repo, path
 /// and fingerprint; this is its SHA-256, first 16 hex digits, the same for the same site on every
@@ -103,18 +103,32 @@ impl InternalTriage {
 /// Look-ups over a reviewed report, built once per export.
 pub struct RowFactsIndex<'a> {
     reviewed: &'a ReviewedReport,
-    nodes: HashMap<&'a str, &'a TreeNode>,
+    /// Each node's label and cause as client output may carry them, checked once.
+    texts: HashMap<&'a str, (String, String)>,
     ids: HashMap<&'a str, String>,
 }
 
 impl<'a> RowFactsIndex<'a> {
     pub fn new(reviewed: &'a ReviewedReport) -> Self {
         let report = reviewed.report();
-        let nodes = report
+        // The label and the cause are model prose: every row carries them, so they pass the same
+        // checks the plan, the tree, the tickets and the PDF apply (a withheld label reads
+        // "Sub-group", a withheld cause is empty).
+        let texts = report
             .tree
-            .as_ref()
-            .map(|t| t.nodes.iter().map(|n| (n.id.as_str(), n)).collect())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|t| &t.nodes)
+            .map(|n| {
+                let label = client_text("label", &n.label);
+                let cause = client_text("cause", n.cause.as_deref().unwrap_or_default());
+                let label = if label.flags.is_empty() {
+                    label.text
+                } else {
+                    "Sub-group".to_string()
+                };
+                (n.id.as_str(), (label, cause.text))
+            })
+            .collect();
         let ids = report
             .findings
             .iter()
@@ -122,7 +136,7 @@ impl<'a> RowFactsIndex<'a> {
             .collect();
         Self {
             reviewed,
-            nodes,
+            texts,
             ids,
         }
     }
@@ -130,7 +144,8 @@ impl<'a> RowFactsIndex<'a> {
     /// The facts of `f`.
     pub fn facts(&self, f: &Finding) -> RowFacts {
         let group = f.group_path.get(2).cloned().unwrap_or_default();
-        let node = self.nodes.get(group.as_str());
+        let (sub_group, sub_group_cause) =
+            self.texts.get(group.as_str()).cloned().unwrap_or_default();
         let merged_into = super::overlay::merged_target(f)
             .map(|target| {
                 self.ids
@@ -146,8 +161,8 @@ impl<'a> RowFactsIndex<'a> {
                 .review_level(f)
                 .map(camerata_api_types::review::ReviewLevel::as_wire)
                 .unwrap_or_default(),
-            sub_group: node.map(|n| n.label.clone()).unwrap_or_default(),
-            sub_group_cause: node.and_then(|n| n.cause.clone()).unwrap_or_default(),
+            sub_group,
+            sub_group_cause,
             group,
             escalated: f.review.escalation_state == EscalationState::Escalated,
             merged_into,
