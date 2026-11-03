@@ -151,5 +151,5 @@ async fn the_verdict_cache_key_does_not_depend_on_the_token() {
     )
     .await;
     assert_eq!(second.call_count(), 0, "the cache answered");
-    assert_eq!(outcome.findings.len(), 1);
+    assert_eq!(outcome.findings.len(), 2, "one cluster, two copies");
 }

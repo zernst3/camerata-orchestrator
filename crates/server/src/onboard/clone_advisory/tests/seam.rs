@@ -16,7 +16,8 @@ async fn same_decision_verdict_becomes_a_high_finding_when_copies_disagree() {
     let stub = StubJudge::answering("same_decision", "the premium discount calculation");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
 
-    assert_eq!(outcome.findings.len(), 1, "{outcome:#?}");
+    // One candidate in two files: one row per site.
+    assert_eq!(outcome.findings.len(), 2, "{outcome:#?}");
     let f = &outcome.findings[0];
     assert_eq!(f.severity, "high");
     assert_eq!(f.confidence.as_deref(), Some("high"));
@@ -31,10 +32,14 @@ async fn same_decision_verdict_becomes_a_high_finding_when_copies_disagree() {
     assert_eq!(f.path, "src/cart/total.ts");
     assert_eq!(f.line, 2);
     assert_eq!(f.snippet, "export function applyDiscount(order, user) {");
-    // Every site: the first is the row, the rest are also_locations.
-    assert_eq!(f.also_locations.len(), 1);
-    assert_eq!(f.also_locations[0].path, "src/checkout/summary.ts");
-    assert!(!f.also_locations[0].consequence);
+    // Every site is its own row, with its own place and quote.
+    let other = &outcome.findings[1];
+    assert!(f.also_locations.is_empty() && other.also_locations.is_empty());
+    assert_eq!(other.path, "src/checkout/summary.ts");
+    assert_eq!(other.line, 2);
+    assert_eq!(other.snippet, "export function quoteTotal(order, user) {");
+    assert_eq!(other.detail, f.detail, "the shared text is the same");
+    assert_eq!(other.severity, f.severity);
     // The message states the facts: both values, every path, and the judge's clause as an
     // appearance.
     assert!(f.detail.contains("do not agree"), "{}", f.detail);
@@ -208,7 +213,11 @@ async fn a_failed_batch_loses_only_that_batch() {
         (c.found, c.judged, c.confirmed, c.unjudged),
         (40, 24, 24, 16)
     );
-    assert_eq!(outcome.findings.len(), 24);
+    assert_eq!(
+        outcome.findings.len(),
+        48,
+        "24 candidates of two sites each"
+    );
     assert_eq!(
         outcome.not_assessed.len(),
         1,
@@ -258,7 +267,7 @@ async fn a_verdict_word_outside_the_vocabulary_never_ships() {
     // The affirmative word is accepted in any case and with surrounding spaces.
     let stub = StubJudge::answering(" Same_Decision ", "the x");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
-    assert_eq!(outcome.findings.len(), 1);
+    assert_eq!(outcome.findings.len(), 2);
 }
 
 #[tokio::test]
@@ -287,7 +296,7 @@ async fn text_around_the_json_and_fences_are_tolerated() {
         ))
     });
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
-    assert_eq!(outcome.findings.len(), 1);
+    assert_eq!(outcome.findings.len(), 2);
 }
 
 #[tokio::test]
@@ -389,7 +398,11 @@ async fn over_cap_candidates_are_counted_and_disclosed_not_judged() {
         2,
         "32 judged candidates are two batches; the 7 are never sent"
     );
-    assert_eq!(outcome.findings.len(), 32);
+    assert_eq!(
+        outcome.findings.len(),
+        64,
+        "32 candidates of two sites each"
+    );
     // Disclosed: one row, with the count and the limit.
     assert_eq!(outcome.not_assessed.len(), 1);
     let row = &outcome.not_assessed[0];
@@ -566,10 +579,15 @@ async fn confirmed_findings_are_ranked_and_the_judge_input_lists_the_facts() {
     ]);
     let stub = StubJudge::answering("same_decision", "the thing");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
-    assert_eq!(outcome.findings.len(), 2);
-    // Disagreeing family first (the shipping weights differ), then the agreeing one.
-    assert_eq!(outcome.findings[0].severity, "high");
-    assert_eq!(outcome.findings[1].severity, "medium");
+    assert_eq!(outcome.findings.len(), 4, "two families of two sites each");
+    // Disagreeing family first (the shipping weights differ), then the agreeing one; each
+    // family's rows stay together.
+    let severities: Vec<&str> = outcome
+        .findings
+        .iter()
+        .map(|f| f.severity.as_str())
+        .collect();
+    assert_eq!(severities, ["high", "high", "medium", "medium"]);
     let sent = stub.request(0).prompt;
     assert!(sent.contains("\"agree\":false") && sent.contains("\"agree\":true"));
     assert!(

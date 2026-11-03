@@ -264,9 +264,10 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
     )
     .await;
 
-    // The confirmed decision ships, high because the rates differ, with both sites and values.
+    // The confirmed decision ships as one row per site, high because the rates differ, with both
+    // sites and values.
     let single = under(&report, SINGLE);
-    assert_eq!(single.len(), 1, "{:#?}", report.findings);
+    assert_eq!(single.len(), 2, "{:#?}", report.findings);
     let f = single[0];
     assert!(matches!(f.kind, Some(FindingKind::Defect)));
     assert_eq!(f.severity, "high");
@@ -278,7 +279,10 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
         f.detail
     );
     assert!(f.detail.contains("src/cart/total.ts") && f.detail.contains("src/checkout/summary.ts"));
-    assert_eq!(f.also_locations.len() + 1, 2);
+    assert!(single.iter().all(|r| r.also_locations.is_empty()));
+    let mut paths: Vec<&str> = single.iter().map(|r| r.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["src/cart/total.ts", "src/checkout/summary.ts"]);
     // The naming candidate was judged a different concept: no defect, and no row of any kind.
     // Nothing client-facing claims an absence (orchestrator decision D1); the ledger below
     // still credits the rule as having run.
@@ -296,7 +300,7 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
             .unwrap_or_else(|| panic!("{id} in the ledger"));
         assert!(entry.ran, "{id}: {entry:?}");
     }
-    assert_eq!(report.ledger.rule(SINGLE).unwrap().findings_emitted, 1);
+    assert_eq!(report.ledger.rule(SINGLE).unwrap().findings_emitted, 2);
 
     // Provenance names the judge model: the fast tier, not the audit model.
     assert_eq!(
@@ -429,8 +433,8 @@ async fn an_unchanged_rescan_reuses_the_cached_verdicts_and_makes_no_judge_call(
     );
     assert_eq!(
         under(&report2, SINGLE).len(),
-        1,
-        "the same finding, from the cached verdict"
+        2,
+        "the same rows, from the cached verdict"
     );
     assert_eq!(
         under(&report2, SINGLE)[0].detail,
@@ -840,7 +844,7 @@ async fn ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_
     .await;
 
     let ui = under(&report, UI);
-    assert_eq!(ui.len(), 1, "{:#?}", report.findings);
+    assert_eq!(ui.len(), 2, "one row per component: {:#?}", report.findings);
     let f = ui[0];
     assert!(matches!(f.kind, Some(FindingKind::Defect)));
     assert_eq!(f.severity, "low");
@@ -861,7 +865,7 @@ async fn ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_
         f.detail
     );
     assert!(f.detail.contains("apart from variable names and strings"));
-    assert_eq!(f.also_locations.len() + 1, 2);
+    assert!(ui.iter().all(|r| r.also_locations.is_empty()));
     assert!(!f.detail.contains('\u{2014}'));
     assert_eq!(
         f.captures.get("mechanism").map(String::as_str),
@@ -879,7 +883,7 @@ async fn ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_
     // The ledger credits the rule; the transcript has its own session; the verdict is cached.
     let entry = report.ledger.rule(UI).unwrap();
     assert!(entry.ran, "{entry:?}");
-    assert_eq!(entry.findings_emitted, 1);
+    assert_eq!(entry.findings_emitted, 2);
     assert!(store
         .get("scan-key")
         .iter()

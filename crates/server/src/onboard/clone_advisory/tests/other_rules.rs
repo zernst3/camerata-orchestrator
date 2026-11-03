@@ -65,7 +65,8 @@ async fn same_concept_verdict_becomes_a_low_finding_listing_both_names() {
     let all = naming_repo("USD", "USD");
     let stub = StubJudge::answering("same_concept", "the money formatter");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[NAMING])).await;
-    assert_eq!(outcome.findings.len(), 1, "{outcome:#?}");
+    // One candidate in two files: one row per site.
+    assert_eq!(outcome.findings.len(), 2, "{outcome:#?}");
     let f = &outcome.findings[0];
     assert_eq!(f.severity, "low");
     assert_eq!(f.rule_id, NAMING.id());
@@ -82,7 +83,9 @@ async fn same_concept_verdict_becomes_a_low_finding_listing_both_names() {
         f.detail
     );
     assert!(f.detail.contains("they currently agree"), "{}", f.detail);
-    assert_eq!(f.also_locations.len(), 1);
+    assert!(outcome.findings.iter().all(|r| r.also_locations.is_empty()));
+    let paths: Vec<&str> = outcome.findings.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, ["lib/format.ts", "utils/money.ts"]);
     assert_eq!(
         f.captures.get("concept").map(String::as_str),
         Some("the money formatter")
@@ -165,11 +168,8 @@ async fn module_rollup_finding_lists_every_pair() {
         f.detail
     );
     assert!(f.detail.contains("Keep one module"), "{}", f.detail);
-    assert_eq!(
-        f.also_locations.len(),
-        3,
-        "four function sites: one row, three also_locations"
-    );
+    assert_eq!(outcome.findings.len(), 4, "four function sites: four rows");
+    assert!(outcome.findings.iter().all(|r| r.also_locations.is_empty()));
     let sent = &stub.request(0).prompt;
     assert!(
         sent.contains("\"module_pair\":[\"lib/format.ts\",\"utils/format.ts\"]"),
@@ -214,7 +214,11 @@ async fn same_mechanism_verdict_becomes_a_low_finding_counting_components() {
     let all = ui_repo("Please wait", "busy");
     let stub = StubJudge::answering("same_mechanism", "the loading spinner");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[UI])).await;
-    assert_eq!(outcome.findings.len(), 1, "{outcome:#?}");
+    assert_eq!(
+        outcome.findings.len(),
+        3,
+        "one row per component: {outcome:#?}"
+    );
     let f = &outcome.findings[0];
     assert_eq!(f.severity, "low");
     assert_eq!(f.rule_id, UI.id());
@@ -246,7 +250,7 @@ async fn same_mechanism_verdict_becomes_a_low_finding_counting_components() {
     assert!(f
         .detail
         .contains("Make it one hook or component in the shared UI module"));
-    assert_eq!(f.also_locations.len(), 2);
+    assert!(outcome.findings.iter().all(|r| r.also_locations.is_empty()));
     assert_eq!(
         f.captures.get("mechanism").map(String::as_str),
         Some("the loading spinner")
@@ -290,7 +294,11 @@ async fn one_scan_asks_each_armed_rule_its_own_question() {
     // The component is also a repeated decision (a conditional on a field), so the single-source
     // rule has candidates in the UI files as well as the discount pair.
     assert!(by_rule(CloneRule::SingleSourceLogic) >= 1);
-    assert_eq!(by_rule(CloneRule::SharedPrimitive), 1);
+    assert_eq!(
+        by_rule(CloneRule::SharedPrimitive),
+        3,
+        "one candidate, three components, three rows"
+    );
     assert_eq!(by_rule(CloneRule::NamingOneConcept), 0);
     assert_eq!(
         stub.call_count(),

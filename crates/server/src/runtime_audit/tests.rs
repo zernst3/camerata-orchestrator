@@ -1007,34 +1007,110 @@ async fn a_supported_release_line_gives_no_finding_and_no_claim() {
     assert!(audit.notes.is_empty(), "{:?}", audit.notes);
 }
 
+const THREE_FILES: [(&str, &str); 3] = [
+    ("Dockerfile", "FROM node:16\n"),
+    (".nvmrc", "16\n"),
+    (
+        "package.json",
+        "{\n  \"engines\": {\n    \"node\": \"16.x\"\n  }\n}\n",
+    ),
+];
+
 #[tokio::test]
-async fn one_release_line_declared_in_several_files_is_one_finding_naming_each_place() {
+async fn a_runtime_finding_covering_three_files_is_three_rows() {
+    let dir = repo(&THREE_FILES);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let findings = eol_findings(&audit);
+    assert_eq!(findings.len(), 3, "{:?}", audit.findings);
+    let mut places: Vec<(&str, usize)> =
+        findings.iter().map(|f| (f.path.as_str(), f.line)).collect();
+    places.sort();
+    assert_eq!(
+        places,
+        vec![(".nvmrc", 1), ("Dockerfile", 1), ("package.json", 3)]
+    );
+    for f in &findings {
+        assert!(f.also_locations.is_empty(), "{f:#?}");
+        // The shared text still names every place the line is declared.
+        assert!(
+            f.detail.contains("Dockerfile line 1") && f.detail.contains("package.json line 3"),
+            "{}",
+            f.detail
+        );
+        assert_eq!(
+            f.captures.get(RUNTIME_CAPTURE),
+            findings[0].captures.get(RUNTIME_CAPTURE)
+        );
+    }
+    // Each row names its own declaration and tells the reader to change its own place.
+    for f in &findings {
+        let declared = f.captures.get(DECLARED_CAPTURE).expect("declared capture");
+        assert_eq!(declared, &f.snippet, "the row quotes its own declaration");
+        let fix = f.fix_specific.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains(&format!("{} line {}", f.path, f.line)),
+            "{} fix names its own place: {fix}",
+            f.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_vulnerable_exact_version_in_three_files_is_three_rows() {
     let dir = repo(&[
-        ("Dockerfile", "FROM node:16\n"),
-        (".nvmrc", "16\n"),
+        ("Dockerfile", "FROM node:18.17.0-alpine\n"),
+        (".nvmrc", "18.17.0\n"),
         (
             "package.json",
-            "{\n  \"engines\": {\n    \"node\": \"16.x\"\n  }\n}\n",
+            "{\n  \"engines\": {\n    \"node\": \"18.17.0\"\n  }\n}\n",
         ),
     ]);
     let audit = run(&dir, &Fixture::online(), None).await;
-    let findings = eol_findings(&audit);
-    assert_eq!(findings.len(), 1, "{:?}", audit.findings);
-    let f = findings[0];
-    assert_eq!((f.path.as_str(), f.line), (".nvmrc", 1));
-    let mut also: Vec<(&str, usize)> = f
-        .also_locations
+    let findings = vuln_findings(&audit);
+    assert_eq!(findings.len(), 3, "{:?}", audit.findings);
+    assert!(findings.iter().all(|f| f.also_locations.is_empty()));
+    let cves: std::collections::BTreeSet<_> = findings
         .iter()
-        .map(|l| (l.path.as_str(), l.line))
+        .map(|f| f.captures.get(CVE_IDS_CAPTURE).cloned())
         .collect();
-    also.sort();
-    assert_eq!(also, vec![("Dockerfile", 1), ("package.json", 3)]);
-    assert!(
-        f.detail
-            .contains("also declared in Dockerfile line 1 and package.json line 3"),
-        "{}",
-        f.detail
+    assert_eq!(cves.len(), 1, "the CVE list is shared text");
+}
+
+#[tokio::test]
+async fn every_runtime_row_passes_the_evidence_check() {
+    let dir = repo(&THREE_FILES);
+    let mut audit = run(&dir, &Fixture::online(), None).await;
+    let files: Vec<(String, String)> = THREE_FILES
+        .iter()
+        .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+        .collect();
+    let counts = crate::onboard::evidence_check::verify_evidence(&mut audit.findings, &files, None);
+    assert_eq!(counts.unverified, 0, "{:?}", audit.findings);
+    assert_eq!(counts.checked, audit.findings.len());
+    assert_eq!(counts.sites_seen(), 0);
+    assert!(counts.reconciles());
+}
+
+#[tokio::test]
+async fn the_ledger_stage_for_a_multi_site_finding_reconciles() {
+    let dir = repo(&THREE_FILES);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let mut ledger = crate::scan_ledger::ScanLedger::new();
+    crate::scan_ledger::record_addition_stage(
+        &mut ledger,
+        LEDGER_STAGE,
+        0,
+        audit.findings.len(),
+        "runtime_audit_findings",
     );
+    let stage = ledger
+        .stages()
+        .iter()
+        .find(|s| s.stage == LEDGER_STAGE)
+        .expect("stage recorded");
+    assert_eq!(stage.rows_out, audit.findings.len());
+    assert_eq!(stage.unaccounted, 0, "{stage:?}");
+    assert!(audit.findings.len() >= 3);
 }
 
 #[tokio::test]
