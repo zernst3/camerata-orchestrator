@@ -517,14 +517,11 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
             outlier_reasons.push(crate::review_tree::OutlierReason::SeverityRaiseHeld);
         } else if candidate != f.severity {
             let before = std::mem::replace(&mut f.severity, candidate.to_string());
-            let why = strip_dedup_pointers(raw_reason.trim());
-            let why = camerata_secrets::redact_str(&why).into_owned();
-            let why = if why.trim().is_empty() {
-                "the calibration step's verdict".to_string()
-            } else {
-                format!("the calibration step's verdict: {}", why.trim())
-            };
-            record_severity_adjustment(&mut f, &before, candidate, &why);
+            // A fixed template: the two severities and the basis they were checked against, the
+            // severity basis of the finding's rule. No model text: this sentence is shown to the
+            // client, and the stage 1 reason stays in the row's `stage1_verdict` record only.
+            let basis = format!("checked against the severity basis of rule {}", f.rule_id);
+            record_severity_adjustment(&mut f, &before, candidate, &basis);
         }
     }
     set_outlier_reasons(&mut f, &outlier_reasons);

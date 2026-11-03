@@ -12503,7 +12503,9 @@ pub use batch_mode::{
 };
 pub(crate) use calibration::mentions_exploit_precondition;
 use calibration::*;
-pub use calibration::{apply_verdicts, verify_findings, verify_system_prompt};
+pub use calibration::{
+    apply_verdicts, verify_findings, verify_system_prompt, OUTLIER_REASONS_CAPTURE, STAGE1_CAPTURE,
+};
 
 #[cfg(test)]
 mod redaction_tests;

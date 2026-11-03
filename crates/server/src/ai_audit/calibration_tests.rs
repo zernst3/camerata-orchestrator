@@ -850,6 +850,15 @@ async fn prompt_size_per_site_on_the_scripted_fixture() {
         user / 12
     );
     assert_eq!(reqs.len(), 12);
+    // The estimator prices the part of a request that is the site's own (not the cached prefix)
+    // as 560 tokens; the fixture's measured figure, at the engine's 3 characters a token, is it.
+    let site_tokens = (user / 12) as f64 / CHARS_PER_TOKEN_ESTIMATE as f64;
+    let priced = camerata_ui_core::scan::CALIBRATION_SITE_INPUT_TOKENS;
+    assert_eq!(priced, 560.0);
+    assert!(
+        (site_tokens - priced).abs() <= 0.05 * priced,
+        "a site's own text is {site_tokens} tokens on the fixture against the estimator's {priced}"
+    );
 }
 
 // ── `real: no` never throws a site out ─────────────────────────────────────────────────────

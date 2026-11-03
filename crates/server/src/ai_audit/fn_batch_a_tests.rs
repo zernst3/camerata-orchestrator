@@ -496,7 +496,7 @@ fn a_floor_earned_critical_on_a_cors_named_rule_is_not_clamped() {
 // ── M2: every severity move is on the record ────────────────────────────────────────────────
 
 #[test]
-fn a_verdict_downgrade_records_the_old_severity_and_the_reason() {
+fn a_verdict_downgrade_records_the_old_severity_and_a_fixed_basis_never_the_reason() {
     let f = finding("AI-X-1", "high", "d");
     let raw = r#"{"verdicts":[{"index":0,"severity":"low","real":"yes","reason":"only reachable from tests"}]}"#;
     let out = apply_verdicts(raw, vec![f]).remove(0);
@@ -508,7 +508,14 @@ fn a_verdict_downgrade_records_the_old_severity_and_the_reason() {
         "{}",
         adj[0]
     );
-    assert!(adj[0].contains("only reachable from tests"), "{}", adj[0]);
+    // The sentence is a fixed template (the two severities and the rule's severity basis): the
+    // model's reason is client-invisible and lives in the stage 1 record only.
+    assert!(
+        adj[0].contains("severity basis of rule AI-X-1"),
+        "{}",
+        adj[0]
+    );
+    assert!(!adj[0].contains("only reachable from tests"), "{}", adj[0]);
 }
 
 #[test]
