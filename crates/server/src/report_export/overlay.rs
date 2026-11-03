@@ -276,6 +276,13 @@ pub fn apply_overlay(
                 apply_splits(tree, &mut r.findings, &outcome.splits);
             }
         }
+        // The ledger's escalation block is worked out again from the tree being exported, not
+        // copied from what stage 2 recorded: a row thrown out after stage 2 is no longer one of
+        // the escalations (wave 5 follow-up).
+        if let (Some(block), Some(tree)) = (r.ledger.escalation().cloned(), r.tree.as_ref()) {
+            let derived = block.derived_from_tree(tree, &r.findings);
+            r.ledger.record_escalation(derived);
+        }
     });
 
     let levels = compute_levels(report.as_scan_report(), &records, &applied, None);

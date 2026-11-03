@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::support::*;
-use crate::release_gate::{xlsx_sheet_grid, ProductPackage};
+use crate::release_gate::{read_zip_entries, release, xlsx_sheet_grid, ProductPackage};
 use crate::report_export::apply_overlay;
 
 type Tally = BTreeMap<String, usize>;
@@ -76,7 +76,9 @@ fn every_export_renders_the_same_reviewed_row_set() {
     let (records, edits) = mixed_review(&sealed);
     let reviewed = apply_overlay(&sealed, &records, &edits, &[]);
     let options = client_options();
-    let entries = released_entries(&reviewed, &options);
+    let package = package_of(&reviewed, &options);
+    let pdf = serde_json::to_value(&package.report_json).expect("the PDF data");
+    let entries = read_zip_entries(&release(package).expect("clears the gate").bytes).expect("zip");
 
     // The rows of the report: kept rows, false positives and dependency advisories.
     let total = sealed.findings.len();
@@ -131,6 +133,71 @@ fn every_export_renders_the_same_reviewed_row_set() {
         assert_eq!(tally(rows, "review_level"), want_levels, "{name}: levels");
         assert_eq!(tally(rows, "group"), want_groups, "{name}: sub-groups");
     }
+
+    // The tree in findings.json counts the same rows in each sub-group.
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let nodes = findings["tree"]["nodes"].as_array().expect("the tree");
+    let tree_groups: Tally = nodes
+        .iter()
+        .filter(|n| n["level"] == "subgroup")
+        .map(|n| {
+            (
+                n["id"].as_str().unwrap().to_string(),
+                n["sites"].as_u64().unwrap() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(tree_groups, want_groups, "findings.json tree: sub-groups");
+
+    // The PDF's patterns describe the sites that are not false positives, in the same
+    // sub-groups and at the same review levels.
+    let not_false_positive: Vec<Value> = [
+        json_rows(&entries, "findings.json"),
+        json_rows(&entries, "json/dependencies.json"),
+    ]
+    .concat();
+    let pattern_groups: Tally = pdf["sub_group_patterns"]
+        .as_array()
+        .expect("patterns in the PDF data")
+        .iter()
+        .map(|p| {
+            (
+                p["group"].as_str().unwrap().to_string(),
+                p["site_count"].as_u64().unwrap() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(
+        pattern_groups,
+        tally(&not_false_positive, "group"),
+        "PDF patterns: sub-groups"
+    );
+    let mut pattern_levels = Tally::new();
+    for p in pdf["sub_group_patterns"].as_array().unwrap() {
+        for (level, n) in p["review_levels"].as_object().unwrap() {
+            *pattern_levels.entry(level.clone()).or_default() += n.as_u64().unwrap() as usize;
+        }
+    }
+    assert_eq!(
+        pattern_levels,
+        tally(&not_false_positive, "review_level"),
+        "PDF patterns: review levels"
+    );
+
+    // The manifest lists every file of the package but itself.
+    let manifest: Value = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+    let listed: std::collections::BTreeSet<String> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    let present: std::collections::BTreeSet<String> = entries
+        .keys()
+        .filter(|n| *n != "manifest.json")
+        .cloned()
+        .collect();
+    assert_eq!(listed, present, "the manifest lists every file");
 }
 
 #[allow(dead_code)]

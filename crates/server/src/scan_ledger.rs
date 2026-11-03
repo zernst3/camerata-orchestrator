@@ -622,6 +622,65 @@ pub struct EscalationBlock {
 }
 
 impl EscalationBlock {
+    /// This block as the reviewed tree states it, for an export (WO9, wave 5 follow-up).
+    ///
+    /// Stage 2 records the block when it runs. A later step can change what it counted: the seal
+    /// throws a row out, so an escalated site is no longer a site of the report, and the tree is
+    /// re-counted ([`crate::review_tree::build_tree`]) while this block is not. An export therefore
+    /// never copies the recorded counts. It takes the candidates and the budget from the tree it
+    /// is exporting, keeps only the candidates whose site is still a row, and carries over what the
+    /// tree cannot know (the model, the rate, the floor and the groups the reviewer read).
+    pub fn derived_from_tree(
+        &self,
+        tree: &crate::review_tree::ReviewTree,
+        rows: &[crate::onboard::Finding],
+    ) -> Self {
+        let keys: std::collections::HashSet<&str> =
+            rows.iter().map(|f| f.site_key.as_str()).collect();
+        let candidates: Vec<_> = tree
+            .candidates
+            .iter()
+            .filter(|c| keys.contains(c.key.as_str()))
+            .collect();
+        let escalated = candidates.iter().filter(|c| c.escalated).count();
+        let budget = tree.budget.budget;
+        let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
+        let mut over_by_reason: BTreeMap<String, usize> = BTreeMap::new();
+        for c in candidates.iter().filter(|c| c.escalated) {
+            *by_reason.entry(c.reason.as_str().to_string()).or_default() += 1;
+            if let Some(why) = c.over_budget_reason {
+                *over_by_reason.entry(why.as_str().to_string()).or_default() += 1;
+            }
+        }
+        let total = rows.len();
+        Self {
+            model: self.model.clone(),
+            rate_per_kloc: tree.budget.rate_per_kloc,
+            floor: tree.budget.floor,
+            counted_lines: tree.budget.counted_lines,
+            budget,
+            candidates: candidates.len(),
+            escalated,
+            over_budget: escalated.saturating_sub(budget),
+            total_sites: total,
+            share_escalated: if total == 0 {
+                0.0
+            } else {
+                escalated as f64 / total as f64
+            },
+            by_reason,
+            over_budget_by_reason: over_by_reason,
+            unplaced: self
+                .unplaced
+                .iter()
+                .filter(|k| keys.contains(k.as_str()))
+                .cloned()
+                .collect(),
+            rules_reviewed: self.rules_reviewed,
+            rules_failed: self.rules_failed,
+        }
+    }
+
     /// The sentence the methodology section and the ledger state: "Escalated 347 of a budget of
     /// 300 (47 over, all unauthenticated reach or secret exposure at critical)".
     pub fn sentence(&self) -> String {

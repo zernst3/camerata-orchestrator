@@ -265,6 +265,9 @@ struct DepRow {
     /// How closely the row was reviewed and where it sits in the review tree.
     #[serde(flatten)]
     facts: crate::report_export::RowFacts,
+    /// True when the reviewer edited any field of this advisory's row, and the ids of their edits.
+    reviewer_edited: bool,
+    edit_ids: Vec<String>,
     advisory: String,
     severity: String,
     repo: String,
@@ -434,6 +437,8 @@ fn partition_rows_for(
                 package: f.snippet.clone(),
                 path: f.path.clone(),
                 facts: facts_index.facts(f),
+                reviewer_edited: crate::report_export::is_reviewer_edited(f),
+                edit_ids: crate::report_export::edit_ids_of(f),
                 advisory: f.detail.clone(),
                 severity: normalize_severity(&f.severity),
                 repo: f.repo.clone(),
@@ -905,6 +910,9 @@ struct SiteRow {
     headline: String,
     /// The finding's review level and sub-group, the same on every site of the finding.
     facts: crate::report_export::RowFacts,
+    /// Whether the reviewer edited the finding, and the ids of their edits.
+    reviewer_edited: bool,
+    edit_ids: String,
 }
 
 /// The Sites sheet's rows: for every row of the export (false positives included) its own site
@@ -939,6 +947,8 @@ fn build_site_rows(rows: &[FindingRow], deps: &[DepRow]) -> Vec<SiteRow> {
             listed_on,
             headline: row.headline.clone(),
             facts: row.facts.clone(),
+            reviewer_edited: row.reviewer_edited,
+            edit_ids: row.edit_ids.join(", "),
         });
         // Amendment A1: every source collapsed into this row keeps its own line, as its own row.
         for source in &row.flagged_by {
@@ -954,6 +964,8 @@ fn build_site_rows(rows: &[FindingRow], deps: &[DepRow]) -> Vec<SiteRow> {
                 listed_on,
                 headline: row.headline.clone(),
                 facts: row.facts.clone(),
+                reviewer_edited: row.reviewer_edited,
+                edit_ids: row.edit_ids.join(", "),
             });
         }
         let split = crate::report_export::split_absorbed(row.place.clone(), &row.also_locations);
@@ -997,6 +1009,8 @@ fn build_site_rows(rows: &[FindingRow], deps: &[DepRow]) -> Vec<SiteRow> {
                 listed_on,
                 headline: l.headline.clone(),
                 facts: row.facts.clone(),
+                reviewer_edited: row.reviewer_edited,
+                edit_ids: row.edit_ids.join(", "),
             });
         }
     }
@@ -1014,6 +1028,8 @@ fn build_site_rows(rows: &[FindingRow], deps: &[DepRow]) -> Vec<SiteRow> {
             listed_on: "Dependencies",
             headline: dep.advisory.clone(),
             facts: dep.facts.clone(),
+            reviewer_edited: dep.reviewer_edited,
+            edit_ids: dep.edit_ids.join(", "),
         });
     }
     out
@@ -1028,7 +1044,7 @@ fn write_sites_sheets(
     chunk: usize,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
-    const HEADERS: [&str; 13] = [
+    const HEADERS: [&str; 15] = [
         "Finding (rule @ first site)",
         "Rule ID",
         "Repo",
@@ -1042,9 +1058,11 @@ fn write_sites_sheets(
         "Site id",
         "Review level",
         "Group",
+        "Reviewer edited",
+        "Edit ids",
     ];
-    const WIDTHS: [f64; 13] = [
-        52.0, 28.0, 18.0, 44.0, 7.0, 18.0, 10.0, 60.0, 16.0, 50.0, 18.0, 30.0, 30.0,
+    const WIDTHS: [f64; 15] = [
+        52.0, 28.0, 18.0, 44.0, 7.0, 18.0, 10.0, 60.0, 16.0, 50.0, 18.0, 30.0, 30.0, 10.0, 22.0,
     ];
     let pages: Vec<&[SiteRow]> = if sites.is_empty() {
         vec![&[]]
@@ -1079,6 +1097,8 @@ fn write_sites_sheets(
             ws.write_text_with_format(r, 10, &s.facts.site_id, &text)?;
             ws.write_text_with_format(r, 11, &s.facts.review_level, &text)?;
             ws.write_text_with_format(r, 12, &s.facts.group, &text)?;
+            ws.write_text_with_format(r, 13, if s.reviewer_edited { "Yes" } else { "" }, &text)?;
+            ws.write_text_with_format(r, 14, &s.edit_ids, &text)?;
         }
         ws.autofilter(0, 0, page.len() as u32, (HEADERS.len() - 1) as u16)?;
         ws.set_freeze_panes(1, 0)?;
@@ -2198,14 +2218,18 @@ fn write_dependencies_sheet(
         "Site id",
         "Review level",
         "Group",
+        "Reviewer edited",
+        "Edit ids",
     ];
     for (c, h) in headers.iter().enumerate() {
         ws.write_text_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
-    for (c, w) in [30.0, 60.0, 12.0, 18.0, 14.0, 48.0, 30.0, 18.0, 30.0, 30.0]
-        .iter()
-        .enumerate()
+    for (c, w) in [
+        30.0, 60.0, 12.0, 18.0, 14.0, 48.0, 30.0, 18.0, 30.0, 30.0, 10.0, 22.0,
+    ]
+    .iter()
+    .enumerate()
     {
         ws.set_column_width(c as u16, *w)?;
     }
@@ -2250,6 +2274,18 @@ fn write_dependencies_sheet(
             &fmts.cell(None, false, false),
         )?;
         ws.write_text_with_format(r, 9, &row.facts.group, &fmts.cell(None, false, false))?;
+        ws.write_text_with_format(
+            r,
+            10,
+            if row.reviewer_edited { "Yes" } else { "" },
+            &fmts.cell(None, false, false),
+        )?;
+        ws.write_text_with_format(
+            r,
+            11,
+            row.edit_ids.join(", "),
+            &fmts.cell(None, false, false),
+        )?;
     }
 
     let last_row = sorted.len() as u32;
@@ -3926,6 +3962,7 @@ pub fn build_csv_exports(
 
 pub mod review_sheets;
 mod subgroups;
+pub(crate) use subgroups::pdf_sections;
 pub mod tickets;
 pub mod triage_log;
 

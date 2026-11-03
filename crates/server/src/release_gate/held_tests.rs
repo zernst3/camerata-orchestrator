@@ -407,6 +407,7 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let reviewed = apply_overlay(&sealed, std::slice::from_ref(&merge), &edits, &[]);
     let package = package_of(&reviewed);
     let data_json = package.data_json.clone();
+    let pdf_data = package.data_json.clone();
     let zip = release(package).expect("the package clears the gate").bytes;
 
     // Reasons and reviewer names are internal.
@@ -443,6 +444,58 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let findings =
         String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["findings.json"]).into_owned();
     assert!(findings.contains("Merged into src/db.rs:12"), "{findings}");
+
+    // WO9: the new outputs are held to the same rule one by one. The name the reviewer gave the
+    // sub-group is the group's label and its cause on the plan, the tree, the tickets and in the
+    // PDF's patterns; the reason for the split, the merge reason and the reviewer's name are in
+    // none of them, and the decisions file records only that a reason exists.
+    let entries = read_zip_entries(&zip).unwrap();
+    let xlsx = entries
+        .iter()
+        .find(|(name, _)| name.ends_with(".xlsx"))
+        .map(|(_, bytes)| bytes.clone())
+        .unwrap();
+    let sheet = |name: &str| -> String {
+        xlsx_sheet_grid(&xlsx, name)
+            .unwrap_or_else(|e| panic!("no {name} sheet: {e}"))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let label = "Helper builds SQL by hand";
+    let new_outputs: Vec<(&str, String)> = vec![
+        ("Remediation plan sheet", sheet("Remediation plan")),
+        ("Tree sheet", sheet("Tree")),
+        ("Decisions sheet", sheet("Decisions")),
+        ("Sites sheet", sheet("Sites")),
+        (
+            "csv/tickets.csv",
+            String::from_utf8_lossy(&entries["csv/tickets.csv"]).into_owned(),
+        ),
+        (
+            "decisions.json",
+            String::from_utf8_lossy(&entries["decisions.json"]).into_owned(),
+        ),
+        ("PDF patterns", pdf_data.clone()),
+    ];
+    for (name, text) in &new_outputs {
+        for secret in secrets {
+            assert!(!text.contains(secret), "{name} carries {secret}");
+        }
+    }
+    for name in [
+        "Remediation plan sheet",
+        "Tree sheet",
+        "csv/tickets.csv",
+        "PDF patterns",
+    ] {
+        let text = &new_outputs.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert!(
+            text.contains(label),
+            "{name} does not carry the sub-group's name"
+        );
+    }
 }
 
 #[test]

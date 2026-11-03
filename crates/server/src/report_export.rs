@@ -1573,6 +1573,18 @@ pub struct AuditReportJson {
     /// group reviewer's triage columns go in.
     #[serde(skip)]
     pub internal: bool,
+    /// The sites the full PDF would print (design A14 item 4).
+    pub site_total: usize,
+    /// True above [`FULL_PDF_SITE_LIMIT`] sites: only the reshaped PDF is rendered. The per-site
+    /// cards, the held-for-review cards and the matrix lists are empty, and
+    /// [`Self::reduced_matrix`] carries the counts they would have given.
+    pub reduced: bool,
+    /// The matrix rows' counts by bucket, severity and kind. Filled only when [`Self::reduced`].
+    pub reduced_matrix: Vec<MatrixTallyJson>,
+    /// The sites the group reviewer escalated, with their decisions.
+    pub escalations: EscalationsJson,
+    /// One entry for each sub-group: its summary, cause, fix once and a worked example.
+    pub sub_group_patterns: Vec<PatternJson>,
     /// P5: `"raw"` (nobody has reviewed anything this session) or `"reviewed"` (at least one
     /// finding carries an explicit auditor disposition). Read directly by the Typst template
     /// (`d.review_state`) to gate the per-page draft banner and the Methodology section's
@@ -1636,6 +1648,77 @@ pub struct AuditReportJson {
     /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
     pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
+}
+
+/// The site count above which only the reshaped PDF (summary, escalations and patterns) is
+/// rendered (amendment A14 item 4). At 30,000 sites the full PDF compiled in about 22 seconds
+/// (M8); the limit is the size the full PDF was measured at.
+pub const FULL_PDF_SITE_LIMIT: usize = 30_000;
+
+/// A site the group reviewer escalated, as the PDF prints it, with the decision on it. Nothing the
+/// group reviewer wrote about the site (its reason, rank or words) is in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EscalatedSiteJson {
+    /// The sub-group the site sits in.
+    pub group: String,
+    pub headline: String,
+    pub severity: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    /// The decision on the site, as its row states it ("Confirmed by the reviewer ...", "Open ...").
+    pub decision: String,
+    pub review_level: String,
+}
+
+/// The escalations section: the sentence the ledger states and the sites above the line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EscalationsJson {
+    /// "Escalated 347 of a budget of 300 (47 over, ...)", worked out from the reviewed tree. Empty
+    /// when the group review did not run for this report.
+    pub sentence: String,
+    pub items: Vec<EscalatedSiteJson>,
+}
+
+/// One sub-group as the PDF describes it: what its sites share, the fix once and a worked example.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PatternJson {
+    /// The sub-group's node id; the Sites sheet filter is `Group = <id>`.
+    pub group: String,
+    pub rule_id: String,
+    pub rule_title: String,
+    pub label: String,
+    pub cause: String,
+    pub summary: String,
+    pub severity: String,
+    /// Every site of the sub-group that is not a false positive.
+    pub site_count: usize,
+    /// Of those, the sites still to fix, and the ones accepted as a risk.
+    pub open_sites: usize,
+    pub ignored_sites: usize,
+    /// Sites by review level wire name.
+    pub review_levels: std::collections::BTreeMap<String, usize>,
+    pub escalated: usize,
+    pub effort: String,
+    /// The fix, written once.
+    pub fix: String,
+    /// The primary site's own fix for its code.
+    pub worked_example: String,
+    pub folders: Vec<String>,
+    pub sequence: String,
+    /// "N sites, see Sites sheet, filter Group = <id>": the PDF names no individual site here.
+    pub pointer: String,
+}
+
+/// How many rows the matrix held in one bucket at one severity and kind. In the reshaped PDF the
+/// matrix lists no site, and this is what the release gate reconciles its counts against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixTallyJson {
+    pub bucket: String,
+    pub severity: String,
+    pub kind: String,
+    pub count: usize,
 }
 
 /// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
@@ -5815,8 +5898,69 @@ pub fn build_report_json(
 
     let priority_grid = build_priority_grid(&matrix);
 
+    // WO9 (design 3B item 1): the escalations and one pattern for each sub-group, worked out from
+    // the reviewed report. The sentence is derived from the tree being exported, never copied from
+    // what stage 2 recorded.
+    let (escalated_items, sub_group_patterns) =
+        crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
+    // (The reviewed report's ledger block is already derived from its tree by `apply_overlay`.)
+    let escalation_sentence = report
+        .ledger
+        .escalation()
+        .map(crate::scan_ledger::EscalationBlock::sentence)
+        .unwrap_or_default();
+    // Amendment A14 item 4: above the limit only the reshaped PDF is rendered. The per-site
+    // cards, the held-for-review cards and the matrix lists are left out, and the matrix's counts
+    // stay so the release gate can still reconcile the PDF with the other files.
+    let site_total: usize = code_findings
+        .iter()
+        .map(|(f, _, _, _)| f.distinct_site_count())
+        .sum();
+    let reduced = site_total > FULL_PDF_SITE_LIMIT;
+    let mut matrix = matrix;
+    let mut curated_findings = curated_findings;
+    let mut held_for_review_findings = held_for_review_findings;
+    let mut reduced_matrix = Vec::new();
+    if reduced {
+        for (bucket, list) in [
+            ("do_now", &matrix.do_now),
+            ("do_next", &matrix.do_next),
+            ("plan", &matrix.plan),
+            ("accepted", &matrix.accepted),
+            ("informational", &matrix.informational),
+            ("held", &matrix.held),
+        ] {
+            let mut counts: std::collections::BTreeMap<(String, String), usize> =
+                std::collections::BTreeMap::new();
+            for f in list {
+                *counts
+                    .entry((f.severity.clone(), f.kind.tag().to_string()))
+                    .or_default() += 1;
+            }
+            reduced_matrix.extend(counts.into_iter().map(|((severity, kind), count)| {
+                MatrixTallyJson {
+                    bucket: bucket.to_string(),
+                    severity,
+                    kind,
+                    count,
+                }
+            }));
+        }
+        matrix = MatrixJson::default();
+        curated_findings = Vec::new();
+        held_for_review_findings = Vec::new();
+    }
+
     AuditReportJson {
         internal: opts.internal,
+        site_total,
+        reduced,
+        reduced_matrix,
+        escalations: EscalationsJson {
+            sentence: escalation_sentence,
+            items: escalated_items,
+        },
+        sub_group_patterns,
         review_state,
         brand_mark: brand_kit_matches(cover.brand.as_deref()),
         confidentiality: confidentiality_marking(&report.provenance, opts),
@@ -6156,6 +6300,8 @@ mod coverage_gaps_tests;
 #[cfg(test)]
 mod wo9 {
     mod decisions_file_tests;
+    mod edit_ids_tests;
+    mod pdf_tests;
     mod plan_tests;
     mod review_level_tests;
     mod row_set_tests;

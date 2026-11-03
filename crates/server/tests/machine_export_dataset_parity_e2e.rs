@@ -974,6 +974,8 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "site_id",
             "review_level",
             "group",
+            "reviewer_edited",
+            "edit_ids",
         ],
         // The sub-group's label and cause, the escalation and the merge pointer are on the
         // Sites, Tree and Remediation plan sheets; the Dependencies worksheet has no such column.
@@ -996,6 +998,8 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         "Site id",
         "Review level",
         "Group",
+        "Reviewer edited",
+        "Edit ids",
     ];
     let mut expected: Vec<Vec<String>> = rows
         .iter()
@@ -1016,6 +1020,16 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
                 text(r, "site_id"),
                 text(r, "review_level"),
                 text(r, "group"),
+                yes_or_blank(r, "reviewer_edited"),
+                r["edit_ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default(),
             ]
         })
         .collect();

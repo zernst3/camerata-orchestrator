@@ -357,6 +357,9 @@ type RowId = (String, String, String, usize);
 /// buckets) must equal `findings.json`'s. A row in one and not the other is named by its rule
 /// and location (never its text).
 pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
+    if report.reduced {
+        return reduced_row_parity(report, findings);
+    }
     let mut pdf: BTreeSet<RowId> = BTreeSet::new();
     for bucket in [
         &report.matrix.do_now,
@@ -400,6 +403,48 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
             &describe(row),
             "a row in findings.json is missing from the PDF",
         ));
+    }
+    problems
+}
+
+/// Row parity for the reshaped PDF (above 30,000 sites), which lists no row: the count of rows in
+/// each bucket, severity and kind that the PDF states must equal `findings.json`'s.
+fn reduced_row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
+    let mut pdf: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for r in &report.reduced_matrix {
+        *pdf.entry((r.bucket.clone(), r.severity.clone(), r.kind.clone()))
+            .or_default() += r.count;
+    }
+    let value = serde_json::to_value(findings).unwrap_or(Value::Null);
+    let mut json: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for row in value
+        .get("findings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        *json
+            .entry((
+                row["bucket"].as_str().unwrap_or_default().to_string(),
+                row["severity"].as_str().unwrap_or_default().to_string(),
+                row["kind"].as_str().unwrap_or_default().to_string(),
+            ))
+            .or_default() += 1;
+    }
+    let mut problems = Vec::new();
+    let keys: BTreeSet<&(String, String, String)> = pdf.keys().chain(json.keys()).collect();
+    for key in keys {
+        let (p, j) = (
+            pdf.get(key).copied().unwrap_or(0),
+            json.get(key).copied().unwrap_or(0),
+        );
+        if p != j {
+            problems.push(problem(
+                "PDF data",
+                &format!("bucket {}, severity {}, kind {}", key.0, key.1, key.2),
+                format!("the reshaped PDF counts {p} rows here and findings.json has {j}"),
+            ));
+        }
     }
     problems
 }
@@ -858,11 +903,19 @@ pub fn pdf_count_reconciliation_problems(
                 .or_insert(0) += 1;
         }
     }
+    // The reshaped PDF (above 30,000 sites) lists no row; it states the counts instead.
+    for r in &report.reduced_matrix {
+        *pdf.entry((r.severity.clone(), r.kind.clone())).or_insert(0) += r.count;
+    }
     // What the PDF actually draws is its finding cards, "Curated findings" plus "Held for
     // review", not the matrix the totals above are taken from. Every matrix row must be drawn
     // exactly once, so a finding that falls out of the cards (or is drawn twice) fails here
     // even though the matrix, the cover and every total still agree.
     let mut rendered = Tally::new();
+    if report.reduced {
+        // No card is drawn by design, so the cards are the counts.
+        rendered = pdf.clone();
+    }
     for group in report
         .curated_findings
         .iter()

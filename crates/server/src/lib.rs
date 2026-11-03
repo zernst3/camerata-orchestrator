@@ -19595,6 +19595,10 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
         "All-Findings rows wrapped with provenance and summary counts, for tooling."
     } else if path == "README.txt" {
         "Plain-text manifest of what each file is."
+    } else if path == "decisions.json" {
+        "Every decision record the report was reviewed with, for tooling."
+    } else if path == "csv/tickets.csv" {
+        "One ticket for each sub-group, for a Jira, Linear or GitHub Issues importer."
     } else if path.starts_with("csv/") {
         "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
     } else if path.starts_with("json/") {
@@ -19604,7 +19608,10 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.
-    let schema = if path.starts_with("csv/") || path.starts_with("json/") || path == "findings.json"
+    let schema = if path.starts_with("csv/")
+        || path.starts_with("json/")
+        || path == "findings.json"
+        || path == "decisions.json"
     {
         let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
         Some(format!("{dataset}/1.0"))

@@ -125,3 +125,103 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
         assert!(!data.contains(secret), "the PDF data carries {secret}");
     }
 }
+
+/// Where each field of the stage 2 reply is rendered in the internal workbook: the text to find
+/// in its cells. The map is checked against `STAGE2_FIELD_HOMES`, so a field added to the reply
+/// without a rendered home fails here.
+#[test]
+fn every_stage2_reply_field_is_rendered_in_the_internal_workbook_and_json() {
+    use crate::ai_audit::group_review::STAGE2_FIELD_HOMES;
+    use crate::review_tree::{Outlier, OutlierBy, TextSource};
+
+    let mut report = triaged_sealed().into_inner();
+    let key = report.findings[0].site_key.clone();
+    let group = report.findings[0].group_path[2].clone();
+    report.findings[0].review.subgroup_label = "Params".to_string();
+    {
+        let tree = report.tree.as_mut().unwrap();
+        let node = tree.nodes.iter_mut().find(|n| n.id == group).unwrap();
+        node.label = "Params".to_string();
+        node.cause = Some("a query parameter".to_string());
+        node.summary = Some("Raw SQL built from input.".to_string());
+        node.summary_source = TextSource::Model;
+        node.outliers = vec![Outlier {
+            key,
+            reason: OutlierReason::DifferentConstruct,
+            by: OutlierBy::Model,
+            why: WHYS[1].to_string(),
+        }];
+        let rule = tree
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "rule:SEC-NO-RAW-SQL-CONCAT-1")
+            .unwrap();
+        rule.summary = Some("The rule: SQL built from input.".to_string());
+    }
+    let sealed = report.seal();
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let internal = crate::report_export::ReportOptions {
+        internal: true,
+        ..client_options()
+    };
+    let zip = release_internal(package_of(&reviewed, &internal))
+        .expect("clears")
+        .bytes;
+    let entries = read_zip_entries(&zip).expect("zip");
+    let workbook = entries
+        .iter()
+        .find(|(n, _)| n.ends_with(".xlsx"))
+        .map(|(_, b)| xlsx_strings(b).expect("strings").join("\n"))
+        .unwrap();
+    let findings = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
+
+    let rendered: &[(&str, &[&str])] = &[
+        ("summary", &["The rule: SQL built from input."]),
+        ("subgroups[].label", &["Params"]),
+        ("subgroups[].cause", &["a query parameter"]),
+        ("subgroups[].summary", &["Raw SQL built from input."]),
+        ("subgroups[].members[]", &["sub:SEC-NO-RAW-SQL-CONCAT-1/0"]),
+        ("outliers[].index", &["Outliers"]),
+        ("outliers[].reason", &["different_construct"]),
+        ("outliers[].why", &[WHYS[1]]),
+        ("escalations[].index", &["Escalation"]),
+        ("escalations[].reason", &["rule_misfit"]),
+        ("escalations[].rank", &["Stage 2 rank", "Global rank"]),
+        ("escalations[].why", &[WHYS[0]]),
+        ("disagreements[].index", &["Stage 2 disagreement"]),
+        ("disagreements[].field", &["severity: stage 1"]),
+        ("disagreements[].stage1", &["stage 1 medium"]),
+        ("disagreements[].mine", &["group reviewer critical"]),
+        ("disagreements[].why", &[WHYS[2]]),
+    ];
+    let homes: std::collections::BTreeSet<&str> =
+        STAGE2_FIELD_HOMES.iter().map(|(f, _)| *f).collect();
+    let covered: std::collections::BTreeSet<&str> = rendered.iter().map(|(f, _)| *f).collect();
+    assert_eq!(
+        covered, homes,
+        "every reply field has a rendered home to check"
+    );
+    for (field, wants) in rendered {
+        for want in *wants {
+            assert!(
+                workbook.contains(want) || findings.contains(want),
+                "{field}: the internal package does not render {want:?}"
+            );
+        }
+    }
+    // And the JSON half: the triage columns are keys of the row in findings.json.
+    for key in [
+        "escalation_reason",
+        "escalation_why",
+        "stage2_rank",
+        "global_rank",
+        "outlier_reason",
+        "outlier_why",
+        "stage2_disagreement",
+    ] {
+        assert!(
+            findings.contains(&format!("\"{key}\"")),
+            "findings.json lacks {key}"
+        );
+    }
+}

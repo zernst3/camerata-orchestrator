@@ -69,8 +69,11 @@ pub(crate) struct SubgroupFacts {
     pub open: Vec<SiteFact>,
     /// Sites the reviewer ignored as accepted risk.
     pub ignored: usize,
-    /// Every site of the sub-group that is not a false positive (open and ignored).
+    /// Every site of the sub-group that is not a false positive (open and ignored). A row that
+    /// still stands for several sites (an older report's merge) counts each.
     pub live_sites: usize,
+    /// The sites still to fix, counted the same way.
+    pub open_site_total: usize,
     /// Live sites by review level wire name.
     pub review_levels: BTreeMap<String, usize>,
     /// Live sites the group reviewer escalated.
@@ -174,6 +177,19 @@ pub(crate) fn subgroup_facts(
     deps: &[DepRow],
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<SubgroupFacts> {
+    subgroup_facts_with(reviewed, rows, deps, corpus, false)
+}
+
+/// [`subgroup_facts`], optionally keeping the sub-groups with nothing left to fix (every live
+/// site ignored as accepted risk). The PDF's patterns keep them: an accepted risk is still a
+/// pattern the report describes. The plan and the tickets do not.
+pub(crate) fn subgroup_facts_with(
+    reviewed: &ReviewedReport,
+    rows: &[FindingRow],
+    deps: &[DepRow],
+    corpus: Option<&camerata_rules::RuleSet>,
+    include_closed: bool,
+) -> Vec<SubgroupFacts> {
     let report = reviewed.report();
     let Some(tree) = report.tree.as_ref() else {
         return Vec::new();
@@ -252,6 +268,7 @@ pub(crate) fn subgroup_facts(
                 sequence: sequence_of(&severity, ""),
                 severity,
                 live_sites: sites.len(),
+                open_site_total: sites.len(),
                 open: sites,
                 ignored: 0,
                 review_levels: levels,
@@ -279,21 +296,23 @@ pub(crate) fn subgroup_facts(
                 )
             })
             .collect();
-        if open.is_empty() {
+        if open.is_empty() && !(include_closed && !live.is_empty()) {
             continue;
         }
-        let primary = open
+        // A sub-group with nothing left to fix describes itself from its ignored sites.
+        let basis: &[&FindingRow] = if open.is_empty() { &live } else { &open };
+        let primary = basis
             .iter()
             .copied()
             .find(|r| primary_ids.contains(&r.facts.site_id))
-            .unwrap_or(open[0]);
-        let rank = open
+            .unwrap_or(basis[0]);
+        let rank = basis
             .iter()
             .map(|r| severity_rank(&r.severity))
             .min()
             .unwrap_or(3);
         let severity = severity_title(rank).to_string();
-        let effort = effort_majority(open.iter().map(|r| r.effort.as_str()));
+        let effort = effort_majority(basis.iter().map(|r| r.effort.as_str()));
         let mut levels = BTreeMap::new();
         for r in &live {
             *levels.entry(r.facts.review_level.clone()).or_default() += 1;
@@ -321,13 +340,14 @@ pub(crate) fn subgroup_facts(
             rule_title: rule_title(&primary.rule_id, corpus),
             category: primary.category.clone(),
             folders: top_folders(
-                open.iter().map(|r| (r.repo.as_str(), r.path.as_str())),
+                basis.iter().map(|r| (r.repo.as_str(), r.path.as_str())),
                 multi_repo,
             ),
             sequence: sequence_of(&severity, &effort),
             severity,
             ignored: live.len() - open.len(),
-            live_sites: live.len(),
+            live_sites: live.iter().map(|r| r.site_count).sum(),
+            open_site_total: open.iter().map(|r| r.site_count).sum(),
             open: sites,
             review_levels: levels,
             escalated: live.iter().filter(|r| r.facts.escalated).count(),
@@ -399,4 +419,63 @@ pub(crate) fn in_plan_order(facts: Vec<SubgroupFacts>) -> Vec<SubgroupFacts> {
     // each.
     ordered.sort_by_key(|g| g.sequence);
     ordered
+}
+
+/// What the PDF prints from the reviewed report beyond the per-site sections (design 3B item 1):
+/// the escalated sites with their decisions, and one pattern for each sub-group.
+pub(crate) fn pdf_sections(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> (
+    Vec<crate::report_export::EscalatedSiteJson>,
+    Vec<crate::report_export::PatternJson>,
+) {
+    let (rows, deps) = super::partition_rows_for(reviewed, corpus, chosen_options, false);
+    let escalated = rows
+        .iter()
+        .filter(|r| r.facts.escalated && !r.is_fp)
+        .map(|r| crate::report_export::EscalatedSiteJson {
+            group: r.facts.group.clone(),
+            headline: r.headline.clone(),
+            severity: title_case(&r.severity),
+            repo: r.repo.clone(),
+            path: r.path.clone(),
+            line: r.line,
+            rule_id: r.rule_id.clone(),
+            decision: r.disposition_label.clone(),
+            review_level: r.facts.review_level.clone(),
+        })
+        .collect();
+    let mut facts = subgroup_facts_with(reviewed, &rows, &deps, corpus, true);
+    facts.sort_by_key(|g| (g.open.is_empty(), g.sequence));
+    let patterns = facts
+        .into_iter()
+        .map(|g| crate::report_export::PatternJson {
+            pointer: format!(
+                "{} {}, see Sites sheet, filter Group = {}",
+                g.live_sites,
+                if g.live_sites == 1 { "site" } else { "sites" },
+                g.id
+            ),
+            group: g.id,
+            rule_id: g.rule_id,
+            rule_title: g.rule_title,
+            label: g.label,
+            cause: g.cause,
+            summary: g.summary,
+            severity: g.severity,
+            site_count: g.live_sites,
+            open_sites: g.open_site_total,
+            ignored_sites: g.ignored,
+            review_levels: g.review_levels,
+            escalated: g.escalated,
+            effort: g.effort,
+            fix: g.fix,
+            worked_example: g.worked_example,
+            folders: g.folders,
+            sequence: g.sequence.label().to_string(),
+        })
+        .collect();
+    (escalated, patterns)
 }
