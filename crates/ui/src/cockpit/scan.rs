@@ -1235,8 +1235,20 @@ pub(super) struct OnboardingDraft {
     // so they survive reload; written to the project's ruleset.custom on apply/complete.
     #[serde(default)]
     pub custom: Vec<CustomRuleView>,
+    /// OLD DRAFTS ONLY. The reviewer's decisions live on the server now (the decision store). A
+    /// draft saved before that holds them here; the first load after the upgrade migrates them
+    /// to the store and the draft is saved blank from then on (it is written empty, never with
+    /// the live dispositions, except when the migration failed and they must not be lost).
     #[serde(default)]
     pub dispositions: std::collections::HashMap<String, Disposition>,
+    /// The decision store's state as of the last time it could be read, so a load that cannot
+    /// reach it still shows what was decided and can queue an undo. `None`: never read.
+    #[serde(default)]
+    pub last_known: Option<std::collections::HashMap<String, Disposition>>,
+    /// When (and on which inspection) each queued change in `dispositions` was decided, so a
+    /// change stored late still carries its own run and moment.
+    #[serde(default)]
+    pub pending_stamps: std::collections::HashMap<String, camerata_ui_core::decisions::Stamp>,
     #[serde(default)]
     pub viewed_repo: String,
     // Read leniently: a view setting a newer build wrote must not fail the whole draft.
@@ -1267,6 +1279,201 @@ pub(super) async fn load_onboarding_draft() -> Option<OnboardingDraft> {
         .await
         .ok()
         .flatten()
+}
+
+/// The decision store over HTTP: the one place the UI talks to the decision routes.
+struct HttpDecisions {
+    project_id: String,
+}
+
+impl HttpDecisions {
+    fn url(&self, tail: &str) -> String {
+        format!(
+            "{}/api/projects/{}/decisions{}",
+            crate::bff_base(),
+            self.project_id,
+            tail
+        )
+    }
+}
+
+/// What a refusing response says, in the server's own words when it sent any.
+async fn refusal_of(resp: reqwest::Response) -> camerata_ui_core::decision_sync::OpError {
+    use camerata_ui_core::decision_sync::OpError;
+    let status = resp.status();
+    if status.is_server_error() {
+        return OpError::Unreachable(format!("the server answered {status}"));
+    }
+    let message = resp
+        .json::<camerata_api_types::decisions::DecisionError>()
+        .await
+        .map(|e| e.message)
+        .unwrap_or_else(|_| format!("the server answered {status}"));
+    OpError::Refused {
+        status: status.as_u16(),
+        message,
+    }
+}
+
+impl camerata_ui_core::decision_sync::DecisionTransport for HttpDecisions {
+    async fn fetch(&self) -> Option<camerata_api_types::decisions::DecisionsResp> {
+        let resp = reqwest::Client::new().get(self.url("")).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.json().await.ok()
+    }
+
+    async fn migrate(
+        &self,
+        req: &camerata_api_types::decisions::MigrateDraftReq,
+    ) -> Result<(), camerata_ui_core::decision_sync::OpError> {
+        use camerata_ui_core::decision_sync::OpError;
+        let resp = reqwest::Client::new()
+            .post(self.url(""))
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| OpError::Unreachable(e.to_string()))?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refusal_of(resp).await)
+        }
+    }
+
+    async fn post(
+        &self,
+        req: &camerata_api_types::decisions::NewDecisionReq,
+    ) -> Result<String, camerata_ui_core::decision_sync::OpError> {
+        use camerata_ui_core::decision_sync::OpError;
+        let resp = reqwest::Client::new()
+            .post(self.url(""))
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| OpError::Unreachable(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(refusal_of(resp).await);
+        }
+        let done: camerata_api_types::decisions::DecisionRecorded = resp
+            .json()
+            .await
+            .map_err(|e| OpError::Unreachable(e.to_string()))?;
+        Ok(done.decision.id)
+    }
+
+    async fn revoke(
+        &self,
+        decision_id: &str,
+    ) -> Result<(), camerata_ui_core::decision_sync::OpError> {
+        use camerata_ui_core::decision_sync::OpError;
+        let resp = reqwest::Client::new()
+            .post(self.url(&format!("/{decision_id}/revoke")))
+            .send()
+            .await
+            .map_err(|e| OpError::Unreachable(e.to_string()))?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(refusal_of(resp).await)
+        }
+    }
+}
+
+/// What the review screen holds of the decision store: the write-through bridge and whether the
+/// store could be read. Provided to the results subtree so the export panel can flush it.
+#[derive(Clone)]
+struct DecisionSync {
+    bridge: std::rc::Rc<std::cell::RefCell<camerata_ui_core::decisions::DecisionBridge>>,
+    project_id: Signal<String>,
+    /// The sites in words, for an error that names one (`path:line`).
+    sites: Signal<std::collections::HashMap<String, String>>,
+}
+
+impl DecisionSync {
+    /// Store what the screen has changed, and say what was refused. Errors are returned as the
+    /// text the reviewer reads.
+    async fn flush(
+        &self,
+        dispositions: Signal<std::collections::HashMap<String, Disposition>>,
+    ) -> camerata_ui_core::decision_sync::SyncOutcome {
+        let transport = HttpDecisions {
+            project_id: self.project_id.peek().clone(),
+        };
+        let sites = self.sites;
+        camerata_ui_core::decision_sync::sync_decisions(
+            &self.bridge,
+            &transport,
+            || dispositions.peek().clone(),
+            |key| {
+                sites
+                    .peek()
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| key.to_string())
+            },
+        )
+        .await
+    }
+}
+
+/// Read the decision store into the screen: migrate an old draft's dispositions once the server
+/// can, show the decisions with the queued changes over them, and set the banner when the store
+/// could not be read. `queue` is the draft's (first load) or the live bridge's (a retry).
+async fn apply_decision_load(
+    queue: camerata_ui_core::decisions::DraftQueue,
+    bridge: std::rc::Rc<std::cell::RefCell<camerata_ui_core::decisions::DecisionBridge>>,
+    mut dispositions: Signal<std::collections::HashMap<String, Disposition>>,
+    mut availability: Signal<Option<camerata_ui_core::decisions::Availability>>,
+    mut banner: Signal<Option<&'static str>>,
+    mut project_id: Signal<String>,
+) {
+    let pid = fetch_active_project()
+        .await
+        .map(|p| p.id)
+        .unwrap_or_default();
+    project_id.set(pid.clone());
+    let loaded = if pid.is_empty() {
+        camerata_ui_core::decision_sync::load_decisions(&NoProject, &queue).await
+    } else {
+        camerata_ui_core::decision_sync::load_decisions(&HttpDecisions { project_id: pid }, &queue)
+            .await
+    };
+    dispositions.set(loaded.shown);
+    availability.set(Some(loaded.bridge.availability()));
+    banner.set(loaded.banner);
+    *bridge.borrow_mut() = loaded.bridge;
+}
+
+/// The store when there is no active project: it cannot be reached.
+struct NoProject;
+
+impl camerata_ui_core::decision_sync::DecisionTransport for NoProject {
+    async fn fetch(&self) -> Option<camerata_api_types::decisions::DecisionsResp> {
+        None
+    }
+    async fn migrate(
+        &self,
+        _: &camerata_api_types::decisions::MigrateDraftReq,
+    ) -> Result<(), camerata_ui_core::decision_sync::OpError> {
+        Err(camerata_ui_core::decision_sync::OpError::Unreachable(
+            "no active project".to_string(),
+        ))
+    }
+    async fn post(
+        &self,
+        _: &camerata_api_types::decisions::NewDecisionReq,
+    ) -> Result<String, camerata_ui_core::decision_sync::OpError> {
+        Err(camerata_ui_core::decision_sync::OpError::Unreachable(
+            "no active project".to_string(),
+        ))
+    }
+    async fn revoke(&self, _: &str) -> Result<(), camerata_ui_core::decision_sync::OpError> {
+        Err(camerata_ui_core::decision_sync::OpError::Unreachable(
+            "no active project".to_string(),
+        ))
+    }
 }
 
 /// Persist the current onboarding draft (best-effort; failure is non-fatal).
@@ -8273,7 +8480,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut last_saved = use_signal(|| Option::<String>::None);
     let mut restart_arm = use_signal(|| false);
     let mut finishing = use_signal(|| false);
-    let mut dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+    let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
     // How the Queue is cut (work order B.4). Saved in the draft beside `triage_view`, so a
     // reload comes back to the same cut. Lifted here so it outlives the table, which remounts
@@ -8349,20 +8556,58 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // overwriting the draft with initial (un-rehydrated) state before the restore runs.
     let mut audit_w = audit;
     let mut repo_selection_w = repo_selection;
-    let mut dispositions_w = dispositions;
+    let dispositions_w = dispositions;
     let mut chosen_w = chosen;
     let mut custom_rules_w = custom_rules;
     let mut order_preset_w = order_preset;
     let mut draft_loaded = use_signal(|| false);
+    // The write-through bridge to the server's decision store. `bridge_ready` is set once the
+    // store has been read (and the old draft's dispositions migrated); until then, and whenever
+    // the store could not be reached, the draft carries every disposition itself so nothing is
+    // lost. Once ready, the draft carries only the changes the store does not hold yet.
+    let decision_bridge = use_hook(|| {
+        std::rc::Rc::new(std::cell::RefCell::new(
+            camerata_ui_core::decisions::DecisionBridge::default(),
+        ))
+    });
+    // `None` while the store is still being read: the queue shows as it always did.
+    let decision_availability =
+        use_signal(|| Option::<camerata_ui_core::decisions::Availability>::None);
+    let decision_banner = use_signal(|| Option::<&'static str>::None);
+    let bridge_pid = use_signal(String::new);
+    let mut bridge_tick = use_signal(|| 0u32);
+    // Changes the store has refused, in words naming the site: shown until they are stored.
+    let mut sync_errors = use_signal(Vec::<String>::new);
+    // The sites in words (`path:line`), for those errors.
+    let mut site_labels = use_signal(std::collections::HashMap::<String, String>::new);
+    use_context_provider(|| DecisionSync {
+        bridge: decision_bridge.clone(),
+        project_id: bridge_pid,
+        sites: site_labels,
+    });
     use_context_provider(|| draft_loaded);
     {
         let report_repos = report.repos.clone();
         let review_restore = review.clone();
+        let decision_bridge_load = decision_bridge.clone();
         use_future(move || {
             let report_repos = report_repos.clone();
             let review_restore = review_restore.clone();
+            let decision_bridge_load = decision_bridge_load.clone();
             async move {
-                if let Some(d) = load_onboarding_draft().await {
+                let draft = load_onboarding_draft().await;
+                // The draft's dispositions: old-style ones to migrate, or changes the store did
+                // not hold yet when it was saved. Only a draft of THIS scan counts.
+                let draft_queue = draft
+                    .as_ref()
+                    .filter(|d| d.scan.repos == report_repos)
+                    .map(|d| camerata_ui_core::decisions::DraftQueue {
+                        pending: d.dispositions.clone(),
+                        last_known: d.last_known.clone(),
+                        stamps: d.pending_stamps.clone(),
+                    })
+                    .unwrap_or_default();
+                if let Some(d) = draft {
                     if d.scan.repos == report_repos {
                         if d.review_log.just_failed {
                             // Part of the saved review-time record could not be read. What could
@@ -8387,9 +8632,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         if !d.custom.is_empty() {
                             custom_rules_w.set(d.custom);
                         }
-                        if !d.dispositions.is_empty() {
-                            dispositions_w.set(d.dispositions);
-                        }
                         if !d.viewed_repo.is_empty() {
                             viewed_repo.set(d.viewed_repo);
                         }
@@ -8397,6 +8639,18 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         order_preset_w.set(d.order_preset);
                     }
                 }
+                // The decisions live on the server. Read them (migrating an old draft's once),
+                // show them with the draft's not-yet-stored changes over them, and set the
+                // banner if the store cannot be read.
+                apply_decision_load(
+                    draft_queue,
+                    decision_bridge_load.clone(),
+                    dispositions_w,
+                    decision_availability,
+                    decision_banner,
+                    bridge_pid,
+                )
+                .await;
                 draft_loaded.set(true);
             }
         });
@@ -8405,6 +8659,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         let report = report.clone();
         let review_save = review.clone();
         let save_queue = save_queue.clone();
+        let decision_bridge_save = decision_bridge.clone();
         use_effect(move || {
             // Track every persisted slice so the effect re-runs on any change.
             let audit_v = audit.read().clone();
@@ -8415,6 +8670,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             let vr = viewed_repo();
             let tv = triage_view();
             let op = order_preset();
+            let availability = decision_availability();
+            let _ = bridge_tick();
             // The review log as last flushed by the timer (decisions, group changes, pauses and
             // every 30 seconds of work). Reading the handle's signal is what re-runs this on a
             // flush; the timer's own state is not a signal.
@@ -8439,13 +8696,41 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         &rows, &disp,
                     ));
             }
+            // The sites in words, for an error that names one.
+            if let Some(a) = audit_v.as_ref() {
+                let labels: std::collections::HashMap<String, String> = a
+                    .findings
+                    .iter()
+                    .map(|f| (finding_key(f), format!("{}:{}", f.path, f.line)))
+                    .collect();
+                site_labels.set(labels);
+            }
+            // Stamp every new change with the run it is made on and the moment, then take what
+            // the draft keeps of the queue. While the decision state is unknown that is the
+            // queue exactly as it was loaded.
+            let queue_state = {
+                let mut bridge = decision_bridge_save.borrow_mut();
+                if availability
+                    .is_some_and(|a| a != camerata_ui_core::decisions::Availability::Unknown)
+                {
+                    let run = bridge.run_id().to_string();
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    bridge.observe(&disp, &run, &now);
+                }
+                bridge.draft_queue(&disp)
+            };
             let draft = OnboardingDraft {
                 scan: report.clone(),
                 audit: audit_v,
                 repo_selection: sel,
                 chosen: cho,
                 custom: cust,
-                dispositions: disp,
+                // The decisions are the server's. The draft keeps only the queue: the changes
+                // the store does not hold yet (an Unresolved entry is an undo waiting to be
+                // revoked), the store's state as last read, and when each change was decided.
+                dispositions: queue_state.pending,
+                last_known: queue_state.last_known,
+                pending_stamps: queue_state.stamps,
                 viewed_repo: vr,
                 triage_view: tv,
                 order_preset: op,
@@ -8461,6 +8746,39 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 })
                 .await;
             });
+            // Write the screen's decisions through to the store as they happen.
+            if availability == Some(camerata_ui_core::decisions::Availability::Live) {
+                let sync = DecisionSync {
+                    bridge: decision_bridge_save.clone(),
+                    project_id: bridge_pid,
+                    sites: site_labels,
+                };
+                spawn(async move {
+                    let out = sync.flush(dispositions).await;
+                    if let Some(e) = &out.unreachable {
+                        eprintln!("[camerata-ui] could not reach the decision store: {e}");
+                    }
+                    // A refused change is shown, naming the site and the reason, until it is
+                    // stored. Each new refusal is also toasted once.
+                    let texts: Vec<String> = out.refused.iter().map(|r| r.text()).collect();
+                    for t in &texts {
+                        if !sync_errors.peek().contains(t) {
+                            crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Error,
+                                t.clone(),
+                            );
+                        }
+                    }
+                    if *sync_errors.peek() != texts {
+                        sync_errors.set(texts);
+                    }
+                    if out.stored_any {
+                        // Re-save the draft now that those changes are stored.
+                        bridge_tick += 1;
+                    }
+                });
+            }
         });
     }
 
@@ -8539,6 +8857,38 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         });
 
     rsx! {
+        // The decision store could not be read: say so, never draw a decision as Unresolved.
+        if let Some(text) = decision_banner() {
+            div { class: "decisions-banner", role: "alert",
+                span { "{text}" }
+                button {
+                    class: "btn-run",
+                    onclick: {
+                        let bridge = decision_bridge.clone();
+                        move |_| {
+                            let bridge = bridge.clone();
+                            spawn(async move {
+                                let queue = bridge.borrow().draft_queue(&dispositions.peek());
+                                apply_decision_load(
+                                    queue,
+                                    bridge,
+                                    dispositions,
+                                    decision_availability,
+                                    decision_banner,
+                                    bridge_pid,
+                                )
+                                .await;
+                            });
+                        }
+                    },
+                    "Retry"
+                }
+            }
+        }
+        // Changes the store refused. They stay in the saved review and are not exported.
+        for text in sync_errors() {
+            div { class: "decisions-error", role: "alert", "{text}" }
+        }
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
@@ -9037,7 +9387,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // repo_selection / chosen / custom_rules are NOT reset: those are
                             // the architect's persistent rule choices that survive a re-audit.
                             audit.set(None);
-                            dispositions.set(std::collections::HashMap::new());
+                            // Decisions are the server's and carry across a re-audit by site key
+                            // (an exact match keeps its decision; a moved or new site is
+                            // Unresolved because its key is not in the map). The map is NOT
+                            // cleared: the write-through bridge would read that as the reviewer
+                            // undoing every decision.
                             triage_view.set(TriageState::Unresolved);
                             detail_finding.set(None);
                             job_progress.set(None);
@@ -9695,7 +10049,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             .unwrap_or_default(),
                         titles: pattern_titles(),
                     }
-                } else if kind_view() == KindSurface::Queue {
+                } else if kind_view() == KindSurface::Queue
+                    && decision_availability()
+                        != Some(camerata_ui_core::decisions::Availability::Unknown)
+                {
                     // Single-select over the triage tables, each with a live count. The set
                     // and its order come from `TriageState::all()` and the count from
                     // `TriageCounts::of`, so a disposition can never exist without a tab or
@@ -10408,6 +10765,7 @@ pub(super) fn AuditReportExportPanel(
                 onclick: move |_| {
                     let pid = project_id.clone();
                     let disp_snapshot = dispositions.read().clone();
+                    let sync = try_consume_context::<DecisionSync>();
                     let pt = project_title();
                     let pb = prepared_by();
                     let so = summary_override();
@@ -10416,11 +10774,32 @@ pub(super) fn AuditReportExportPanel(
                     spawn(async move {
                         let _guard = crate::loading::LoadingGuard::new();
                         let override_opt = if so.trim().is_empty() { None } else { Some(so) };
+                        // The export reads the decision store. Store what the screen has
+                        // changed first; whatever is still not stored is listed in the request
+                        // and the release gate refuses to export while any is. With the
+                        // decision state unknown nothing can be exported at all.
+                        let mut unsynced = Vec::new();
+                        if let Some(sync) = sync {
+                            if sync.bridge.borrow().availability()
+                                == camerata_ui_core::decisions::Availability::Unknown
+                            {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    camerata_ui_core::decision_sync::UNKNOWN_BANNER,
+                                );
+                                loading.set(false);
+                                return;
+                            }
+                            sync.flush(dispositions).await;
+                            unsynced = sync.bridge.borrow().unsynced(&disp_snapshot);
+                        }
                         let options = camerata_ui_core::product_export::ProductExportOptions {
                             project_title: pt,
                             prepared_by: pb,
                             executive_summary_override: override_opt,
                             triage_log: log,
+                            unsynced_changes: unsynced,
                         };
                         match export_product_zip(&pid, &disp_snapshot, &options).await {
                             Ok((bytes, filename)) => {
@@ -10679,6 +11058,32 @@ mod tests {
         let (compliance, other) = super::split_compliance_notes("me/api: audit failed (timeout)");
         assert!(compliance.is_empty());
         assert_eq!(other, Some("me/api: audit failed (timeout)".to_string()));
+    }
+
+    #[test]
+    fn the_draft_queue_of_unstored_changes_round_trips_including_a_revert() {
+        // The draft's dispositions are the offline queue of the write-through bridge: a decided
+        // entry is a change to store, an Unresolved entry is a revert to revoke. Both must
+        // survive a save and a load.
+        let mut d: OnboardingDraft =
+            serde_json::from_str(&format!(r#"{{"scan": {}}}"#, minimal_scan_json())).unwrap();
+        d.dispositions.insert(
+            "stored-later".to_string(),
+            super::Disposition {
+                state: super::TriageState::Ignored,
+                reason: "dead code".to_string(),
+                bucket: super::TechDebtBucket::Later,
+            },
+        );
+        d.dispositions
+            .insert("undone".to_string(), super::Disposition::default());
+        let back: OnboardingDraft =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.dispositions, d.dispositions);
+        assert_eq!(
+            back.dispositions["undone"].state,
+            super::TriageState::Unresolved
+        );
     }
 
     /// Old drafts that predate the `dispositions` or `triage_view` fields must still
@@ -18973,6 +19378,145 @@ mod order_preset_tests {
         }
     }
 
+    /// The HTTP transport against a stand-in server: a load reads the store, a post the server
+    /// refuses comes back as a refusal in the server's words (and does not stop the next key),
+    /// a server error counts as unreachable, and the run the load learned stamps the change.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_decision_transport_maps_refusals_and_failures_and_stamps_the_run() {
+        use camerata_api_types::decisions::{
+            Decision, DecisionError, DecisionRecorded, DecisionState, DecisionsResp, Scope,
+        };
+        use camerata_ui_core::decision_sync::{
+            load_decisions, sync_decisions, DecisionTransport, OpError,
+        };
+        use camerata_ui_core::decisions::{Availability, DraftQueue};
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let uri = "/api/projects/p1/decisions";
+        Mock::given(method("GET"))
+            .and(path(uri))
+            .respond_with(ResponseTemplate::new(200).set_body_json(DecisionsResp {
+                decisions: Vec::new(),
+                standings: Vec::new(),
+                migrated_from_draft: true,
+                latest_run_id: "insp-9".to_string(),
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(uri))
+            .and(body_partial_json(serde_json::json!({"key": "k1"})))
+            .respond_with(ResponseTemplate::new(422).set_body_json(DecisionError {
+                ok: false,
+                code: "reason_required".to_string(),
+                message: "ignoring a finding needs a reason".to_string(),
+            }))
+            .mount(&server)
+            .await;
+        let recorded = |key: &str| DecisionRecorded {
+            decision: Decision {
+                id: format!("dec-{key}"),
+                key: key.to_string(),
+                state: DecisionState::Confirmed,
+                reason: String::new(),
+                scope: Scope::Site,
+                applies_to: Vec::new(),
+                except: Vec::new(),
+                inherited_from: None,
+                decided_by: "reviewer".to_string(),
+                decided_at: "2026-11-02T10:00:00Z".to_string(),
+                run_id: "insp-9".to_string(),
+                engine_version: "v".to_string(),
+                needed_me: None,
+                sample_verdict: None,
+                confirmed_by_client: None,
+                revoked_at: None,
+            },
+            inherited_count: 0,
+        };
+        Mock::given(method("POST"))
+            .and(path(uri))
+            .and(body_partial_json(serde_json::json!({"key": "k2"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(recorded("k2")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(uri))
+            .and(body_partial_json(serde_json::json!({"key": "k3"})))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let transport = HttpDecisions {
+            project_id: "p1".to_string(),
+        };
+        let loaded = load_decisions(&transport, &DraftQueue::default()).await;
+        assert_eq!(loaded.bridge.availability(), Availability::Live);
+        assert_eq!(loaded.bridge.run_id(), "insp-9");
+
+        let mut screen = std::collections::HashMap::new();
+        for (k, st, why) in [
+            ("k1", TriageState::Ignored, ""),
+            ("k2", TriageState::Confirmed, ""),
+        ] {
+            screen.insert(
+                k.to_string(),
+                Disposition {
+                    state: st,
+                    reason: why.to_string(),
+                    bucket: TechDebtBucket::Later,
+                },
+            );
+        }
+        let bridge = std::cell::RefCell::new(loaded.bridge);
+        bridge
+            .borrow_mut()
+            .observe(&screen, "insp-9", "2026-11-02T10:00:00Z");
+        let out = sync_decisions(
+            &bridge,
+            &transport,
+            || screen.clone(),
+            |k| format!("{k}.rs:1"),
+        )
+        .await;
+        assert!(out.stored_any, "k2 was stored after k1 was refused");
+        assert_eq!(out.refused.len(), 1);
+        let text = out.refused[0].text();
+        assert!(text.contains("k1.rs:1") && text.contains("ignoring a finding needs a reason"));
+        let bodies: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .map(|r| r.body_json().unwrap())
+            .collect();
+        let k2 = bodies.iter().find(|b| b["key"] == "k2").unwrap();
+        assert_eq!(k2["run_id"], "insp-9");
+        assert_eq!(k2["decided_at"], "2026-11-02T10:00:00Z");
+
+        // A server error is not a refusal: the store is unreachable and the change stays queued.
+        let boom = transport
+            .post(&camerata_api_types::decisions::NewDecisionReq {
+                scope: Scope::Site,
+                key: "k3".to_string(),
+                state: DecisionState::Confirmed,
+                reason: String::new(),
+                decided_by: String::new(),
+                needed_me: None,
+                sample_verdict: None,
+                except: Vec::new(),
+                run_id: String::new(),
+                decided_at: String::new(),
+            })
+            .await;
+        assert!(matches!(boom, Err(OpError::Unreachable(_))), "{boom:?}");
+    }
+
     /// The request that asks the server for the client's export carries the dispositions and the
     /// report options and nothing else, so the review log cannot ride along even by accident.
     /// It carries no client name either: the server reads that from the project.
@@ -19117,6 +19661,22 @@ mod order_preset_reload_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p1", "name": "Acme", "client_name": ""
+            })))
+            .mount(&server)
+            .await;
+        // The decision store answers (the Queue is drawn only while decisions are known).
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p1/decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "decisions": [], "standings": [], "migrated_from_draft": true,
+                "latest_run_id": "insp-1"
+            })))
+            .mount(&server)
+            .await;
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
 
         let mut vdom = VirtualDom::new(results);
@@ -19147,6 +19707,69 @@ mod order_preset_reload_tests {
             .next_back()
             .expect("the restored view saved the draft");
         assert_eq!(saved["order_preset"], "by_file", "{saved}");
+    }
+
+    /// With the decision store unreachable (or its file damaged: the server answers 503
+    /// `store_corrupt`) the Queue is not drawn (its counts would read every
+    /// finding as Unresolved), and the banner says why.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_unreachable_decision_store_hides_the_queue_and_shows_the_banner() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p1", "name": "Acme", "client_name": ""
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p1/decisions"))
+            // What the server answers for a project whose decision file is damaged.
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "ok": false, "code": "store_corrupt", "message": "the decision file is damaged"
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Decisions not loaded"), "{html}");
+        assert!(
+            !html.contains("triage-switch"),
+            "no Unresolved count is drawn while decisions are unknown"
+        );
+        // The draft saved while unknown does not overwrite the queue with an empty one.
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the draft was saved");
+        assert_eq!(saved["dispositions"], serde_json::json!({}));
+        assert!(
+            saved["last_known"].is_null(),
+            "no state was ever read: {saved}"
+        );
     }
 
     /// M1: two saves queued out of order (the second submitted while the first is still on the

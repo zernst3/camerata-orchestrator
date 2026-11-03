@@ -378,7 +378,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_ten_checks() {
+fn release_passes_a_clean_package_and_reports_eleven_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -393,7 +393,8 @@ fn release_passes_a_clean_package_and_reports_ten_checks() {
             "reviewer decision on unverified evidence",
             "confidentiality marking",
             "manifest",
-            "provenance"
+            "provenance",
+            "unsynced reviewer changes"
         ]
     );
     assert_eq!(&z.bytes[0..2], b"PK");
@@ -408,7 +409,7 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
         readme.contains(
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
-             confidentiality marking, manifest, provenance (all passed)"
+             confidentiality marking, manifest, provenance, unsynced reviewer changes (all passed)"
         ),
         "{readme}"
     );
@@ -1127,7 +1128,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         Some(
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, confidentiality marking, \
-             manifest, provenance"
+             manifest, provenance, unsynced reviewer changes"
         )
     );
 }
