@@ -6144,7 +6144,9 @@ mod coverage_gaps_tests;
 
 #[cfg(test)]
 mod wo9 {
+    mod review_level_tests;
     mod signature_tests;
+    pub(super) mod support;
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ use camerata_api_types::decisions::{
     effective_by_key, restored_keys, restored_undecided_keys, Decision, DecisionState,
 };
 use camerata_api_types::edits::{Edit, EditField};
+use camerata_api_types::review::ReviewLevel;
 
 use super::DispositionWire;
 use crate::decisions::StoreDecisions;
@@ -128,6 +129,10 @@ pub struct ReviewedReport {
     stale: Vec<StaleEditNote>,
     superseded: Vec<SupersededNote>,
     merges: Vec<MergeNote>,
+    /// How closely each row was reviewed, by site key (design 3B item 3). Computed in
+    /// [`apply_overlay`] and nowhere else; a row with no entry is held for a ruling and cannot
+    /// ship to a client.
+    levels: HashMap<String, ReviewLevel>,
     /// Dispositions that came from an export request rather than the store (an older client
     /// while the store is empty). They answer the gate's question too.
     legacy: bool,
@@ -175,6 +180,14 @@ impl ReviewedReport {
         &self.merges
     }
 
+    /// How closely `f` was reviewed. `None` for a row held for a ruling it has not had (evidence
+    /// not verified, junk text, put back by the reviewer): such a row is not `engine_verified`
+    /// and nobody has reviewed it, so the claim is not made, and the release gate refuses it
+    /// until it is decided.
+    pub fn review_level(&self, f: &Finding) -> Option<&ReviewLevel> {
+        self.levels.get(&f.site_key)
+    }
+
     /// The overlay of nothing: the sealed rows with `dispositions` as the decisions. The one
     /// way a caller that holds no stores (the headless `camerata inspect`, the sample generator,
     /// a test) goes through the overlay.
@@ -182,10 +195,7 @@ impl ReviewedReport {
         sealed: &SealedReport,
         dispositions: &HashMap<String, DispositionWire>,
     ) -> Self {
-        let mut reviewed = apply_overlay(sealed, &[], &[], &[]);
-        reviewed.dispositions.clone_from(dispositions);
-        reviewed.legacy = true;
-        reviewed
+        apply_overlay(sealed, &[], &[], &[]).with_legacy_dispositions(dispositions.clone())
     }
 
     /// This report with `dispositions` (an older client's export request) as the decisions. Used
@@ -197,6 +207,14 @@ impl ReviewedReport {
     ) -> Self {
         self.dispositions = dispositions;
         self.legacy = true;
+        // The levels are worked out again here, in this module, with the older client's decisions
+        // among the evidence of who looked at what.
+        self.levels = compute_levels(
+            self.report.as_scan_report(),
+            &self.records,
+            &self.applied,
+            Some(&self.dispositions),
+        );
         self
     }
 }
@@ -260,6 +278,7 @@ pub fn apply_overlay(
         }
     });
 
+    let levels = compute_levels(report.as_scan_report(), &records, &applied, None);
     ReviewedReport {
         report,
         dispositions: crate::decisions::wire_dispositions(&records),
@@ -270,8 +289,82 @@ pub fn apply_overlay(
         stale,
         superseded,
         merges,
+        levels,
         legacy: false,
     }
+}
+
+// ── how closely each row was reviewed ─────────────────────────────────────────────────────
+
+/// The review level of every row (design 3B item 3), the ONE place it is worked out.
+///
+/// - [`ReviewLevel::PersonallyReviewed`]: a site-scope decision, an applied edit, or a decision of
+///   any kind on a row the group reviewer escalated.
+/// - [`ReviewLevel::ReviewedAsPattern`]: a decision the row inherited from a tree node; the node
+///   is the one the reviewer decided.
+/// - [`ReviewLevel::EngineVerified`]: no decision, and nothing holds the row.
+///
+/// A row held for a ruling it has not had (evidence not verified, junk text, put back by the
+/// reviewer) has no level: it is not engine verified, and nobody has reviewed it. `legacy` is an
+/// older client's dispositions; each is a site-scope ruling.
+fn compute_levels(
+    report: &crate::onboard::ScanReport,
+    records: &[Decision],
+    applied: &[AppliedEdit],
+    legacy: Option<&HashMap<String, DispositionWire>>,
+) -> HashMap<String, ReviewLevel> {
+    use camerata_api_types::decisions::Scope;
+    use camerata_api_types::review::EscalationState;
+
+    let effective = effective_by_key(records);
+    let node_of: HashMap<&str, &str> = records
+        .iter()
+        .filter_map(|d| match &d.scope {
+            Scope::Node(node) => Some((d.id.as_str(), node.as_str())),
+            Scope::Site => None,
+        })
+        .collect();
+    let edited: HashSet<&str> = applied.iter().map(|e| e.key.as_str()).collect();
+    let mut out = HashMap::with_capacity(report.findings.len());
+    for f in &report.findings {
+        let key = f.site_key.as_str();
+        let record = effective.get(key).copied();
+        let legacy_decided = legacy.is_some_and(|d| d.has_decision(f));
+        let level = if let Some(parent) = record.and_then(|d| d.inherited_from.as_deref()) {
+            let escalated = f.review.escalation_state == EscalationState::Escalated;
+            if escalated || edited.contains(key) {
+                Some(ReviewLevel::PersonallyReviewed)
+            } else {
+                match node_of.get(parent) {
+                    Some(node) => Some(ReviewLevel::ReviewedAsPattern((*node).to_string())),
+                    // An inherited record whose node record is missing is not a pattern the
+                    // reviewer decided: the release gate reports it. The site still has a ruling.
+                    None => Some(ReviewLevel::PersonallyReviewed),
+                }
+            }
+        } else if record.is_some() || legacy_decided || edited.contains(key) {
+            Some(ReviewLevel::PersonallyReviewed)
+        } else if is_held_for_a_ruling(f) {
+            None
+        } else {
+            Some(ReviewLevel::EngineVerified)
+        };
+        if let Some(level) = level {
+            out.insert(f.site_key.clone(), level);
+        }
+    }
+    out
+}
+
+/// Whether a mark on the row holds it until the reviewer rules on it.
+fn is_held_for_a_ruling(f: &Finding) -> bool {
+    [
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
+        crate::junk_finding::JUNK_CONTENT_CAPTURE,
+        crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+    ]
+    .iter()
+    .any(|capture| f.captures.contains_key(*capture))
 }
 
 // ── added findings ────────────────────────────────────────────────────────────────────────
