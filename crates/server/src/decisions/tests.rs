@@ -1686,3 +1686,132 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
     // The store answers the gate's question for the discarded row too.
     assert!(StoreDecisions::for_project(&state.decisions, &pid).has_decision(discarded));
 }
+
+// ── holds and a corrupt store ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_node_decision_over_a_group_with_a_junk_row_leaves_that_row_unresolved_and_excluded() {
+    let (state, app, pid) = app_with_project();
+    let mut rows = three_rows();
+    rows[1].captures.insert(
+        crate::junk_finding::JUNK_CONTENT_CAPTURE.to_string(),
+        "placeholder headline".to_string(),
+    );
+    let entry = state
+        .inspections
+        .append(entry_of(&pid, rows, "2026-11-02T10:00:00Z"))
+        .unwrap();
+    let node = rule_node(entry.report.tree.as_ref().unwrap(), "SEC-1");
+    let junk = key_at(&entry.report.findings, "src/b.rs");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions"),
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::Confirmed,
+            "reviewed the group",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(done.inherited_count, 2, "the junk row gets no record");
+    assert_eq!(done.decision.except, vec![junk.clone()]);
+    assert!(state.decisions.list(&pid).iter().all(|d| d.key != junk));
+    let junk_row = entry
+        .report
+        .findings
+        .iter()
+        .find(|f| f.site_key == junk)
+        .unwrap();
+    assert!(
+        !StoreDecisions::for_project(&state.decisions, &pid).has_decision(junk_row),
+        "the junk text does not ship as decided"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_decision_file_answers_503_keeps_the_file_and_is_never_replaced_by_an_empty_store(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let decisions_dir = dir.path().join("decisions");
+    // A project with decisions, then its file is damaged.
+    let mut state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state.decisions = DecisionStore::at(decisions_dir.clone());
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/app".to_string()])
+        .unwrap();
+    let pid = project.id;
+    state
+        .inspections
+        .append(entry_of(&pid, three_rows(), "2026-11-02T10:00:00Z"))
+        .unwrap();
+    state
+        .decisions
+        .record_site(
+            &pid,
+            &site_req("k1", DecisionState::Ignored, "kept"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let file = state.decisions.file_for(&pid).unwrap();
+    std::fs::write(&file, "{ this is not json").unwrap();
+
+    // A restart finds it corrupt.
+    state.decisions = DecisionStore::at(decisions_dir);
+    let app = router(state.clone());
+    let uri = format!("/api/projects/{pid}/decisions");
+    let (status, body) = call(&app, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        serde_json::from_value::<DecisionError>(body).unwrap().code,
+        "store_corrupt"
+    );
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            "k2",
+            DecisionState::Confirmed,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, _) = call(&app, "POST", &format!("{uri}/dec-000001/revoke"), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // The migration is not run over it either.
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(serde_json::json!({"migrated_from_draft": true, "dispositions": {}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    // The damaged file is kept aside, nothing new was written over it, and a direct write to
+    // the store is refused too.
+    assert!(file.with_extension("json.corrupt").exists());
+    assert_eq!(
+        std::fs::read_to_string(file.with_extension("json.corrupt")).unwrap(),
+        "{ this is not json"
+    );
+    assert!(!file.exists(), "no empty store was created over it");
+    assert!(matches!(
+        state
+            .decisions
+            .record_site(
+                &pid,
+                &site_req("k3", DecisionState::Confirmed, ""),
+                ctx("i")
+            )
+            .unwrap_err(),
+        DecisionStoreError::Corrupt
+    ));
+    // Another project is unaffected.
+    assert!(!state.decisions.is_corrupt("some-other-project"));
+}

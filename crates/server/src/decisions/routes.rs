@@ -51,12 +51,25 @@ fn store_refusal(e: &DecisionStoreError) -> Response {
             StatusCode::CONFLICT
         }
         DecisionStoreError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        DecisionStoreError::Corrupt => StatusCode::SERVICE_UNAVAILABLE,
     };
     refusal(status, e.code(), e.to_string())
 }
 
 fn no_project() -> Response {
     refusal(StatusCode::NOT_FOUND, "no_project", "no such project")
+}
+
+/// The 503 every decision route answers for a project whose file was damaged. The UI reads a
+/// 5xx as "decisions not loaded" and never draws them as Unresolved.
+pub(crate) fn corrupt_response() -> Response {
+    refusal(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "store_corrupt",
+        "The decision file for this project is damaged and was moved aside (it is kept with a \
+         .corrupt ending). Decisions are not loaded and nothing will be written over it. Restore \
+         the file, then restart.",
+    )
 }
 
 fn no_inspection() -> Response {
@@ -74,6 +87,9 @@ pub(crate) async fn get_decisions(
 ) -> Response {
     if state.projects.get(&id).is_none() {
         return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
     }
     let decisions = state.decisions.list(&id);
     let standings = match state.inspections.latest(&id) {
@@ -142,6 +158,9 @@ pub(crate) async fn post_decisions(
 ) -> Response {
     if state.projects.get(&id).is_none() {
         return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
     }
     match req {
         PostDecisionsReq::Migrate(m) => migrate(&state, &id, m),
@@ -323,6 +342,9 @@ pub(crate) async fn revoke_decision(
 ) -> Response {
     if state.projects.get(&id).is_none() {
         return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
     }
     // The body is optional: `{}` or nothing at all both mean "revoke".
     let _req: RevokeReq = if body.is_empty() {

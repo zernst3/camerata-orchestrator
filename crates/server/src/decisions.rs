@@ -87,6 +87,10 @@ pub enum DecisionStoreError {
     NotFound(String),
     #[error("decision {0} is already revoked")]
     AlreadyRevoked(String),
+    #[error(
+        "the decision file for this project is damaged and was moved aside; nothing was changed"
+    )]
+    Corrupt,
     #[error("the decisions could not be saved: {0}")]
     Persist(#[from] std::io::Error),
 }
@@ -103,6 +107,7 @@ impl DecisionStoreError {
             Self::EmptyNode(_) => "empty_node",
             Self::NotFound(_) => "not_found",
             Self::AlreadyRevoked(_) => "already_revoked",
+            Self::Corrupt => "store_corrupt",
             Self::Persist(_) => "persist_failed",
         }
     }
@@ -126,6 +131,11 @@ pub struct DecisionStore {
     /// `None` = in-memory only (tests, no resolvable data dir).
     dir: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<BTreeMap<String, ProjectDecisions>>>,
+    /// File stems (see [`crate::inspections::file_stem`]) of project files that did not parse
+    /// when the store opened. The file was moved aside; the project's decisions are UNKNOWN, not
+    /// empty, so every read and write for it is refused until the file is restored and the app
+    /// restarted. Never auto-created over.
+    corrupt: Arc<std::collections::BTreeSet<String>>,
 }
 
 impl DecisionStore {
@@ -139,6 +149,7 @@ impl DecisionStore {
     /// reported with `tracing::warn!`.
     pub fn at(dir: PathBuf) -> Self {
         let mut mem: BTreeMap<String, ProjectDecisions> = BTreeMap::new();
+        let mut corrupt: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         if let Ok(read) = std::fs::read_dir(&dir) {
             let mut files: Vec<PathBuf> = read
                 .filter_map(Result::ok)
@@ -165,6 +176,9 @@ impl DecisionStore {
                             "decision file did not parse; moving it aside"
                         );
                         let _ = std::fs::rename(&path, &aside);
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            corrupt.insert(stem.to_string());
+                        }
                     }
                 }
             }
@@ -172,6 +186,7 @@ impl DecisionStore {
         Self {
             dir: Some(Arc::new(dir)),
             mem: Arc::new(Mutex::new(mem)),
+            corrupt: Arc::new(corrupt),
         }
     }
 
@@ -436,6 +451,9 @@ impl DecisionStore {
         project_id: &str,
         change: impl FnOnce(&mut ProjectDecisions) -> Result<T, DecisionStoreError>,
     ) -> Result<T, DecisionStoreError> {
+        if self.is_corrupt(project_id) {
+            return Err(DecisionStoreError::Corrupt);
+        }
         let mut guard = self.lock();
         let mut working = guard.get(project_id).cloned().unwrap_or_default();
         let out = change(&mut working)?;
@@ -472,6 +490,12 @@ impl DecisionStore {
         std::fs::rename(&tmp, &path)
     }
 
+    /// Whether this project's decision file was damaged when the store opened.
+    pub fn is_corrupt(&self, project_id: &str) -> bool {
+        self.corrupt
+            .contains(&crate::inspections::file_stem(project_id))
+    }
+
     /// The directory the store persists into, if any.
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref().map(PathBuf::as_path)
@@ -494,8 +518,9 @@ struct StoredFileRef<'a> {
 }
 
 /// The site keys a batch decision never covers: rows held for a ruling of their own. A row is
-/// held when its quoted evidence could not be verified, or when it was merged into another site.
-/// This is the one place a new kind of hold (the Engine Check's pending correction) is added.
+/// held when its quoted evidence could not be verified, when its text is junk (M4), or when it
+/// was merged into another site. This is THE hold list: a new kind of hold (the Engine Check's
+/// pending correction) is added here and nowhere else.
 pub fn held_keys(
     rows: &[crate::onboard::Finding],
     active: &[Decision],
@@ -505,6 +530,8 @@ pub fn held_keys(
         .filter(|f| {
             f.captures
                 .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
+                || f.captures
+                    .contains_key(crate::junk_finding::JUNK_CONTENT_CAPTURE)
         })
         .map(|f| f.site_key.clone())
         .collect();

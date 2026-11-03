@@ -18531,6 +18531,12 @@ async fn export_audit_report(
             .into_response();
     };
 
+    // A damaged decision file means the reviewer's decisions are unknown: nothing is exported
+    // from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
+
     let Some(report) = state.get_last_scan(&id) else {
         return (
             StatusCode::NOT_FOUND,
@@ -18748,6 +18754,12 @@ async fn export_product(
         )
             .into_response();
     };
+
+    // A damaged decision file means the reviewer's decisions are unknown: nothing is exported
+    // from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
 
     let Some(report) = state.get_last_scan(&id) else {
         return (

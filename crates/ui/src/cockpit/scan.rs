@@ -19685,7 +19685,8 @@ mod order_preset_reload_tests {
         assert_eq!(saved["order_preset"], "by_file", "{saved}");
     }
 
-    /// With the decision store unreachable the Queue is not drawn (its counts would read every
+    /// With the decision store unreachable (or its file damaged: the server answers 503
+    /// `store_corrupt`) the Queue is not drawn (its counts would read every
     /// finding as Unresolved), and the banner says why.
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial(process_env)]
@@ -19713,7 +19714,10 @@ mod order_preset_reload_tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/projects/p1/decisions"))
-            .respond_with(ResponseTemplate::new(503))
+            // What the server answers for a project whose decision file is damaged.
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "ok": false, "code": "store_corrupt", "message": "the decision file is damaged"
+            })))
             .mount(&server)
             .await;
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
