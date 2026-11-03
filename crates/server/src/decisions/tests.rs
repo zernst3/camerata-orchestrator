@@ -805,7 +805,7 @@ fn wire(state: &str, reason: &str, bucket: &str) -> crate::report_export::Dispos
 }
 
 #[test]
-fn the_export_uses_the_store_first_and_fills_in_per_key_from_the_request() {
+fn the_export_uses_the_store_and_the_request_only_while_the_store_is_empty() {
     let store = DecisionStore::new();
     let mut from_request = HashMap::new();
     from_request.insert("k1".to_string(), wire("Ignored", "from the draft", "Later"));
@@ -842,8 +842,9 @@ fn the_export_uses_the_store_first_and_fills_in_per_key_from_the_request() {
     assert_eq!(e.disagreements[0].request.as_deref(), Some("Ignored"));
     assert_eq!(e.disagreements[0].store.as_deref(), Some("TechDebt"));
 
-    // A key only the request knows (the store has no record for it) still counts: the request's
-    // disposition fills in, per key, and is not a disagreement.
+    // WO8: once the store holds a record, a key only the request knows does NOT count: decisions
+    // come from the store alone (the fallback is gone; see
+    // `decisions_come_from_the_store_only_once_it_has_records`).
     let mut partial = from_request.clone();
     partial.insert("k9".to_string(), wire("Confirmed", "", "Later"));
     partial.insert(
@@ -851,22 +852,18 @@ fn the_export_uses_the_store_first_and_fills_in_per_key_from_the_request() {
         wire("FalsePositive", "generated", "Later"),
     );
     let e = effective_dispositions(&store, "p", &partial);
-    assert_eq!(
-        e.map.len(),
-        3,
-        "k1 and k2 from the store, k9 from the request"
-    );
-    assert_eq!(e.map["k9"].state, "Confirmed");
+    assert_eq!(e.map.len(), 2, "k1 and k2 from the store; k9 is not used");
+    assert!(!e.map.contains_key("k9"));
     assert_eq!(e.map["k1"].state, "TechDebt");
     let keys: Vec<&str> = e.disagreements.iter().map(|d| d.key.as_str()).collect();
-    assert_eq!(keys, vec!["k1"], "k2 agrees and k9 is only a fill-in");
+    assert_eq!(keys, vec!["k1"], "k2 agrees; k9 is not a disagreement");
 
-    // A key the store revoked has no record, so the request's entry for it is used.
+    // A key the store revoked is undecided: the request's entry for it is not used either.
     let k2 = store.list("p").into_iter().find(|d| d.key == "k2").unwrap();
     store.revoke("p", &k2.id, NOW).unwrap();
     let e = effective_dispositions(&store, "p", &partial);
-    assert_eq!(e.map["k2"].state, "FalsePositive");
-    assert_eq!(e.map.len(), 3);
+    assert!(!e.map.contains_key("k2"), "{:?}", e.map);
+    assert_eq!(e.map.len(), 1);
 }
 
 #[test]

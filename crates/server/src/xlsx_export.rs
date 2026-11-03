@@ -229,6 +229,12 @@ pub struct FindingRow {
     /// H11: the commit of the earlier inspection this row was carried forward from, when this
     /// run re-audited only the changed files. Empty when the row was found this run.
     carried_from: String,
+    /// True when the reviewer edited any field of this row (WO8, design 5.1). Present on every
+    /// row of every export, so a reader can tell the engine's text from the reviewer's.
+    reviewer_edited: bool,
+    /// The ids of the edits applied to this row, in the order they were applied. Empty when
+    /// `reviewer_edited` is false. The reviewer's reasons and name never appear in an export.
+    edit_ids: Vec<String>,
     /// True when the project has more than one repo, so every site this row prints names its
     /// repo (`src/index.ts:12` is a different place in each service). Not serialized: the
     /// row's own `repo` field already says which service it is.
@@ -519,7 +525,10 @@ fn partition_rows(
                 chosen_option_for_rule,
             );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
-            let label = disposition_label(disposition, &reason, bucket, confirmed);
+            // A merged row exports with a pointer to the row it was merged into.
+            let label = crate::report_export::overlay::merged_label(f)
+                .map(str::to_string)
+                .unwrap_or_else(|| disposition_label(disposition, &reason, bucket, confirmed));
             (bucket, Some(disposition), label, String::new())
         };
 
@@ -587,6 +596,8 @@ fn partition_rows(
             severity_adjustments: crate::severity_bounds::severity_adjustment_lines(f, corpus)
                 .join(" "),
             carried_from: crate::report_export::carried_from(f).unwrap_or_default(),
+            reviewer_edited: crate::report_export::is_reviewer_edited(f),
+            edit_ids: crate::report_export::edit_ids_of(f),
             multi_repo: report.repos.len() > 1,
             same_credential_note: crate::onboard::credential_cross_ref::note(
                 &credentials.also_flagged_in(f),
@@ -1689,7 +1700,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 29] = [
+const HEADERS: [&str; 31] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1732,11 +1743,14 @@ const HEADERS: [&str; 29] = [
     // D8: whether the fix is "Tailored fix" (written for this code) or "Standard fix" (the
     // rule's own guidance).
     "Fix type",
+    // WO8: whether the reviewer edited this row, and the ids of their edits.
+    "Reviewer edited",
+    "Edit ids",
 ];
 
-const WIDTHS: [f64; 29] = [
+const WIDTHS: [f64; 31] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0, 14.0, 14.0, 22.0,
 ];
 
 /// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
@@ -1757,6 +1771,11 @@ fn held_reasons(f: &crate::onboard::Finding) -> String {
     }
     if let Some(why) = f.captures.get(crate::junk_finding::JUNK_CONTENT_CAPTURE) {
         reasons.push(format!("junk text: {why}"));
+    }
+    if f.captures
+        .contains_key(crate::engine_discard::ENGINE_RESTORED_CAPTURE)
+    {
+        reasons.push("put back by the reviewer after the engine threw it out".to_string());
     }
     reasons.join("; ")
 }
@@ -1875,6 +1894,13 @@ fn write_finding_row(
     )?;
     ws.write_text_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
     ws.write_text_with_format(r, 28, &row.fix_type, &fmts.cell(bg, false, false))?;
+    ws.write_text_with_format(
+        r,
+        29,
+        if row.reviewer_edited { "Yes" } else { "" },
+        &fmts.cell(bg, false, false),
+    )?;
+    ws.write_text_with_format(r, 30, row.edit_ids.join(", "), &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -3984,7 +4010,11 @@ mod tests {
         // carried-forward row must be observable in the workbook).
         // D8: 28 -> 29 — "Fix type" appends after "Carried from" (same exception (a): the
         // label beside each fix must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 29);
+        // WO8: 29 -> 31 — "Reviewer edited" and "Edit ids" append after "Fix type" (same
+        // exception (a): an edit the reviewer made must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 31);
+        assert_eq!(HEADERS[29], "Reviewer edited");
+        assert_eq!(HEADERS[30], "Edit ids");
         assert_eq!(HEADERS[26], "Severity adjustments");
         assert_eq!(HEADERS[27], "Carried from");
         assert_eq!(HEADERS[28], "Fix type");

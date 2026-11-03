@@ -54,6 +54,7 @@ pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;
 pub mod draft;
+pub mod edits;
 pub mod enforcement_ledger;
 pub mod escalation;
 pub mod eval;
@@ -246,6 +247,9 @@ pub struct AppState {
     /// The reviewer's decisions on sites, one file per project beside the inspections. Never
     /// part of the sealed report; see [`crate::decisions`].
     decisions: crate::decisions::DecisionStore,
+    /// The reviewer's edits, added findings, merges and splits, one file per project beside the
+    /// decisions. An overlay on the sealed report; see [`crate::edits`].
+    edits: crate::edits::EditStore,
     /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
     /// Not part of the project export. See [`crate::client_source`].
     source_records: crate::client_source::records::SourceRecordStore,
@@ -373,6 +377,7 @@ impl AppState {
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             inspections: crate::inspections::InspectionStore::new(),
             decisions: crate::decisions::DecisionStore::new(),
+            edits: crate::edits::EditStore::new(),
             source_records: crate::client_source::records::SourceRecordStore::new(),
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
@@ -636,6 +641,11 @@ impl AppState {
     /// The reviewer's decision store. Out-of-crate test seam (mirrors [`Self::inspections`]).
     pub fn decisions(&self) -> &crate::decisions::DecisionStore {
         &self.decisions
+    }
+
+    /// The reviewer's edit store. Out-of-crate test seam (mirrors [`Self::decisions`]).
+    pub fn edits(&self) -> &crate::edits::EditStore {
+        &self.edits
     }
 
     /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
@@ -913,6 +923,12 @@ impl AppState {
         // The patterns across services are derived from the ledger and the findings; rebuilt
         // here so the stored report (and the cockpit tab that reads it) never lags them.
         let mut report = report;
+        // A finding the reviewer put back after the engine threw it out stays put when the scan
+        // runs again (A12 item 2): its restore is a decision in the store, and the new run's
+        // report gets the row back before it is recorded.
+        report.reinstate_restored(&crate::decisions::restored_keys_of(
+            &self.decisions.active(&project_id),
+        ));
         report.refresh_patterns_across_services();
         self.record_inspection(
             &project_id,
@@ -1143,6 +1159,8 @@ impl AppState {
         // The reviewer's decisions, one file per project beside the inspections. Not disposable:
         // a decision is the reviewer's work, and the release gate reads it.
         self.decisions = crate::decisions::DecisionStore::at(dir.join("decisions"));
+        // The reviewer's edits, beside the decisions. Not disposable either.
+        self.edits = crate::edits::EditStore::at(dir.join("edits"));
         // The proof of what source deletion removed, and when source was fetched back.
         self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
             dir.join("source-records.json"),
@@ -1467,6 +1485,40 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/decisions/:decision_id/revoke",
             post(crate::decisions::routes::revoke_decision),
+        )
+        // The reviewer's edits, added findings, merges and splits, and the client's
+        // acknowledgement of an accepted risk (design section 5).
+        .route(
+            "/api/projects/:id/decisions/:decision_id/client-ack",
+            post(crate::edits::routes::client_ack),
+        )
+        .route(
+            "/api/projects/:id/edits",
+            get(crate::edits::routes::get_edits).post(crate::edits::routes::post_edit),
+        )
+        .route(
+            "/api/projects/:id/edits/split",
+            post(crate::edits::routes::post_split),
+        )
+        .route(
+            "/api/projects/:id/edits/:edit_id/reapply",
+            post(crate::edits::routes::reapply_edit),
+        )
+        .route(
+            "/api/projects/:id/edits/:edit_id/discard",
+            post(crate::edits::routes::discard_edit),
+        )
+        .route(
+            "/api/projects/:id/added-findings",
+            post(crate::edits::routes::post_added_finding),
+        )
+        .route(
+            "/api/projects/:id/merge",
+            post(crate::edits::routes::post_merge),
+        )
+        .route(
+            "/api/projects/:id/reviewed-report",
+            get(crate::edits::routes::get_reviewed_report),
         )
         .route("/api/inspections/:id/plan", get(run_resume_plan))
         .route("/api/inspections/:id/resume", post(run_resume_start))
@@ -18531,10 +18583,13 @@ async fn export_audit_report(
             .into_response();
     };
 
-    // A damaged decision file means the reviewer's decisions are unknown: nothing is exported
+    // A damaged decision or edit file means the reviewer's work is unknown: nothing is exported
     // from guesses.
     if state.decisions.is_corrupt(&id) {
         return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
     }
 
     let Some(report) = state.get_last_scan(&id) else {
@@ -18553,7 +18608,9 @@ async fn export_audit_report(
     // `apply_evidence_gate` call site. Sealing it here, immediately on retrieval and before any
     // further processing, is therefore the correct "row set is final" point for this handler:
     // every exporter below reads the identical sealed set.
-    let report = report.seal();
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
 
     // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
     // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
@@ -18590,15 +18647,13 @@ async fn export_audit_report(
         return run_incomplete_response(&e);
     }
 
-    // The reviewer's decisions are the store's; the request's own copy is read only while the
-    // store is empty (see `crate::decisions::effective_dispositions`).
-    let dispositions =
-        crate::decisions::effective_dispositions(&state.decisions, &id, &req.dispositions);
-    dispositions.log_disagreements(&id);
+    // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
+    // after the seal, before the gate, in every export.
+    let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
 
     let json = crate::report_export::build_report_json(
-        &report,
-        &dispositions.map,
+        reviewed.report(),
+        reviewed.dispositions(),
         corpus.as_ref(),
         &req.options,
     );
@@ -18615,13 +18670,15 @@ async fn export_audit_report(
     };
     // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
     // ships a PDF outside any zip, and `data.json` is the only data the template reads.
-    let stem = report_filename_stem_for(&report, &req.options.project_title);
+    let stem = report_filename_stem_for(reviewed.report(), &req.options.project_title);
     if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
         return release_blocked_response(&failure);
     }
-    if let Err(failure) =
-        crate::release_gate::check_unsynced(&stem, &report.findings, &req.options.unsynced_changes)
-    {
+    if let Err(failure) = crate::release_gate::check_unsynced(
+        &stem,
+        &reviewed.report().findings,
+        &req.options.unsynced_changes,
+    ) {
         return release_blocked_response(&failure);
     }
     let pdf_bytes = match crate::report_export::compile_pdf_from_data(&data_json).await {
@@ -18649,6 +18706,36 @@ async fn export_audit_report(
         pdf_bytes,
     )
         .into_response()
+}
+
+/// The reviewer's overlay over a sealed report, for an export: the decisions and edits of the
+/// project's stores applied with [`crate::report_export::apply_overlay`]. The request's own
+/// dispositions (an older client's) are used only while the decision store holds no live record
+/// for the project, and any disagreement with the store is logged
+/// ([`crate::decisions::effective_dispositions`]).
+fn reviewed_for_export(
+    state: &AppState,
+    project_id: &str,
+    sealed: &crate::onboard::SealedReport,
+    request_dispositions: &std::collections::HashMap<String, crate::report_export::DispositionWire>,
+) -> crate::report_export::ReviewedReport {
+    let effective = crate::decisions::effective_dispositions(
+        &state.decisions,
+        project_id,
+        request_dispositions,
+    );
+    effective.log_disagreements(project_id);
+    let reviewed = crate::report_export::apply_overlay(
+        sealed,
+        &state.decisions.list(project_id),
+        &state.edits.list(project_id),
+        &state.edits.added(project_id),
+    );
+    if state.decisions.has_active_records(project_id) {
+        reviewed
+    } else {
+        reviewed.with_legacy_dispositions(effective.map)
+    }
 }
 
 /// `camerata-inspection-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
@@ -18755,10 +18842,13 @@ async fn export_product(
             .into_response();
     };
 
-    // A damaged decision file means the reviewer's decisions are unknown: nothing is exported
+    // A damaged decision or edit file means the reviewer's work is unknown: nothing is exported
     // from guesses.
     if state.decisions.is_corrupt(&id) {
         return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
     }
 
     let Some(report) = state.get_last_scan(&id) else {
@@ -18774,7 +18864,9 @@ async fn export_product(
     // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
     // "row set is final" point for every artifact this handler builds (PDF, xlsx,
     // findings.json), all three now reading the SAME sealed set.
-    let report = report.seal();
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
@@ -18814,14 +18906,11 @@ async fn export_product(
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
     // sample generator.
-    // The reviewer's decisions are the store's; the request's own copy is read only while the
-    // store is empty (see `crate::decisions::effective_dispositions`).
-    let dispositions =
-        crate::decisions::effective_dispositions(&state.decisions, &id, &req.dispositions);
-    dispositions.log_disagreements(&id);
-    let package = match crate::release_gate::build_product_package(
-        &report,
-        &dispositions.map,
+    // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
+    // after the seal, before the gate, in every export.
+    let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
+    let package = match crate::release_gate::build_product_package_reviewed(
+        &reviewed,
         corpus.as_ref(),
         &req.options,
     )

@@ -393,16 +393,29 @@ pub fn row_problem(rule_id: &str, headline: &str, snippet: &str, detail: &str) -
 /// in words. Absent on any other row. A bookkeeping key (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`).
 pub const JUNK_CONTENT_CAPTURE: &str = "junk_content";
 
-/// Move every row that is not a finding out of `findings`: the rows already marked
+/// Move every row that is not a finding out of `findings` (except the rows the reviewer
+/// `restored`, which stay, marked no longer thrown out): the rows already marked
 /// `engine_discarded` and the rows [`classify_row`] throws out (marked here with the reason).
 /// Nothing is deleted: the rows are returned, in their original order, for the caller to keep
 /// apart. Run at seal, the safety net behind the engine's own throw-out steps.
 pub fn take_thrown_out(
     findings: &mut Vec<crate::onboard::Finding>,
+    restored: &crate::engine_discard::RestoredKeys,
 ) -> Vec<crate::onboard::Finding> {
     let rows = std::mem::take(findings);
     let mut thrown = Vec::new();
     for mut f in rows {
+        // A row the reviewer put back is never thrown out again, whatever its text reads.
+        if restored.covers(&f) {
+            if let Some(reason) = crate::engine_discard::restore(&mut f) {
+                f.captures.insert(
+                    crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string(),
+                    reason,
+                );
+            }
+            findings.push(f);
+            continue;
+        }
         if !crate::engine_discard::is_discarded(&f) {
             if let Some(reason) = classify_finding(&f).discard.first() {
                 crate::engine_discard::mark(&mut f, reason.describe());
@@ -807,7 +820,7 @@ mod tests {
             already,
         ];
         let before = rows.len();
-        let thrown = take_thrown_out(&mut rows);
+        let thrown = take_thrown_out(&mut rows, &crate::engine_discard::RestoredKeys::default());
         assert_eq!(rows.len() + thrown.len(), before, "no row is lost");
         assert_eq!(
             rows.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),

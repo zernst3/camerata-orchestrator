@@ -8386,10 +8386,18 @@ pub(crate) const MIN_CONTAINED_SNIPPET: usize = 12;
 /// adopted rule backs. The row is KEPT and marked [`crate::engine_discard`] with the reason, never
 /// deleted. Operator side, each is logged with its rule and place; the client report never
 /// mentions it. Returns how many rows were marked.
-fn mark_discarded_invented_rows(repo: &str, findings: &mut [Finding]) -> usize {
+fn mark_discarded_invented_rows(
+    repo: &str,
+    findings: &mut [Finding],
+    restored: &crate::engine_discard::RestoredKeys,
+) -> usize {
     let mut marked = Vec::new();
     for f in findings.iter_mut() {
-        if crate::engine_discard::is_discarded(f) || !f.rule_id.starts_with("AI-") {
+        // A12 item 2: a row the reviewer put back is never marked again.
+        if crate::engine_discard::is_discarded(f)
+            || !f.rule_id.starts_with("AI-")
+            || restored.covers(f)
+        {
             continue;
         }
         let headline = finding_headline(f);
@@ -8827,6 +8835,17 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::junk_finding::JUNK_CONTENT_CAPTURE,
     // A10: the mark that says the engine threw the row out (the reason is the value).
     crate::engine_discard::ENGINE_DISCARDED_CAPTURE,
+    // The reviewer overlay's marks: which edits and fields the reviewer changed, their headline
+    // and detail, who produced the row, the merge pointer and the restore mark. None of them
+    // names an object, and the same value on two rows says the same thing was done to both.
+    crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+    crate::report_export::overlay::REVIEWER_EDITED_CAPTURE,
+    crate::report_export::overlay::REVIEWER_FIELDS_CAPTURE,
+    crate::report_export::overlay::REVIEWER_HEADLINE_CAPTURE,
+    crate::report_export::overlay::REVIEWER_DETAIL_CAPTURE,
+    crate::report_export::overlay::PROVENANCE_CAPTURE,
+    crate::report_export::overlay::MERGED_INTO_CAPTURE,
+    crate::report_export::overlay::MERGED_LABEL_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -11347,7 +11366,11 @@ pub async fn audit_repo(
     }
     // D1: the detail and calibration steps write "discard this finding" into a placeholder row's
     // explanation; act on it for the rows the model invented, and account for the removal below.
-    let dropped_discarded = mark_discarded_invented_rows(repo, &mut verified);
+    let dropped_discarded = mark_discarded_invented_rows(
+        repo,
+        &mut verified,
+        &crate::engine_discard::RestoredKeys::default(),
+    );
     // A10: the rows thrown out above are KEPT, but apart from the rows that go on: the stages
     // below (the option splice, kind assignment, the convention emissions) must not see them. The
     // calibration stage accounts for them as leaving it (`other` below); they rejoin the returned
@@ -13690,7 +13713,11 @@ mod tests {
         let mut adopted = finding("SEC-NO-RAW-SQL-CONCAT-1", "high");
         adopted.detail = "Raw SQL — a note that says discard this finding".into();
         let mut rows = vec![discarded, kept_ai, adopted];
-        let marked = mark_discarded_invented_rows("me/api", &mut rows);
+        let marked = mark_discarded_invented_rows(
+            "me/api",
+            &mut rows,
+            &crate::engine_discard::RestoredKeys::default(),
+        );
         assert_eq!(marked, 1);
         let ids: Vec<&str> = rows.iter().map(|f| f.rule_id.as_str()).collect();
         assert_eq!(

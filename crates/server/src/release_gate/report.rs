@@ -28,6 +28,12 @@ pub enum CheckId {
     /// Every row whose quoted evidence was not found in the file carries a reviewer decision
     /// (M5). Runs over the in-memory rows, so a standalone audit of a zip cannot run it.
     EvidenceUnverified,
+    /// Every merged row has a merge decision with a reason behind it, and every group decision has
+    /// one per-site record for each site it covers (design 5.3).
+    MergedWithoutDecision,
+    /// A finding the engine threw out and the reviewer put back is decided before it ships
+    /// (A12 item 2).
+    RestoredWithoutDecision,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -42,7 +48,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 11] = [
+    pub const ALL: [CheckId; 13] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -50,6 +56,8 @@ impl CheckId {
         CheckId::Counts,
         CheckId::Content,
         CheckId::EvidenceUnverified,
+        CheckId::MergedWithoutDecision,
+        CheckId::RestoredWithoutDecision,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -66,6 +74,8 @@ impl CheckId {
             CheckId::Counts => "severity and kind counts",
             CheckId::Content => "finding content",
             CheckId::EvidenceUnverified => "reviewer decision on unverified evidence",
+            CheckId::MergedWithoutDecision => "decision records behind merged rows",
+            CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
