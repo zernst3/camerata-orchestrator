@@ -24,8 +24,8 @@ pub use camerata_app_core::project::{
     default_routine_secs, default_watched_secs, export_ruleset, parse_ruleset, CustomRule,
     HierarchySchema, ImportOutcome, L3ReviewConfig, MemoryEntry, MemoryKind, MemoryStatus,
     ModelProfile, OperatingPrinciple, Project, ProjectBackend, ProjectImport, ProjectRuleset,
-    ReviewOnError, ReviewTier, RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation,
-    WorkType, DEFAULT_MODEL,
+    ReviewOnError, ReviewSettings, ReviewTier, RuleSelection, StallThresholds, StepKind,
+    StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
 };
 
 use crate::model_tier::TierMap;
@@ -153,6 +153,7 @@ impl ProjectStore {
                 // `Project::client_engagement`); the operator turns it off for their own development.
                 client_engagement: true,
                 client_tooling_opt_in: false,
+                review: ReviewSettings::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -269,6 +270,7 @@ impl ProjectStore {
                     // `Project::client_engagement`); the operator turns it off for their own development.
                     client_engagement: true,
                     client_tooling_opt_in: false,
+                    review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);

@@ -28819,6 +28819,7 @@ mod tests {
                 site_key: String::new(),
                 group_path: Vec::new(),
                 group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
                 flagged_by: Vec::new(),
                 possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),

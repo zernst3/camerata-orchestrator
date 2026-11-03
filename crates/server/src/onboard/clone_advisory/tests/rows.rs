@@ -76,6 +76,7 @@ async fn the_four_rows_land_in_one_sub_group_of_the_tree() {
     assert_eq!(rows.len(), 4, "grouping returns every row");
     let tree = build_tree(
         &mut rows,
+        &mut [],
         Some(crate::review_tree::ReviewTree {
             nodes: sub_nodes,
             ..Default::default()

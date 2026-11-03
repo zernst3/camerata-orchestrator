@@ -18,7 +18,9 @@ mod mapping;
 mod types;
 mod unfold;
 
-pub use build::{build_tree, kind_of, resolve_rule_categories};
+pub use build::{
+    build_tree, is_thrown_out_id, kind_of, resolve_rule_categories, THROWN_OUT_SUFFIX,
+};
 pub use collapse::{collapse_identical, mark_located, same_place, CollapseOutcome, CollapsedRow};
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
 pub use mapping::{
@@ -176,5 +178,7 @@ mod scale_tests;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thrown_out_tests;
 #[cfg(test)]
 mod tree_tests;

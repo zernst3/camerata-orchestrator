@@ -248,6 +248,105 @@ impl Default for StepModels {
     }
 }
 
+/// The model stage 1 (the per-site first reviewer) runs on when no calibration model is set by the
+/// `--calibration-model` flag or the project setting (A13). Named once, here beside
+/// [`DEFAULT_MODEL`] (which stays the scan default): the server resolves it
+/// (`camerata_server::ai_audit::resolve_calibration_model`) and the pre-flight prices it.
+pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
+
+/// The model stage 2 (the group reviewer) runs on when no group review model is set by the
+/// `--group-review-model` flag or the project setting (A13).
+pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
+
+/// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
+/// in the architect's queue, which reasons may exceed that number, and the group reviewer's
+/// model. Every field `serde(default)`s so a project written before the settings existed loads
+/// with the design values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewSettings {
+    /// Escalations per 1,000 counted lines. Default 1.0.
+    #[serde(default = "default_escalation_rate")]
+    pub escalation_rate_per_kloc: f32,
+    /// The fewest escalations a run may carry. Default 20.
+    #[serde(default = "default_escalation_floor")]
+    pub escalation_floor: usize,
+    /// The reasons that may go past the budget (the severe-reach four at critical severity, and
+    /// `evidence_unverified`, by default).
+    #[serde(default = "default_over_budget_reasons")]
+    pub over_budget_reasons: Vec<crate::review::EscalationReason>,
+    /// The group reviewer's model. Empty means not set: the run uses [`STAGE2_DEFAULT_MODEL`].
+    /// Set only here or by the `--group-review-model` flag, never by the environment.
+    #[serde(default)]
+    pub group_review_model: String,
+}
+
+// `Project` is `Eq`, so its settings have to be. The rate is a number a person types; a NaN would
+// make `==` on a project false against itself, so [`EscalationBudget::compute`] reads the rate
+// through `f32::max(0.0)`, which turns a NaN into zero, and nothing compares settings for
+// identity.
+impl Eq for ReviewSettings {}
+
+fn default_escalation_rate() -> f32 {
+    crate::review::DEFAULT_ESCALATION_RATE_PER_KLOC
+}
+
+fn default_escalation_floor() -> usize {
+    crate::review::DEFAULT_ESCALATION_FLOOR
+}
+
+fn default_over_budget_reasons() -> Vec<crate::review::EscalationReason> {
+    crate::review::EscalationReason::default_over_budget_set()
+}
+
+impl Default for ReviewSettings {
+    fn default() -> Self {
+        Self {
+            escalation_rate_per_kloc: default_escalation_rate(),
+            escalation_floor: default_escalation_floor(),
+            over_budget_reasons: default_over_budget_reasons(),
+            group_review_model: String::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_settings_tests {
+    use super::*;
+    use crate::review::EscalationReason;
+
+    #[test]
+    fn the_review_settings_default_to_the_design_values() {
+        let s = ReviewSettings::default();
+        assert!((s.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+        assert_eq!(s.escalation_floor, 20);
+        assert_eq!(
+            s.over_budget_reasons,
+            EscalationReason::default_over_budget_set()
+        );
+        assert!(s.group_review_model.is_empty());
+    }
+
+    #[test]
+    fn a_project_written_before_the_settings_existed_loads_with_the_defaults() {
+        let s: ReviewSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, ReviewSettings::default());
+        let s: ReviewSettings = serde_json::from_str(
+            r#"{"escalation_floor":5,"group_review_model":"claude-opus-5-5"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.escalation_floor, 5);
+        assert_eq!(s.group_review_model, "claude-opus-5-5");
+        assert!((s.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_stage_defaults_are_opus_5_5_and_fable_5_1() {
+        assert_eq!(STAGE1_DEFAULT_MODEL, "claude-opus-5-5");
+        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-1");
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+    }
+}
+
 #[cfg(test)]
 mod fix_stage_model_name_tests {
     use super::*;

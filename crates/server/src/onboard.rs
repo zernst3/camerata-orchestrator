@@ -400,6 +400,15 @@ pub struct Finding {
         skip_serializing_if = "crate::review_tree::GroupRole::is_primary"
     )]
     pub group_role: crate::review_tree::GroupRole,
+    /// What the group reviewer (stage 2) said about this site, as columns: why it is or is not an
+    /// escalation candidate and where it stands against the line, why it is an outlier, the
+    /// sub-group and cause it was placed in, and any disagreement with stage 1. Internal: no
+    /// client export reads it. Empty until the group reviewer has read the site's rule group.
+    #[serde(
+        default,
+        skip_serializing_if = "camerata_api_types::review::SiteReview::is_empty"
+    )]
+    pub review: camerata_api_types::review::SiteReview,
     /// The sources collapsed into this row because they were mechanically identical to it
     /// (same repo and file, same rule family, same place). Each keeps its own path, line and
     /// site key. Empty for a row nothing was collapsed into.
@@ -569,6 +578,7 @@ impl Default for Finding {
             site_key: String::new(),
             group_path: Vec::new(),
             group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
             flagged_by: Vec::new(),
             possible_duplicate_of: None,
             repo: String::new(),
@@ -1454,6 +1464,7 @@ impl ScanReport {
         let run_id = self.run_id.clone().unwrap_or_default();
         self.tree = Some(crate::review_tree::build_tree(
             &mut self.findings,
+            &mut self.discarded,
             prev,
             &crate::review_tree::ToolMap::builtin(),
             &run_id,
@@ -5363,6 +5374,7 @@ mod tests {
             site_key: String::new(),
             group_path: Vec::new(),
             group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
             flagged_by: Vec::new(),
             possible_duplicate_of: None,
             repo: "me/api".into(),
@@ -5410,6 +5422,7 @@ mod tests {
                 site_key: String::new(),
                 group_path: Vec::new(),
                 group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
                 flagged_by: Vec::new(),
                 possible_duplicate_of: None,
                 repo: "me/api".into(),
@@ -5441,6 +5454,7 @@ mod tests {
                 site_key: String::new(),
                 group_path: Vec::new(),
                 group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
                 flagged_by: Vec::new(),
                 possible_duplicate_of: None,
                 repo: "me/web".into(),
@@ -5493,6 +5507,7 @@ mod tests {
             site_key: String::new(),
             group_path: Vec::new(),
             group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
             flagged_by: Vec::new(),
             possible_duplicate_of: None,
             repo: repo.to_string(),
@@ -5648,6 +5663,7 @@ mod tests {
             site_key: String::new(),
             group_path: Vec::new(),
             group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
             flagged_by: Vec::new(),
             possible_duplicate_of: None,
             repo: "me/api".into(),

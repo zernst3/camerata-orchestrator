@@ -80,25 +80,7 @@ pub enum OutlierBy {
     Model,
 }
 
-/// Why a site does not belong with the rest of its sub-group (design 4.3). The full closed set
-/// is defined here so the group reviewer (a later work order) fills in the rest; the grouping
-/// pass only ever writes [`OutlierReason::DifferentObject`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutlierReason {
-    SeverityRaiseHeld,
-    DifferentObject,
-    DifferentConstruct,
-    OnlySiteInFile,
-    Stage2Outlier,
-    PreconditionAdded,
-    UnverifiedName,
-    FixUngrounded,
-    Contradiction,
-    EvidenceUnverified,
-    InTestCode,
-    CouldBeIntentional,
-}
+pub use camerata_api_types::review::OutlierReason;
 
 /// One outlier on a node: a site (by key), why, and who said so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +88,22 @@ pub struct Outlier {
     pub key: String,
     pub reason: OutlierReason,
     pub by: OutlierBy,
+    /// The group reviewer's one-line reason for marking the site; empty for an engine mark.
+    #[serde(default)]
+    pub why: String,
+}
+
+/// One site the group reviewer wants the architect to look at, as it said it on its own node.
+/// The ranking ([`super::rank_candidates`]) reads these from every node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEscalation {
+    /// The site key.
+    pub key: String,
+    pub reason: camerata_api_types::review::EscalationReason,
+    /// The group reviewer's rank inside the node (1 is first).
+    pub rank: u32,
+    /// Its one-line reason, in the architect's words.
+    pub why: String,
 }
 
 /// Where a node's summary text came from.
@@ -133,19 +131,34 @@ pub struct TreeNode {
     /// Site keys of the direct members. Only a sub-group has direct members.
     pub members: Vec<String>,
     pub outliers: Vec<Outlier>,
-    /// What the reviewer reads at this node (written by the group reviewer, a later work order).
+    /// What the reviewer reads at this node (written by the group reviewer).
     pub summary: Option<String>,
     #[serde(default)]
     pub summary_source: TextSource,
+    /// The sites the group reviewer wants escalated, from this node's stage 2 call. Rule nodes
+    /// only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalations: Vec<NodeEscalation>,
+    /// Review flags on the node's summary: a count it states that the data contradicts, or a
+    /// differing member it does not name (A9). Never shown to the client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
 }
 
 /// The review tree of one report. Sealed with it, stored in the inspection entry.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReviewTree {
     pub run_id: String,
     pub engine_version: String,
     /// Every level, parents before children.
     pub nodes: Vec<TreeNode>,
+    /// How many escalations the run may carry and what came of it (4.4).
+    #[serde(default)]
+    pub budget: camerata_api_types::review::EscalationBudget,
+    /// Every site the group reviewer wanted to escalate, in global rank order, above and below
+    /// the line. Moving the line re-marks these with no model call.
+    #[serde(default)]
+    pub candidates: Vec<camerata_api_types::review::EscalationCandidate>,
     /// False until the group reviewer has read the tree. An old inspection unfolded on load has a
     /// tree that no group reviewer has seen.
     #[serde(default)]
@@ -169,10 +182,14 @@ impl ReviewTree {
                 continue;
             };
             keys.extend(node.members.iter().cloned());
+            // A thrown-out node is reached only by naming it: a decision on a category or a rule
+            // never writes to a row the engine threw out (restoring one is its own decision).
+            let from_thrown_out = super::build::is_thrown_out_id(node_id);
             stack.extend(
                 self.nodes
                     .iter()
                     .filter(|n| n.parent.as_deref() == Some(id))
+                    .filter(|n| from_thrown_out || !super::build::is_thrown_out_id(&n.id))
                     .map(|n| n.id.as_str()),
             );
         }
