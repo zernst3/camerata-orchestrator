@@ -3573,8 +3573,13 @@ pub fn build_workbook(
     // WO9 (design 3B): the review sheets lead the workbook, in this order: Sites (every site, in
     // full), Tree, Decisions. The Remediation plan sheet is before them. The Index and the
     // sheets that follow keep their order after these.
-    review_sheets::write_plan_sheet(&mut wb, &plan_rows, &fmts)
-        .context("writing the Remediation plan sheet")?;
+    review_sheets::write_plan_sheet(
+        &mut wb,
+        &plan_rows,
+        subgroups::no_tree_note(reviewed),
+        &fmts,
+    )
+    .context("writing the Remediation plan sheet")?;
     write_sites_sheets(
         &mut wb,
         &site_sheet_names,
@@ -3963,7 +3968,7 @@ pub fn build_csv_exports(
 
 pub mod review_sheets;
 mod subgroups;
-pub(crate) use subgroups::pdf_sections;
+pub(crate) use subgroups::{no_tree_note, pdf_sections};
 pub mod tickets;
 pub mod triage_log;
 

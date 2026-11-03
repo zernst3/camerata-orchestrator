@@ -135,6 +135,9 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook() {
     let key = report.findings[0].site_key.clone();
     let group = report.findings[0].group_path[2].clone();
     report.findings[0].review.subgroup_label = "Params".to_string();
+    // Ranks no other cell can hold, so a blanked column cannot be matched by accident.
+    report.findings[0].review.stage2_rank = Some(4242);
+    report.findings[0].review.global_rank = Some(7171);
     {
         let tree = report.tree.as_mut().unwrap();
         let node = tree.nodes.iter_mut().find(|n| n.id == group).unwrap();
@@ -182,7 +185,10 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook() {
         ("outliers[].why", &[WHYS[1]]),
         ("escalations[].index", &["Escalation"]),
         ("escalations[].reason", &["rule_misfit"]),
-        ("escalations[].rank", &["Stage 2 rank", "Global rank"]),
+        (
+            "escalations[].rank",
+            &["Stage 2 rank", "Global rank", "4242", "7171"],
+        ),
         ("escalations[].why", &[WHYS[0]]),
         ("disagreements[].index", &["Stage 2 disagreement"]),
         ("disagreements[].field", &["severity: stage 1"]),

@@ -229,3 +229,127 @@ fn a_ticket_lists_fifty_sites_and_points_at_the_sites_sheet_for_the_rest() {
         "{sites}"
     );
 }
+
+/// The mixed report whose first SQL row also stands for two more places (an older report's
+/// merge): the sub-group has three rows and five sites.
+fn sealed_with_a_row_standing_for_three_sites() -> crate::onboard::SealedReport {
+    let mut report = mixed_sealed().into_inner();
+    report.findings[0].also_locations = (0..2)
+        .map(|i| {
+            crate::onboard::MergedLocation::site(
+                "acme/portal".to_string(),
+                format!("src/also_{i}.rs"),
+                i + 1,
+                "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                format!("let q = format!(\"SELECT {i}\");"),
+                false,
+            )
+        })
+        .collect();
+    report.seal()
+}
+
+#[test]
+fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
+    let sealed = sealed_with_a_row_standing_for_three_sites();
+    let group = sealed.findings[0].group_path[2].clone();
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let options = client_options();
+    let entries = released_entries(&reviewed, &options);
+
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Remediation plan").expect("the plan sheet");
+    let plan_row = grid
+        .iter()
+        .skip(1)
+        .find(|r| cell(&grid, r, "Group id") == group)
+        .expect("the plan row");
+    let plan_sites = cell(&grid, plan_row, "Sites").to_string();
+
+    let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
+    let tickets: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();
+    let ticket = tickets
+        .iter()
+        .find(|r| &r[5] == group.as_str())
+        .expect("the ticket");
+    let ticket_sites = ticket[6].to_string();
+
+    let json = serde_json::to_value(crate::report_export::build_report_json(
+        &reviewed, None, &options,
+    ))
+    .unwrap();
+    let pattern = json["sub_group_patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["group"] == group.as_str())
+        .expect("the pattern");
+    let pdf_sites = pattern["open_sites"].to_string();
+
+    // Three rows, five sites: all three files say five.
+    assert_eq!(pdf_sites, "5", "the PDF counts sites");
+    assert_eq!(plan_sites, pdf_sites, "the plan counts sites, not rows");
+    assert_eq!(ticket_sites, pdf_sites, "the ticket counts sites, not rows");
+    assert!(
+        ticket[1].contains("5 sites, listed below"),
+        "the ticket description counts sites: {:?}",
+        &ticket[1]
+    );
+}
+
+#[test]
+fn a_report_with_no_tree_says_so_in_the_plan_the_tickets_and_the_pdf_patterns() {
+    // A report with no tree: one stored before the review tree existed, exported as it is.
+    let sealed = mixed_sealed().overlaid(|r| r.tree = None);
+    assert!(sealed.tree.is_none(), "the fixture has no tree");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let options = client_options();
+    let entries = released_entries(&reviewed, &options);
+
+    // The plan sheet: its header, then one row that says why there is no plan.
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Remediation plan").expect("the plan sheet");
+    assert_eq!(grid.len(), 2, "{grid:?}");
+    assert!(
+        grid[1][0].contains("no review tree"),
+        "the plan says so: {:?}",
+        grid[1]
+    );
+
+    // The ticket file: its header, then one row that says why there are no tickets.
+    let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
+    let tickets: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();
+    assert_eq!(tickets.len(), 1, "{tickets:?}");
+    assert!(
+        tickets[0][0].contains("no review tree") || tickets[0][1].contains("no review tree"),
+        "the tickets say so: {:?}",
+        tickets[0]
+    );
+
+    // The PDF's patterns: no pattern, and a sentence in the data the Patterns section prints.
+    let json = serde_json::to_value(crate::report_export::build_report_json(
+        &reviewed, None, &options,
+    ))
+    .unwrap();
+    assert!(json["sub_group_patterns"].as_array().unwrap().is_empty());
+    assert!(
+        json["sub_group_patterns_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no review tree"),
+        "the PDF says so: {}",
+        json["sub_group_patterns_note"]
+    );
+
+    // A report with a tree, or with no finding at all, carries no such note.
+    let with_tree = apply_overlay(&mixed_sealed(), &[], &[], &[]);
+    let json = serde_json::to_value(crate::report_export::build_report_json(
+        &with_tree, None, &options,
+    ))
+    .unwrap();
+    assert_eq!(json["sub_group_patterns_note"], "");
+    let (reviewed, _) = (apply_overlay(&sealed_of(0), &[], &[], &[]), ());
+    let json = serde_json::to_value(crate::report_export::build_report_json(
+        &reviewed, None, &options,
+    ))
+    .unwrap();
+    assert_eq!(json["sub_group_patterns_note"], "");
+}

@@ -20,6 +20,23 @@ use crate::report_export::prose_checks::client_text;
 use crate::report_export::{Disposition, ReviewedReport};
 use crate::review_tree::{is_thrown_out_id, NodeLevel};
 
+/// What the plan, the tickets and the PDF's patterns say for a report that has findings and no
+/// review tree (one stored before the tree existed): there are no sub-groups to plan, and
+/// printing nothing would read as "nothing to fix".
+pub(crate) const NO_TREE_NOTE: &str =
+    "This report has no review tree, so there are no sub-groups to plan. Every site is on the \
+     Sites sheet.";
+
+/// [`NO_TREE_NOTE`] when `reviewed` has findings and no tree, empty otherwise.
+pub(crate) fn no_tree_note(reviewed: &ReviewedReport) -> &'static str {
+    let report = reviewed.report();
+    if report.tree.is_none() && !report.findings.is_empty() {
+        NO_TREE_NOTE
+    } else {
+        ""
+    }
+}
+
 /// One site of a sub-group, as a ticket and a plan row name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SiteFact {

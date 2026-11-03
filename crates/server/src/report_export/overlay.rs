@@ -717,7 +717,8 @@ pub fn restored_undecided(records: &[Decision]) -> Vec<String> {
 
 /// Move the split sites to sub-groups of their own, as a post-pass over the built tree. One new
 /// sub-group per (rule node, name): its members are the moved sites, it keeps the kind of the
-/// sub-group they left, and the reviewer's reason is its cause. A sub-group left with no site is
+/// sub-group they left, and its cause is its label (the reviewer's reason stays on the edit
+/// record and reaches no output). A sub-group left with no site is
 /// removed. No site is lost or added.
 fn apply_splits(tree: &mut ReviewTree, rows: &mut [Finding], moves: &[SplitMove]) {
     // The later split of a site wins.

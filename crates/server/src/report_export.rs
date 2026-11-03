@@ -1585,6 +1585,9 @@ pub struct AuditReportJson {
     pub escalations: EscalationsJson,
     /// One entry for each sub-group: its summary, cause, fix once and a worked example.
     pub sub_group_patterns: Vec<PatternJson>,
+    /// Said in the Patterns section when the report has findings and no review tree (so no
+    /// pattern), empty otherwise.
+    pub sub_group_patterns_note: String,
     /// P5: `"raw"` (nobody has reviewed anything this session) or `"reviewed"` (at least one
     /// finding carries an explicit auditor disposition). Read directly by the Typst template
     /// (`d.review_state`) to gate the per-page draft banner and the Methodology section's
@@ -5958,6 +5961,7 @@ pub fn build_report_json(
             items: escalated_items,
         },
         sub_group_patterns,
+        sub_group_patterns_note: crate::xlsx_export::no_tree_note(reviewed).to_string(),
         review_state,
         brand_mark: brand_kit_matches(cover.brand.as_deref()),
         confidentiality: confidentiality_marking(&report.provenance, opts),

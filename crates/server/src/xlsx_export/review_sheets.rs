@@ -189,6 +189,7 @@ const PLAN_HEADERS: [&str; 12] = [
 pub(super) fn write_plan_sheet(
     wb: &mut Workbook,
     plan: &[SubgroupFacts],
+    no_tree_note: &str,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let mut ws = CappedSheet::new(wb.add_worksheet());
@@ -213,7 +214,7 @@ pub(super) fn write_plan_sheet(
         ws.write_text_with_format(r, 2, &g.cause, &wrap)?;
         ws.write_text_with_format(r, 3, &g.summary, &wrap)?;
         ws.write_text_with_format(r, 4, &g.severity, &text)?;
-        ws.write_number_with_format(r, 5, g.open.len() as f64, &text)?;
+        ws.write_number_with_format(r, 5, g.open_site_total as f64, &text)?;
         ws.write_text_with_format(r, 6, &g.fix, &wrap)?;
         ws.write_text_with_format(r, 7, &g.worked_example, &wrap)?;
         ws.write_text_with_format(r, 8, &g.effort, &text)?;
@@ -231,7 +232,17 @@ pub(super) fn write_plan_sheet(
             .collect();
         ws.write_text_with_format(r, 11, reviewed.join(", "), &wrap)?;
     }
-    ws.autofilter(0, 0, plan.len() as u32, (PLAN_HEADERS.len() - 1) as u16)?;
+    // A report with no tree has no plan; the sheet says so rather than looking empty.
+    let note_rows = u32::from(plan.is_empty() && !no_tree_note.is_empty());
+    if note_rows == 1 {
+        ws.write_text_with_format(1, 0, no_tree_note, &wrap)?;
+    }
+    ws.autofilter(
+        0,
+        0,
+        plan.len() as u32 + note_rows,
+        (PLAN_HEADERS.len() - 1) as u16,
+    )?;
     ws.set_freeze_panes(1, 0)?;
     Ok(())
 }

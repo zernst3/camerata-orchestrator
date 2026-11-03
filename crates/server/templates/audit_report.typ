@@ -782,6 +782,12 @@
   #pagebreak()
 ]
 
+#if d.sub_group_patterns.len() == 0 and d.sub_group_patterns_note != "" [
+  #section("Patterns", [What the findings have in common])
+  #text(size: 9.5pt)[#d.sub_group_patterns_note]
+  #pagebreak()
+]
+
 #if d.sub_group_patterns.len() > 0 [
   #section("Patterns", [What the findings have in common])
   #text(size: 9pt, style: "italic", fill: ink_faint)[
