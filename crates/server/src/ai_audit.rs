@@ -339,6 +339,27 @@ impl StageTrail {
         self.class = Some(class);
     }
 
+    /// An item the shared runner could not get a result for: keep the transport's own attempt
+    /// records (or one describing the failure when it has none), and the class of the failure.
+    pub(crate) fn note_failed_item(
+        &mut self,
+        class: FailureClass,
+        message: &str,
+        attempts: &[AttemptRecord],
+    ) {
+        let mut records = attempts.to_vec();
+        if records.is_empty() {
+            records.push(Self::describe(class, message));
+        }
+        for r in &mut records {
+            if r.model.is_empty() {
+                r.model = resolve_audit_model(None);
+            }
+        }
+        self.attempts.extend(records);
+        self.class = Some(class);
+    }
+
     /// The stage's calls answered but the answer was unusable (no fix, no estimate): keep one
     /// record saying so, so the failed pass shows when each try ended without a result.
     ///
@@ -11353,7 +11374,9 @@ pub async fn audit_repo(
             &Stage1Inputs::new(&repo_shape)
                 .with_files(map_files.unwrap_or(files))
                 .with_rules(&calibration_rules)
-                .with_concurrency(concurrency),
+                .with_concurrency(concurrency)
+                .with_batch(mode == ScanMode::Batch)
+                .with_job(job),
         )
         .await;
         // C3-1b: disclose a run-wide estimation-pass failure the same way the
@@ -12563,6 +12586,8 @@ mod calibration_tests;
 pub mod group_review;
 #[cfg(test)]
 mod group_review_tests;
+#[cfg(test)]
+mod runner_adoption_tests;
 pub mod stage_batch;
 #[cfg(test)]
 mod stage_batch_tests;

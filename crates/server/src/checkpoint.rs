@@ -267,6 +267,43 @@ impl StageCheckpoint {
     }
 }
 
+// ── The run's checkpoint folder, carried with the audit future ──────────────────────────────────
+//
+// The audit's stages are many calls deep and none of them knows which run it belongs to. The run's
+// folder is therefore carried with the future that runs the audit, the way the run's delimiter seed
+// is ([`crate::prompt_frame::with_seed`]): never global, so two runs in one process (two tests, two
+// projects) cannot read each other's checkpoints.
+
+tokio::task_local! {
+    static RUN_CHECKPOINT_DIR: PathBuf;
+}
+
+/// The folder of a run's stage checkpoints: `checkpoints/` inside the run's own folder, so a run
+/// that is deleted (a client's data being removed) takes its checkpoints, which hold model replies
+/// derived from the client's code, with it.
+pub fn checkpoint_dir_of(run_dir: &Path) -> PathBuf {
+    run_dir.join("checkpoints")
+}
+
+/// Run `fut` with the run's checkpoint folder in scope (`None` runs it with no checkpoints).
+pub async fn with_run_checkpoints<F: std::future::Future>(
+    dir: Option<PathBuf>,
+    fut: F,
+) -> F::Output {
+    match dir {
+        Some(dir) => RUN_CHECKPOINT_DIR.scope(dir, fut).await,
+        None => fut.await,
+    }
+}
+
+/// The checkpoint of the stage named `stage` (a file stem: a stage on two repos uses two names)
+/// in the run in scope, or `None` outside a run.
+pub fn stage_checkpoint(stage: &str) -> Option<StageCheckpoint> {
+    RUN_CHECKPOINT_DIR
+        .try_with(|dir| StageCheckpoint::new(dir, stage))
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

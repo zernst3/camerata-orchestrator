@@ -874,6 +874,12 @@ impl RunStore {
         &self.dir
     }
 
+    /// Where the run's stage checkpoints live: inside the run's own folder, so they go when the
+    /// run goes.
+    pub fn checkpoint_dir(&self) -> PathBuf {
+        crate::checkpoint::checkpoint_dir_of(&self.dir)
+    }
+
     /// Keep the incremental-scan baseline the run started from. A resume starts from this one,
     /// not from the cache file an attempt since may have replaced, so the resumed scan covers the
     /// same files as the run it continues.
