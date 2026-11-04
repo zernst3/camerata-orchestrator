@@ -173,7 +173,16 @@ fn tree_not_group_reviewed_says_so_and_shows_no_summary() {
 fn tree_empty_loading_and_error_are_the_three_states_of_the_left_column() {
     let empty = page("tree/empty");
     assert!(empty.contains(NO_INSPECTION), "{empty}");
+    assert_eq!(
+        empty.matches(NO_INSPECTION).count(),
+        1,
+        "the tree says it once; the shell leaves it to the lane"
+    );
     assert!(!empty.contains("tree-region"), "nothing to move through");
+    assert!(
+        !empty.contains("Select a node or a site"),
+        "the right pane is blank"
+    );
 
     let loading = page("tree/loading");
     assert!(loading.contains("Loading the tree"));

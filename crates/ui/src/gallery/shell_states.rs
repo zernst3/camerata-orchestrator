@@ -21,7 +21,7 @@ pub(super) fn ShellPage(props: PageProps) -> Element {
         return rsx! { p { "no fixture for {props.id}" } };
     };
     rsx! {
-        ReviewShell { status: (&fx.shell).into(), active: Lane::Tree, div {} }
+        ReviewShell { status: (&fx.shell).into(), active: Lane::Tree, note_when_empty: true, div {} }
     }
 }
 

@@ -306,7 +306,7 @@ pub(crate) fn TreeScreen(
                         on_prompt_commit,
                         on_prompt_cancel,
                     }
-                } else {
+                } else if !index.is_empty() {
                     p { class: "pane-empty", "Select a node or a site." }
                 }
             }
@@ -479,6 +479,19 @@ fn SiteTable(
             }
             if !loaded.rows.is_empty() {
                 table { class: "site-table",
+                    // Fixed widths so every column, the Decision column included, is on screen
+                    // at the spec's 1440 and 1000 pixel widths; long cells clip with a tooltip.
+                    colgroup {
+                        col { style: "width: 22px" }
+                        col { style: "width: 18%" }
+                        col { style: "width: 9%" }
+                        col { style: "width: 9%" }
+                        col { style: "width: 20%" }
+                        col { style: "width: 14%" }
+                        col { style: "width: 8%" }
+                        col { style: "width: 9%" }
+                        col { style: "width: 13%" }
+                    }
                     thead {
                         tr {
                             th { class: "col-tick", "" }

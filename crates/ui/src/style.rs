@@ -6987,6 +6987,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   overflow-y: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px;
   background: var(--surface); font-size: 12.5px; line-height: 1.5; box-sizing: border-box;
 }
+.tree-right:empty { display: none; }
 @media (max-width: 1100px) {
   .tree-lane { flex-direction: column; }
   .tree-left, .tree-right { flex: 1 1 auto; width: 100%; }
@@ -7023,10 +7024,13 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   border: 1px solid var(--warning-color); border-radius: 999px; padding: 0 6px; cursor: help;
 }
 .tree-sites { margin: 2px 0 6px; overflow-x: auto; }
-.site-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.site-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.site-table td, .site-table th { overflow: hidden; text-overflow: ellipsis; }
+.mark-cell { max-width: 100%; }
+.mark-cell > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .site-table th {
-  text-align: left; padding: 3px 6px; color: var(--ink-faint); font-size: 10.5px; font-weight: 700;
-  letter-spacing: .04em; text-transform: uppercase; border-bottom: 1px solid var(--line);
+  text-align: left; padding: 3px 6px; color: var(--ink-faint); font-size: 10px; font-weight: 700;
+  letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--paper);
 }
 .site-table td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
@@ -7090,7 +7094,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .export-blocked-head { margin: 0 0 8px; font-weight: 700; color: var(--ink); }
 .gate-rows { display: flex; flex-direction: column; gap: 4px; }
 .gate-row {
-  display: grid; grid-template-columns: 56px minmax(120px, 220px) minmax(90px, 140px) 1fr auto;
+  display: grid; grid-template-columns: 56px minmax(240px, 2fr) 90px 3fr auto;
   align-items: center; gap: 10px; font-size: 12.5px; padding: 3px 0;
   border-bottom: 1px dotted var(--line);
 }
@@ -7100,8 +7104,13 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .gate-rule { color: var(--ink-soft); }
 .gate-reason { color: var(--ink-soft); overflow-wrap: anywhere; }
 @media (max-width: 1100px) {
-  .gate-row { grid-template-columns: 56px 1fr auto; }
-  .gate-rule, .gate-reason { grid-column: 2 / 3; }
+  /* Two lines to a row: the word, the place, the rule and the door, then the reason under them. */
+  .gate-row { grid-template-columns: 56px 1fr 90px auto; row-gap: 2px; }
+  .gate-word { grid-row: 1; grid-column: 1; }
+  .gate-place { grid-row: 1; grid-column: 2; }
+  .gate-rule { grid-row: 1; grid-column: 3; }
+  .gate-row button { grid-row: 1; grid-column: 4; }
+  .gate-reason { grid-row: 2; grid-column: 2 / 4; }
 }
 .export-clear { margin: 10px 0; }
 "#;

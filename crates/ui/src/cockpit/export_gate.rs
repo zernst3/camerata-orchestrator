@@ -8,7 +8,7 @@ use camerata_api_types::review_view::ExportGateView;
 use camerata_ui_core::tree::export::{blocked_headline, gate_rows, Door};
 use dioxus::prelude::*;
 
-use super::tree::DoorRequest;
+use super::tree::{DoorRequest, ShellRefresh};
 use camerata_ui::review_io::ReviewApi;
 
 /// The panel when the gate refuses, or `children` (the export button) when it does not.
@@ -56,19 +56,24 @@ pub(crate) fn ExportGateHost(
     #[props(default)] on_open: Callback<Door>,
     children: Element,
 ) -> Element {
-    let api = try_use_context::<ReviewApi>()
-        .unwrap_or_else(|| ReviewApi::http(crate::bff_base(), project_id.clone()));
+    let api = use_hook(|| {
+        try_use_context::<ReviewApi>()
+            .unwrap_or_else(|| ReviewApi::http(crate::bff_base(), project_id.clone()))
+    });
     let door = try_use_context::<DoorRequest>();
+    let refresh = try_use_context::<ShellRefresh>();
     let mut gate = use_signal(ExportGateView::default);
-    use_hook({
-        let api = api.clone();
-        move || {
-            spawn(async move {
-                if let Ok(g) = api.reads.export_gate().await {
-                    gate.set(g);
-                }
-            });
+    // Read the gate now and again whenever a decision is written (the tree bumps the counter).
+    use_effect(move || {
+        if let Some(r) = refresh {
+            let _ = r.0.read();
         }
+        let api = api.clone();
+        spawn(async move {
+            if let Ok(g) = api.reads.export_gate().await {
+                gate.set(g);
+            }
+        });
     });
     rsx! {
         ExportGate {

@@ -144,9 +144,10 @@ pub fn plan_sentence(plan: &BatchPlan) -> String {
     let a = plan.already_recorded.len();
     if a > 0 {
         s.push_str(&format!(
-            " {} already {} left as {}.",
+            " {} already {} this decision and {} left as {}.",
             thousands(a),
-            plural(a, "records", "record"),
+            plural(a, "holds", "hold"),
+            plural(a, "is", "are"),
             plural(a, "it is", "they are")
         ));
     }
@@ -524,7 +525,9 @@ mod tests {
         let plan = batch_plan("n", &DecisionState::Confirmed, &rows, &BTreeSet::new());
         assert_eq!(plan.keys.len(), 2, "the new members only");
         assert_eq!(plan.already_recorded.len(), 3);
-        assert!(plan_sentence(&plan).contains("3 already record"));
+        assert!(
+            plan_sentence(&plan).contains("3 already hold this decision and are left as they are.")
+        );
         // A different decision is not "already recorded": the new one is written.
         let other = batch_plan("n", &DecisionState::Ignored, &rows, &BTreeSet::new());
         assert_eq!(other.keys.len(), 5);

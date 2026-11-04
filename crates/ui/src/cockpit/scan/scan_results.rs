@@ -376,6 +376,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     let mut review_open = use_signal(|| false);
     let door = use_signal(|| Option::<camerata_ui_core::tree::export::Door>::None);
     use_context_provider(|| crate::cockpit::tree::DoorRequest(door));
+    // Bumped after every write in the tree, so the shell's counts and the export panel's gate
+    // read again.
+    let review_refresh = use_signal(|| 0u32);
+    use_context_provider(|| crate::cockpit::tree::ShellRefresh(review_refresh));
     use_effect(move || {
         if door.read().is_some() {
             review_open.set(true);

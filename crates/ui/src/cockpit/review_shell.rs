@@ -36,6 +36,10 @@ pub(crate) fn ReviewShell(
     #[props(default)]
     on_tab_key: Callback<(String, bool)>,
     #[props(default)] on_retry: Callback<()>,
+    /// Say "No inspection to review" under the tabs when the run has no sites. The lane that is
+    /// showing says it itself, so only a shell shown alone asks for it.
+    #[props(default)]
+    note_when_empty: bool,
     children: Element,
 ) -> Element {
     rsx! {
@@ -84,7 +88,9 @@ pub(crate) fn ReviewShell(
                             }
                         }
                         if is_empty_run(&shell.counts) {
-                            p { class: "pane-empty", "{NO_INSPECTION}" }
+                            if note_when_empty {
+                                p { class: "pane-empty", "{NO_INSPECTION}" }
+                            }
                         } else {
                             div { class: "progress-strip review-strip", role: "group", "aria-label": "Review progress",
                                 span { class: "progress-counts", "{strip_text(&shell.counts)}" }
@@ -111,7 +117,10 @@ pub(crate) fn ReviewShellHost(
     children: Element,
 ) -> Element {
     let api = use_context_provider(|| ReviewApi::http(crate::bff_base(), project_id.clone()));
-    let mut refresh = use_signal(|| 0u32);
+    // One counter for everything that reads the shell: the results screen provides it so the
+    // export panel's gate re-reads after a decision too; a shell mounted alone makes its own.
+    let own = use_signal(|| 0u32);
+    let mut refresh = try_use_context::<ShellRefresh>().map_or(own, |r| r.0);
     use_context_provider(|| ShellRefresh(refresh));
     // A request from outside (the export panel's `open`) to show a site in the tree.
     let door = try_use_context::<DoorRequest>();
