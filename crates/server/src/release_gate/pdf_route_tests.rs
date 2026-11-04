@@ -4,10 +4,9 @@
 //! corrected, a group decision missing a site, an incomplete run) did not stop a client PDF.
 //!
 //! Every held kind is run through both routes on the same state: the PDF route must refuse with
-//! the same 422, naming the same sites, as the package route. The PDF route needs Typst to
-//! compile a clear report, as the package route's own tests do; a refusal does not (the gate runs
-//! before the compile only where the package route does, so these tests skip without Typst
-//! exactly as the package route's do).
+//! the same 422, naming the same sites, as the package route. A refusal needs no Typst: the held
+//! checks run before the PDF is compiled, so these tests run with a Typst that does not exist and
+//! never skip. Only a clear report, which compiles, needs it.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -103,11 +102,52 @@ fn confirm_node() -> (String, NewDecisionReq) {
     )
 }
 
+/// An export request whose review screen still holds an undo for one site of the scan.
+fn unsynced_request() -> axum::Json<crate::AuditReportReq> {
+    use camerata_api_types::decisions::{UnsyncedChange, UnsyncedKind};
+    let key = site_key(&scan_report(), "src/db.rs");
+    axum::Json(crate::AuditReportReq {
+        dispositions: HashMap::new(),
+        options: crate::report_export::ReportOptions {
+            unsynced_changes: vec![UnsyncedChange {
+                key,
+                change: UnsyncedKind::Undo,
+            }],
+            ..crate::report_export::ReportOptions::default()
+        },
+    })
+}
+
+/// An export request whose free-text options carry a key-shaped value, which reaches the PDF's
+/// data without passing through the finding redactor.
+fn secret_request() -> axum::Json<crate::AuditReportReq> {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+    axum::Json(crate::AuditReportReq {
+        dispositions: HashMap::new(),
+        options: crate::report_export::ReportOptions {
+            prepared_by: format!("Prepared with {}", planted.value),
+            ..crate::report_export::ReportOptions::default()
+        },
+    })
+}
+
+/// Run `fut` with a Typst that does not exist: a refusal must not need it, and a route that
+/// reaches the compile answers 500 instead of 422.
+async fn without_typst<F: std::future::Future>(fut: F) -> F::Output {
+    crate::report_export::TYPST_PROGRAM
+        .scope(std::path::PathBuf::from("/nonexistent/typst"), fut)
+        .await
+}
+
 /// One held kind: the gate check that refuses it and how to build a state that holds it.
 struct Held {
     name: &'static str,
     check: CheckId,
     build: fn() -> (crate::AppState, String),
+    /// The export request that, with the state, is refused. Most held kinds live in the state and
+    /// send the default request; the unsynced and secrets refusals live in the request.
+    request: fn() -> axum::Json<crate::AuditReportReq>,
 }
 
 fn evidence_unverified() -> (crate::AppState, String) {
@@ -201,36 +241,54 @@ fn node_decision_missing_a_member() -> (crate::AppState, String) {
     (state, id)
 }
 
-const HELD: [Held; 6] = [
+const HELD: [Held; 8] = [
     Held {
         name: "evidence unverified",
         check: CheckId::EvidenceUnverified,
         build: evidence_unverified,
+        request,
     },
     Held {
         name: "junk content",
         check: CheckId::Content,
         build: junk_content,
+        request,
     },
     Held {
         name: "merged without decision",
         check: CheckId::MergedWithoutDecision,
         build: merged_without_decision,
+        request,
     },
     Held {
         name: "restored without decision",
         check: CheckId::RestoredWithoutDecision,
         build: restored_without_decision,
+        request,
     },
     Held {
         name: "engine check no without correction",
         check: CheckId::EngineCheckNoWithoutCorrection,
         build: engine_check_no_without_correction,
+        request,
     },
     Held {
         name: "node decision missing a member",
         check: CheckId::MergedWithoutDecision,
         build: node_decision_missing_a_member,
+        request,
+    },
+    Held {
+        name: "unsynced reviewer change",
+        check: CheckId::UnsyncedReviewerChanges,
+        build: || state_with(scan_report()),
+        request: unsynced_request,
+    },
+    Held {
+        name: "secret in the export options",
+        check: CheckId::Secrets,
+        build: || state_with(scan_report()),
+        request: secret_request,
     },
 ];
 
@@ -253,20 +311,28 @@ fn sites_named(body: &Value) -> BTreeSet<(String, String, String)> {
         .collect()
 }
 
-async fn pdf_route(state: crate::AppState, id: &str) -> axum::response::Response {
+async fn pdf_route(
+    state: crate::AppState,
+    id: &str,
+    req: axum::Json<crate::AuditReportReq>,
+) -> axum::response::Response {
     crate::export_audit_report(
         axum::extract::State(state),
         axum::extract::Path(id.to_string()),
-        request(),
+        req,
     )
     .await
 }
 
-async fn package_route(state: crate::AppState, id: &str) -> axum::response::Response {
+async fn package_route(
+    state: crate::AppState,
+    id: &str,
+    req: axum::Json<crate::AuditReportReq>,
+) -> axum::response::Response {
     crate::export_product(
         axum::extract::State(state),
         axum::extract::Path(id.to_string()),
-        request(),
+        req,
     )
     .await
 }
@@ -274,13 +340,9 @@ async fn package_route(state: crate::AppState, id: &str) -> axum::response::Resp
 /// The fixtures are real: the package route refuses each, naming the check that holds it.
 #[tokio::test]
 async fn each_held_fixture_is_refused_by_the_package_route() {
-    if !typst_on_path() {
-        eprintln!("held fixtures test: skipping, typst is not on PATH");
-        return;
-    }
     for held in HELD {
         let (state, id) = (held.build)();
-        let package = package_route(state, &id).await;
+        let package = without_typst(package_route(state, &id, (held.request)())).await;
         assert_eq!(
             package.status(),
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -301,16 +363,14 @@ async fn each_held_fixture_is_refused_by_the_package_route() {
 
 #[tokio::test]
 async fn the_pdf_route_refuses_each_held_kind_the_package_route_refuses() {
-    if !typst_on_path() {
-        eprintln!("pdf route held test: skipping, typst is not on PATH");
-        return;
-    }
     let mut failures: Vec<String> = Vec::new();
     for held in HELD {
         let (state, id) = (held.build)();
-        let package = body_json(package_route(state.clone(), &id).await).await;
+        let package =
+            body_json(without_typst(package_route(state.clone(), &id, (held.request)())).await)
+                .await;
 
-        let pdf = pdf_route(state, &id).await;
+        let pdf = without_typst(pdf_route(state, &id, (held.request)())).await;
         let status = pdf.status();
         let content_type = pdf
             .headers()
@@ -361,7 +421,7 @@ async fn the_pdf_route_refuses_an_incomplete_run_for_a_client() {
         scope_note: false,
     }];
     let (state, id) = state_with(report);
-    let pdf = pdf_route(state, &id).await;
+    let pdf = pdf_route(state, &id, request()).await;
     assert_eq!(pdf.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     let body = body_json(pdf).await;
     assert_eq!(body["gate"], "incomplete_run", "{body}");
@@ -375,7 +435,7 @@ async fn the_pdf_route_still_renders_a_clear_report() {
         return;
     }
     let (state, id) = state_with(scan_report());
-    let resp = pdf_route(state, &id).await;
+    let resp = pdf_route(state, &id, request()).await;
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
     assert_eq!(
         resp.headers()

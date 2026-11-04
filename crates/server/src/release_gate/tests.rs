@@ -1003,6 +1003,44 @@ fn compile_pdf_from_data_is_called_from_the_release_assembly_only() {
     );
 }
 
+/// Whether each of `needles` appears in `body`, in this order. `Err` names the first one missing
+/// or out of place.
+fn in_order(body: &str, needles: &[&str]) -> Result<(), String> {
+    let mut from = 0;
+    for needle in needles {
+        match body[from..].find(needle) {
+            Some(at) => from += at + needle.len(),
+            None => return Err(format!("{needle} is missing or comes too early")),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_order_check_catches_a_swapped_assembly() {
+    assert!(in_order("a( b( c(", &["a(", "b(", "c("]).is_ok());
+    assert!(in_order("b( a( c(", &["a(", "b(", "c("]).is_err());
+    assert!(in_order("a( c(", &["a(", "b(", "c("]).is_err());
+}
+
+#[test]
+fn the_assembly_checks_and_holds_before_it_compiles() {
+    // The secrets check over `data.json` runs before Typst is given the file, and the held
+    // checks run before Typst is run at all: a refusal needs no Typst and no value reaches disk.
+    // `gated_release(` pins the routes; this pins the order inside the one assembly.
+    let source = production_part(include_str!("../release_gate.rs"));
+    let start = source
+        .find("pub async fn build_product_package_with_stem(")
+        .expect("the assembly");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("the end of the assembly")];
+    in_order(
+        body,
+        &["check_pdf_data(", "held_refusal(", "compile_pdf_from_data("],
+    )
+    .unwrap_or_else(|e| panic!("the assembly must check, then hold, then compile: {e}"));
+}
+
 #[test]
 fn the_wrapper_compile_pdf_is_not_called_by_production_code_outside_report_export() {
     let sites = production_call_sites("compile_pdf");

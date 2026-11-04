@@ -130,14 +130,77 @@ pub async fn build_product_package_with_stem(
     // The secrets check over the PDF's data runs BEFORE the compile: Typst gets a temp dir, and
     // a value that would be refused must never be written to disk, let alone compiled.
     check_pdf_data(stem, &data_json).map_err(ReleaseError::Blocked)?;
-    let pdf = crate::report_export::compile_pdf_from_data(&data_json).await?;
-    assemble_package(
+    // Everything but the PDF, then the held checks, then the compile. The held problems need only
+    // the rows, the overlay and the package's own datasets, so a held run is refused here, with
+    // the same 422 `release` gives, without Typst. The package carries no PDF yet; it is never
+    // returned without one.
+    let mut package = assemble_package(
         reviewed,
         corpus,
         options,
         stem,
-        (report_json, data_json, pdf),
-    )
+        (report_json, data_json, Vec::new()),
+    )?;
+    if let Some(failure) = held_refusal(&package) {
+        return Err(ReleaseError::Blocked(failure).into());
+    }
+    package.pdf = crate::report_export::compile_pdf_from_data(&package.data_json).await?;
+    Ok(package)
+}
+
+/// The refusals [`release`] would give for rows held for a reviewer, worked out before the PDF is
+/// compiled: undecided junk content, unverified evidence, restored findings and Engine Check Nos
+/// (an internal package, which [`release_internal`] releases, skips these four), the unsynced
+/// reviewer changes, and a merge or group decision with no record behind it (read from the
+/// package's own `findings.json` and `decisions.json`). Only checks that `release` runs over the
+/// same lists, so a package this clears is still held to every other check by `release`.
+fn held_refusal(package: &ProductPackage) -> Option<GateFailure> {
+    let mut report = GateReport::default();
+    let held = |problems: &[Problem]| {
+        if package.internal {
+            Vec::new()
+        } else {
+            problems.to_vec()
+        }
+    };
+    report.record(CheckId::Content, held(&package.undecided_junk_content));
+    report.record(
+        CheckId::EvidenceUnverified,
+        held(&package.undecided_unverified_evidence),
+    );
+    report.record(
+        CheckId::RestoredWithoutDecision,
+        held(&package.restored_without_decision),
+    );
+    report.record(
+        CheckId::EngineCheckNoWithoutCorrection,
+        held(&package.engine_check_no_without_correction),
+    );
+    report.record(
+        CheckId::UnsyncedReviewerChanges,
+        package.unsynced_reviewer_changes.clone(),
+    );
+    let mut entries = std::collections::BTreeMap::new();
+    entries.insert("findings.json".to_string(), package.findings_json.clone());
+    if let Some((_, bytes)) = package
+        .datasets
+        .iter()
+        .find(|(name, _)| name == crate::report_export::decisions_file::DECISIONS_FILE)
+    {
+        entries.insert(
+            crate::report_export::decisions_file::DECISIONS_FILE.to_string(),
+            bytes.clone(),
+        );
+    }
+    report.record(
+        CheckId::MergedWithoutDecision,
+        held::merged_without_decision_in_archive(&entries),
+    );
+    let report = report.sorted();
+    (!report.is_clean()).then(|| GateFailure {
+        stem: package.stem.clone(),
+        report,
+    })
 }
 
 /// The rest of the assembly, around an already-compiled PDF. Split out so the gate's own tests
@@ -614,29 +677,6 @@ fn release_checked(
 pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     let mut report = GateReport::default();
     report.record(CheckId::Secrets, pdf_data_problems(data_json));
-    if report.is_clean() {
-        Ok(())
-    } else {
-        Err(GateFailure {
-            stem: stem.to_string(),
-            report,
-        })
-    }
-}
-
-/// The PDF-only route's unsynced-changes gate: that route ships no zip, so it cannot run
-/// [`release`], but a PDF made while the store lacks the reviewer's latest changes is as wrong as
-/// a zip would be.
-pub fn check_unsynced(
-    stem: &str,
-    findings: &[crate::onboard::Finding],
-    changes: &[camerata_api_types::decisions::UnsyncedChange],
-) -> Result<(), GateFailure> {
-    let mut report = GateReport::default();
-    report.record(
-        CheckId::UnsyncedReviewerChanges,
-        unsynced::problems(findings, changes),
-    );
     if report.is_clean() {
         Ok(())
     } else {

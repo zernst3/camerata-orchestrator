@@ -115,19 +115,6 @@ fn a_pending_decision_is_refused_too_and_each_change_is_named() {
 }
 
 #[test]
-fn the_pdf_only_route_is_gated_the_same_way() {
-    let sealed = scan_report().seal();
-    let site = sealed.findings[0].site_key.clone();
-    let pending = [UnsyncedChange {
-        key: site,
-        change: UnsyncedKind::Undo,
-    }];
-    let failure = check_unsynced("stem", &sealed.findings, &pending).unwrap_err();
-    assert_eq!(unsynced_problems(&failure).len(), 1);
-    assert!(check_unsynced("stem", &sealed.findings, &[]).is_ok());
-}
-
-#[test]
 fn the_export_request_options_carry_the_unsynced_changes() {
     let options: ReportOptions = serde_json::from_value(serde_json::json!({
         "project_title": "T",
