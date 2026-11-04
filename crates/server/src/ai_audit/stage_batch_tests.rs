@@ -1763,6 +1763,10 @@ async fn a_saved_batch_the_provider_no_longer_has_is_settled_as_gone_and_its_mem
         notes.contains("msgbatch_gone") && notes.contains("no longer exists"),
         "the gone batch is disclosed: {notes}"
     );
+    assert!(
+        !notes.contains("  "),
+        "a note is a sentence, not a wrapped source line: {notes}"
+    );
 
     // Process 4: nothing is left to do, and the gone id is never asked about again.
     let api = Api::new().breaking("msgbatch_gone", 404);
@@ -1861,6 +1865,10 @@ async fn a_kill_after_the_provider_accepts_a_batch_and_before_its_id_is_saved_is
     assert!(
         notes.iter().any(|n| n.contains("3 item")),
         "the line says how many items it covered: {notes:?}"
+    );
+    assert!(
+        notes.iter().all(|n| !n.contains("  ")),
+        "a note is a sentence, not a wrapped source line: {notes:?}"
     );
 
     // Process 3: the batch was saved and settled this time; the old intent is not reported again.

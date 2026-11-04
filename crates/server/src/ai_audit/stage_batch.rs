@@ -1416,7 +1416,11 @@ fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
     let saved: BTreeSet<String> = cp.batches().into_iter().filter_map(|r| r.nonce).collect();
     for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
         let note = format!(
-            "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the              earlier process stopped after asking the provider to accept it and before saving its              id, so it cannot be polled or cancelled from here, and what it was charged, if              anything, is not in this ledger. Check the Anthropic console. The items of it that              have no result were submitted again.",
+            "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the \
+             earlier process stopped after asking the provider to accept it and before saving \
+             its id, so it cannot be polled or cancelled from here, and what it was charged, \
+             if anything, is not in this ledger. Check the Anthropic console. The items of it \
+             that have no result were submitted again.",
             intent.items.len(),
             stage.label()
         );
@@ -1539,7 +1543,10 @@ where
                 // for the gone batch is not in this ledger, and the note says so.
                 let error = disclosable_error(&format!("{:#}", failed.error));
                 let note = format!(
-                    "Batch {} no longer exists at the provider ({error}), so its results can                      never be fetched. It was settled as gone and its {} unfinished item(s) were                      submitted again. What the provider charged for the gone batch, if anything,                      is not in this ledger.",
+                    "Batch {} no longer exists at the provider ({error}), so its results can \
+                     never be fetched. It was settled as gone and its {} unfinished item(s) were \
+                     submitted again. What the provider charged for the gone batch, if anything, \
+                     is not in this ledger.",
                     record.batch_id,
                     members.len()
                 );
