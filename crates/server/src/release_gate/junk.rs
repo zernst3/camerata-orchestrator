@@ -16,15 +16,24 @@ use super::Problem;
 use crate::junk_finding::JUNK_CONTENT_CAPTURE;
 use crate::onboard::Finding;
 
+/// The rows marked as junk that `decisions` has not decided: what [`junk_without_decision`]
+/// refuses, as rows (the review screen's export panel lists these same rows).
+pub fn undecided_junk<'a>(
+    findings: &'a [Finding],
+    decisions: &'a dyn ReviewerDecisions,
+) -> impl Iterator<Item = &'a Finding> {
+    findings
+        .iter()
+        .filter(|f| f.captures.contains_key(JUNK_CONTENT_CAPTURE))
+        .filter(|f| !decisions.has_decision(f))
+}
+
 /// One problem per row marked as junk that `decisions` has not decided.
 pub fn junk_without_decision(
     findings: &[Finding],
     decisions: &dyn ReviewerDecisions,
 ) -> Vec<Problem> {
-    findings
-        .iter()
-        .filter(|f| f.captures.contains_key(JUNK_CONTENT_CAPTURE))
-        .filter(|f| !decisions.has_decision(f))
+    undecided_junk(findings, decisions)
         .map(|f| {
             Problem::new(
                 "findings.json",

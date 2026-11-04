@@ -42,15 +42,25 @@ impl ReviewerDecisions for HashMap<String, DispositionWire> {
     }
 }
 
+/// The rows marked `evidence_unverified` that `decisions` has not decided: what
+/// [`unverified_without_decision`] refuses, as rows. The review screen's export panel lists these
+/// same rows (`crate::review_view`), so the panel and the gate cannot disagree.
+pub fn undecided_unverified<'a>(
+    findings: &'a [Finding],
+    decisions: &'a dyn ReviewerDecisions,
+) -> impl Iterator<Item = &'a Finding> {
+    findings
+        .iter()
+        .filter(|f| f.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE))
+        .filter(|f| !decisions.has_decision(f))
+}
+
 /// One problem per row marked `evidence_unverified` that `decisions` has not decided.
 pub fn unverified_without_decision(
     findings: &[Finding],
     decisions: &dyn ReviewerDecisions,
 ) -> Vec<Problem> {
-    findings
-        .iter()
-        .filter(|f| f.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE))
-        .filter(|f| !decisions.has_decision(f))
+    undecided_unverified(findings, decisions)
         .map(|f| {
             Problem::new(
                 "findings.json",

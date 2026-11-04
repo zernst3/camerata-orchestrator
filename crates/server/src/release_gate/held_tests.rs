@@ -623,3 +623,229 @@ fn the_merge_check_refuses_a_package_whose_findings_or_decisions_file_is_unreada
         }
     }
 }
+
+// ── the review screen's export panel lists exactly what the gate refuses (WO9c) ───────────
+
+/// The (path, line) a gate problem's location names ("src/users.rs line 21").
+fn located(p: &Problem) -> (String, usize) {
+    let (path, line) = p
+        .location
+        .rsplit_once(" line ")
+        .unwrap_or_else(|| panic!("not a row location: {}", p.location));
+    (path.to_string(), line.parse().expect("a line number"))
+}
+
+fn sorted(mut v: Vec<(String, usize)>) -> Vec<(String, usize)> {
+    v.sort();
+    v
+}
+
+/// The rows of the view for one reason, as (path, line).
+fn view_rows(rows: &[camerata_api_types::review_view::HeldRow]) -> Vec<(String, usize)> {
+    sorted(rows.iter().map(|h| (h.path.clone(), h.line)).collect())
+}
+
+fn gate_problems(reviewed: &ReviewedReport) -> GateFailure {
+    match release(package_of(reviewed)) {
+        Err(ReleaseError::Blocked(failure)) => failure,
+        other => panic!("the package must be refused: {other:?}"),
+    }
+}
+
+#[test]
+fn export_gate_view_equals_release_gate_refusals() {
+    use camerata_api_types::review_view::{ExportGateView, HoldReason};
+
+    // Five rows, each held for a different reason the gate refuses: evidence not verified, junk
+    // text, a merge with no decision behind it, a restored row nobody has ruled on, and a site a
+    // group decision covers without writing its record.
+    let mut report = report_of_three();
+    report.findings.push(second_row("src/cart.rs", 7));
+    report.findings.push(second_row("src/wishlist.rs", 9));
+    let row = |report: &mut ScanReport, path: &str| -> usize {
+        report
+            .findings
+            .iter()
+            .position(|f| f.path == path)
+            .unwrap_or_else(|| panic!("no row in {path}"))
+    };
+    let (db, users, orders, cart) = (
+        row(&mut report, "src/db.rs"),
+        row(&mut report, "src/users.rs"),
+        row(&mut report, "src/orders.rs"),
+        row(&mut report, "src/cart.rs"),
+    );
+    report.findings[db].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    report.findings[users].detail = "A title \u{2014} I cannot assist.".to_string();
+    report.findings[orders].captures.insert(
+        MERGED_INTO_CAPTURE.to_string(),
+        "some-target-key".to_string(),
+    );
+    report.findings[orders].captures.insert(
+        MERGED_LABEL_CAPTURE.to_string(),
+        "Merged into src/db.rs:12".to_string(),
+    );
+    report.findings[cart].captures.insert(
+        crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string(),
+        "its headline is a placeholder".to_string(),
+    );
+    let sealed = report.seal();
+    let key_of = |path: &str| at(&sealed, path).site_key;
+    let wishlist = key_of("src/wishlist.rs");
+    let node = Decision {
+        scope: Scope::Node("rule:SEC-NO-RAW-SQL-CONCAT-1".to_string()),
+        applies_to: vec![wishlist.clone()],
+        ..decision(
+            "dec-000001",
+            "rule:SEC-NO-RAW-SQL-CONCAT-1",
+            DecisionState::Confirmed,
+            "pattern",
+        )
+    };
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&node), &[], &[]);
+
+    let view = crate::release_gate::holds::gate_holds(&reviewed);
+    let failure = gate_problems(&reviewed);
+
+    // Row by row, kind by kind: the view lists the rows each check refuses and no others.
+    let located_in = |check: CheckId, file: &str| {
+        sorted(
+            check_problems(&failure, check)
+                .into_iter()
+                .filter(|p| p.file == file)
+                .map(located)
+                .collect(),
+        )
+    };
+    let kind = |reason: HoldReason| {
+        view_rows(
+            &view
+                .held
+                .iter()
+                .filter(|h| h.reason == reason)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        kind(HoldReason::EvidenceUnverified),
+        located_in(CheckId::EvidenceUnverified, "findings.json")
+    );
+    assert_eq!(
+        kind(HoldReason::JunkContent),
+        located_in(CheckId::Content, "findings.json")
+    );
+    assert_eq!(
+        kind(HoldReason::RestoredWithoutDecision),
+        located_in(CheckId::RestoredWithoutDecision, "findings.json")
+    );
+    assert_eq!(
+        view_rows(&view.merged_without_decision),
+        located_in(CheckId::MergedWithoutDecision, "findings.json")
+    );
+    assert!(view
+        .merged_without_decision
+        .iter()
+        .all(|h| h.reason == HoldReason::MergedWithoutDecision));
+    // Each kind found its one row (the fixture holds one of each), so the equalities above are
+    // not empty ones.
+    for (what, rows) in [
+        ("evidence", kind(HoldReason::EvidenceUnverified)),
+        ("junk", kind(HoldReason::JunkContent)),
+        ("restored", kind(HoldReason::RestoredWithoutDecision)),
+        ("merged", view_rows(&view.merged_without_decision)),
+    ] {
+        assert_eq!(rows.len(), 1, "{what}: {rows:?}");
+    }
+
+    // The group decision's gap: one problem per site, one gap entry naming the same site.
+    let gap_problems = check_problems(&failure, CheckId::MergedWithoutDecision)
+        .into_iter()
+        .filter(|p| p.file == crate::report_export::decisions_file::DECISIONS_FILE)
+        .count();
+    let gap_sites: usize = view
+        .node_decisions_missing_members
+        .iter()
+        .map(|g| g.missing.len())
+        .sum();
+    assert_eq!((gap_problems, gap_sites), (1, 1));
+    assert_eq!(
+        view.node_decisions_missing_members[0].missing,
+        vec![wishlist.clone()]
+    );
+
+    // And nothing else: every problem the four checks raise is a row or a gap in the view.
+    let refused: usize = [
+        CheckId::EvidenceUnverified,
+        CheckId::Content,
+        CheckId::RestoredWithoutDecision,
+        CheckId::MergedWithoutDecision,
+    ]
+    .iter()
+    .map(|c| check_problems(&failure, *c).len())
+    .sum();
+    assert_eq!(
+        refused,
+        view.held.len() + view.merged_without_decision.len() + gap_sites
+    );
+
+    // Rule on every one of them: the view empties and the gate lets the package through.
+    let mut records = vec![node];
+    records.push(Decision {
+        inherited_from: Some("dec-000001".to_string()),
+        ..decision(
+            "dec-000001.00000",
+            &wishlist,
+            DecisionState::Confirmed,
+            "pattern",
+        )
+    });
+    let sealed = {
+        let mut report = report_of_three();
+        report.findings.push(second_row("src/cart.rs", 7));
+        report.findings.push(second_row("src/wishlist.rs", 9));
+        let db = row(&mut report, "src/db.rs");
+        let users = row(&mut report, "src/users.rs");
+        let cart = row(&mut report, "src/cart.rs");
+        report.findings[db].captures.insert(
+            crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+            "not found near the cited line".to_string(),
+        );
+        report.findings[users].detail = "A title \u{2014} I cannot assist.".to_string();
+        report.findings[cart].captures.insert(
+            crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string(),
+            "its headline is a placeholder".to_string(),
+        );
+        report.seal()
+    };
+    let key = |path: &str| at(&sealed, path).site_key;
+    let (db, users, orders, cart) = (
+        key("src/db.rs"),
+        key("src/users.rs"),
+        key("src/orders.rs"),
+        key("src/cart.rs"),
+    );
+    for (i, k) in [&db, &users, &cart].into_iter().enumerate() {
+        records.push(decision(
+            &format!("dec-1{i:05}"),
+            k,
+            DecisionState::Confirmed,
+            "",
+        ));
+    }
+    records.push(decision(
+        "dec-200000",
+        &orders,
+        DecisionState::MergedInto(db.clone()),
+        "same query helper",
+    ));
+    let reviewed = apply_overlay(&sealed, &records, &[], &[]);
+    assert_eq!(
+        crate::release_gate::holds::gate_holds(&reviewed),
+        ExportGateView::default()
+    );
+    assert!(release(package_of(&reviewed)).is_ok());
+}

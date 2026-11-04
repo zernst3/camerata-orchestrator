@@ -20,6 +20,7 @@ mod archive;
 mod consistency;
 pub mod evidence;
 pub mod held;
+pub mod holds;
 pub mod junk;
 mod report;
 mod secrets;
