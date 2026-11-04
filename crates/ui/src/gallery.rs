@@ -21,16 +21,16 @@ use dioxus::prelude::*;
 
 use crate::test_harness;
 
+mod export_states;
+mod shell_states;
+mod tree_states;
+
 /// How a state draws itself.
 #[derive(Clone, Copy)]
 pub enum StateKind {
     /// The screen does not exist yet; `owner` is the work order that builds it.
     Placeholder { owner: &'static str },
     /// Renders the real screen from fixtures to a full HTML document.
-    #[expect(
-        dead_code,
-        reason = "no review screen exists yet; the first work order to build one constructs this and deletes this attribute"
-    )]
     Built(fn() -> String),
 }
 
@@ -161,15 +161,35 @@ const SPEC: &[(&str, &str, &[&str])] = &[
     ("export", "WO10", &["clear", "blocked"]),
 ];
 
-/// Every named state, in spec order.
+/// The renderer of every state a work order has built, by `screen/state`. A work order that
+/// builds a screen adds its `gallery/<screen>_states.rs` here.
+fn built_renderers() -> Vec<(&'static str, fn() -> String)> {
+    let mut all = Vec::new();
+    all.extend(shell_states::states());
+    all.extend(tree_states::states());
+    all.extend(export_states::states());
+    all
+}
+
+/// Every named state, in spec order. A state with a renderer is `Built`; the rest are
+/// placeholders naming the work order that owns them.
 pub fn registry() -> Vec<GalleryState> {
+    let built = built_renderers();
     SPEC.iter()
-        .flat_map(|(screen, owner, states)| {
-            states.iter().map(move |state| GalleryState {
+        .flat_map(|(screen, owner, states)| states.iter().map(|state| (*screen, *owner, *state)))
+        .map(|(screen, owner, state)| {
+            let id = format!("{screen}/{state}");
+            let kind = built
+                .iter()
+                .find(|(built_id, _)| *built_id == id)
+                .map_or(StateKind::Placeholder { owner }, |(_, render)| {
+                    StateKind::Built(*render)
+                });
+            GalleryState {
                 screen,
                 state,
-                kind: StateKind::Placeholder { owner },
-            })
+                kind,
+            }
         })
         .collect()
 }

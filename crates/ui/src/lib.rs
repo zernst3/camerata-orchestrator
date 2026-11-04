@@ -8,4 +8,5 @@
 
 pub mod clipboard_probe;
 pub mod desktop_chrome;
+pub mod review_io;
 pub mod review_source;

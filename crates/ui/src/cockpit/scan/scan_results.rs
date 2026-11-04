@@ -370,6 +370,17 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // The "Patterns across services" tab of a multi-repo project. It is an observation, not a
     // kind of finding, so it is a lens of its own beside the kind switch and not a fifth kind.
     let mut patterns_open = use_signal(|| false);
+    // The review tree lane (review UI spec sections 4 and 5): a lens of its own beside the kind
+    // switch, because it reads the server's review views and not this component's report. The
+    // export panel's `open` on a held row asks for it through `DoorRequest`.
+    let mut review_open = use_signal(|| false);
+    let door = use_signal(|| Option::<camerata_ui_core::tree::export::Door>::None);
+    use_context_provider(|| crate::cockpit::tree::DoorRequest(door));
+    use_effect(move || {
+        if door.read().is_some() {
+            review_open.set(true);
+        }
+    });
     // The rule library, for the titles the patterns tab prints (the report prints titles too).
     let pattern_titles_res = use_resource(fetch_corpus_rules);
     let pattern_titles = move || {
@@ -1875,13 +1886,14 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 div { class: "kind-switch",
                     for (surface , count) in kind_counts.iter().copied() {
                         {
-                            let active = !patterns_open() && kind_view() == surface;
+                            let active = !patterns_open() && !review_open() && kind_view() == surface;
                             rsx! {
                                 button {
                                     key: "{surface.label()}",
                                     class: if active { "kind-tab active" } else { "kind-tab" },
                                     onclick: move |_| {
                                         patterns_open.set(false);
+                                        review_open.set(false);
                                         kind_view.set(surface);
                                     },
                                     "{surface.label()} "
@@ -1904,8 +1916,11 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     // The observation tab, only for a project of several repos.
                     if audited.as_ref().is_some_and(|a| a.patterns_across_services.is_present()) {
                         button {
-                            class: if patterns_open() { "kind-tab active" } else { "kind-tab" },
-                            onclick: move |_| patterns_open.set(true),
+                            class: if patterns_open() && !review_open() { "kind-tab active" } else { "kind-tab" },
+                            onclick: move |_| {
+                                review_open.set(false);
+                                patterns_open.set(true);
+                            },
                             "Patterns across services "
                             span { class: "triage-tab-count",
                                 "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count_with_titles(pattern_titles().as_ref()))}"
@@ -1914,7 +1929,31 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
 
-                if patterns_open() {
+                // The review lanes: the tree, and the Queue as the Flat view.
+                if !project_id.is_empty() {
+                    button {
+                        class: if review_open() { "kind-tab active" } else { "kind-tab" },
+                        title: "The tree of groups: decide a whole group at once, with the exceptions listed.",
+                        onclick: move |_| {
+                            patterns_open.set(false);
+                            review_open.set(true);
+                        },
+                        "Review"
+                    }
+                }
+
+                if review_open() {
+                    crate::cockpit::review_shell::ReviewShellHost { project_id: project_id.clone(),
+                        div { class: "pane-empty",
+                            "The flat view is the Queue tab above. "
+                            button {
+                                class: "btn-edit-sm",
+                                onclick: move |_| review_open.set(false),
+                                "Open the Queue"
+                            }
+                        }
+                    }
+                } else if patterns_open() {
                     PatternsPanel {
                         view: audited
                             .as_ref()
@@ -2081,7 +2120,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // since Pass 2 step 3, a Confirmed row is not: it is decided, just decided to
                 // be real. The gate's whole rule lives in `TriageCounts` (core, unit-tested);
                 // `ProcessGate` renders it and this closure performs the commit.
-                if !patterns_open() && kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
+                if !patterns_open() && !review_open() && kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
                     {
                     // QUEUE rows only. Process commits dispositions (baseline waivers,
                     // tickets); an informational row has no disposition to commit, and

@@ -3438,6 +3438,7 @@ fn DocsView() -> Element {
 }
 
 mod decision_cards;
+pub(crate) mod export_gate;
 mod freshness;
 pub mod live_run;
 mod palette;
@@ -3445,6 +3446,7 @@ mod pane_context;
 mod remediation;
 mod review;
 mod review_findings;
+pub(crate) mod review_shell;
 pub mod rules;
 mod saved_inspections;
 pub mod scan;
@@ -3452,6 +3454,7 @@ mod stack;
 pub mod table;
 #[cfg(test)]
 mod tour_targets;
+pub(crate) mod tree;
 pub mod uow;
 pub mod viewer;
 

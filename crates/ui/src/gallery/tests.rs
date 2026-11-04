@@ -65,19 +65,6 @@ const SPEC_STATES: &[&str] = &[
 /// The states still placeholders, with the work order that owns each. A work order that builds a
 /// screen deletes its lines here in the same commit that registers the real renderer.
 const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
-    ("shell/empty", "WO10"),
-    ("shell/loading", "WO10"),
-    ("shell/error", "WO10"),
-    ("shell/held-count", "WO10"),
-    ("tree/empty", "WO10"),
-    ("tree/loading", "WO10"),
-    ("tree/error", "WO10"),
-    ("tree/30k", "WO10"),
-    ("tree/markers", "WO10"),
-    ("tree/node-prompt", "WO10"),
-    ("tree/node-decided", "WO10"),
-    ("tree/not-group-reviewed", "WO10"),
-    ("tree/narrow", "WO10"),
     ("queue/empty", "WO11"),
     ("queue/loading", "WO11"),
     ("queue/error", "WO11"),
@@ -119,8 +106,6 @@ const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
     ("settings/saving", "WO11b"),
     ("settings/error", "WO11b"),
     ("settings/run-in-flight", "WO11b"),
-    ("export/clear", "WO10"),
-    ("export/blocked", "WO10"),
 ];
 
 fn scratch(name: &str) -> PathBuf {
@@ -169,11 +154,11 @@ fn placeholders_are_listed_with_their_owner() {
 fn a_placeholder_page_says_what_is_not_built_and_who_owns_it() {
     let state = registry()
         .into_iter()
-        .find(|s| s.id() == "tree/30k")
-        .expect("tree/30k is registered");
+        .find(|s| s.id() == "queue/30k")
+        .expect("queue/30k is registered");
     let html = state.render();
     assert!(
-        html.contains("not built: tree/30k, owned by WO10"),
+        html.contains("not built: queue/30k, owned by WO11"),
         "{html}"
     );
 }
@@ -196,6 +181,30 @@ fn gallery_renders_every_registered_state_to_a_file() {
             path.display()
         );
     }
+}
+
+/// A site key joins its parts with NUL. A screen that puts one in an element id, an `href` or a
+/// `data-` attribute writes a NUL byte into the page; this guards every owner's screens at once
+/// (the tree, the queue, the Engine Check and the settings lane share it).
+#[test]
+fn no_gallery_page_contains_a_raw_nul_byte() {
+    let out = scratch("no-nul");
+    write_gallery(&out).unwrap();
+    let mut checked = 0;
+    for s in registry() {
+        let path = out.join(s.screen).join(format!("{}.html", s.state));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("{} was not written: {e}", path.display()));
+        assert!(
+            !bytes.contains(&0u8),
+            "{} contains a raw NUL byte: a key was written into the page without going through the one escape",
+            s.id()
+        );
+        checked += 1;
+    }
+    let index = std::fs::read(out.join("index.html")).unwrap();
+    assert!(!index.contains(&0u8), "index.html contains a raw NUL byte");
+    assert_eq!(checked, SPEC_STATES.len(), "a vacuous pass proves nothing");
 }
 
 #[test]

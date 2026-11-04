@@ -300,61 +300,65 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
                      out, and why: a Triage Log sheet in the workbook and csv/triage-log.csv. Off by default."
                 }
             }
-            button {
-                class: "btn-run",
-                "data-tour": camerata_ui_core::walkthrough::target::EXPORT_PACKAGE,
-                disabled: loading(),
-                onclick: move |_| {
-                    let pid = project_id.clone();
-                    let disp_snapshot = dispositions.read().clone();
-                    let sync = try_consume_context::<DecisionSync>();
-                    let pt = project_title();
-                    let pb = prepared_by();
-                    let so = summary_override();
-                    let log = triage_log();
-                    loading.set(true);
-                    spawn(async move {
-                        let _guard = crate::loading::LoadingGuard::new();
-                        let override_opt = if so.trim().is_empty() { None } else { Some(so) };
-                        // The export reads the decision store. Store what the screen has
-                        // changed first; whatever is still not stored is listed in the request
-                        // and the release gate refuses to export while any is. With the
-                        // decision state unknown nothing can be exported at all.
-                        let mut unsynced = Vec::new();
-                        if let Some(sync) = sync {
-                            if sync.bridge.borrow().availability()
-                                == camerata_ui_core::decisions::Availability::Unknown
-                            {
-                                crate::toast::push_toast(
-                                    toasts,
-                                    crate::toast::ToastKind::Error,
-                                    camerata_ui_core::decision_sync::UNKNOWN_BANNER,
-                                );
-                                loading.set(false);
-                                return;
-                            }
-                            sync.flush(dispositions).await;
-                            unsynced = sync.bridge.borrow().unsynced(&disp_snapshot);
-                        }
-                        let options = camerata_ui_core::product_export::ProductExportOptions {
-                            project_title: pt,
-                            prepared_by: pb,
-                            executive_summary_override: override_opt,
-                            triage_log: log,
-                            unsynced_changes: unsynced,
-                        };
-                        match export_product_zip(&pid, &disp_snapshot, &options).await {
-                            Ok((bytes, filename)) => {
-                                if save_bytes(&filename, bytes).await {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
+            // The release gate refuses a package while a row needs a decision. When it does, the
+            // button gives way to the list of those rows, each with a door to it (spec section 10).
+            crate::cockpit::export_gate::ExportGateHost { project_id: project_id.clone(),
+                button {
+                    class: "btn-run",
+                    "data-tour": camerata_ui_core::walkthrough::target::EXPORT_PACKAGE,
+                    disabled: loading(),
+                    onclick: move |_| {
+                        let pid = project_id.clone();
+                        let disp_snapshot = dispositions.read().clone();
+                        let sync = try_consume_context::<DecisionSync>();
+                        let pt = project_title();
+                        let pb = prepared_by();
+                        let so = summary_override();
+                        let log = triage_log();
+                        loading.set(true);
+                        spawn(async move {
+                            let _guard = crate::loading::LoadingGuard::new();
+                            let override_opt = if so.trim().is_empty() { None } else { Some(so) };
+                            // The export reads the decision store. Store what the screen has
+                            // changed first; whatever is still not stored is listed in the request
+                            // and the release gate refuses to export while any is. With the
+                            // decision state unknown nothing can be exported at all.
+                            let mut unsynced = Vec::new();
+                            if let Some(sync) = sync {
+                                if sync.bridge.borrow().availability()
+                                    == camerata_ui_core::decisions::Availability::Unknown
+                                {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Error,
+                                        camerata_ui_core::decision_sync::UNKNOWN_BANNER,
+                                    );
+                                    loading.set(false);
+                                    return;
                                 }
+                                sync.flush(dispositions).await;
+                                unsynced = sync.bridge.borrow().unsynced(&disp_snapshot);
                             }
-                            Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
-                        }
-                        loading.set(false);
-                    });
-                },
-                if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
+                            let options = camerata_ui_core::product_export::ProductExportOptions {
+                                project_title: pt,
+                                prepared_by: pb,
+                                executive_summary_override: override_opt,
+                                triage_log: log,
+                                unsynced_changes: unsynced,
+                            };
+                            match export_product_zip(&pid, &disp_snapshot, &options).await {
+                                Ok((bytes, filename)) => {
+                                    if save_bytes(&filename, bytes).await {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
+                                    }
+                                }
+                                Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
+                            }
+                            loading.set(false);
+                        });
+                    },
+                    if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
+                }
             }
         }
     }
