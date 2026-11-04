@@ -1,5 +1,6 @@
 use super::*;
 use crate::style::GLOBAL_CSS;
+use camerata_api_types::review_view::QueueRow;
 use camerata_ui_core::queue::{layout, Entry, ROWS_PER_PAGE};
 use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base};
 
@@ -45,10 +46,29 @@ fn the_over_budget_page_draws_the_head_the_line_and_the_band_with_their_sentence
     );
     assert!(html.contains("the line: "));
     assert!(html.contains("class=\"queue-over-band\""));
+    // The sentence is read from the rows over budget (D3): the severities it names are theirs.
+    let over: Vec<&QueueRow> = q
+        .escalated
+        .iter()
+        .filter(|r| r.candidate.over_budget_reason.is_some())
+        .collect();
+    assert!(!over.is_empty());
+    let sentence = camerata_ui_core::queue::over_budget_reasons_text(&over);
     assert!(
-        html.contains("all unauthenticated reach"),
-        "the over-budget sentence"
+        html.contains(&format!("over budget: {sentence}")),
+        "the over-budget band says {sentence:?}: {html}"
     );
+    for r in &over {
+        assert!(
+            r.candidate.severity == "critical"
+                || r.candidate.reason
+                    == camerata_api_types::review::EscalationReason::EvidenceUnverified,
+            "{} at {} is under a band that would claim a severity it does not have",
+            r.candidate.reason.as_str(),
+            r.candidate.severity
+        );
+    }
+    assert!(sentence.contains(" at critical"), "{sentence}");
     // The candidates stay hidden until asked, with the view-only button.
     assert!(!html.contains("queue-below-heading"));
     assert!(html.contains("(hidden)"));
@@ -154,4 +174,48 @@ fn a_rendered_queue_page_has_each_key_as_a_plain_token() {
         rest = &after[end..];
     }
     assert!(seen > 10, "{seen}");
+}
+
+/// D3: every queue page that draws an over-budget band says what the rows in it are, read from
+/// the rows: no Low row sits under a band that claims "at critical".
+#[test]
+fn no_queue_page_claims_a_severity_the_rows_over_budget_do_not_have() {
+    use camerata_ui_core::test_support::review_fixtures::{fixture, Body, StateFixture};
+    let mut with_band = 0;
+    for id in [
+        "queue/over-budget",
+        "queue/line-lowered",
+        "queue/rate-changed-toast",
+        "queue/30k",
+    ] {
+        let Some(StateFixture {
+            body: Body::Queue(body),
+            ..
+        }) = fixture(id)
+        else {
+            panic!("{id}");
+        };
+        let q = body.queue.ready().cloned().expect("a ready queue");
+        let over: Vec<&QueueRow> = q
+            .escalated
+            .iter()
+            .filter(|r| r.candidate.over_budget_reason.is_some())
+            .collect();
+        if over.is_empty() {
+            continue;
+        }
+        with_band += 1;
+        let sentence = camerata_ui_core::queue::over_budget_reasons_text(&over);
+        let html = page(id);
+        assert!(html.contains(&sentence), "{id}: {sentence}");
+        if sentence.contains("at critical") {
+            for r in over.iter().filter(|r| {
+                r.candidate.reason
+                    != camerata_api_types::review::EscalationReason::EvidenceUnverified
+            }) {
+                assert_eq!(r.candidate.severity, "critical", "{id}");
+            }
+        }
+    }
+    assert!(with_band >= 3, "a vacuous pass proves nothing");
 }

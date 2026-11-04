@@ -14,6 +14,9 @@ fn view() -> QueueView {
 fn row_of(reason: EscalationReason, rank: u32, band: Band) -> QueueRow {
     let mut r = view().escalated[0].clone();
     r.candidate.reason = reason;
+    // The server lets a reason go over budget only at critical (evidence at any severity); a row
+    // cut from the fixture takes that severity so the sentence reads what the server would.
+    r.candidate.severity = "critical".to_string();
     r.candidate.global_rank = rank;
     r.candidate.escalated = band != Band::BelowLine;
     r.candidate.over_budget_reason = (band == Band::OverBudget).then_some(reason);
@@ -298,6 +301,38 @@ fn the_over_budget_sentence_names_critical_reach_and_unverified_evidence_apart()
     assert_eq!(
         over_budget_reasons_text(&[&a, &c]),
         "all unauthenticated reach at critical, and unverified evidence at any severity"
+    );
+}
+
+#[test]
+fn the_over_budget_sentence_names_the_severities_the_rows_have() {
+    use EscalationReason::{EvidenceUnverified, SecretExposure, UnauthenticatedReach};
+    let mut low = row_of(UnauthenticatedReach, 1, Band::OverBudget);
+    low.candidate.severity = "low".to_string();
+    let mut crit = row_of(SecretExposure, 2, Band::OverBudget);
+    crit.candidate.severity = "critical".to_string();
+    let mut also_crit = row_of(UnauthenticatedReach, 3, Band::OverBudget);
+    also_crit.candidate.severity = "critical".to_string();
+    // The sentence reads the rows, not the reason: a Low row is never "at critical".
+    let sentence = over_budget_reasons_text(&[&low]);
+    assert!(!sentence.contains("critical"), "{sentence}");
+    assert_eq!(sentence, "all unauthenticated reach at low");
+    // Different reasons at different severities are said apart.
+    assert_eq!(
+        over_budget_reasons_text(&[&low, &crit]),
+        "all unauthenticated reach at low, and secret exposure at critical"
+    );
+    // A reason whose rows differ in severity names each severity present, highest first.
+    assert_eq!(
+        over_budget_reasons_text(&[&low, &also_crit]),
+        "all unauthenticated reach at critical or low"
+    );
+    // Evidence stays "at any severity", whatever the rows' own severity.
+    let mut ev = row_of(EvidenceUnverified, 4, Band::OverBudget);
+    ev.candidate.severity = "medium".to_string();
+    assert_eq!(
+        over_budget_reasons_text(&[&ev]),
+        "all unverified evidence at any severity"
     );
 }
 

@@ -234,24 +234,52 @@ pub fn budget_line(view: &QueueView) -> String {
 
 /// What the rows over budget have in common, in the design's words (4.4 step 5): `all
 /// unauthenticated reach or secret exposure at critical`, and `unverified evidence at any
-/// severity` where that is why a row is over.
+/// severity` where that is why a row is over. The severities are read from the rows, never
+/// assumed from the reason: the server lets a reason go over budget only at critical, so on real
+/// data the sentence says critical, but a row of another severity is named as it is.
 pub fn over_budget_reasons_text(rows: &[&QueueRow]) -> String {
-    let mut reasons: Vec<EscalationReason> = rows
-        .iter()
-        .filter_map(|r| r.candidate.over_budget_reason)
-        .collect();
-    reasons.sort_by_key(|r| r.rank());
-    reasons.dedup();
-    let critical: Vec<&str> = reasons
-        .iter()
-        .filter(|r| **r != EscalationReason::EvidenceUnverified)
-        .map(|r| r.phrase())
-        .collect();
-    let mut parts: Vec<String> = Vec::new();
-    if !critical.is_empty() {
-        parts.push(format!("{} at critical", join_or(&critical)));
+    // Each reason with the severities its rows have, worst first.
+    let mut by_reason: Vec<(EscalationReason, Vec<String>)> = Vec::new();
+    for row in rows {
+        let Some(reason) = row.candidate.over_budget_reason else {
+            continue;
+        };
+        let severity = row.candidate.severity.to_ascii_lowercase();
+        match by_reason.iter_mut().find(|(r, _)| *r == reason) {
+            Some((_, severities)) => {
+                if !severities.contains(&severity) {
+                    severities.push(severity);
+                }
+            }
+            None => by_reason.push((reason, vec![severity])),
+        }
     }
-    if reasons.contains(&EscalationReason::EvidenceUnverified) {
+    by_reason.sort_by_key(|(r, _)| r.rank());
+    for (_, severities) in &mut by_reason {
+        severities.sort_by_key(|s| crate::viewer::severity_rank(s));
+    }
+    let evidence = by_reason
+        .iter()
+        .any(|(r, _)| *r == EscalationReason::EvidenceUnverified);
+    // Reasons that share the same severities share one clause.
+    let mut clauses: Vec<(Vec<&str>, &Vec<String>)> = Vec::new();
+    for (reason, severities) in by_reason
+        .iter()
+        .filter(|(r, _)| *r != EscalationReason::EvidenceUnverified)
+    {
+        match clauses.iter_mut().find(|(_, s)| *s == severities) {
+            Some((phrases, _)) => phrases.push(reason.phrase()),
+            None => clauses.push((vec![reason.phrase()], severities)),
+        }
+    }
+    let mut parts: Vec<String> = clauses
+        .iter()
+        .map(|(phrases, severities)| {
+            let words: Vec<&str> = severities.iter().map(String::as_str).collect();
+            format!("{} at {}", join_or(phrases), join_or(&words))
+        })
+        .collect();
+    if evidence {
         parts.push("unverified evidence at any severity".to_string());
     }
     if parts.is_empty() {

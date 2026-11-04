@@ -932,10 +932,24 @@ pub fn build(p: &Params) -> ReviewDataSet {
         }];
     }
 
-    // Candidates: reasons, then the global ranking.
+    // Candidates: reasons, then the global ranking. The ranking is the server's (design 4.4):
+    // by reason rank first, then by the row's place inside the reason (the server interleaves
+    // the nodes, so severity does not lead inside a reason). The reasons are skewed to the
+    // top reasons, as a real run's are, so the budget runs out inside them and the critical rows
+    // of the D5 reasons that come after it go over budget.
     let reasons = EscalationReason::ALL;
+    // A run with no reason allowed over budget has no unverified-evidence candidate either (the
+    // server lets that reason over regardless), so the at-budget state stays at the budget.
+    let evidence_candidates = !p.over_budget_reasons.is_empty();
+    let weighted: Vec<EscalationReason> = reasons
+        .iter()
+        .zip([22usize, 9, 6, 4, 3, 3, 2, 2, 3, 1])
+        .filter(|(r, _)| evidence_candidates || **r != EscalationReason::EvidenceUnverified)
+        .flat_map(|(r, n)| std::iter::repeat_n(*r, n))
+        .collect();
+    let offset = rng.below(weighted.len());
     for (n, &i) in cand_rows.iter().enumerate() {
-        let reason = reasons[(n + rng.below(3)) % reasons.len()];
+        let reason = weighted[(n * 7 + offset) % weighted.len()];
         let sev = rows[i].severity.clone();
         if let Some(s) = rows[i].stage2.as_mut() {
             s.reason = Some(reason);
@@ -958,11 +972,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
             let prio = reason
                 .and_then(|r| reasons.iter().position(|x| *x == r))
                 .unwrap_or(99);
-            (
-                severity_rank(&rows[i].severity),
-                prio,
-                rows[i].site_key.clone(),
-            )
+            (prio, rows[i].site_key.clone())
         };
         key(a).cmp(&key(b))
     });
@@ -978,7 +988,9 @@ pub fn build(p: &Params) -> ReviewDataSet {
             .unwrap_or(EscalationReason::NeedsMoreCode);
         let (escalated, over) = if taken < budget.budget {
             (true, None)
-        } else if p.over_budget_reasons.contains(&reason) {
+        } else if reason.may_exceed_budget(&rows[i].severity, &p.over_budget_reasons) {
+            // The server's rule (re_mark): a D5 reason goes over budget only at critical, and
+            // unverified evidence at any severity.
             (true, Some(reason))
         } else {
             (false, None)
