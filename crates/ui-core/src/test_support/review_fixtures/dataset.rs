@@ -1938,6 +1938,7 @@ fn apply_engine_mode(p: &Params, rows: &mut [SiteRow]) -> BTreeMap<String, Engin
             correction: None,
             by: "architect".to_string(),
             at: timestamp(n),
+            carried_from: None,
         };
         if wrong {
             wrongs += 1;

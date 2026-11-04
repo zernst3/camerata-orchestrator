@@ -636,3 +636,56 @@ fn a_node_summary_that_leaks_the_methodology_carries_its_prose_flag_on_the_tree_
         );
     }
 }
+
+// ── a carried No on the lane (WO11a) ───────────────────────────────────────────────────────
+
+#[test]
+fn a_carried_no_shows_on_its_card_as_carried_and_does_not_count_in_this_runs_rate() {
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdict};
+
+    let rows: Vec<Finding> = (0..6)
+        .map(|i| row("SEC-ONE-1", &format!("src/a{i}.rs"), 10 + i, "medium"))
+        .collect();
+    let report = sealed(rows, |_| {});
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 6;
+    let keys: Vec<String> = report.findings.iter().map(|f| f.site_key.clone()).collect();
+    let verdict = |key: &str, right: bool, carried: Option<&str>| EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: RUN.to_string(),
+        right,
+        wrong: (!right).then_some(EngineCheckError::NotARealIssue),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        carried_from: carried.map(str::to_string),
+    };
+    stores.verdicts = vec![
+        verdict(&keys[0], true, None),
+        verdict(&keys[1], false, Some("insp-0")),
+    ];
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let card = |key: &str| {
+        lane.cards
+            .iter()
+            .find(|c| c.site.site_key == key)
+            .and_then(|c| c.verdict.clone())
+    };
+    assert_eq!(
+        card(&keys[1]).and_then(|v| v.carried_from).as_deref(),
+        Some("insp-0"),
+        "the card carries the earlier run's No"
+    );
+    assert_eq!(card(&keys[0]).and_then(|v| v.carried_from), None);
+    let kept = lane
+        .strata
+        .iter()
+        .find(|s| s.stratum == camerata_api_types::review_view::SampleStratum::Kept)
+        .unwrap();
+    assert_eq!(
+        (kept.verdicts, kept.wrong),
+        (1, 0),
+        "an earlier run's No is not an answer on this run, so it is not in this run's rate"
+    );
+}

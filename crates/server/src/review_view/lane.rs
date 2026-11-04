@@ -47,7 +47,13 @@ impl<'a> ReviewComposer<'a> {
     fn verdict_counts<'k>(&self, keys: impl Iterator<Item = &'k String>) -> (usize, usize) {
         let (mut verdicts, mut wrong) = (0, 0);
         for key in keys {
-            if let Some(v) = self.verdicts.get(key.as_str()) {
+            // A No carried from an earlier run stands for the hold, but it is not an answer given
+            // on this run, so it is not in this run's rate.
+            if let Some(v) = self
+                .verdicts
+                .get(key.as_str())
+                .filter(|v| v.carried_from.is_none())
+            {
                 verdicts += 1;
                 wrong += usize::from(!v.right);
             }

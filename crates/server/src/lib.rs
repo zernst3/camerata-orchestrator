@@ -1506,6 +1506,10 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/decisions/:decision_id/revoke",
             post(crate::decisions::routes::revoke_decision),
         )
+        .route(
+            "/api/projects/:id/decisions/:decision_id/needed-me",
+            post(crate::decisions::routes::set_needed_me),
+        )
         // The reviewer's edits, added findings, merges and splits, and the client's
         // acknowledgement of an accepted risk (design section 5).
         .route(

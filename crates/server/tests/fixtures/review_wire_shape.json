@@ -295,6 +295,7 @@
         "verdict": {
           "at": "string",
           "by": "string",
+          "carried_from": "null",
           "correction": {
             "decision": "string"
           },

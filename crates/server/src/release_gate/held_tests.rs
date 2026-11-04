@@ -913,6 +913,7 @@ fn no_verdict(key: &str) -> camerata_api_types::review_view::EngineCheckVerdict 
         correction: None,
         by: "reviewer".to_string(),
         at: VERDICT_AT.to_string(),
+        carried_from: None,
     }
 }
 

@@ -604,6 +604,12 @@ pub struct EngineCheckVerdict {
     pub correction: Option<CorrectionRef>,
     pub by: String,
     pub at: String,
+    /// Set on a No that was given on an EARLIER run and stands for this one because nothing on
+    /// this run has answered it: the id of the run it was given on. The lane shows such a card as
+    /// "No from an earlier run, still uncorrected", not as a fresh unanswered card. Never
+    /// stored: only the read model sets it, when it carries a No forward.
+    #[serde(default)]
+    pub carried_from: Option<String>,
 }
 
 /// `POST /api/projects/:id/review/engine-check/:key` (spec section 7).
