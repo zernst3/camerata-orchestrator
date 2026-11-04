@@ -22,8 +22,9 @@ use camerata_api_types::decisions::{
 };
 use camerata_api_types::edits::{Edit, EditError, EditRecorded, NewEditReq};
 use camerata_api_types::review_view::{
-    EngineCheckLane, ExportGateView, QueueView, ReviewSettingsView, ReviewShellView,
-    ReviewViewError, SiteRow, SitesPage, TreeView, SITES_PAGE_SIZE,
+    EngineCheckLane, EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, QueueView,
+    ReviewSettingsView, ReviewShellView, ReviewViewError, SampleSizeReq, SampleSizeResp, SiteRow,
+    SitesPage, TreeView, SITES_PAGE_SIZE,
 };
 use camerata_ui_core::tree::state::SitesRequest;
 use serde::de::DeserializeOwned;
@@ -33,7 +34,8 @@ use crate::review_source::{ReviewSource, ReviewSourceError, SourceFuture};
 
 // ── The write side ────────────────────────────────────────────────────────────────────────
 
-/// Everything the tree lane writes.
+/// Everything the review lanes write: the tree lane's decisions and edits, and the settings
+/// lane's four writes (none of which calls a model).
 pub trait ReviewWrites {
     /// `POST /api/projects/:id/decisions`: a site decision or a node batch.
     fn post_decision(&self, req: NewDecisionReq) -> SourceFuture<'_, DecisionRecorded>;
@@ -41,6 +43,21 @@ pub trait ReviewWrites {
     fn revoke_decision<'a>(&'a self, decision_id: &'a str) -> SourceFuture<'a, RevokeResp>;
     /// `POST /api/projects/:id/edits`: a field of a site, or a node's summary.
     fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded>;
+
+    // ── The settings lane's writes (spec section 9). ──
+
+    /// `POST escalation-budget/preview`: the line a proposed rate and floor would give. Writes
+    /// nothing.
+    fn preview_budget(&self, req: EscalationBudgetReq)
+        -> SourceFuture<'_, EscalationBudgetOutcome>;
+    /// `POST escalation-budget`: save the rate, floor and over-budget reasons. The server marks
+    /// the line again from the stored candidates (design A4).
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome>;
+    /// `POST sample-size`.
+    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp>;
+    /// `POST step-models { step, model }` for a stage (`audit`, `calibration`, `group_review`,
+    /// `fix`).
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()>;
 }
 
 /// The reads and writes a host holds. Cloning shares the same source.
@@ -247,6 +264,58 @@ impl ReviewWrites for HttpReviewSource {
     fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded> {
         Box::pin(async move { self.post_json("edits", &req).await })
     }
+
+    fn preview_budget(
+        &self,
+        req: EscalationBudgetReq,
+    ) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        Box::pin(async move { self.post_json("escalation-budget/preview", &req).await })
+    }
+
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        Box::pin(async move { self.post_json("escalation-budget", &req).await })
+    }
+
+    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp> {
+        Box::pin(async move {
+            self.post_json(
+                "sample-size",
+                &SampleSizeReq {
+                    sample_size_per_run,
+                },
+            )
+            .await
+        })
+    }
+
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            // The step-models route answers 200 with `{ ok: false, message }` for a refusal
+            // (an unknown step, a blank model), so the body decides, not the status.
+            let reply: serde_json::Value = self
+                .post_json(
+                    "step-models",
+                    &serde_json::json!({ "step": step, "model": model }),
+                )
+                .await?;
+            step_models_outcome(&reply)
+        })
+    }
+}
+
+/// The step-models route's reply as a result: `Ok` when `ok` is true, else its own message.
+pub(crate) fn step_models_outcome(reply: &serde_json::Value) -> Result<(), ReviewSourceError> {
+    if reply.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    Err(ReviewSourceError {
+        message: reply
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or("The model was not saved.")
+            .to_string(),
+    })
 }
 
 // ── The fake write side ───────────────────────────────────────────────────────────────────
@@ -257,6 +326,12 @@ pub enum Written {
     Decision(NewDecisionReq),
     Revoke(String),
     Edit(NewEditReq),
+    /// A budget preview (writes nothing on the server).
+    PreviewBudget(EscalationBudgetReq),
+    ApplyBudget(EscalationBudgetReq),
+    SampleSize(usize),
+    /// A stage's model, as (step key, model id).
+    StageModel(String, String),
 }
 
 /// A write side that records what it is given and answers with a made-up record. For tests and
@@ -355,6 +430,72 @@ impl ReviewWrites for RecordingWrites {
             }
         };
         Box::pin(std::future::ready(result))
+    }
+
+    fn preview_budget(
+        &self,
+        req: EscalationBudgetReq,
+    ) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                self.log.borrow_mut().push(Written::PreviewBudget(req));
+                Ok(unchanged_outcome(false))
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                self.log.borrow_mut().push(Written::ApplyBudget(req));
+                Ok(unchanged_outcome(true))
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                self.log
+                    .borrow_mut()
+                    .push(Written::SampleSize(sample_size_per_run));
+                Ok(SampleSizeResp {
+                    sample_size_per_run,
+                    lane_off: sample_size_per_run == 0,
+                })
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                self.log
+                    .borrow_mut()
+                    .push(Written::StageModel(step.to_string(), model.to_string()));
+                Ok(())
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+}
+
+/// A recorded budget write's answer: the line did not move.
+fn unchanged_outcome(applied: bool) -> EscalationBudgetOutcome {
+    let line = camerata_api_types::review::EscalationBudget::default();
+    EscalationBudgetOutcome {
+        applied,
+        before: line,
+        after: line,
+        moved_above: 0,
+        moved_below: 0,
     }
 }
 

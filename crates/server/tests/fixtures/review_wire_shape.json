@@ -566,7 +566,7 @@
       "percent": "number"
     },
     "over_budget_reasons": [
-      "empty"
+      "string"
     ],
     "run_id": "string",
     "show_below": "bool"
@@ -589,7 +589,7 @@
       "counted_lines": "number",
       "floor": "number",
       "over_budget_reasons": [
-        "empty"
+        "string"
       ],
       "rate_per_kloc": "number"
     },

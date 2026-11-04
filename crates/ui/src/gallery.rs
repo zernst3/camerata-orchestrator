@@ -171,6 +171,7 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     all.extend(shell_states::states());
     all.extend(tree_states::states());
     all.extend(export_states::states());
+    all.extend(settings_states::states());
     all
 }
 
@@ -313,6 +314,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     }
 }
+
+pub(crate) mod settings_states;
 
 #[cfg(test)]
 mod tests;

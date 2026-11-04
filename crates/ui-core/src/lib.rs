@@ -25,6 +25,7 @@ pub mod product_export;
 pub mod progress;
 pub mod provider_safety;
 pub mod readiness;
+pub mod review_settings;
 pub mod review_stats;
 pub mod review_timer;
 pub mod rules;

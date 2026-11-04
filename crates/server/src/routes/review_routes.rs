@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use camerata_api_types::project::ReviewSettings;
-use camerata_api_types::review::EscalationBudget;
+use camerata_api_types::review::{EscalationBudget, EscalationReason};
 use camerata_api_types::review_view::{
     EngineCheckVerdictReq, EscalationBudgetOutcome, EscalationBudgetReq, MovedFromView,
     ReviewViewError, SampleSizeReq, SampleSizeResp, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
@@ -402,7 +402,8 @@ fn invalid_setting(message: impl Into<String>) -> Response {
     refusal(StatusCode::UNPROCESSABLE_ENTITY, "invalid_setting", message)
 }
 
-/// The refusal for a budget request outside the bounds the settings validate against.
+/// The refusal for a budget request outside the bounds the settings validate against, or one
+/// whose reasons leave out evidence unverified (design D5: it is always escalated).
 #[allow(clippy::result_large_err)]
 fn check_budget_req(req: &EscalationBudgetReq) -> Result<(), Response> {
     if !req.rate_per_kloc.is_finite()
@@ -417,6 +418,16 @@ fn check_budget_req(req: &EscalationBudgetReq) -> Result<(), Response> {
         return Err(invalid_setting(format!(
             "The floor must be between 0 and {ESCALATION_FLOOR_MAX}."
         )));
+    }
+    // Design D5: evidence unverified is always escalated. The release gate holds those rows
+    // anyway, so a set that drops it only hides them from the architect's queue.
+    if !req
+        .over_budget_reasons
+        .contains(&EscalationReason::EvidenceUnverified)
+    {
+        return Err(invalid_setting(
+            "The over-budget reasons must include evidence unverified: it is always escalated.",
+        ));
     }
     Ok(())
 }

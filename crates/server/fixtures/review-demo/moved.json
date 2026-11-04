@@ -1,0 +1,27 @@
+{
+  "about": "The moved variant: the same project a day later, scanned again after the code changed. Decisions and edits made on the first run stay where they were written, so some of them no longer sit on a site of the new run. A move with a snippet changes the site's key (the engine finds it next to the old one and shows the old decision and edit beside it as stale). A move with only a line leaves the key alone. A new site is one the first run did not have.",
+  "run": {
+    "started_at": "2026-11-04T10:00:00Z",
+    "finished_at": "2026-11-04T10:05:00Z"
+  },
+  "moves": [
+    {
+      "site": "sql-03", "line": 24,
+      "snippet": "let q = format!(\"SELECT id FROM orders WHERE state = '{}'\", state);"
+    },
+    {
+      "site": "sql-04", "line": 63,
+      "snippet": "q.push_str(&format!(\" ORDER BY {} {}\", sort_col, direction));"
+    },
+    { "site": "sql-01", "line": 47 }
+  ],
+  "new_sites": [
+    {
+      "id": "html-07", "path": "web/src/comments.js", "line": 88,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "high",
+      "title": "Comment count badge writes user text with innerHTML",
+      "body": "The badge label is assigned to innerHTML without escaping.",
+      "snippet": "badge.innerHTML = thread.label;"
+    }
+  ]
+}

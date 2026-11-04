@@ -8,8 +8,8 @@
 //!
 //! [`ReviewShell`] is props-only (the gallery renders it from fixtures); [`ReviewShellHost`] owns
 //! the lane and the shell read, and mounts the lane that is showing. The lanes other work orders
-//! build (Escalations, Engine Check, Settings) show their tab and say so until they land; the
-//! Flat view is the existing Queue, handed in as `flat`.
+//! build (Escalations, Engine Check) show their tab and say so until they land; the Flat view is
+//! the existing Queue, handed in as `flat`.
 
 use camerata_api_types::review_view::ReviewShellView;
 use camerata_ui_core::tree::shell::{
@@ -18,8 +18,11 @@ use camerata_ui_core::tree::shell::{
 use camerata_ui_core::tree::ViewStatus;
 use dioxus::prelude::*;
 
+use super::review_settings::ReviewSettingsHost;
 use super::tree::{DoorRequest, ShellRefresh, TreeHost};
+use camerata_api_types::review_view::EscalationBudgetOutcome;
 use camerata_ui::review_io::ReviewApi;
+use camerata_ui_core::review_settings::effect_sentence;
 
 /// The lane signal, provided by the host so a lane can switch to another with `1` to `5`.
 #[derive(Clone, Copy, PartialEq)]
@@ -175,18 +178,133 @@ pub(crate) fn ReviewShellHost(
                     shell.set(ViewStatus::Loading);
                     refresh += 1;
                 },
-                {
-                    match active {
-                        Lane::Tree => rsx! { TreeHost {} },
-                        Lane::Flat => children.clone(),
-                        other => rsx! {
-                            p { class: "pane-empty",
-                                "The {other.label()} lane is not built yet. The Tree and the Flat view are."
-                            }
-                        },
-                    }
-                }
+                {lane_body(active, &children)}
             }
         }
+    }
+}
+
+/// The lane that is showing. The Tree, the Flat view and Settings are built; the others say so.
+fn lane_body(active: Lane, flat: &Element) -> Element {
+    match active {
+        Lane::Tree => rsx! { TreeHost {} },
+        Lane::Flat => flat.clone(),
+        Lane::Settings => rsx! { SettingsLane {} },
+        other => rsx! {
+            p { class: "pane-empty",
+                "The {other.label()} lane is not built yet. The Tree, the Flat view and Settings are."
+            }
+        },
+    }
+}
+
+/// What to say once the settings lane has re-marked the line: the outcome in words, which always
+/// includes that no model was called.
+pub(crate) fn applied_message(outcome: &EscalationBudgetOutcome) -> String {
+    effect_sentence(outcome)
+}
+
+/// The Settings lane: the host over the shell's api, the model registry for its selects, and a
+/// run-in-flight flag from the scan panel's job. After an apply it says what happened and has the
+/// shell read the counts again (the line moved, so the Escalations count may have).
+#[component]
+fn SettingsLane() -> Element {
+    let api = use_context::<ReviewApi>();
+    let mut refresh = use_context::<ShellRefresh>().0;
+    let toasts = try_use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The app-scope in-flight job id (the scan panel's); a job running locks the lane.
+    let run_in_flight =
+        try_use_context::<Signal<Option<String>>>().is_some_and(|job| job.read().is_some());
+    let models = use_resource(crate::chat::fetch_models);
+    let models = models.read().clone().flatten();
+    rsx! {
+        ReviewSettingsHost {
+            api,
+            run_in_flight,
+            models,
+            on_applied: move |outcome: EscalationBudgetOutcome| {
+                if let Some(toasts) = toasts {
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        applied_message(&outcome),
+                    );
+                }
+                refresh += 1;
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use camerata_api_types::review::EscalationBudget;
+    use camerata_ui::review_source::FixtureReviewSource;
+
+    use super::*;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct Case {
+        lane: Lane,
+        api: ReviewApi,
+    }
+
+    fn harness(case: Case) -> Element {
+        use_context_provider(|| case.api.clone());
+        let refresh = use_signal(|| 0u32);
+        use_context_provider(|| ShellRefresh(refresh));
+        let flat = rsx! { p { "the flat view" } };
+        lane_body(case.lane, &flat)
+    }
+
+    fn lane_html(lane: Lane) -> String {
+        let fixture = Rc::new(FixtureReviewSource::base());
+        crate::test_harness::render_fragment(
+            harness,
+            Case {
+                lane,
+                api: ReviewApi {
+                    reads: fixture.clone(),
+                    writes: fixture,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn the_settings_lane_mounts_the_settings_host() {
+        let html = lane_html(Lane::Settings);
+        assert!(html.contains("Loading settings"), "{html}");
+        assert!(!html.contains("not built yet"), "{html}");
+    }
+
+    #[test]
+    fn the_lanes_still_to_come_say_so_and_the_flat_view_is_handed_in() {
+        for lane in [Lane::Escalations, Lane::EngineCheck] {
+            let html = lane_html(lane);
+            assert!(html.contains("is not built yet"), "{html}");
+            assert!(html.contains(lane.label()), "{html}");
+        }
+        assert!(lane_html(Lane::Flat).contains("the flat view"));
+    }
+
+    #[test]
+    fn an_applied_line_is_announced_with_the_no_model_sentence() {
+        let line = EscalationBudget::default();
+        let outcome = EscalationBudgetOutcome {
+            applied: true,
+            before: line,
+            after: line,
+            moved_above: 103,
+            moved_below: 0,
+        };
+        let said = applied_message(&outcome);
+        assert!(
+            said.starts_with("103 candidates moved above the line."),
+            "{said}"
+        );
+        assert!(said.ends_with("No model call was made."), "{said}");
     }
 }

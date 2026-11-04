@@ -879,10 +879,25 @@ fn check_pdf_data_blocks_a_secret_in_the_pdf_only_route() {
 // ---- source pins: one path to zip bytes, one path to a PDF ------------------------------------
 
 /// The production part of a source file: everything before its inline `#[cfg(test)]` module.
-fn production_part(source: &str) -> &str {
+///
+/// Only a module whose body is in place (`mod name {`) ends it. `mod name;` keeps its module in
+/// another file, so the code below that declaration is production code and stays in view.
+pub(super) fn production_part(source: &str) -> &str {
+    const MARK: &str = "\n#[cfg(test)]\nmod ";
+    let mut from = 0;
+    while let Some(found) = source[from..].find(MARK) {
+        let at = from + found;
+        let declaration = source[at + MARK.len()..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end();
+        if declaration.ends_with('{') {
+            return &source[..at];
+        }
+        from = at + MARK.len();
+    }
     source
-        .find("\n#[cfg(test)]\nmod ")
-        .map_or(source, |at| &source[..at])
 }
 
 fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -963,34 +978,67 @@ fn the_unreleased_zip_wrapper_is_never_called_by_production_code() {
 }
 
 #[test]
-fn compile_pdf_from_data_is_called_from_release_and_the_pdf_route_only() {
+fn compile_pdf_from_data_is_called_from_the_release_assembly_only() {
+    // The PDF-only route once compiled its own PDF after a partial gate. It now takes its PDF from
+    // the package assembly and passes the full release gate (`gated_release`), so no route calls
+    // the compile: only the assembly (release_gate.rs) and the wrapper's home (report_export.rs).
     let sites = production_call_sites("compile_pdf_from_data");
     let allowed = |s: &String| {
-        s.starts_with("server/src/release_gate.rs")
-            || s.starts_with("server/src/lib.rs")
-            || s.starts_with("server/src/report_export.rs")
+        s.starts_with("server/src/release_gate.rs") || s.starts_with("server/src/report_export.rs")
     };
     let outside: Vec<&String> = sites.iter().filter(|s| !allowed(s)).collect();
     assert!(
         outside.is_empty(),
         "compile_pdf_from_data( called elsewhere: {outside:?}"
     );
-    // lib.rs: exactly the PDF-only route, and it checks data.json first.
     let lib = production_part(include_str!("../lib.rs"));
     let route_start = lib
         .find("async fn export_audit_report(")
         .expect("the PDF route");
     let route = &lib[route_start..];
-    let gate_at = route
-        .find("check_pdf_data(")
-        .expect("the PDF route is gated");
-    let compile_at = route
-        .find("compile_pdf_from_data(")
-        .expect("the PDF route compiles");
+    let route = &route[..route.find("\n}\n").expect("the end of the route")];
     assert!(
-        gate_at < compile_at,
-        "the gate must run BEFORE the PDF is compiled"
+        route.contains("gated_release("),
+        "the PDF route passes the same release gate as the package route"
     );
+}
+
+/// Whether each of `needles` appears in `body`, in this order. `Err` names the first one missing
+/// or out of place.
+fn in_order(body: &str, needles: &[&str]) -> Result<(), String> {
+    let mut from = 0;
+    for needle in needles {
+        match body[from..].find(needle) {
+            Some(at) => from += at + needle.len(),
+            None => return Err(format!("{needle} is missing or comes too early")),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_order_check_catches_a_swapped_assembly() {
+    assert!(in_order("a( b( c(", &["a(", "b(", "c("]).is_ok());
+    assert!(in_order("b( a( c(", &["a(", "b(", "c("]).is_err());
+    assert!(in_order("a( c(", &["a(", "b(", "c("]).is_err());
+}
+
+#[test]
+fn the_assembly_checks_and_holds_before_it_compiles() {
+    // The secrets check over `data.json` runs before Typst is given the file, and the held
+    // checks run before Typst is run at all: a refusal needs no Typst and no value reaches disk.
+    // `gated_release(` pins the routes; this pins the order inside the one assembly.
+    let source = production_part(include_str!("../release_gate.rs"));
+    let start = source
+        .find("pub async fn build_product_package_with_stem(")
+        .expect("the assembly");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("the end of the assembly")];
+    in_order(
+        body,
+        &["check_pdf_data(", "held_refusal(", "compile_pdf_from_data("],
+    )
+    .unwrap_or_else(|e| panic!("the assembly must check, then hold, then compile: {e}"));
 }
 
 #[test]
@@ -2028,4 +2076,14 @@ fn the_gate_catches_a_followed_convention_row_dropped_from_the_conventions_sheet
             .any(|p| p.location == "sheet \"Conventions\" rows, kind convention_observed"),
         "{failure}"
     );
+}
+
+#[test]
+fn production_part_cuts_only_at_an_inline_test_module() {
+    // A `mod tests;` declaration keeps its module in another file: the code below it is
+    // production code. Only `mod name {` (the module's body in place) ends the production part.
+    let declared = "fn a() {}\n#[cfg(test)]\nmod tests;\nasync fn b() {}\n";
+    assert_eq!(production_part(declared), declared);
+    let inline = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    assert_eq!(production_part(inline), "fn a() {}");
 }

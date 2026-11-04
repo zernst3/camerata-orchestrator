@@ -138,6 +138,134 @@ async fn a_decision_is_posted_as_json_and_the_record_comes_back() {
 }
 
 #[tokio::test]
+async fn the_settings_writes_go_to_their_routes_and_a_budget_request_carries_the_locked_reason() {
+    use camerata_api_types::review::EscalationReason;
+    use camerata_api_types::review_view::SampleSizeReq;
+    use camerata_ui_core::review_settings::{escalation_req, SettingsDraft};
+
+    let server = MockServer::start().await;
+    let view = dataset_base().settings;
+    // Every other reason switched off: the evidence-unverified one still rides along.
+    let mut draft = SettingsDraft::from_view(&view);
+    draft.reasons.clear();
+    draft.rate = "2.5".to_string();
+    let req = escalation_req(&draft, &view.limits).unwrap();
+    assert_eq!(
+        req.over_budget_reasons,
+        [EscalationReason::EvidenceUnverified]
+    );
+    assert!(
+        serde_json::to_string(&req)
+            .unwrap()
+            .contains("evidence_unverified"),
+        "on the wire"
+    );
+    let outcome = FixtureReviewSource::base()
+        .preview_budget(req.clone())
+        .await
+        .unwrap();
+    for (route, applied) in [
+        ("escalation-budget/preview", false),
+        ("escalation-budget", true),
+    ] {
+        let mut body = outcome.clone();
+        body.applied = applied;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/projects/p1/{route}")))
+            .and(body_json(&req))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/sample-size"))
+        .and(body_json(SampleSizeReq {
+            sample_size_per_run: 0,
+        }))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            camerata_api_types::review_view::SampleSizeResp {
+                sample_size_per_run: 0,
+                lane_off: true,
+            },
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/step-models"))
+        .and(body_json(
+            serde_json::json!({ "step": "group_review", "model": "claude-opus-5-5" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let src = http(&server);
+    assert!(!src.preview_budget(req.clone()).await.unwrap().applied);
+    assert!(src.apply_budget(req).await.unwrap().applied);
+    assert!(src.set_sample_size(0).await.unwrap().lane_off);
+    src.set_stage_model("group_review", "claude-opus-5-5")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_step_models_refusal_arrives_with_a_200_and_is_shown_as_the_servers_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/step-models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "ok": false, "message": "model must not be empty" }),
+        ))
+        .mount(&server)
+        .await;
+    let err = http(&server)
+        .set_stage_model("audit", " ")
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "model must not be empty");
+    // A reply with neither says so in words rather than passing as saved.
+    assert_eq!(
+        step_models_outcome(&serde_json::json!({}))
+            .unwrap_err()
+            .message,
+        "The model was not saved."
+    );
+    assert!(step_models_outcome(&serde_json::json!({ "ok": true })).is_ok());
+}
+
+#[tokio::test]
+async fn the_recording_writes_log_the_settings_writes_in_order() {
+    let writes = RecordingWrites::default();
+    let req = camerata_api_types::review_view::EscalationBudgetReq {
+        rate_per_kloc: 2.0,
+        floor: 20,
+        over_budget_reasons: Vec::new(),
+    };
+    writes.preview_budget(req.clone()).await.unwrap();
+    writes.apply_budget(req.clone()).await.unwrap();
+    writes.set_sample_size(5).await.unwrap();
+    writes.set_stage_model("fix", "m").await.unwrap();
+    assert_eq!(
+        *writes.log.borrow(),
+        [
+            Written::PreviewBudget(req.clone()),
+            Written::ApplyBudget(req),
+            Written::SampleSize(5),
+            Written::StageModel("fix".to_string(), "m".to_string()),
+        ]
+    );
+    *writes.refuse.borrow_mut() = Some("read only".to_string());
+    assert!(writes.set_sample_size(1).await.is_err());
+    assert_eq!(
+        writes.log.borrow().len(),
+        4,
+        "a refused write is not logged"
+    );
+}
+
+#[tokio::test]
 async fn an_undo_posts_a_revoke_and_an_edit_posts_to_the_edits_route() {
     let server = MockServer::start().await;
     let revoke = RevokeResp {
