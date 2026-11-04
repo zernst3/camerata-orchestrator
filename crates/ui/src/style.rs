@@ -2885,13 +2885,11 @@ html, body {
 .review-settings-page { max-width: 820px; margin: 24px auto; }
 .review-settings .scan-section-h { margin-top: 22px; }
 .review-settings-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.review-settings-num {
-  width: 84px; box-sizing: border-box; border: 1px solid var(--line); background: var(--surface);
-  color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
-  font-weight: 600; padding: 5px 9px; border-radius: 8px;
+.review-settings-num { width: 84px; box-sizing: border-box; font-size: 12.5px; font-weight: 600; padding: 5px 9px; }
+/* The global form theme sets the border sides one by one; this out-ranks it for a bad value. */
+.review-settings input.review-settings-num.review-settings-num[aria-invalid="true"] {
+  border-color: var(--danger-color);
 }
-.review-settings-num:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
-.review-settings-num[aria-invalid="true"] { border-color: var(--danger-color); }
 .review-settings-num:disabled { opacity: .55; cursor: default; }
 .review-settings-budget { font-size: 12.5px; font-weight: 700; color: var(--ink); }
 .review-settings-bad { font-size: 11.5px; font-weight: 600; color: var(--danger-color); }
