@@ -67,6 +67,35 @@ impl Rng {
     }
 }
 
+/// A real site key: `repo NUL path NUL fingerprint NUL ordinal`, the fingerprint 16 hex digits.
+/// Readable fixture keys would hide the bug class where a screen puts a key in an element id, an
+/// href or a `data-` attribute, so the generator uses the real shape.
+fn site_key(repo: &str, path: &str, rule: &str, line: usize, ordinal: usize) -> String {
+    // FNV-1a over the pieces that identify a finding, fixed forever like the PRNG.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{rule}\0{path}\0{line}").bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{repo}\0{path}\0{h:016x}\0{ordinal}")
+}
+
+/// The sites-page cursor: an opaque hex blob, as the server's is.
+fn hex_encode(key: &str) -> String {
+    key.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(cursor: &str) -> Option<String> {
+    if cursor.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..cursor.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(cursor.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
 /// What a data set contains. Counts are exact: a count of 12 outliers gives 12 outliers.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -484,7 +513,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         disagreements: Vec::new(),
     });
     SiteRow {
-        site_key: format!("{repo}:{path}:{}:{i}", rule.id),
+        site_key: site_key(repo, &path, &rule.id, line, i),
         repo: repo.to_string(),
         path,
         line,
@@ -526,11 +555,12 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
 fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
     let i = sites + n;
     let path = format!("api/src/legacy/old{n}.ts");
+    let line = 10 + rng.below(200);
     SiteRow {
-        site_key: format!("acme-api:{path}:THROWN-1:{i}"),
+        site_key: site_key("acme-api", &path, "THROWN-1", line, i),
         repo: "acme-api".to_string(),
         path,
-        line: 10 + rng.below(200),
+        line,
         rule_id: "THROWN-1".to_string(),
         severity: "Low".to_string(),
         kind: Some(FindingKind::Defect),
@@ -640,6 +670,7 @@ impl ReviewDataSet {
     pub fn sites_page(&self, node: &str, cursor: Option<&str>, limit: usize) -> Option<SitesPage> {
         let members = self.node_rows.get(node)?;
         let start = cursor
+            .and_then(hex_decode)
             .and_then(|c| members.iter().position(|&i| self.rows[i].site_key == c))
             .map_or(0, |p| p + 1);
         let end = (start + limit.clamp(1, SITES_PAGE_SIZE)).min(members.len());
@@ -648,7 +679,7 @@ impl ReviewDataSet {
             .map(|&i| self.rows[i].clone())
             .collect();
         let next_cursor = (end < members.len())
-            .then(|| rows.last().map(|r| r.site_key.clone()))
+            .then(|| rows.last().map(|r| hex_encode(&r.site_key)))
             .flatten();
         Some(SitesPage {
             run_id: self.shell.run_id.clone(),
@@ -813,7 +844,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
         rows[i].flagged_by = vec![FlaggedByView {
             rule_id: "SEMGREP-12".to_string(),
             tool: Some("semgrep".to_string()),
-            site_key: format!("{}:{path}", rows[i].repo),
+            site_key: site_key(&rows[i].repo, &path, "SEMGREP-12", rows[i].line, i),
             path,
             line: rows[i].line,
         }];
@@ -988,7 +1019,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
     for &i in &moved_rows {
         let was = rows[i].line + 12;
         rows[i].moved_from = Some(MovedFromView {
-            key: format!("{}:old", rows[i].site_key),
+            key: site_key(&rows[i].repo, &rows[i].path, &rows[i].rule_id, was, i),
             line: Some(was),
         });
     }

@@ -340,7 +340,14 @@ fn sites_page_pages_every_row_once_in_order_and_never_over_500() {
         seen.extend(page.rows.iter().map(|r| r.site_key.clone()));
         pages += 1;
         match page.next_cursor {
-            Some(c) => cursor = Some(c),
+            Some(c) => {
+                // The server's cursor is an opaque hex blob, never a raw key.
+                assert!(
+                    !c.is_empty() && c.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "cursor is hex: {c:?}"
+                );
+                cursor = Some(c);
+            }
             None => break,
         }
     }
@@ -733,4 +740,44 @@ fn engine_modes_other_than_pending_leave_the_rest_of_the_data_alone() {
     let b = build(&p);
     assert_eq!(a.tree.nodes.len(), b.tree.nodes.len());
     assert_eq!(a.candidates, b.candidates);
+}
+
+/// Real site keys are `repo NUL path NUL fingerprint NUL ordinal`. A readable fixture key would
+/// hide the bug class where a screen puts a key in an id, an href or a `data-` attribute.
+#[test]
+fn every_fixture_key_has_the_real_shape_with_three_nuls() {
+    let check = |what: &str, key: &str| {
+        assert_eq!(key.matches('\0').count(), 3, "{what}: {key:?}");
+        let parts: Vec<&str> = key.split('\0').collect();
+        assert!(
+            parts.iter().all(|p| !p.is_empty()),
+            "{what}: empty part in {key:?}"
+        );
+        assert_eq!(parts[2].len(), 16, "{what}: fingerprint is 16 hex digits");
+        assert!(parts[2].bytes().all(|b| b.is_ascii_hexdigit()), "{what}");
+        assert!(parts[3].bytes().all(|b| b.is_ascii_digit()), "{what}");
+    };
+    for ds in [dataset_base(), dataset_30k()] {
+        for r in &ds.rows {
+            check("site_key", &r.site_key);
+            for f in &r.flagged_by {
+                check("flagged_by", &f.site_key);
+            }
+            if let Some(m) = &r.moved_from {
+                check("moved_from", &m.key);
+            }
+            if let Some(d) = &r.possible_duplicate_of {
+                check("duplicate", &d.key);
+            }
+            if let Some(m) = &r.merged_into {
+                check("merged_into", &m.key);
+            }
+        }
+        for h in ds.gate.held.iter().chain(&ds.gate.merged_without_decision) {
+            check("held", &h.key);
+        }
+        for c in &ds.candidates {
+            check("candidate", &c.key);
+        }
+    }
 }
