@@ -37,11 +37,15 @@ pub enum EditField {
     /// The sub-group of the review tree the site sits in. A split is one such edit per moved
     /// site, all with the same new sub-group name and the same reason.
     Subgroup,
+    /// The summary of a tree NODE (review UI spec U4). The only edit whose `key` is a node id and
+    /// not a site key; its `fingerprint_at_edit` is the hash of the model summary it replaced, so
+    /// a rerun that changes the model summary shows the edit as stale like any other.
+    Summary,
 }
 
 impl EditField {
     /// Every field a reviewer can edit, in the order a form lists them.
-    pub const ALL: [EditField; 9] = [
+    pub const ALL: [EditField; 10] = [
         Self::Headline,
         Self::Detail,
         Self::Fix,
@@ -51,6 +55,7 @@ impl EditField {
         Self::Kind,
         Self::Category,
         Self::Subgroup,
+        Self::Summary,
     ];
 
     /// The name serde writes for this field.
@@ -65,7 +70,13 @@ impl EditField {
             Self::Kind => "kind",
             Self::Category => "category",
             Self::Subgroup => "subgroup",
+            Self::Summary => "summary",
         }
+    }
+
+    /// Whether the edit's `key` is a tree node id (a summary) and not a site key.
+    pub fn is_node_scope(self) -> bool {
+        matches!(self, Self::Summary)
     }
 }
 
@@ -343,7 +354,7 @@ mod tests {
             names,
             [
                 "headline", "detail", "fix", "fix_type", "severity", "rule_id", "kind", "category",
-                "subgroup"
+                "subgroup", "summary"
             ]
         );
         for f in EditField::ALL {

@@ -840,7 +840,18 @@
         "level": "string",
         "parent": "string",
         "summary": "string",
-        "summary_edit": "null",
+        "summary_edit": {
+          "at": "string",
+          "by": "string",
+          "current_value": "string",
+          "field": "string",
+          "id": "string",
+          "new": "string",
+          "old": "string",
+          "reapplied_from": "null",
+          "reason": "string",
+          "stale": "bool"
+        },
         "summary_source": "string",
         "thrown_out": "bool"
       }

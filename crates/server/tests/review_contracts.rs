@@ -175,6 +175,23 @@ async fn decorate_decisions(f: &ReviewFixture) {
     )
     .await;
     ok("edit a headline", s, t);
+    // The reviewer's reading of a whole rule, edited at the node (spec U4).
+    let summary = NewEditReq {
+        key: "rule:SEC-AUTHZ-4".to_string(),
+        field: EditField::Summary,
+        new: "Every handler skips the shared guard; one wrapper fixes all of them.".to_string(),
+        reason: "the model described only the first handler".to_string(),
+        by: "zach".to_string(),
+        run_id: String::new(),
+    };
+    let (s, t) = call(
+        &f.app,
+        "POST",
+        &format!("{b}/edits"),
+        Some(serde_json::to_value(summary).unwrap()),
+    )
+    .await;
+    ok("edit a node summary", s, t);
     // The line: rate 0 and a floor of 1 puts the second candidate below it.
     let _: EscalationBudgetOutcome = post_ok(
         f,
@@ -593,14 +610,12 @@ fn field_has_a_value(v: &Value, field: &str) -> bool {
     }
 }
 
-// `summary_edit` is the one optional field the fixture cannot fill: it stays `None` (and so
-// `"null"` in the snapshot) until `EditField::Summary` exists (review-tree design U4, WO10), when
-// the fixture must edit a node summary and the list below must gain it.
-const OPTIONAL_FIELDS_THE_FIXTURE_FILLS: [&str; 4] = [
+const OPTIONAL_FIELDS_THE_FIXTURE_FILLS: [&str; 5] = [
     "moved_from",
     "stale_decision",
     "correction",
     "confirmed_by_client",
+    "summary_edit",
 ];
 
 #[tokio::test]

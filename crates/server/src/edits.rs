@@ -559,7 +559,11 @@ pub fn validate_value(field: EditField, new: &str) -> Result<(), EditStoreError>
     let bad = |why: &str| Err(EditStoreError::InvalidValue(why.to_string()));
     let new = new.trim();
     match field {
-        EditField::Headline | EditField::Detail | EditField::Fix | EditField::RuleId => {
+        EditField::Headline
+        | EditField::Detail
+        | EditField::Fix
+        | EditField::RuleId
+        | EditField::Summary => {
             if new.is_empty() {
                 return bad("the new value cannot be empty");
             }

@@ -529,9 +529,9 @@ fn each_editable_field_round_trips_into_the_exports() {
         (EditField::Category, "secret-exposure", "category"),
     ];
     assert_eq!(
-        cases.len() + 1,
+        cases.len() + 2,
         EditField::ALL.len(),
-        "every editable field but the sub-group (a tree edit) has a case here"
+        "every editable field but the sub-group and the node summary (both tree edits) has a case here"
     );
     for (n, (field, new, column)) in cases.iter().enumerate() {
         let edits = vec![edit_of(n + 1, &row, *field, "", new)];
