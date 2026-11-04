@@ -109,8 +109,10 @@ fn default_report() -> ScanReport {
 
 fn cover_of(report: &ScanReport) -> AuditReportJson {
     build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )

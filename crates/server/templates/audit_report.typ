@@ -752,6 +752,83 @@
   ]
 }
 
+// ── Escalations and patterns (WO9, design 3B item 1) ───────────────────────────────────
+// The sites the architect reviewed in person, with the decision on each, and one entry for each
+// sub-group: what its sites share, the fix written once and a worked example. The sentence and the
+// counts come from the reviewed tree. No individual site is listed in a pattern: it points at the
+// Sites sheet of the workbook, filtered on the group.
+#if d.escalations.sentence != "" or d.escalations.items.len() > 0 [
+  #section("Escalations", [Sites reviewed in person])
+  #if d.escalations.sentence != "" [
+    #text(size: 9.5pt)[#d.escalations.sentence.]
+    #v(6pt)
+  ]
+  #if d.escalations.items.len() == 0 [
+    No site is above the line this run.
+  ] else [
+    #table(
+      columns: (auto, 2fr, 1fr, 2fr),
+      stroke: table_stroke,
+      inset: (x: 5pt, y: 4pt),
+      table.header(th[Severity], th[Finding], th[Location], th[Decision]),
+      ..d.escalations.items.map(item => (
+        [#severity_chip(lower(item.severity))],
+        [#item.headline],
+        [#breakable(item.path + ":" + str(item.line))],
+        [#item.decision],
+      )).flatten()
+    )
+  ]
+  #pagebreak()
+]
+
+#if d.sub_group_patterns.len() == 0 and d.sub_group_patterns_note != "" [
+  #section("Patterns", [What the findings have in common])
+  #text(size: 9.5pt)[#d.sub_group_patterns_note]
+  #pagebreak()
+]
+
+#if d.sub_group_patterns.len() > 0 [
+  #section("Patterns", [What the findings have in common])
+  #text(size: 9pt, style: "italic", fill: ink_faint)[
+    Each entry is one kind of violation with one cause. It states the fix once. The sites it covers are in the Sites sheet of the workbook.
+  ]
+  #v(6pt)
+  #for p in d.sub_group_patterns [
+    #block(breakable: false, below: 12pt)[
+      #text(weight: 600, fill: ink)[#p.rule_title] #text(size: 8.5pt, fill: ink_faint)[#p.rule_id]
+      #h(6pt) #severity_chip(lower(p.severity))
+      #if p.cause != "" [
+        #v(2pt)
+        #text(size: 9.5pt)[#p.cause]
+      ]
+      #if p.summary != "" [
+        #v(2pt)
+        #text(size: 9.5pt)[#p.summary]
+      ]
+      #v(2pt)
+      #text(size: 9pt, fill: ink_faint)[#p.pointer. Fix #p.sequence#if p.effort != "" [, effort #p.effort].]
+      #if p.fix != "" [
+        #v(3pt)
+        #text(weight: 600, size: 9pt)[Fix:] #fix_body(p.fix)
+      ]
+      #if p.worked_example != "" [
+        #v(3pt)
+        #text(weight: 600, size: 9pt)[Worked example:] #fix_body(p.worked_example)
+      ]
+      #if p.folders.len() > 0 [
+        #v(2pt)
+        #text(size: 8.5pt, fill: ink_faint)[Mostly in #p.folders.join(", ")]
+      ]
+    ]
+  ]
+  #pagebreak()
+]
+
+#if d.reduced [
+  #section("Findings", [Where the individual findings are])
+  This report covers #thousands(d.site_total) sites. The individual sites are not listed here: they are in the Sites sheet of the workbook and in the ticket file, one row for each site and one ticket for each pattern above.
+] else [
 // ── 5. Curated findings ───────────────────────────────────────────────────
 // C4-P4 (residual defect 5): `d.curated_findings` is already ordered by the server (severity
 // desc, then bucket do_now -> do_next -> plan -> accepted, then confidence) — see
@@ -791,6 +868,7 @@
   #for group in d.held_for_review_findings [
     #render_curated_group(group)
   ]
+]
 ]
 
 // ── Patterns across services ──────────────────────────────────────────────────────────

@@ -32,11 +32,14 @@ fn two_repo_report() -> crate::onboard::ScanReport {
 fn package_for(report: crate::onboard::ScanReport) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,

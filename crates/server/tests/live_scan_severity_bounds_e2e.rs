@@ -154,10 +154,13 @@ fn report_with(findings: Vec<Finding>) -> ScanReport {
 fn exported_xlsx_severity(f: &Finding, corpus: &camerata_rules::RuleSet) -> String {
     let report = report_with(vec![f.clone()]).seal();
     let opts = ReportOptions::default();
-    let json = build_report_json(&report, &HashMap::new(), Some(corpus), &opts);
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(corpus),
+        &opts,
+    );
     let export = build_findings_export(
-        &report,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(corpus),
         &json,
         &opts.chosen_options,
@@ -178,8 +181,7 @@ fn exported_xlsx_severity(f: &Finding, corpus: &camerata_rules::RuleSet) -> Stri
 fn exported_pdf_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec<String> {
     let report = report_with(vec![f.clone()]).seal();
     let json = build_report_json(
-        &report,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(corpus),
         &ReportOptions::default(),
     );
@@ -197,8 +199,7 @@ fn exported_pdf_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec
 fn exported_pdf_matrix_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec<String> {
     let report = report_with(vec![f.clone()]).seal();
     let m = build_report_json(
-        &report,
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(corpus),
         &ReportOptions::default(),
     )

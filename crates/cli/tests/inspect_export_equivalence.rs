@@ -149,8 +149,7 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     // calls that same pair directly rather than through `build_product_export_bytes`, so the
     // test still proves the CLI wrapper adds nothing of its own.
     let package = camerata_server::release_gate::build_product_package(
-        &sealed,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
         None,
         &options,
     )

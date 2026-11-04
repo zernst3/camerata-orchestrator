@@ -64,8 +64,7 @@ fn the_pdf_data_says_what_a_ceiling_lowered_whether_or_not_the_live_pass_ran() {
     // Export-only: the bounds were never applied to the finding itself.
     let report = report_with(vec![capped_finding()], vec!["CEIL-1"]);
     let json = build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     );
@@ -81,8 +80,7 @@ fn the_pdf_data_says_what_a_ceiling_lowered_whether_or_not_the_live_pass_ran() {
     crate::severity_bounds::apply_corpus_severity_bounds(&mut fs, &corpus);
     let report = report_with(fs, vec!["CEIL-1"]);
     let json = build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     );
@@ -95,7 +93,11 @@ fn an_unadjusted_row_carries_an_empty_list() {
         vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 3, "high")],
         vec!["SEC-NO-HARDCODED-SECRETS-1"],
     );
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(every_site(&json)[0].severity_adjustments.is_empty());
 }
 
@@ -110,10 +112,13 @@ fn findings_json_and_the_csv_carry_the_adjustment_only_when_there_is_one() {
         vec!["CEIL-1", "SEC-NO-HARDCODED-SECRETS-1"],
     )
     .seal();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(&corpus),
         &json,
         &HashMap::new(),
@@ -129,8 +134,7 @@ fn findings_json_and_the_csv_carry_the_adjustment_only_when_there_is_one() {
     assert_eq!(plain["severity_adjustments"], "", "{plain}");
 
     let csvs = crate::xlsx_export::build_csv_exports(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     )
@@ -148,9 +152,12 @@ fn findings_json_and_the_csv_carry_the_adjustment_only_when_there_is_one() {
 fn the_workbook_has_a_severity_adjustments_column() {
     let corpus = corpus_with_ceiling();
     let report = report_with(vec![capped_finding()], vec!["CEIL-1"]).seal();
-    let bytes =
-        crate::xlsx_export::build_workbook(&report, &HashMap::new(), Some(&corpus), &empty_opts())
-            .unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    )
+    .unwrap();
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
@@ -167,8 +174,7 @@ async fn the_pdf_prints_the_adjustment() {
     let corpus = corpus_with_ceiling();
     let report = report_with(vec![capped_finding()], vec!["CEIL-1"]);
     let json = build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     );

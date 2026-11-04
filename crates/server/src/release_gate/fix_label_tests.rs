@@ -52,11 +52,14 @@ fn report(detail: &str) -> ScanReport {
 fn package_for(report: ScanReport) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -251,7 +254,11 @@ fn the_workbook_labels_each_fix_beside_the_fix() {
 #[tokio::test]
 async fn the_pdf_labels_each_fix_in_its_data_and_in_the_rendered_page() {
     let sealed = report("Raw SQL built by string formatting.").seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &client_options());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    );
     let labels: BTreeMap<usize, String> = json
         .curated_findings
         .iter()
@@ -303,11 +310,14 @@ async fn an_unmarked_fix_equal_to_the_authored_text_is_a_standard_fix_in_every_f
 
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        Some(&corpus),
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),
         &options,
         STEM,

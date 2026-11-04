@@ -12,7 +12,9 @@ use camerata_secrets::SecretShape;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::onboard::{AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport};
+use crate::onboard::{
+    AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport, SealedReport,
+};
 use crate::report_export::{build_report_json, render_data_json};
 
 const STEM: &str = "acme-inspection";
@@ -106,11 +108,14 @@ pub(super) fn client_options() -> ReportOptions {
 pub(super) fn package() -> ProductPackage {
     let sealed = sealed_report();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -134,11 +139,14 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
         )),
         ..client_options()
     };
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -173,11 +181,14 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
         ),
         ..client_options()
     };
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -219,11 +230,14 @@ fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
         )),
         ..ReportOptions::default()
     };
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let mut package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -792,9 +806,11 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
+    // WO9: 8 -> 9. The merge check now reads the package's own decisions.json, so a standalone
+    // audit of a zip runs it too.
     assert_eq!(
         report.checks.len(),
-        8,
+        9,
         "row parity needs the in-memory rows"
     );
 }
@@ -1175,8 +1191,10 @@ async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() 
         .scope(
             fake_typst,
             build_product_package_with_stem(
-                &sealed_report(),
-                &HashMap::new(),
+                &crate::report_export::ReviewedReport::unreviewed(
+                    &sealed_report(),
+                    &HashMap::new(),
+                ),
                 None,
                 &options,
                 STEM,
@@ -1209,8 +1227,10 @@ async fn a_clean_package_still_reaches_the_compiler() {
         .scope(
             fake_typst,
             build_product_package_with_stem(
-                &sealed_report(),
-                &HashMap::new(),
+                &crate::report_export::ReviewedReport::unreviewed(
+                    &sealed_report(),
+                    &HashMap::new(),
+                ),
                 None,
                 &client_options(),
                 STEM,
@@ -1237,8 +1257,7 @@ async fn a_blank_client_name_blocks_the_package_before_typst_is_ever_run() {
             ..ReportOptions::default()
         };
         let error = build_product_package_with_stem(
-            &sealed_report(),
-            &HashMap::new(),
+            &crate::report_export::ReviewedReport::unreviewed(&sealed_report(), &HashMap::new()),
             None,
             &options,
             STEM,
@@ -1448,8 +1467,12 @@ fn every_sheet_footer_carries_the_pdfs_confidentiality_line_and_the_gate_checks_
     let entries_without = {
         let sealed = sealed_report();
         let options = client_options();
-        let mut wb = crate::xlsx_export::build_workbook(&sealed, &HashMap::new(), None, &options)
-            .expect("workbook");
+        let mut wb = crate::xlsx_export::build_workbook(
+            &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+            None,
+            &options,
+        )
+        .expect("workbook");
         // Rewrite every `<oddFooter>` out of the workbook's sheet XML.
         wb = rewrite_xlsx(&wb, |name, xml| {
             if name.starts_with("xl/worksheets/sheet") {
@@ -1506,11 +1529,14 @@ fn the_manifest_the_pdf_and_the_workbook_name_the_client_identically() {
         client_name: " Acme\u{200B} Ltd\u{FEFF} ".to_string(),
         ..ReportOptions::default()
     };
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -1545,11 +1571,14 @@ fn a_secret_in_the_client_name_is_caught_in_the_sheet_footers() {
         client_name: format!("Acme {}", p.value),
         ..ReportOptions::default()
     };
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -1648,11 +1677,14 @@ fn mixed_scan_report() -> ScanReport {
 fn mixed_package() -> ProductPackage {
     let sealed = mixed_scan_report().seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,
@@ -1701,11 +1733,14 @@ fn a_scan_with_no_findings_reconciles_and_releases() {
     report.findings.clear();
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         STEM,

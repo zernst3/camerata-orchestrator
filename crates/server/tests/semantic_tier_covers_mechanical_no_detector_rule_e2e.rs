@@ -323,8 +323,10 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         Some(&corpus),
         &opts,
     );

@@ -38,14 +38,12 @@ fn only_findings_json_row(
     corpus: &camerata_rules::RuleSet,
 ) -> serde_json::Value {
     let json = crate::report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
         Some(corpus),
         &empty_opts(),
     );
     let export = build_findings_export(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
         Some(corpus),
         &json,
         &HashMap::new(),
@@ -87,8 +85,7 @@ async fn keyword_matched_ai_finding_cites_a_related_standard_in_every_artifact()
     // Report JSON (the PDF's data): still curated, carrying the related citation.
     let report = report_with(vec![f], vec![]);
     let json = crate::report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     );
@@ -113,19 +110,18 @@ async fn keyword_matched_ai_finding_cites_a_related_standard_in_every_artifact()
 
     // xlsx: the Citation column (P) and the Provenance column carry the same honest words.
     let xlsx = build_workbook(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
         Some(&corpus),
         &empty_opts(),
     )
     .expect("workbook builds");
-    let citation_cell = cell_text(&xlsx, "xl/worksheets/sheet2.xml", "P2");
+    let citation_cell = cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "P2");
     assert!(
         citation_cell.starts_with(RELATED_STANDARD_LABEL_PREFIX),
         "xlsx citation cell must say related standard, got {citation_cell:?}"
     );
     assert_eq!(
-        cell_text(&xlsx, "xl/worksheets/sheet2.xml", "O2"),
+        cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "O2"),
         "AI-advisory",
         "a keyword-matched AI row's provenance must never read Deterministic"
     );
@@ -171,8 +167,7 @@ fn the_report_explains_related_standards_in_one_plain_sentence() {
         vec![],
     );
     let json = crate::report_export::build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         None,
         &empty_opts(),
     );
@@ -200,8 +195,12 @@ fn the_index_sheet_defines_related_standard() {
         vec![finding("SEC-CRITICAL-1", "a.rs", 1, "critical")],
         vec![],
     );
-    let xlsx = build_workbook(&report.seal(), &HashMap::new(), None, &empty_opts())
-        .expect("workbook builds");
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("workbook builds");
     let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
     assert!(
         shared.contains("Related standard"),
@@ -215,8 +214,12 @@ fn the_index_sheet_provenance_lines_are_accurate_and_free_of_em_dashes() {
         vec![finding("SEC-CRITICAL-1", "a.rs", 1, "critical")],
         vec![],
     );
-    let xlsx = build_workbook(&report.seal(), &HashMap::new(), None, &empty_opts())
-        .expect("workbook builds");
+    let xlsx = build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .expect("workbook builds");
     let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
     // A related row now carries sources, so "no corpus citation" would be false.
     assert!(

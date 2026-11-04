@@ -30,7 +30,11 @@ fn a_member_at_the_rows_own_line_is_not_another_site() {
     )]);
     assert_eq!(f.distinct_site_count(), 1);
     let report = report_with(vec![f], vec![RULE]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let site = &json.curated_findings[0].sites[0];
     assert_eq!(site.site_count, 1);
     assert!(site.also_sites.is_empty(), "{:?}", site.also_sites);
@@ -49,7 +53,11 @@ fn a_member_at_another_line_is_a_site_and_a_member_at_the_same_line_is_not() {
     ]);
     assert_eq!(f.distinct_site_count(), 2);
     let report = report_with(vec![f], vec![RULE]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let site = &json.curated_findings[0].sites[0];
     assert_eq!(site.site_count, 2);
     assert_eq!(site.also_sites.len(), 1);
@@ -66,7 +74,11 @@ fn an_absorbed_site_without_a_corpus_title_shows_its_headline_and_a_higher_sever
         "Missing owner check",
     )]);
     let report = report_with(vec![f], vec![RULE]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let also = &json.curated_findings[0].sites[0].also_sites[0];
     assert!(also.title.is_none());
     assert_eq!(also.headline.as_deref(), Some("Missing owner check"));
@@ -84,7 +96,11 @@ fn a_lower_or_equal_member_severity_is_not_shown() {
         member("src/b.rs", 2, "medium", "Same"),
     ]);
     let report = report_with(vec![f], vec![RULE]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let sites = &json.curated_findings[0].sites[0].also_sites;
     assert!(sites.iter().all(|s| s.severity.is_none()), "{sites:?}");
 }

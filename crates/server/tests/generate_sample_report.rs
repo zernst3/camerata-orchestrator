@@ -414,8 +414,10 @@ async fn regenerate_sample_report() {
     };
 
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );
@@ -451,9 +453,15 @@ async fn regenerate_sample_report() {
         .expect("write sample-report/data.json");
 
     // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
-    let xlsx =
-        xlsx_export::build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts)
-            .expect("build_workbook must succeed for the sample fixture");
+    let xlsx = xlsx_export::build_workbook(
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
+        Some(&corpus),
+        &opts,
+    )
+    .expect("build_workbook must succeed for the sample fixture");
     assert_eq!(
         &xlsx[0..2],
         b"PK",
@@ -499,8 +507,10 @@ async fn regenerate_sample_report() {
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
     // to eyeball) and the zip entry below come from this one call.
     let findings_export = xlsx_export::build_findings_export(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &json,
         &std::collections::HashMap::new(),
@@ -536,8 +546,7 @@ async fn regenerate_sample_report() {
     // csv/*, json/*, manifest.json, and the release gate's checks. Only the filename stem differs.
     let sealed_for_zip = report.clone().seal();
     let package = camerata_server::release_gate::build_product_package_with_stem(
-        &sealed_for_zip,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed_for_zip, &dispositions),
         Some(&corpus),
         &opts,
         "camerata-sample-audit",

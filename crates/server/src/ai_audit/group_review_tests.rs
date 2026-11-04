@@ -929,14 +929,18 @@ async fn stage2_columns_never_reach_the_client_json() {
     let sealed = report.seal();
     let opts = crate::report_export::ReportOptions::default();
     let report_json = crate::report_export::build_report_json(
-        &sealed,
-        &std::collections::HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &std::collections::HashMap::new(),
+        ),
         None,
         &opts,
     );
     let export = crate::xlsx_export::build_findings_export(
-        &sealed,
-        &std::collections::HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &std::collections::HashMap::new(),
+        ),
         None,
         &report_json,
         &std::collections::HashMap::new(),

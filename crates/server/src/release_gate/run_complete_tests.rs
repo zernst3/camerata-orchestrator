@@ -46,11 +46,14 @@ fn package_from(
 ) -> anyhow::Result<ProductPackage> {
     let sealed = report.seal();
     crate::report_export::require_complete_run(&sealed, options)?;
-    let json = build_report_json(&sealed, &HashMap::new(), None, options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        options,
+    );
     let data = render_data_json(&json)?;
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         options,
         STEM,

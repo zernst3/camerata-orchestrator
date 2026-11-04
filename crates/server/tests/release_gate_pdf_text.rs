@@ -128,9 +128,13 @@ async fn pdf_text_contains_the_redacted_form_and_never_the_value() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
-        .await
-        .expect("the package assembles");
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
     let pdf = package.pdf.clone();
     let released = release(package).expect("redacted findings clear the gate");
 
@@ -179,7 +183,11 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
     // extraction approach CAN fail (a check that can never fail proves nothing), and that the
     // data.json check is the load-bearing one: a raw value in data.json is a raw value in the PDF.
     let sealed = report_with_one_finding_per_shape();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
     let mut data: Value =
         serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
     let raw =
@@ -239,9 +247,13 @@ async fn the_rendered_pdf_text_names_no_review_time_data() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
-        .await
-        .expect("the package assembles");
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
     let text = pdf_extract::extract_text_from_mem(&package.pdf).expect("the PDF's text extracts");
     assert!(
         text.len() > 200,
@@ -263,7 +275,11 @@ async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
     let mut data: Value =
         serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
     set_every_snippet(&mut data, "reviewed_by");
@@ -287,9 +303,13 @@ async fn every_rendered_page_carries_the_confidentiality_line() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
-        .await
-        .expect("the package assembles");
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
     let line = package.report_json.confidentiality.line.clone();
     assert_eq!(
         line,

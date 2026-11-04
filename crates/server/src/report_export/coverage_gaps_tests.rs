@@ -97,7 +97,11 @@ fn a_scan_that_covered_everything_has_no_gaps() {
 #[test]
 fn the_pdf_data_carries_the_coverage_gaps() {
     let report = report_with_gaps();
-    let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert_eq!(json.coverage_gaps, coverage_gaps(&report));
     let data = render_data_json(&json).expect("renders");
     assert!(data.contains("data/huge.json"), "{data}");
@@ -107,10 +111,13 @@ fn the_pdf_data_carries_the_coverage_gaps() {
 #[test]
 fn findings_json_carries_the_coverage_gaps() {
     let report = report_with_gaps().seal();
-    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
@@ -133,8 +140,12 @@ fn findings_json_carries_the_coverage_gaps() {
 #[test]
 fn the_workbook_coverage_sheet_lists_the_gaps() {
     let report = report_with_gaps().seal();
-    let bytes =
-        crate::xlsx_export::build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let strings = crate::release_gate::xlsx_strings(&bytes).expect("a workbook");
     let all = strings.join("\n");
     assert!(all.contains("Not reviewed this scan"), "{all}");
@@ -151,7 +162,11 @@ async fn the_pdf_renders_the_coverage_gaps() {
         return;
     }
     let report = report_with_gaps();
-    let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json)
         .await
         .expect("the PDF compiles with coverage gaps");
@@ -243,12 +258,15 @@ fn a_complete_list_has_no_more_line() {
 #[test]
 fn findings_json_and_the_pdf_data_carry_the_and_k_more_count() {
     let report = report_with_a_huge_skip_list().seal();
-    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert_eq!(json.coverage_gaps.skipped_files.len(), 2_000);
     assert_eq!(json.coverage_gaps.skipped_beyond_cap_total, 1_700);
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
@@ -266,8 +284,12 @@ fn findings_json_and_the_pdf_data_carry_the_and_k_more_count() {
 #[test]
 fn the_workbook_coverage_sheet_says_and_k_more() {
     let report = report_with_a_huge_skip_list().seal();
-    let bytes =
-        crate::xlsx_export::build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let strings = crate::release_gate::xlsx_strings(&bytes).expect("a workbook");
     let all = strings.join("\n");
     assert!(all.contains("big/00999.json"));
@@ -282,7 +304,11 @@ async fn the_pdf_says_and_k_more() {
         return;
     }
     let report = report_with_a_huge_skip_list();
-    let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
     // The PDF names the first 100, then points to the sheet for the rest it holds.
@@ -438,7 +464,11 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
     let extracted = read_local_repo_files_capped(dir.path(), 2).unwrap();
     let report = report_from_walk(extracted);
     let sealed = report.seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
 
     // The PDF's data.
     let data = render_data_json(&json).expect("renders");
@@ -448,8 +478,7 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
 
     // findings.json.
     let export = crate::xlsx_export::build_findings_export(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
@@ -469,8 +498,12 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
     );
 
     // The workbook's Coverage sheet.
-    let bytes =
-        crate::xlsx_export::build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
@@ -495,7 +528,11 @@ async fn the_pdf_prints_the_size_and_the_file_limit() {
         ],
     );
     let report = report_from_walk(read_local_repo_files_capped(dir.path(), 1).unwrap());
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
     assert!(text.contains("402 KB"), "{text}");
@@ -524,21 +561,28 @@ fn coverage_says_how_many_absorbed_sites_were_not_checked() {
     );
     // The PDF data, findings.json and the workbook carry it.
     let sealed = report.seal();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(render_data_json(&json)
         .unwrap()
         .contains("3 absorbed sites were not checked"));
     let export = crate::xlsx_export::build_findings_export(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
     );
     let value = serde_json::to_value(&export).unwrap();
     assert!(value["coverage"]["evidence_note"].is_string());
-    let bytes =
-        crate::xlsx_export::build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let all = crate::release_gate::xlsx_strings(&bytes)
         .unwrap()
         .join("\n");

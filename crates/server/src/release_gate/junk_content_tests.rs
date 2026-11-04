@@ -12,11 +12,14 @@ use crate::report_export::{build_report_json, render_data_json};
 fn package_for(report: ScanReport) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
         &options,
         "acme-inspection",
@@ -150,11 +153,14 @@ fn package_with(
 ) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(&sealed, dispositions, None, &options);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
+        None,
+        &options,
+    );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &sealed,
-        dispositions,
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
         None,
         &options,
         "acme-inspection",

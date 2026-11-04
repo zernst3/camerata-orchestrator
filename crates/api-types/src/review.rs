@@ -439,6 +439,70 @@ impl SiteReview {
     }
 }
 
+// ── How a row was reviewed (design 3B item 3) ─────────────────────────────────────────────
+
+/// How closely a row was reviewed. A closed set, written on every row of every export, so the
+/// claim "this row was reviewed" is true row by row and never a rate.
+///
+/// The server computes it in ONE place, the reviewer overlay (`apply_overlay`), and nowhere else.
+/// Every exporter reads it from the reviewed report; none works it out itself.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReviewLevel {
+    /// The reviewer looked at this site: a site-scope decision, an edit, or a decision on an
+    /// escalated site.
+    PersonallyReviewed,
+    /// The reviewer decided the pattern (the tree node with this id) and the site inherited the
+    /// decision.
+    ReviewedAsPattern(String),
+    /// Nobody has decided it; the engine's evidence check passed.
+    EngineVerified,
+}
+
+/// The wire name of [`ReviewLevel::PersonallyReviewed`].
+pub const PERSONALLY_REVIEWED: &str = "personally_reviewed";
+/// The wire prefix of [`ReviewLevel::ReviewedAsPattern`]; the node id follows the colon.
+pub const REVIEWED_AS_PATTERN_PREFIX: &str = "reviewed_as_pattern:";
+/// The wire name of [`ReviewLevel::EngineVerified`].
+pub const ENGINE_VERIFIED: &str = "engine_verified";
+
+impl ReviewLevel {
+    /// The wire form: `personally_reviewed`, `reviewed_as_pattern:<node_id>` or
+    /// `engine_verified`.
+    pub fn as_wire(&self) -> String {
+        match self {
+            Self::PersonallyReviewed => PERSONALLY_REVIEWED.to_string(),
+            Self::ReviewedAsPattern(node) => format!("{REVIEWED_AS_PATTERN_PREFIX}{node}"),
+            Self::EngineVerified => ENGINE_VERIFIED.to_string(),
+        }
+    }
+
+    /// The level named by `wire`, or `None` for anything else.
+    pub fn parse(wire: &str) -> Option<Self> {
+        match wire {
+            PERSONALLY_REVIEWED => Some(Self::PersonallyReviewed),
+            ENGINE_VERIFIED => Some(Self::EngineVerified),
+            other => other
+                .strip_prefix(REVIEWED_AS_PATTERN_PREFIX)
+                .filter(|node| !node.is_empty())
+                .map(|node| Self::ReviewedAsPattern(node.to_string())),
+        }
+    }
+}
+
+impl Serialize for ReviewLevel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReviewLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = String::deserialize(deserializer)?;
+        Self::parse(&wire)
+            .ok_or_else(|| serde::de::Error::custom(format!("not a review level: {wire}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +643,20 @@ mod tests {
         assert!(candidates[1..]
             .iter()
             .all(|c| c.over_budget_reason.is_none()));
+    }
+
+    #[test]
+    fn a_review_level_round_trips_through_its_wire_form() {
+        for level in [
+            ReviewLevel::PersonallyReviewed,
+            ReviewLevel::ReviewedAsPattern("sub:SEC-RLS-1/3".to_string()),
+            ReviewLevel::EngineVerified,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, format!("\"{}\"", level.as_wire()));
+            assert_eq!(serde_json::from_str::<ReviewLevel>(&json).unwrap(), level);
+        }
+        assert_eq!(ReviewLevel::parse("reviewed_as_pattern:"), None);
+        assert_eq!(ReviewLevel::parse("reviewed"), None);
     }
 }

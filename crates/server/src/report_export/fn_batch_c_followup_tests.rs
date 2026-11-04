@@ -33,7 +33,11 @@ fn deterministic_only_scan() -> crate::onboard::ScanReport {
 
 #[test]
 fn a_scan_where_osv_scanner_never_ran_is_not_dependency_clean() {
-    let json = build_report_json(&ai_only_scan().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&ai_only_scan().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(!json.dependency_snapshot.clean);
     assert!(!json.whats_healthy.dependency_clean);
 }
@@ -45,7 +49,11 @@ fn a_scan_where_osv_scanner_ran_and_found_nothing_is_still_clean() {
         vec!["SEC-NO-HARDCODED-SECRETS-1"],
     );
     assert!(report.provenance.osv_scanner_version.is_some());
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert!(json.dependency_snapshot.clean);
 }
 
@@ -68,7 +76,11 @@ async fn the_pdf_of_an_ai_only_scan_never_prints_the_clean_dependency_sentence()
         eprintln!("skipping: typst not on PATH");
         return;
     }
-    let json = build_report_json(&ai_only_scan().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&ai_only_scan().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
     let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -84,7 +96,11 @@ async fn the_pdf_of_an_ai_only_scan_never_prints_the_clean_dependency_sentence()
 fn a_scan_with_no_model_recorded_counts_every_repo_as_not_reviewed_by_the_model() {
     let report = deterministic_only_scan();
     assert_eq!(repos_without_ai_review(&report), ["owner/repo"]);
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let note = &json.methodology.ai_tier_note;
     assert!(
         note.contains("did not run for 1 repo; see Coverage."),
@@ -105,8 +121,10 @@ fn a_scan_with_a_model_recorded_keeps_the_review_description() {
 #[test]
 fn the_not_run_note_speaks_only_for_this_run() {
     let json = build_report_json(
-        &deterministic_only_scan().seal(),
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(
+            &deterministic_only_scan().seal(),
+            &HashMap::new(),
+        ),
         None,
         &empty_opts(),
     );

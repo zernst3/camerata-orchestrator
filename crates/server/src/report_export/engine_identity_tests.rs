@@ -54,7 +54,11 @@ fn the_engine_version_names_the_build_commit() {
 #[tokio::test]
 async fn the_cover_carries_the_engine_commit_and_the_rule_library_lock_hash() {
     let corpus = corpus().await;
-    let json = build_report_json(&sample(), &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sample(), &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     assert_eq!(
         json.cover.engine_commit.as_deref(),
         crate::ENGINE_COMMIT,
@@ -68,7 +72,11 @@ async fn the_cover_carries_the_engine_commit_and_the_rule_library_lock_hash() {
     );
 
     // No corpus: no hash, never a fabricated one.
-    let bare = build_report_json(&sample(), &HashMap::new(), None, &empty_opts());
+    let bare = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sample(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     assert_eq!(bare.cover.corpus_version, None);
 }
 
@@ -76,10 +84,13 @@ async fn the_cover_carries_the_engine_commit_and_the_rule_library_lock_hash() {
 async fn findings_json_provenance_carries_the_engine_identity() {
     let corpus = corpus().await;
     let report = sample();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         Some(&corpus),
         &json,
         &HashMap::new(),
@@ -105,7 +116,11 @@ fn provenance_engine_version() -> String {
 async fn the_readme_and_manifest_state_the_engine_version_with_its_commit() {
     let corpus = corpus().await;
     let report = sample();
-    let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let provenance =
         crate::client_provenance::export_provenance(&report, &json.cover, Some(&corpus));
     let readme = crate::product_export_readme("stem", &provenance);
@@ -135,7 +150,11 @@ async fn the_pdf_states_the_engine_commit_and_the_rule_library_lock_hash() {
         return;
     }
     let corpus = corpus().await;
-    let json = build_report_json(&sample(), &HashMap::new(), Some(&corpus), &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sample(), &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text: String = pdf_extract::extract_text_from_mem(&pdf)
         .unwrap_or_default()

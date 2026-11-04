@@ -39,7 +39,11 @@ fn an_ai_error_on_one_of_two_repos_lists_only_that_repo() {
     report.failed_passes.push(whole_repo_failure("owner/two"));
     assert_eq!(repos_without_ai_review(&report), ["owner/two"]);
 
-    let json = build_report_json(&report.seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let note = &json.methodology.ai_tier_note;
     assert!(
         note.contains("did not run for 1 repo; see Coverage."),
@@ -167,9 +171,12 @@ fn an_incremental_runs_scope_counts_say_they_are_over_the_changed_files() {
     let note = gaps.scope_limited_note.as_deref().unwrap();
     assert!(note.contains("2 of the 5 changed files"), "{note}");
 
-    let bytes =
-        crate::xlsx_export::build_workbook(&report.seal(), &HashMap::new(), None, &empty_opts())
-            .unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
@@ -226,17 +233,24 @@ fn a_scan_whose_rules_all_saw_every_file_has_no_scope_line() {
 #[test]
 fn the_workbook_and_findings_json_carry_the_scope_lines() {
     let report = scoped_scan().seal();
-    let bytes =
-        crate::xlsx_export::build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
     let strings = crate::release_gate::xlsx_strings(&bytes).expect("a workbook");
     let all = strings.join("\n");
     assert!(all.contains("2 rules were checked only against"), "{all}");
     assert!(all.contains("RUST-A-1"), "{all}");
 
-    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let export = crate::xlsx_export::build_findings_export(
-        &report,
-        &HashMap::new(),
+        &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         None,
         &json,
         &HashMap::new(),
@@ -258,7 +272,11 @@ async fn the_pdf_prints_the_scope_sentence() {
         eprintln!("skipping: typst not on PATH");
         return;
     }
-    let json = build_report_json(&scoped_scan().seal(), &HashMap::new(), None, &empty_opts());
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&scoped_scan().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
     let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();

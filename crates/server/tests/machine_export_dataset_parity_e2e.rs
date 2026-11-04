@@ -478,7 +478,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 31] = [
+const FINDING_HEADERS: [&str; 38] = [
     "Severity",
     "Headline",
     "Repo",
@@ -510,9 +510,16 @@ const FINDING_HEADERS: [&str; 31] = [
     "Fix type",
     "Reviewer edited",
     "Edit ids",
+    "Site id",
+    "Review level",
+    "Group",
+    "Sub-group",
+    "Sub-group cause",
+    "Escalated",
+    "Merged into",
 ];
 
-const FINDING_RENDERED: [&str; 29] = [
+const FINDING_RENDERED: [&str; 36] = [
     "severity",
     "headline",
     "repo",
@@ -542,6 +549,13 @@ const FINDING_RENDERED: [&str; 29] = [
     "fix_type",
     "reviewer_edited",
     "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -572,7 +586,7 @@ const FINDING_EXTRA_KEYS: [&str; 13] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 33] = [
+const FINDING_BASE_KEYS: [&str; 40] = [
     "severity",
     "headline",
     "repo",
@@ -604,6 +618,13 @@ const FINDING_BASE_KEYS: [&str; 33] = [
     "fix_type",
     "reviewer_edited",
     "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
     "is_fp",
     "fp_reason",
 ];
@@ -691,6 +712,13 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
                     .join(", ")
             })
             .unwrap_or_default(),
+        text(row, "site_id"),
+        text(row, "review_level"),
+        text(row, "group"),
+        text(row, "sub_group"),
+        text(row, "sub_group_cause"),
+        yes_or_blank(row, "escalated"),
+        text(row, "merged_into"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));
@@ -942,8 +970,22 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "repo",
             "fixed_version",
             "action",
+            "path",
+            "site_id",
+            "review_level",
+            "group",
+            "reviewer_edited",
+            "edit_ids",
         ],
-        &["ownership"],
+        // The sub-group's label and cause, the escalation and the merge pointer are on the
+        // Sites, Tree and Remediation plan sheets; the Dependencies worksheet has no such column.
+        &[
+            "ownership",
+            "sub_group",
+            "sub_group_cause",
+            "escalated",
+            "merged_into",
+        ],
     );
     let headers = [
         "Package",
@@ -952,6 +994,12 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         "Repo",
         "Fixed in",
         "Recommended action",
+        "File",
+        "Site id",
+        "Review level",
+        "Group",
+        "Reviewer edited",
+        "Edit ids",
     ];
     let mut expected: Vec<Vec<String>> = rows
         .iter()
@@ -968,6 +1016,20 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
                 text(r, "repo"),
                 fixed.unwrap_or("(no patch yet)").to_string(),
                 action,
+                text(r, "path"),
+                text(r, "site_id"),
+                text(r, "review_level"),
+                text(r, "group"),
+                yes_or_blank(r, "reviewer_edited"),
+                r["edit_ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default(),
             ]
         })
         .collect();
@@ -1135,14 +1197,29 @@ fn build(
             .collect::<HashMap<_, _>>()
     };
     Artifacts {
-        xlsx: build_workbook(report, dispositions, corpus, &opts).unwrap(),
+        xlsx: build_workbook(
+            &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+            corpus,
+            &opts,
+        )
+        .unwrap(),
         json: by_dataset(
-            build_json_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_json_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "json",
             "json",
         ),
         csv: by_dataset(
-            build_csv_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_csv_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "csv",
             "csv",
         ),
@@ -1158,10 +1235,13 @@ fn assert_every_dataset_agrees(
 ) {
     let a = build(report, dispositions, corpus);
 
-    // The dataset set is exactly the eight, in BOTH text formats.
+    // The dataset set is exactly the eight, in BOTH text formats. The CSV set also holds the
+    // ticket file (WO9b), which has no JSON sibling.
     let expected: BTreeSet<String> = DATASETS.iter().map(|s| s.to_string()).collect();
+    let mut expected_csv = expected.clone();
+    expected_csv.insert("tickets".to_string());
     assert_eq!(a.json.keys().cloned().collect::<BTreeSet<_>>(), expected);
-    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected_csv);
 
     let mut rows: HashMap<&str, Vec<Value>> = HashMap::new();
     for dataset in DATASETS {

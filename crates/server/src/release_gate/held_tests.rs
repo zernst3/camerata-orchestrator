@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use camerata_api_types::decisions::{Decision, DecisionState, Scope};
 use camerata_api_types::edits::{Edit, EditField};
 
-use super::held::{merged_without_decision, restored_without_decision};
+use super::held::restored_without_decision;
 use super::tests::{client_options, scan_report};
 use super::*;
 use crate::onboard::{Finding, ScanReport};
@@ -59,9 +59,9 @@ fn decision(id: &str, key: &str, state: DecisionState, reason: &str) -> Decision
 
 fn package_of(reviewed: &ReviewedReport) -> ProductPackage {
     let options = client_options();
-    let json = build_report_json(reviewed.report(), reviewed.dispositions(), None, &options);
+    let json = build_report_json(reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
-    assemble_package_reviewed(
+    assemble_package(
         reviewed,
         None,
         &options,
@@ -79,6 +79,21 @@ fn check_problems(failure: &GateFailure, check: CheckId) -> Vec<&Problem> {
         .filter(|o| o.check == check)
         .flat_map(|o| o.problems.iter())
         .collect()
+}
+
+/// The merge-and-group-decision problems the gate finds in the package made from `reviewed`,
+/// read from the package's own files.
+fn merge_problems(reviewed: &ReviewedReport) -> Vec<Problem> {
+    match release(package_of(reviewed)) {
+        Ok(_) => Vec::new(),
+        Err(ReleaseError::Blocked(failure)) => {
+            check_problems(&failure, CheckId::MergedWithoutDecision)
+                .into_iter()
+                .cloned()
+                .collect()
+        }
+        Err(other) => panic!("the package must assemble: {other}"),
+    }
 }
 
 fn at(report: &ScanReport, path: &str) -> Finding {
@@ -138,7 +153,7 @@ fn release_gate_refuses_a_merged_row_without_a_decision_record() {
     let mut no_reason = merge;
     no_reason.reason = "  ".to_string();
     let rows = apply_overlay(&sealed, std::slice::from_ref(&no_reason), &[], &[]);
-    let problems = merged_without_decision(&rows.report().findings, &[no_reason]);
+    let problems = merge_problems(&rows);
     assert_eq!(problems.len(), 1, "{problems:?}");
 }
 
@@ -170,9 +185,7 @@ fn release_gate_refuses_a_node_decision_missing_a_member_record() {
             .map(|(i, k)| member("dec-000001", i, k)),
     );
     let reviewed = apply_overlay(&sealed, &whole, &[], &[]);
-    assert!(
-        merged_without_decision(&reviewed.report().findings, reviewed.all_records()).is_empty()
-    );
+    assert!(merge_problems(&reviewed).is_empty());
     assert!(release(package_of(&reviewed)).is_ok());
 
     // One site's record is missing: the group decision names a site nothing holds a ruling for.
@@ -201,9 +214,7 @@ fn release_gate_refuses_a_node_decision_missing_a_member_record() {
     let mut undone = whole;
     undone[1].revoked_at = Some(NOW.to_string());
     let reviewed = apply_overlay(&sealed, &undone, &[], &[]);
-    assert!(
-        merged_without_decision(&reviewed.report().findings, reviewed.all_records()).is_empty()
-    );
+    assert!(merge_problems(&reviewed).is_empty());
 }
 
 #[test]
@@ -365,7 +376,16 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let edited = at(sealed.as_scan_report(), "src/users.rs");
     let merged = at(sealed.as_scan_report(), "src/orders.rs");
     let target = at(sealed.as_scan_report(), "src/db.rs");
-    let mut split = edit_of(3, &edited, EditField::Subgroup, "", "SECRET-SUBGROUP");
+    // The name the reviewer gives a sub-group is the group's label and cause in the client
+    // package (design D16: the sub-group is the unit of the plan); only the reason for the split
+    // is internal.
+    let mut split = edit_of(
+        3,
+        &edited,
+        EditField::Subgroup,
+        "",
+        "Helper builds SQL by hand",
+    );
     split.reason = "SECRET-SPLIT-REASON".to_string();
     let edits = vec![
         edit_of(
@@ -387,15 +407,15 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let reviewed = apply_overlay(&sealed, std::slice::from_ref(&merge), &edits, &[]);
     let package = package_of(&reviewed);
     let data_json = package.data_json.clone();
+    let pdf_data = package.data_json.clone();
     let zip = release(package).expect("the package clears the gate").bytes;
 
-    // Reasons, reviewer names and the sub-group the reviewer typed are internal.
+    // Reasons and reviewer names are internal.
     let secrets = [
         "SECRET-REASON",
         "SECRET-REVIEWER",
         "SECRET-SPLIT-REASON",
         "SECRET-MERGE-REASON",
-        "SECRET-SUBGROUP",
     ];
     let mut outputs: Vec<(String, String)> = text_entries(&zip);
     outputs.push(("PDF data".to_string(), data_json));
@@ -424,6 +444,58 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let findings =
         String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["findings.json"]).into_owned();
     assert!(findings.contains("Merged into src/db.rs:12"), "{findings}");
+
+    // WO9: the new outputs are held to the same rule one by one. The name the reviewer gave the
+    // sub-group is the group's label and its cause on the plan, the tree, the tickets and in the
+    // PDF's patterns; the reason for the split, the merge reason and the reviewer's name are in
+    // none of them, and the decisions file records only that a reason exists.
+    let entries = read_zip_entries(&zip).unwrap();
+    let xlsx = entries
+        .iter()
+        .find(|(name, _)| name.ends_with(".xlsx"))
+        .map(|(_, bytes)| bytes.clone())
+        .unwrap();
+    let sheet = |name: &str| -> String {
+        xlsx_sheet_grid(&xlsx, name)
+            .unwrap_or_else(|e| panic!("no {name} sheet: {e}"))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let label = "Helper builds SQL by hand";
+    let new_outputs: Vec<(&str, String)> = vec![
+        ("Remediation plan sheet", sheet("Remediation plan")),
+        ("Tree sheet", sheet("Tree")),
+        ("Decisions sheet", sheet("Decisions")),
+        ("Sites sheet", sheet("Sites")),
+        (
+            "csv/tickets.csv",
+            String::from_utf8_lossy(&entries["csv/tickets.csv"]).into_owned(),
+        ),
+        (
+            "decisions.json",
+            String::from_utf8_lossy(&entries["decisions.json"]).into_owned(),
+        ),
+        ("PDF patterns", pdf_data.clone()),
+    ];
+    for (name, text) in &new_outputs {
+        for secret in secrets {
+            assert!(!text.contains(secret), "{name} carries {secret}");
+        }
+    }
+    for name in [
+        "Remediation plan sheet",
+        "Tree sheet",
+        "csv/tickets.csv",
+        "PDF patterns",
+    ] {
+        let text = &new_outputs.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert!(
+            text.contains(label),
+            "{name} does not carry the sub-group's name"
+        );
+    }
 }
 
 #[test]
@@ -499,4 +571,55 @@ fn each_editable_field_round_trips_into_the_exports() {
         );
     }
     let _ = HashMap::<String, String>::new();
+}
+
+// ── the merge check refuses when it cannot read its evidence ───────────────────────────────
+
+/// The entries of a package that clears the gate.
+fn clean_entries() -> std::collections::BTreeMap<String, Vec<u8>> {
+    let reviewed = apply_overlay(&report_of_three().seal(), &[], &[], &[]);
+    let zip = release(package_of(&reviewed))
+        .expect("the package clears the gate")
+        .bytes;
+    read_zip_entries(&zip).expect("zip")
+}
+
+#[test]
+fn the_merge_check_refuses_a_package_whose_findings_or_decisions_file_is_unreadable() {
+    use super::held::merged_without_decision_in_archive;
+    // A clean package raises nothing.
+    assert!(merged_without_decision_in_archive(&clean_entries()).is_empty());
+
+    for file in ["findings.json", "decisions.json"] {
+        let key = if file == "findings.json" {
+            "findings"
+        } else {
+            "decisions"
+        };
+        let mutations: [(&str, Option<Vec<u8>>); 4] = [
+            ("absent", None),
+            ("corrupt", Some(b"{ not json".to_vec())),
+            (
+                "not an array",
+                Some(format!("{{\"{key}\": \"nope\"}}").into_bytes()),
+            ),
+            ("key missing", Some(b"{}".to_vec())),
+        ];
+        for (how, replacement) in mutations {
+            let mut entries = clean_entries();
+            match replacement {
+                None => {
+                    entries.remove(file);
+                }
+                Some(bytes) => {
+                    entries.insert(file.to_string(), bytes);
+                }
+            }
+            let problems = merged_without_decision_in_archive(&entries);
+            assert!(
+                problems.iter().any(|p| p.file == file),
+                "{file} {how}: the merge check must refuse and name the file, got {problems:?}"
+            );
+        }
+    }
 }

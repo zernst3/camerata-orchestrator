@@ -110,8 +110,10 @@ fn report() -> ScanReport {
 
 fn report_json() -> AuditReportJson {
     build_report_json(
-        &report().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )
