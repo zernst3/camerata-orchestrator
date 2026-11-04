@@ -48,6 +48,12 @@ async fn a_blank_group_review_model_is_refused_and_changes_nothing() {
     .await;
     let reply: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(reply["ok"], json!(false), "{text}");
+    // The unknown-step branch also answers ok:false, so the reason is what pins this route.
+    assert_eq!(
+        reply["message"],
+        json!("model must not be empty"),
+        "the blank model is refused by name, not as an unknown step: {text}"
+    );
     assert_eq!(
         f.state
             .projects()
