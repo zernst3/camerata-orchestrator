@@ -92,8 +92,30 @@ fn decision_at(scope: Scope, key: &str, state: DecisionState, reason: &str, at: 
 }
 
 /// Give the fixture a story for every view: a decision on a site and on a node, a restored row,
-/// an edit, the line moved so a candidate sits below it, and two Engine Check verdicts.
+/// an edit, the line moved so a candidate sits below it, and Engine Check verdicts.
 async fn decorate(f: &ReviewFixture) {
+    decorate_decisions(f).await;
+    decorate_verdicts(f).await;
+}
+
+/// The key of the row at `path` in the project's latest inspection.
+fn key_at(f: &ReviewFixture, path: &str) -> String {
+    f.state
+        .inspections()
+        .latest(&f.project_id)
+        .unwrap()
+        .report
+        .findings
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("no row in {path}"))
+        .site_key
+        .clone()
+}
+
+/// The first half of the story: everything a reviewer writes against the inspection the scan
+/// made (decisions, a client acknowledgement, an edit, the line).
+async fn decorate_decisions(f: &ReviewFixture) {
     let b = base(f);
     let ok = |what: &'static str, status: axum::http::StatusCode, text: String| {
         assert_eq!(status, 200, "{what}: {text}");
@@ -161,6 +183,93 @@ async fn decorate(f: &ReviewFixture) {
         json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": [] }),
     )
     .await;
+    // An Ignored row the client has acknowledged (after a package was delivered), and a confirmed
+    // row that `second_inspection` will move.
+    let (s, t) = call(
+        &f.app,
+        "POST",
+        &format!("{b}/decisions"),
+        Some(decision(
+            Scope::Site,
+            &key_at(f, "src/q00003.rs"),
+            DecisionState::Ignored,
+            "the client accepts this one",
+        )),
+    )
+    .await;
+    ok("ignore a row", s, t.clone());
+    let ignored: camerata_api_types::decisions::DecisionRecorded =
+        serde_json::from_str(&t).unwrap();
+    let (s, t) = call(
+        &f.app,
+        "POST",
+        &format!("{b}/decisions"),
+        Some(decision(
+            Scope::Site,
+            &key_at(f, "src/q00006.rs"),
+            DecisionState::Confirmed,
+            "",
+        )),
+    )
+    .await;
+    ok("confirm the row that will move", s, t);
+    f.state
+        .inspections()
+        .set_package(
+            &f.project_id,
+            camerata_server::inspections::PackageRecord {
+                generated_at: "2026-11-03T09:00:00Z".to_string(),
+                zip_sha256: "0".repeat(64),
+                manifest_json: Value::Null,
+            },
+        )
+        .unwrap();
+    let (s, t) = call(
+        &f.app,
+        "POST",
+        &format!("{b}/decisions/{}/client-ack", ignored.decision.id),
+        Some(json!({ "by": "the client's lead", "note": "agreed" })),
+    )
+    .await;
+    ok("the client acknowledges", s, t);
+}
+
+/// A second inspection of the same project: the same rows, one of them (`src/q00006.rs`, which
+/// holds a decision from the first inspection) with a changed snippet. Its key changes, so the
+/// engine finds it as moved and the old decision shows stale beside it. The rows keep their
+/// stage 2 data and their place in the tree, with the moved row's old key replaced throughout.
+async fn second_inspection(f: &ReviewFixture) {
+    let mut entry = f.state.inspections().latest(&f.project_id).unwrap();
+    let old_key = key_at(f, "src/q00006.rs");
+    let row = entry
+        .report
+        .findings
+        .iter_mut()
+        .find(|r| r.site_key == old_key)
+        .unwrap();
+    row.snippet = "run(\"another shape\", 16)".to_string();
+    row.line = 16;
+    let new_key =
+        camerata_api_types::site_key::site_key(&row.repo, &row.path, &row.rule_id, &row.snippet, 0);
+    row.site_key = new_key.clone();
+    assert_ne!(old_key, new_key);
+    // The tree names the row by its key in its members, candidates and outliers.
+    let json = |k: &str| {
+        let quoted = serde_json::to_string(k).unwrap();
+        quoted[1..quoted.len() - 1].to_string()
+    };
+    let tree = serde_json::to_string(&entry.report.tree).unwrap();
+    entry.report.tree =
+        serde_json::from_str(&tree.replace(&json(&old_key), &json(&new_key))).unwrap();
+    entry.id = String::new();
+    entry.package = None;
+    f.state.inspections().append(entry).expect("append");
+}
+
+/// The second half: Engine Check verdicts on the latest inspection. A Yes, an uncorrected No, and
+/// a No whose correction is a decision.
+async fn decorate_verdicts(f: &ReviewFixture) {
+    let b = base(f);
     // Two Engine Check verdicts: a Yes and an uncorrected No.
     let lane: EngineCheckLane = get(f, "the lane", "/review/engine-check").await;
     assert!(lane.cards.len() >= 2, "{} cards", lane.cards.len());
@@ -182,6 +291,35 @@ async fn decorate(f: &ReviewFixture) {
             path_key(&lane.cards[1].site.site_key)
         ),
         json!({ "right": false, "wrong": "wrong_severity" }),
+    )
+    .await;
+    // A No that has been corrected: the reviewer decided the row and the verdict names it.
+    assert!(lane.cards.len() >= 3, "{} cards", lane.cards.len());
+    let corrected = &lane.cards[2].site.site_key;
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{b}/decisions"),
+        Some(decision(
+            Scope::Site,
+            corrected,
+            DecisionState::FalsePositive,
+            "not a real issue",
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let decided: camerata_api_types::decisions::DecisionRecorded =
+        serde_json::from_str(&text).unwrap();
+    let _: EngineCheckVerdict = post_ok(
+        f,
+        "a corrected no",
+        &format!("/review/engine-check/{}", path_key(corrected)),
+        json!({
+            "right": false,
+            "wrong": "not_a_real_issue",
+            "correction": { "decision": decided.decision.id },
+        }),
     )
     .await;
 }
@@ -387,7 +525,11 @@ fn one_of(a: Value, b: Value) -> Value {
 /// switch on.
 async fn wire_shapes() -> Value {
     let f = review_fixture(12);
-    decorate(&f).await;
+    // The decisions are written against the first inspection; the second one moves a row, and the
+    // Engine Check's verdicts are given on it (a verdict belongs to one run).
+    decorate_decisions(&f).await;
+    second_inspection(&f).await;
+    decorate_verdicts(&f).await;
     let fetch = |uri: String| {
         let f = &f;
         async move {
@@ -439,9 +581,37 @@ const SNAPSHOT: &str = concat!(
     "/tests/fixtures/review_wire_shape.json"
 );
 
+/// Whether some object in `v` has `field` and its shape is not `"null"` (the field's inner shape
+/// is pinned by the snapshot only when the fixture gives it a value).
+fn field_has_a_value(v: &Value, field: &str) -> bool {
+    match v {
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, x)| (k == field && x != "null") || field_has_a_value(x, field)),
+        Value::Array(items) => items.iter().any(|x| field_has_a_value(x, field)),
+        _ => false,
+    }
+}
+
+// `summary_edit` is the one optional field the fixture cannot fill: it stays `None` (and so
+// `"null"` in the snapshot) until `EditField::Summary` exists (review-tree design U4, WO10), when
+// the fixture must edit a node summary and the list below must gain it.
+const OPTIONAL_FIELDS_THE_FIXTURE_FILLS: [&str; 4] = [
+    "moved_from",
+    "stale_decision",
+    "correction",
+    "confirmed_by_client",
+];
+
 #[tokio::test]
 async fn wire_shape_snapshot_fails_on_unreviewed_change() {
     let now = sorted(wire_shapes().await);
+    for field in OPTIONAL_FIELDS_THE_FIXTURE_FILLS {
+        assert!(
+            field_has_a_value(&now, field),
+            "{field} is null in every fixture row, so the snapshot does not pin its inner shape"
+        );
+    }
     let rendered = format!("{}\n", serde_json::to_string_pretty(&now).unwrap());
     if std::env::var("UPDATE_REVIEW_WIRE_SHAPE").is_ok_and(|v| v == "1") {
         std::fs::write(SNAPSHOT, &rendered).unwrap();

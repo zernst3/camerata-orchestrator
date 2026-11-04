@@ -177,10 +177,20 @@ fn node_counts_come_from_the_tree_and_agree_with_the_trees_own_counts() {
 }
 
 #[test]
-fn the_line_is_marked_again_from_the_current_settings_and_never_stored() {
+fn the_line_is_marked_from_the_current_settings_where_the_report_is_loaded_and_never_stored() {
+    // The composer reads the marks the loader gave the report ([`re_mark_line`], the one place
+    // the line moves, shared with the exports), so each setting loads its own report.
     let sealed = staged();
-    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let load = |stores: &Stores| {
+        apply_overlay(
+            &crate::report_export::re_mark_line(&sealed, &stores.settings),
+            &[],
+            &[],
+            &[],
+        )
+    };
     let mut stores = Stores::default();
+    let reviewed = load(&stores);
     // The design's floor of 20 puts all four candidates above the line.
     let q = compose(&reviewed, &stores, |c| c.queue(true, 0, 100));
     assert_eq!((q.escalated.len(), q.below_total, q.below.len()), (4, 0, 0));
@@ -189,6 +199,7 @@ fn the_line_is_marked_again_from_the_current_settings_and_never_stored() {
     stores.settings.escalation_rate_per_kloc = 0.0;
     stores.settings.escalation_floor = 1;
     stores.settings.over_budget_reasons = Vec::new();
+    let reviewed = load(&stores);
     let q = compose(&reviewed, &stores, |c| c.queue(false, 0, 100));
     assert_eq!((q.escalated.len(), q.below_total), (1, 3));
     assert!(
@@ -212,6 +223,7 @@ fn the_line_is_marked_again_from_the_current_settings_and_never_stored() {
 
     // The reasons that may exceed the budget bring a candidate back over the line.
     stores.settings.over_budget_reasons = EscalationReason::default_over_budget_set();
+    let reviewed = load(&stores);
     let q = compose(&reviewed, &stores, |c| c.queue(false, 0, 100));
     let over: Vec<_> = q
         .escalated
@@ -461,4 +473,94 @@ fn a_thirty_thousand_site_tree_view_is_under_2_mb_and_builds_in_under_2_s() {
     assert_eq!(total, 30_000);
     let _: TreeView = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(RUN, "insp-test-1");
+}
+
+#[test]
+fn after_a_rate_change_the_queue_and_the_client_export_agree_on_the_line() {
+    use camerata_api_types::review::EscalationState;
+    use std::collections::BTreeSet;
+
+    let state = crate::AppState::new(std::sync::Arc::new(
+        camerata_worktracker::InMemoryStoryStore::new(),
+    ));
+    let project = state.projects.create("Acme", vec![]).expect("project");
+    let entry = state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &project.id,
+            staged().into_inner(),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .expect("inspection stored");
+    // The scan marked all four candidates above the line (floor 20). The reviewer now moves it to
+    // one escalation: a rate of 0, a floor of 1 and no over-budget reasons.
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.review.escalation_rate_per_kloc = 0.0;
+            p.review.escalation_floor = 1;
+            p.review.over_budget_reasons = Vec::new();
+        })
+        .expect("project exists");
+
+    // What the queue shows.
+    let (_, shown) = crate::edits::routes::review_of(&state, &project.id, &entry);
+    let moved = std::collections::HashMap::new();
+    let inputs = super::ReviewInputs {
+        run_id: &entry.id,
+        engine_version: "0.0.0-test",
+        reviewed: &shown,
+        edits: &[],
+        settings: &project.review,
+        scan_model: "",
+        calibration_model: "",
+        fix_model: "",
+        verdicts: &[],
+        moved: &moved,
+        links: &[],
+    };
+    let queue = super::ReviewComposer::new(&inputs).queue(false, 0, 100);
+    let on_screen: BTreeSet<String> = queue
+        .escalated
+        .iter()
+        .map(|r| r.candidate.key.clone())
+        .collect();
+    assert_eq!(on_screen.len(), 1, "the screen shows the new line");
+
+    // What the client export ships: the rows' own escalation state, and the review level that
+    // follows it.
+    let sealed = state
+        .get_last_scan(&project.id)
+        .expect("the last scan")
+        .seal_with_restored(&crate::decisions::restored_keys_of(&[]));
+    let exported = crate::reviewed_for_export(&state, &project.id, &sealed, &Default::default());
+    let shipped: BTreeSet<String> = exported
+        .report()
+        .findings
+        .iter()
+        .filter(|f| f.review.escalation_state == EscalationState::Escalated)
+        .map(|f| f.site_key.clone())
+        .collect();
+    assert_eq!(
+        shipped, on_screen,
+        "the export ships the line the screen shows"
+    );
+    for f in &exported.report().findings {
+        let on_the_screen = shown
+            .report()
+            .findings
+            .iter()
+            .find(|g| g.site_key == f.site_key)
+            .expect("same rows");
+        assert_eq!(
+            exported.review_level(f),
+            shown.review_level(on_the_screen),
+            "{}: how closely the row was reviewed",
+            f.path
+        );
+        assert_eq!(
+            f.review.escalation_state,
+            on_the_screen.review.escalation_state
+        );
+    }
 }

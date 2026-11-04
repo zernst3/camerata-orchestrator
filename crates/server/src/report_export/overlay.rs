@@ -243,6 +243,39 @@ impl ReviewerDecisions for ReviewedReport {
     }
 }
 
+/// The sealed report with the escalation line marked again from the project's CURRENT settings,
+/// over the stored candidates: no model call, no candidate added or dropped. The budget, the
+/// candidates' marks and the rows' escalation columns are rewritten on the copy
+/// ([`crate::review_tree::ReviewTree::re_mark`]); the stored inspection is untouched.
+///
+/// This is THE place the line moves. The review screens and every export load the report through
+/// it (`review_of` and `reviewed_for_export`, before [`apply_overlay`]), so the queue the reviewer
+/// works from and the escalations, review levels and PDF a client receives are marked by the same
+/// line. A report with no tree is returned as it is.
+pub fn re_mark_line(
+    sealed: &SealedReport,
+    settings: &camerata_api_types::project::ReviewSettings,
+) -> SealedReport {
+    sealed.overlaid(|report| {
+        let code_lines = report.code_lines;
+        let Some(tree) = report.tree.as_mut() else {
+            return;
+        };
+        let counted_lines = Some(tree.budget.counted_lines)
+            .filter(|n| *n > 0)
+            .unwrap_or(code_lines);
+        tree.re_mark(
+            &crate::review_tree::RankSettings {
+                rate_per_kloc: settings.escalation_rate_per_kloc,
+                floor: settings.escalation_floor,
+                counted_lines,
+                over_budget_reasons: settings.over_budget_reasons.clone(),
+            },
+            &mut report.findings,
+        );
+    })
+}
+
 /// Apply the reviewer's overlay to a sealed report (design 5.1). `decisions` may include revoked
 /// records; they are ignored. `edits` may include discarded ones; they are ignored. The sealed
 /// report is not changed.

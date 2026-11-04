@@ -102,7 +102,16 @@
           "path": "string",
           "rule_id": "string"
         },
-        "escalation": "string",
+        "escalation": {
+          "$one_of": [
+            "string",
+            {
+              "below_line": {
+                "rank": "number"
+              }
+            }
+          ]
+        },
         "flagged_by": [
           {
             "$one_of": [
@@ -146,7 +155,11 @@
           "added_by_reviewer": "bool",
           "category": "string",
           "decision": {
-            "confirmed_by_client": "null",
+            "confirmed_by_client": {
+              "at": "string",
+              "by": "string",
+              "note": "string"
+            },
             "decided_at": "string",
             "decided_by": "string",
             "id": "string",
@@ -158,7 +171,23 @@
           },
           "detail": "string",
           "edits": [
-            "empty"
+            {
+              "$one_of": [
+                "empty",
+                {
+                  "at": "string",
+                  "by": "string",
+                  "current_value": "string",
+                  "field": "string",
+                  "id": "string",
+                  "new": "string",
+                  "old": "string",
+                  "reapplied_from": "null",
+                  "reason": "string",
+                  "stale": "bool"
+                }
+              ]
+            }
           ],
           "fix": "string",
           "fix_type": "string",
@@ -198,7 +227,10 @@
             "key": "string",
             "label": "string"
           },
-          "moved_from": "null",
+          "moved_from": {
+            "key": "string",
+            "line": "number"
+          },
           "new_since_decision": "null",
           "path": "string",
           "possible_duplicate_of": {
@@ -224,8 +256,32 @@
             "reason": "string",
             "severity": "string"
           },
-          "stage2": "null",
-          "stale_decision": "null",
+          "stage2": {
+            "disagreements": [
+              "empty"
+            ],
+            "global_rank": "number",
+            "outlier_reason": "null",
+            "outlier_why": "string",
+            "over_budget_reason": "null",
+            "reason": "string",
+            "stage2_rank": "number",
+            "state": "string",
+            "subgroup_cause": "string",
+            "subgroup_label": "string",
+            "why": "string"
+          },
+          "stale_decision": {
+            "confirmed_by_client": "null",
+            "decided_at": "string",
+            "decided_by": "string",
+            "id": "string",
+            "inherited_from": "null",
+            "needed_me": "null",
+            "reason": "string",
+            "scope": "string",
+            "state": "string"
+          },
           "thrown_out_reason": "string"
         },
         "stage1": {
@@ -239,7 +295,9 @@
         "verdict": {
           "at": "string",
           "by": "string",
-          "correction": "null",
+          "correction": {
+            "decision": "string"
+          },
           "key": "string",
           "right": "bool",
           "run_id": "string",
@@ -616,7 +674,11 @@
         "added_by_reviewer": "bool",
         "category": "string",
         "decision": {
-          "confirmed_by_client": "null",
+          "confirmed_by_client": {
+            "at": "string",
+            "by": "string",
+            "note": "string"
+          },
           "decided_at": "string",
           "decided_by": "string",
           "id": "string",
@@ -684,7 +746,10 @@
           "key": "string",
           "label": "string"
         },
-        "moved_from": "null",
+        "moved_from": {
+          "key": "string",
+          "line": "number"
+        },
         "new_since_decision": "null",
         "path": "string",
         "possible_duplicate_of": {
@@ -725,7 +790,17 @@
           "subgroup_label": "string",
           "why": "string"
         },
-        "stale_decision": "null",
+        "stale_decision": {
+          "confirmed_by_client": "null",
+          "decided_at": "string",
+          "decided_by": "string",
+          "id": "string",
+          "inherited_from": "null",
+          "needed_me": "null",
+          "reason": "string",
+          "scope": "string",
+          "state": "string"
+        },
         "thrown_out_reason": "null"
       }
     ],

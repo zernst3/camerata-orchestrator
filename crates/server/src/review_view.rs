@@ -15,9 +15,10 @@
 //!
 //! # The line
 //!
-//! The escalation line is marked again here from the stored candidates and the project's CURRENT
-//! settings ([`camerata_api_types::review::re_mark`], design A4), so a changed rate or floor shows
-//! on the next read with no model call. "Show below the line" is a view flag on the queue request
+//! The escalation line is marked from the stored candidates and the project's CURRENT settings
+//! ([`camerata_api_types::review::re_mark`], design A4) once, where the report is loaded
+//! ([`crate::report_export::re_mark_line`]), so a changed rate or floor shows on the next read AND
+//! in the next export, with no model call. The composer reads the marks it is given. "Show below the line" is a view flag on the queue request
 //! and changes nothing ([`ReviewComposer::queue`], spec U5).
 //!
 //! # Size
@@ -150,21 +151,19 @@ impl<'a> ReviewComposer<'a> {
             None => AppliedDecisions::default(),
         };
 
-        // The line, marked again from the stored candidates and the settings as they stand now.
-        let mut candidates = tree.map(|t| t.candidates.clone()).unwrap_or_default();
-        let counted_lines = tree
-            .map(|t| t.budget.counted_lines)
-            .filter(|n| *n > 0)
-            .unwrap_or(report.code_lines);
-        let mut budget = EscalationBudget::compute(
-            inputs.settings.escalation_rate_per_kloc,
-            inputs.settings.escalation_floor,
-            counted_lines,
-        );
-        re_mark(
-            &mut candidates,
-            &mut budget,
-            &inputs.settings.over_budget_reasons,
+        // The line as the report carries it: the loader marked it from the project's settings
+        // before the overlay ([`crate::report_export::re_mark_line`]), the same marks the exports
+        // ship, so this reads them and moves nothing.
+        let candidates = tree.map(|t| t.candidates.clone()).unwrap_or_default();
+        let budget = tree.map_or_else(
+            || {
+                EscalationBudget::compute(
+                    inputs.settings.escalation_rate_per_kloc,
+                    inputs.settings.escalation_floor,
+                    report.code_lines,
+                )
+            },
+            |t| t.budget,
         );
         let candidate_at = candidates
             .iter()

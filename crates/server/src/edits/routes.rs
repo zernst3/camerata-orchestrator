@@ -30,7 +30,7 @@ use crate::decisions::{restored_keys_of, DecisionCtx, DecisionStoreError};
 use crate::inspections::InspectionEntry;
 use crate::onboard::{Finding, SealedReport};
 use crate::report_export::overlay::current_value;
-use crate::report_export::{apply_overlay, ReviewedReport};
+use crate::report_export::{apply_overlay, re_mark_line, ReviewedReport};
 use crate::AppState;
 
 fn now() -> String {
@@ -131,6 +131,11 @@ pub(crate) fn review_of(
     let decisions = state.decisions.list(id);
     let restored = restored_keys_of(&state.decisions.active(id));
     let sealed = latest.report.clone().seal_with_restored(&restored);
+    // The line the project's settings give now, the same one the exports ship.
+    let sealed = state
+        .projects
+        .get(id)
+        .map_or_else(|| sealed.clone(), |p| re_mark_line(&sealed, &p.review));
     let reviewed = apply_overlay(
         &sealed,
         &decisions,

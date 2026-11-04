@@ -3537,6 +3537,12 @@ fn reviewed_for_export(
         .latest(project_id)
         .map(|e| e.id)
         .unwrap_or_default();
+    // The escalation line the project's settings give now, the one the review screens show.
+    let marked = state.projects.get(project_id).map_or_else(
+        || sealed.clone(),
+        |p| crate::report_export::re_mark_line(sealed, &p.review),
+    );
+    let sealed = &marked;
     let reviewed = crate::report_export::apply_overlay(
         sealed,
         &state.decisions.list(project_id),
