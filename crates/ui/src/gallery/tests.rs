@@ -113,12 +113,6 @@ const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
     ("detail/split-picker", "WO11"),
     ("detail/add-form", "WO11"),
     ("detail/add-refused", "WO11"),
-    ("settings/defaults", "WO11b"),
-    ("settings/rate-changed", "WO11b"),
-    ("settings/invalid", "WO11b"),
-    ("settings/saving", "WO11b"),
-    ("settings/error", "WO11b"),
-    ("settings/run-in-flight", "WO11b"),
     ("export/clear", "WO10"),
     ("export/blocked", "WO10"),
 ];

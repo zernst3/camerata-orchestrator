@@ -287,6 +287,20 @@ pub fn reason_choices(view: &ReviewSettingsView) -> Vec<EscalationReason> {
     in_priority_order(&shown)
 }
 
+/// A reason as the checkbox says it.
+pub fn reason_label(reason: EscalationReason) -> &'static str {
+    match reason {
+        EscalationReason::CrossTenant => "cross tenant",
+        EscalationReason::EvidenceUnverified => "evidence unverified",
+        other => other.phrase(),
+    }
+}
+
+/// The note under the reason checkboxes: which of them need critical severity.
+pub fn reasons_note() -> &'static str {
+    "Every reason except evidence unverified counts only at critical severity."
+}
+
 /// The proposed request to preview on the server, when the draft is valid and not yet saved.
 pub fn preview_request(
     view: &ReviewSettingsView,

@@ -5,13 +5,15 @@
 //! the fixture source the gallery and the tests use. Reads only so far: the work orders that add
 //! writes (decisions, edits, settings) extend the trait with them.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
-    EngineCheckLane, ExportGateView, QueueView, ReviewSettingsView, ReviewShellView, SitesPage,
-    TreeView,
+    EngineCheckLane, EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, QueueView,
+    ReviewSettingsView, ReviewShellView, SampleSizeResp, SitesPage, TreeView,
 };
 use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base, ReviewDataSet};
 
@@ -59,20 +61,51 @@ pub trait ReviewSource {
     fn export_gate(&self) -> SourceFuture<'_, ExportGateView>;
     /// The review settings (spec section 9).
     fn settings(&self) -> SourceFuture<'_, ReviewSettingsView>;
+
+    // ── The settings lane's writes (spec section 9). None of them calls a model. ──
+
+    /// `POST escalation-budget/preview`: the line a proposed rate and floor would give. Writes
+    /// nothing.
+    fn preview_budget(&self, req: EscalationBudgetReq)
+        -> SourceFuture<'_, EscalationBudgetOutcome>;
+    /// `POST escalation-budget`: save the rate, floor and over-budget reasons. The server marks
+    /// the line again from the stored candidates (design A4).
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome>;
+    /// `POST sample-size`.
+    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp>;
+    /// `POST step-models { step, model }` for a stage (`audit`, `calibration`, `group_review`,
+    /// `fix`).
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()>;
 }
 
 /// A source over a seeded fixture data set, or one that fails every read.
 pub struct FixtureReviewSource {
     data: ReviewDataSet,
     failure: Option<String>,
+    /// The settings as the lane last wrote them: a write shows on the next read, as it does on
+    /// the server.
+    settings: RefCell<ReviewSettingsView>,
+    /// Every call made, by name, in order. A test reads it to see what a screen asked for.
+    calls: RefCell<Vec<String>>,
 }
 
 impl FixtureReviewSource {
     pub fn new(data: ReviewDataSet) -> Self {
         Self {
+            settings: RefCell::new(data.settings.clone()),
             data,
             failure: None,
+            calls: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Every call made so far, by name (`apply_budget`, `settings`, `set_stage_model:fix`).
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+
+    fn log(&self, call: impl Into<String>) {
+        self.calls.borrow_mut().push(call.into());
     }
 
     /// The 600-site working set.
@@ -88,9 +121,26 @@ impl FixtureReviewSource {
     /// A source whose every read fails with `message` (the error states).
     pub fn failing(message: &str) -> Self {
         Self {
-            data: dataset_base(),
             failure: Some(message.to_string()),
+            ..Self::new(dataset_base())
         }
+    }
+
+    /// A write: refused with the failure message when the source fails, else `f` against the
+    /// settings. The call is logged first, so a refused call still shows.
+    fn write<'a, T: 'a>(
+        &'a self,
+        call: impl Into<String>,
+        f: impl FnOnce(&mut ReviewSettingsView) -> Result<T, ReviewSourceError>,
+    ) -> SourceFuture<'a, T> {
+        self.log(call);
+        let result = match &self.failure {
+            Some(message) => Err(ReviewSourceError {
+                message: message.clone(),
+            }),
+            None => f(&mut self.settings.borrow_mut()),
+        };
+        Box::pin(std::future::ready(result))
     }
 
     fn read<'a, T: 'a>(
@@ -109,10 +159,12 @@ impl FixtureReviewSource {
 
 impl ReviewSource for FixtureReviewSource {
     fn shell(&self) -> SourceFuture<'_, ReviewShellView> {
+        self.log("shell");
         self.read(|d| Ok(d.shell.clone()))
     }
 
     fn tree(&self) -> SourceFuture<'_, TreeView> {
+        self.log("tree");
         self.read(|d| Ok(d.tree.clone()))
     }
 
@@ -122,6 +174,7 @@ impl ReviewSource for FixtureReviewSource {
         cursor: Option<&'a str>,
         limit: usize,
     ) -> SourceFuture<'a, SitesPage> {
+        self.log("sites_page");
         self.read(move |d| {
             d.sites_page(node, cursor, limit)
                 .ok_or_else(|| ReviewSourceError {
@@ -136,20 +189,127 @@ impl ReviewSource for FixtureReviewSource {
         below_offset: usize,
         below_limit: usize,
     ) -> SourceFuture<'_, QueueView> {
+        self.log("queue");
         self.read(move |d| Ok(d.queue(show_below, below_offset, below_limit)))
     }
 
     fn engine_check(&self) -> SourceFuture<'_, EngineCheckLane> {
+        self.log("engine_check");
         self.read(|d| Ok(d.engine.clone()))
     }
 
     fn export_gate(&self) -> SourceFuture<'_, ExportGateView> {
+        self.log("export_gate");
         self.read(|d| Ok(d.gate.clone()))
     }
 
     fn settings(&self) -> SourceFuture<'_, ReviewSettingsView> {
-        self.read(|d| Ok(d.settings.clone()))
+        self.log("settings");
+        let result = match &self.failure {
+            Some(message) => Err(ReviewSourceError {
+                message: message.clone(),
+            }),
+            None => Ok(self.settings.borrow().clone()),
+        };
+        Box::pin(std::future::ready(result))
     }
+
+    fn preview_budget(
+        &self,
+        req: EscalationBudgetReq,
+    ) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        self.write("preview_budget", move |s| budget_outcome(s, &req, false))
+    }
+
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        self.write("apply_budget", move |s| {
+            let outcome = budget_outcome(s, &req, true)?;
+            s.escalation.rate_per_kloc = req.rate_per_kloc;
+            s.escalation.floor = req.floor;
+            s.escalation.over_budget_reasons = req.over_budget_reasons;
+            s.escalation.budget = outcome.after;
+            Ok(outcome)
+        })
+    }
+
+    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp> {
+        self.write("set_sample_size", move |s| {
+            if sample_size_per_run > s.limits.sample_max {
+                return Err(refused(format!(
+                    "The sample size must be between 0 and {}.",
+                    s.limits.sample_max
+                )));
+            }
+            s.engine_check.sample_size_per_run = sample_size_per_run;
+            Ok(SampleSizeResp {
+                sample_size_per_run,
+                lane_off: sample_size_per_run == 0,
+            })
+        })
+    }
+
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {
+        self.write(format!("set_stage_model:{step}"), move |s| {
+            let slot = match step {
+                "audit" => &mut s.stage_models.scan,
+                "calibration" => &mut s.stage_models.calibration,
+                "group_review" => &mut s.stage_models.group_review,
+                "fix" => &mut s.stage_models.fix,
+                other => return Err(refused(format!("unknown step: {other}"))),
+            };
+            if model.trim().is_empty() && step != "fix" {
+                return Err(refused("model must not be empty".to_string()));
+            }
+            *slot = model.trim().to_string();
+            Ok(())
+        })
+    }
+}
+
+fn refused(message: String) -> ReviewSourceError {
+    ReviewSourceError { message }
+}
+
+/// What a budget request would do to the fixture's settings: the line before and after, and how
+/// many candidates cross it. Refuses what the server refuses (outside the limits). The crossing
+/// counts are a stand-in over the fixture's candidate count, deterministic and plausible.
+fn budget_outcome(
+    settings: &ReviewSettingsView,
+    req: &EscalationBudgetReq,
+    applied: bool,
+) -> Result<EscalationBudgetOutcome, ReviewSourceError> {
+    let limits = settings.limits;
+    if !req.rate_per_kloc.is_finite()
+        || req.rate_per_kloc < 0.0
+        || req.rate_per_kloc > limits.rate_max
+    {
+        return Err(refused(format!(
+            "The rate must be between 0 and {} escalations per 1,000 lines.",
+            limits.rate_max
+        )));
+    }
+    if req.floor > limits.floor_max {
+        return Err(refused(format!(
+            "The floor must be between 0 and {}.",
+            limits.floor_max
+        )));
+    }
+    let before = settings.escalation.budget;
+    let mut after = EscalationBudget::compute(
+        req.rate_per_kloc,
+        req.floor,
+        settings.escalation.counted_lines,
+    );
+    after.candidates = before.candidates;
+    after.escalated = before.candidates.min(after.budget).max(before.over_budget);
+    after.over_budget = after.escalated.saturating_sub(after.budget);
+    Ok(EscalationBudgetOutcome {
+        applied,
+        before,
+        after,
+        moved_above: after.escalated.saturating_sub(before.escalated),
+        moved_below: before.escalated.saturating_sub(after.escalated),
+    })
 }
 
 #[cfg(test)]
@@ -211,6 +371,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_settings_writes_show_on_the_next_read_and_are_logged_by_name() {
+        use camerata_api_types::review_view::EscalationBudgetReq;
+        let src = FixtureReviewSource::base();
+        let before = src.settings().await.unwrap();
+        let req = EscalationBudgetReq {
+            rate_per_kloc: 3.0,
+            floor: 40,
+            over_budget_reasons: Vec::new(),
+        };
+        let preview = src.preview_budget(req.clone()).await.unwrap();
+        assert!(!preview.applied);
+        assert_eq!(
+            src.settings().await.unwrap(),
+            before,
+            "a preview writes nothing"
+        );
+        let applied = src.apply_budget(req).await.unwrap();
+        assert!(applied.applied);
+        let after = src.settings().await.unwrap();
+        assert_eq!(after.escalation.rate_per_kloc, 3.0);
+        assert_eq!(after.escalation.floor, 40);
+        assert_eq!(after.escalation.budget, applied.after);
+        assert!(after.escalation.over_budget_reasons.is_empty());
+        src.set_sample_size(0).await.unwrap();
+        src.set_stage_model("group_review", "claude-opus-5-5")
+            .await
+            .unwrap();
+        let after = src.settings().await.unwrap();
+        assert_eq!(after.engine_check.sample_size_per_run, 0);
+        assert_eq!(after.stage_models.group_review, "claude-opus-5-5");
+        assert!(src.set_stage_model("nonsense", "x").await.is_err());
+        assert!(src.set_sample_size(1001).await.is_err());
+        assert_eq!(
+            src.calls(),
+            [
+                "settings",
+                "preview_budget",
+                "settings",
+                "apply_budget",
+                "settings",
+                "set_sample_size",
+                "set_stage_model:group_review",
+                "settings",
+                "set_stage_model:nonsense",
+                "set_sample_size",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_failing_source_fails_every_read_with_its_message() {
         let src = FixtureReviewSource::failing("the server is down");
         assert_eq!(src.shell().await.unwrap_err().message, "the server is down");
@@ -219,6 +429,16 @@ mod tests {
         assert!(src.engine_check().await.is_err());
         assert!(src.export_gate().await.is_err());
         assert!(src.settings().await.is_err());
+        assert!(src.set_sample_size(5).await.is_err());
+        assert!(src.set_stage_model("fix", "x").await.is_err());
+        assert!(src
+            .apply_budget(camerata_api_types::review_view::EscalationBudgetReq {
+                rate_per_kloc: 1.0,
+                floor: 20,
+                over_budget_reasons: Vec::new(),
+            })
+            .await
+            .is_err());
         assert!(src.sites_page("cat:authorization", None, 10).await.is_err());
     }
 }

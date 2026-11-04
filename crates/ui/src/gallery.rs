@@ -27,10 +27,6 @@ pub enum StateKind {
     /// The screen does not exist yet; `owner` is the work order that builds it.
     Placeholder { owner: &'static str },
     /// Renders the real screen from fixtures to a full HTML document.
-    #[expect(
-        dead_code,
-        reason = "no review screen exists yet; the first work order to build one constructs this and deletes this attribute"
-    )]
     Built(fn() -> String),
 }
 
@@ -161,6 +157,15 @@ const SPEC: &[(&str, &str, &[&str])] = &[
     ("export", "WO10", &["clear", "blocked"]),
 ];
 
+/// The renderer of a screen's state once its work order has built it, else `None`. One arm per
+/// built screen; the arm calls that screen's `gallery/<screen>_states.rs`.
+fn built_renderer(screen: &str, state: &str) -> Option<fn() -> String> {
+    match screen {
+        "settings" => settings_states::renderer(state),
+        _ => None,
+    }
+}
+
 /// Every named state, in spec order.
 pub fn registry() -> Vec<GalleryState> {
     SPEC.iter()
@@ -168,7 +173,10 @@ pub fn registry() -> Vec<GalleryState> {
             states.iter().map(move |state| GalleryState {
                 screen,
                 state,
-                kind: StateKind::Placeholder { owner },
+                kind: match built_renderer(screen, state) {
+                    Some(render) => StateKind::Built(render),
+                    None => StateKind::Placeholder { owner },
+                },
             })
         })
         .collect()
@@ -290,6 +298,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         }
     }
 }
+
+pub(crate) mod settings_states;
 
 #[cfg(test)]
 mod tests;

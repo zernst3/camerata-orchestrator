@@ -2880,6 +2880,33 @@ html, body {
 .audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 .audit-mode-rec { font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; }
 
+/* Review settings lane (review spec section 9): the audit model panel's rows above, plus a
+   compact number field, the live budget, a red hint and a banner. */
+.review-settings-page { max-width: 820px; margin: 24px auto; }
+.review-settings .scan-section-h { margin-top: 22px; }
+.review-settings-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.review-settings-num {
+  width: 84px; box-sizing: border-box; border: 1px solid var(--line); background: var(--surface);
+  color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+  font-weight: 600; padding: 5px 9px; border-radius: 8px;
+}
+.review-settings-num:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.review-settings-num[aria-invalid="true"] { border-color: var(--danger-color); }
+.review-settings-num:disabled { opacity: .55; cursor: default; }
+.review-settings-budget { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.review-settings-bad { font-size: 11.5px; font-weight: 600; color: var(--danger-color); }
+.review-settings-effect { font-size: 11.5px; color: var(--ink-soft); }
+.review-settings-note { margin: 4px 0 0; max-width: 64ch; line-height: 1.5; }
+.review-settings-apply { margin-bottom: 0; }
+.review-settings-banner {
+  margin: 0 0 12px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; color: var(--ink);
+  background: rgba(220,38,38,0.12); border: 1px solid var(--danger-color); border-radius: 8px;
+}
+.review-settings-locked {
+  margin: 0 0 12px; padding: 9px 12px; font-size: 12.5px; color: var(--ink);
+  background: var(--accent-wash); border: 1px solid var(--accent); border-radius: 8px;
+}
+
 /* Product-export options (AuditReportExportPanel: client name / project title / prepared by /
    executive-summary override). Each field is a `.audit-model-row` (the same label|value grid
    the audit-config rows above it use) so the bottom of the panel aligns with the rest of the

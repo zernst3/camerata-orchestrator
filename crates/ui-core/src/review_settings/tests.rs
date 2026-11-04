@@ -618,3 +618,23 @@ fn a_stage_select_always_offers_the_models_it_currently_holds() {
         "no registry: the current model alone, never an empty select"
     );
 }
+
+#[test]
+fn reasons_are_labelled_as_the_spec_words_them() {
+    let labels: Vec<&str> = EscalationReason::default_over_budget_set()
+        .into_iter()
+        .map(reason_label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "unauthenticated reach",
+            "secret exposure",
+            "data loss",
+            "cross tenant",
+            "evidence unverified"
+        ]
+    );
+    assert_eq!(reason_label(EscalationReason::RuleMisfit), "a rule misfit");
+    assert!(reasons_note().contains("critical"));
+}
