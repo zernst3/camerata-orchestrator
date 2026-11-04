@@ -564,3 +564,54 @@ fn after_a_rate_change_the_queue_and_the_client_export_agree_on_the_line() {
         );
     }
 }
+
+// ── prose flags on the tree (wave 6 F9) ───────────────────────────────────────────────────
+
+#[test]
+fn a_node_summary_that_leaks_the_methodology_carries_its_prose_flag_on_the_tree_view() {
+    let report = sealed(
+        vec![
+            row("SEC-1", "src/a.rs", 10, "high"),
+            row("SEC-1", "src/b.rs", 20, "high"),
+            row("SEC-2", "src/c.rs", 30, "high"),
+        ],
+        |r| {
+            if let Some(tree) = r.tree.as_mut() {
+                for n in &mut tree.nodes {
+                    n.summary = Some(if n.id == "rule:SEC-1" {
+                        "Camerata's scanner found the same call in both handlers.".to_string()
+                    } else {
+                        "Both handlers call the database without a bound parameter.".to_string()
+                    });
+                }
+            }
+        },
+    );
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let view = compose(&reviewed, &Stores::default(), |c| c.tree());
+    let flagged = view.nodes.iter().find(|n| n.id == "rule:SEC-1").unwrap();
+    assert!(
+        flagged
+            .flags
+            .iter()
+            .any(|f| f.starts_with("summary:methodology_leak:")),
+        "{:?}",
+        flagged.flags
+    );
+    let clean = view.nodes.iter().find(|n| n.id == "rule:SEC-2").unwrap();
+    assert!(
+        clean.flags.is_empty(),
+        "a clean summary earns no flag: {:?}",
+        clean.flags
+    );
+    // The flag the screen shows is the one the internal export carries, not a second opinion.
+    let internal = crate::report_export::tree_view::tree_view(&reviewed, true);
+    let exported = internal.iter().find(|n| n.id == "rule:SEC-1").unwrap();
+    let internal_flags = &exported.internal.as_ref().unwrap().flags;
+    for f in internal_flags {
+        assert!(
+            flagged.flags.contains(f),
+            "{f} is on the export but not on the screen"
+        );
+    }
+}

@@ -15,6 +15,7 @@ use camerata_api_types::review_view::{
 
 use super::ReviewComposer;
 use crate::onboard::Finding;
+use crate::report_export::tree_view::prose_flags_of;
 use crate::review_tree::{is_thrown_out_id, NodeKind, NodeLevel, TextSource, TreeNode};
 
 /// The rank of a severity for ordering: critical first. An unknown severity sorts last.
@@ -213,7 +214,7 @@ impl<'a> ReviewComposer<'a> {
                     TextSource::Model => SummarySource::Model,
                     TextSource::Reviewer => SummarySource::Reviewer,
                 },
-                flags: n.flags.clone(),
+                flags: n.flags.iter().cloned().chain(prose_flags_of(n)).collect(),
                 thrown_out: is_thrown_out_id(&n.id),
                 counts: counts
                     .get(n.id.as_str())
