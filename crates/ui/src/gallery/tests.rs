@@ -240,3 +240,22 @@ fn no_gallery_page_contains_an_em_dash() {
         assert!(!page.contains('\u{2014}'), "{}", s.id());
     }
 }
+
+#[test]
+fn fixtures_cover_every_state() {
+    use camerata_ui_core::test_support::review_fixtures::{fixture, FIXTURE_IDS};
+    let registered: Vec<String> = registry().iter().map(GalleryState::id).collect();
+    for id in &registered {
+        assert!(
+            fixture(id).is_some(),
+            "{id} has neither a fixture nor is it excluded: every named state has a fixture"
+        );
+    }
+    for id in FIXTURE_IDS {
+        assert!(
+            registered.iter().any(|r| r == id),
+            "fixture {id} belongs to no registered state"
+        );
+    }
+    assert_eq!(registered.len(), FIXTURE_IDS.len());
+}

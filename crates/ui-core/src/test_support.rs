@@ -1,12 +1,18 @@
-//! Shared test helpers (compiled for tests only).
+//! Shared test helpers (the helpers here compile for tests only) and the review fixtures, which
+//! the gallery binary also reads, so [`review_fixtures`] is always compiled.
 
+pub mod review_fixtures;
+
+#[cfg(test)]
 use std::collections::BTreeSet;
 
+#[cfg(test)]
 use serde_json::Value;
 
 /// Every FIELD name written in `value`, recursively. `entry_maps` names the fields whose own keys
 /// are data and not field names (the review log's maps, keyed by group and row keys): the keys
 /// of those maps are not collected, the entries' fields are.
+#[cfg(test)]
 pub(crate) fn json_keys(value: &Value, entry_maps: &[&str], out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -27,9 +33,11 @@ pub(crate) fn json_keys(value: &Value, entry_maps: &[&str], out: &mut BTreeSet<S
 }
 
 /// The field maps of the review log, whose keys are group and row keys.
+#[cfg(test)]
 pub(crate) const LOG_ENTRY_MAPS: &[&str] = &["review_groups", "review_rows"];
 
 /// The field names written by `value`, as a set.
+#[cfg(test)]
 pub(crate) fn keys_written(value: &Value, entry_maps: &[&str]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     json_keys(value, entry_maps, &mut out);
@@ -37,6 +45,7 @@ pub(crate) fn keys_written(value: &Value, entry_maps: &[&str]) -> BTreeSet<Strin
 }
 
 /// Assert every key in `written` is on the internal-only deny-list or is one of its generic words.
+#[cfg(test)]
 pub(crate) fn assert_all_listed(written: &BTreeSet<String>, what: &str) {
     use camerata_api_types::review_timing::{GENERIC_KEYS, INTERNAL_ONLY_KEYS};
     for key in written {
