@@ -49,11 +49,13 @@ use tokio::time::Instant;
 
 use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
-    plan_item_ranges, poll_and_fetch, BatchApi, JobCancelled, PollProgress, RoundContext,
+    plan_item_ranges, poll_and_fetch, BatchApi, BatchSeam, JobCancelled, PollProgress,
+    RoundContext,
 };
+use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
 use super::*;
-use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint};
+use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint, SubmitIntent};
 use crate::jobs::JobStore;
 use crate::llm::{BatchItem, BatchResultRow, CacheTtl, LlmPort, LlmRequest, LlmResponse};
 
@@ -214,6 +216,37 @@ impl Default for StageSettings {
             per_item_usd: None,
         }
     }
+}
+
+/// How a post-scan stage (detail rewrites, fix generation, alternatives) sends a round, and the
+/// job it reports to. `batch` is the run's choice (its scan mode is Batch); whether the round
+/// really goes out as a batch is decided per round by [`mode_and_api`], exactly as stage 1 does.
+#[derive(Clone, Copy, Default)]
+pub struct StageRoute<'a> {
+    /// The run asked for batches. A real-time run leaves this `false` and nothing is submitted.
+    pub batch: bool,
+    /// The job whose progress line and activity the runner keeps, and whose cancel it honors.
+    pub job: Option<(&'a JobStore, &'a str)>,
+}
+
+/// The mode a stage round runs in, and the batch API it can use: [`StageMode::Batch`] when the
+/// run asked for batches and the model seam carries a [`BatchApi`], else real time with
+/// `max_in_flight` requests at once. The seam is the only source of a batch API (the real client
+/// reaches it through the run journal's seam), so a plain real-time completer stays real time.
+pub fn mode_and_api(
+    llm: &dyn LlmPort,
+    batch_wanted: bool,
+    max_in_flight: usize,
+) -> (StageMode, Option<&dyn BatchApi>) {
+    let api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
+    let mode = if batch_wanted && api.is_some() {
+        StageMode::Batch
+    } else {
+        StageMode::Parallel {
+            max_in_flight: max_in_flight.max(1),
+        }
+    };
+    (mode, api)
 }
 
 /// Everything a run needs besides the stage's items.
@@ -479,6 +512,7 @@ where
     if cancel_requested(ctx) {
         book.cancelled = true;
     }
+    disclose_orphaned_submissions(stage, ctx);
     let mut follow: BTreeMap<S::Id, Work<S::Id>> = BTreeMap::new();
     if !book.cancelled && ctx.batch.is_some() {
         follow = resume_batches(stage, s, ctx, &mut book, &by_key, &reqs).await;
@@ -1356,6 +1390,102 @@ fn round_ctx<'a>(stage: Stage, ctx: &'a StageCtx<'a>, api: &'a dyn BatchApi) -> 
     }
 }
 
+/// The projected input dollars of submitting `sub`, from the bytes of the requests the runner is
+/// about to send (each estimated as the size check does, at the batch price of the stage's model),
+/// so a window of large items cannot outrun the spend limit on a low guess. Only when a request is
+/// not built, or the model is not in the price table, does the stage's own per-item figure
+/// ([`StageSettings::per_item_usd`]) stand in; with neither there is no projection at all and the
+/// gate refuses (a limit that cannot be enforced admits nothing).
+fn projected_input_usd<Id>(ctx: &StageCtx<'_>, sub: &[Work<Id>]) -> Option<f64> {
+    let fallback = |n: usize| ctx.settings.per_item_usd.map(|p| p * n as f64);
+    let mut total = 0.0;
+    let mut unbuilt = 0usize;
+    for w in sub {
+        let Some(req) = w.req.as_deref() else {
+            unbuilt += 1;
+            continue;
+        };
+        let tokens = estimate_tokens(super::request_budget::request_bytes(req)) as u64;
+        let Some(usd) = crate::llm::input_cost_usd(
+            ctx.model,
+            tokens,
+            crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+        ) else {
+            // An unpriced model prices no request: the stage's figure covers the whole window.
+            return fallback(sub.len());
+        };
+        total += usd;
+    }
+    if unbuilt > 0 {
+        total += fallback(unbuilt)?;
+    }
+    Some(total)
+}
+
+/// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
+/// and nothing was accepted).
+fn clear_submit_intent(ctx: &StageCtx<'_>) {
+    if let Some(cp) = ctx.checkpoint {
+        if let Err(e) = cp.save_intents(&[]) {
+            checkpoint_trouble(ctx, "submit intent", &e);
+        }
+    }
+}
+
+/// Resume, between the halves: a submission intent no saved batch carries the nonce of is a
+/// batch that may have been accepted by the provider while its id was never saved (the process
+/// was killed between `submit` returning and the batch list being written). It cannot be polled
+/// or cancelled from here, so the possible spend is put on the ledger, not hidden; its items that
+/// have no result are sent again by the rounds that follow. The intents are cleared once told.
+fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
+    let Some(cp) = ctx.checkpoint else {
+        return;
+    };
+    let intents = cp.intents();
+    if intents.is_empty() {
+        return;
+    }
+    let saved: BTreeSet<String> = cp.batches().into_iter().filter_map(|r| r.nonce).collect();
+    for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
+        let note = format!(
+            "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the \
+             earlier process stopped after asking the provider to accept it and before saving \
+             its id, so it cannot be polled or cancelled from here, and what it was charged, \
+             if anything, is not in this ledger. Check the Anthropic console. The items of it \
+             that have no result were submitted again.",
+            intent.items.len(),
+            stage.label()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+    if let Err(e) = cp.save_intents(&[]) {
+        checkpoint_trouble(ctx, "submit intent", &e);
+    }
+}
+
+/// True when the provider says the batch is gone for good: not found (404) or expired (410, or a
+/// `not_found_error`). Read from the typed failure's HTTP status and error type when the
+/// transport produced one, else from the text of the error (a stub, a wrapped message). A
+/// transient failure (a 5xx, a timeout, a rate limit) is NOT gone: the batch may still be there.
+fn batch_is_gone(e: &anyhow::Error) -> bool {
+    if let Some(f) = failure::call_failure_of(e) {
+        let typed = f.http.as_ref().is_some_and(|(status, body)| {
+            matches!(*status, 404 | 410) || body.contains("not_found_error")
+        }) || f
+            .attempts
+            .iter()
+            .any(|a| matches!(a.http_status, Some(404 | 410)));
+        if typed {
+            return true;
+        }
+    }
+    let text = format!("{e:#}");
+    text.contains("HTTP 404") || text.contains("HTTP 410") || text.contains("not_found_error")
+}
+
 /// Resume, second half: batches an earlier process submitted and did not settle are polled and
 /// fetched by id (never submitted again). Returns the follow-up work their rows produced, to
 /// replace those items' requests in the first round.
@@ -1435,6 +1565,31 @@ where
             Err(failed) if failed.error.is::<JobCancelled>() => {
                 cancel_live_batch(ctx, api, book, &record.batch_id).await;
                 break;
+            }
+            Err(failed) if batch_is_gone(&failed.error) => {
+                // The provider answers not found or expired for this id, now and on every later
+                // try: nothing can ever be fetched from it, so polling it again would fail the
+                // same items on every resume. It is settled as gone, and the members it still
+                // owed are sent again once, in this run's first round. Nothing was absorbed from
+                // it, so none of them is paid for twice here; what the provider may have charged
+                // for the gone batch is not in this ledger, and the note says so.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let note = format!(
+                    "Batch {} no longer exists at the provider ({error}), so its results can \
+                     never be fetched. It was settled as gone and its {} unfinished item(s) were \
+                     submitted again. What the provider charged for the gone batch, if anything, \
+                     is not in this ledger.",
+                    record.batch_id,
+                    members.len()
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                for (_, work) in members {
+                    out.insert(work.id.clone(), work);
+                }
+                records[i].settled = true;
             }
             Err(failed) => {
                 let error = disclosable_error(&format!("{:#}", failed.error));
@@ -1546,9 +1701,7 @@ where
             continue;
         }
         if let Some(m) = ctx.meter {
-            if let Some(why) =
-                m.batch_refusal_reason(ctx.settings.per_item_usd.map(|p| p * sub.len() as f64))
-            {
+            if let Some(why) = m.batch_refusal_reason(projected_input_usd(ctx, sub)) {
                 eprintln!("[camerata-server] {why}");
                 m.record_note(why.clone());
                 m.record_stage_not_run(ctx.repo, admission_name(stage), true);
@@ -1560,6 +1713,22 @@ where
         }
 
         let ttl = batch_cache_ttl(eff, sub.len());
+        // The intent goes to the checkpoint BEFORE the submit: a kill after the provider accepts
+        // the batch and before its id is saved leaves this behind, and the resume says so.
+        let nonce = crate::checkpoint::new_submit_nonce();
+        if let Some(cp) = ctx.checkpoint {
+            let intent = SubmitIntent {
+                nonce: nonce.clone(),
+                items: sub_cids
+                    .iter()
+                    .zip(sub)
+                    .map(|(cid, w)| (cid.clone(), w.id.to_string()))
+                    .collect(),
+            };
+            if let Err(e) = cp.save_intents(&[intent]) {
+                checkpoint_trouble(ctx, "submit intent", &e);
+            }
+        }
         let submitted: Result<String, anyhow::Error> = loop {
             let items: Vec<BatchItem> = sub
                 .iter()
@@ -1608,11 +1777,13 @@ where
         let batch_id = match submitted {
             Ok(id) => id,
             Err(e) if e.is::<JobCancelled>() => {
+                clear_submit_intent(ctx);
                 book.cancelled = true;
                 break;
             }
             Err(e) => {
                 // Nothing was accepted, so nothing can be running: safe to send again.
+                clear_submit_intent(ctx);
                 let class = classify_pass_error(&e);
                 let attempts = failure::attempts_of(&e);
                 let reason = format!(
@@ -1648,6 +1819,7 @@ where
                 .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                 .collect(),
             settled: false,
+            nonce: Some(nonce),
         };
         let mut records = ctx
             .checkpoint
@@ -1655,8 +1827,10 @@ where
             .unwrap_or_default();
         records.push(record.clone());
         if let Some(cp) = ctx.checkpoint {
-            if let Err(e) = cp.save_batches(&records) {
-                checkpoint_trouble(ctx, "batch list", &e);
+            match cp.save_batches(&records) {
+                // The id is on file: the intent has done its job.
+                Ok(()) => clear_submit_intent(ctx),
+                Err(e) => checkpoint_trouble(ctx, "batch list", &e),
             }
         }
 

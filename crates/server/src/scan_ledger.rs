@@ -579,6 +579,13 @@ pub struct ScanLedger {
     /// should have been checked there and was not.
     #[serde(default)]
     rule_scopes: BTreeMap<String, Vec<String>>,
+    /// What the batch runner told the operator about spend it cannot count: a batch the provider
+    /// no longer has, a submission that may have been accepted and orphaned, a batch that could
+    /// not be cancelled. Kept whether or not a spend limit was set (the cap record's copy exists
+    /// only under a limit), so provider spend outside the ledger is never disclosed on stderr
+    /// alone. Operator-only. Empty for a ledger written before the field existed.
+    #[serde(default)]
+    runner_notes: Vec<String>,
 }
 
 /// What the escalation formula did in one run (design 4.4 and 4.7). The counts are the tree's,
@@ -1272,6 +1279,18 @@ impl ScanLedger {
     /// Record what the spend cap did. Overwrites: one scan, one record.
     pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
         self.cost_cap = Some(record);
+    }
+
+    /// Append the notes the batch runner kept on the run's meter (see [`Self::runner_notes`]).
+    /// Appends: the scan and the group review each run on a meter of their own.
+    pub fn record_runner_notes(&mut self, notes: Vec<String>) {
+        self.runner_notes.extend(notes);
+    }
+
+    /// What the batch runner told the operator about spend this ledger cannot count, oldest
+    /// first, with or without a spend limit.
+    pub fn runner_notes(&self) -> &[String] {
+        &self.runner_notes
     }
 
     /// Record that the run stopped on an outage. Overwrites: one scan, one record.

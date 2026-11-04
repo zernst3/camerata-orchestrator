@@ -1585,7 +1585,8 @@ pub async fn resume_inspect(
 ///    real reason, so a dark layer can never hide even when every stage happens to reconcile
 ///    cleanly.
 /// 4. **FAILED PASSES** — every `FailedPass` disclosure, printed plainly (repo, pass name,
-///    reason), verbatim — never summarized or truncated.
+///    reason), verbatim — never summarized or truncated. When the batch runner kept notes about
+///    spend the ledger cannot count, a **BATCH RUNNER NOTES** section follows.
 ///
 /// `verbose == true` appends a fifth PER-RULE DETAIL section: one line per rule (id, ran?,
 /// files evaluated, findings), sorted by rule id for stable output.
@@ -1746,6 +1747,21 @@ pub fn render_ledger_summary(
     } else {
         for fp in failed_passes {
             writeln!(out, "  [{}] {}: {}", fp.repo, fp.pass, fp.reason).ok();
+        }
+    }
+
+    // What the batch runner told the operator about spend the ledger cannot count: a batch the
+    // provider no longer has, a submission that may have been orphaned. Printed in full, with or
+    // without a spend limit; absent on a run with nothing to say.
+    if !ledger.runner_notes().is_empty() {
+        writeln!(
+            out,
+            "\n== BATCH RUNNER NOTES ({}) ==",
+            ledger.runner_notes().len()
+        )
+        .ok();
+        for note in ledger.runner_notes() {
+            writeln!(out, "  {note}").ok();
         }
     }
 
@@ -3142,6 +3158,28 @@ mod tests {
         assert!(text.contains("acme/widgets"), "{text}");
         assert!(text.contains("commodity taint pass"), "{text}");
         assert!(text.contains("semgrep absent"), "{text}");
+    }
+
+    /// What the batch runner told the operator about spend the ledger cannot count (a lost or
+    /// orphaned batch) is printed in the summary, whether or not a spend limit was set.
+    #[test]
+    fn render_ledger_summary_prints_the_batch_runners_notes() {
+        let mut ledger = ScanLedger::new();
+        assert!(
+            !render_ledger_summary(&ledger, &[], false).contains("BATCH RUNNER NOTES"),
+            "a quiet run has no such section"
+        );
+        ledger.record_runner_notes(vec![
+            "Batch msgbatch_x no longer exists at the provider.".to_string()
+        ]);
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        assert!(text.contains("BATCH RUNNER NOTES (1)"), "{text}");
+        assert!(
+            text.contains("Batch msgbatch_x no longer exists at the provider."),
+            "{text}"
+        );
     }
 
     /// Default (non-verbose) output must NOT list individual rules — only `--verbose` does.

@@ -64,6 +64,8 @@ struct Scripted {
     huge: BTreeSet<String>,
     /// Ids whose RETRY request is far over any model window.
     huge_retry: BTreeSet<String>,
+    /// Bytes of padding every request carries, so a window of them has a real size.
+    padding: usize,
     absorb_calls: usize,
 }
 
@@ -91,6 +93,7 @@ impl StageItems for Scripted {
             .iter()
             .map(|id| {
                 let mut prompt = prompt_for(id);
+                prompt.push_str(&"p".repeat(self.padding));
                 if self.huge.contains(id) {
                     prompt.push_str(&"x".repeat(20_000_000));
                 }
@@ -291,6 +294,11 @@ struct Api {
     probe: Option<Box<PollProbe>>,
     submit_times: Mutex<Vec<Instant>>,
     cancel_calls: Mutex<Vec<String>>,
+    /// Batch ids whose poll and fetch fail, with the HTTP status the provider answers.
+    broken: Mutex<HashMap<String, u16>>,
+    /// The simulated kill: `submit` accepts the batch (the provider holds it) and then the
+    /// process dies before the id can be saved, so the call never returns.
+    kill_after_accepting: bool,
 }
 
 impl Api {
@@ -309,6 +317,40 @@ impl Api {
             probe: None,
             submit_times: Mutex::new(Vec::new()),
             cancel_calls: Mutex::new(Vec::new()),
+            broken: Mutex::new(HashMap::new()),
+            kill_after_accepting: false,
+        }
+    }
+
+    /// A saved batch the provider answers `status` for on every poll and fetch (404: gone).
+    fn breaking(self, batch_id: &str, status: u16) -> Self {
+        self.broken
+            .lock()
+            .unwrap()
+            .insert(batch_id.to_string(), status);
+        self
+    }
+
+    /// The process is killed after the provider accepts a submission and before its id is saved.
+    fn killed_after_accepting(mut self) -> Self {
+        self.kill_after_accepting = true;
+        self
+    }
+
+    fn broken_answer(&self, batch_id: &str) -> Option<anyhow::Error> {
+        let status = *self.broken.lock().unwrap().get(batch_id)?;
+        if status == 404 {
+            let body = r#"{"type":"error","error":{"type":"not_found_error","message":"batch not found"}}"#;
+            let mut f = LlmCallFailure::new(
+                FailureClass::Content,
+                format!("batch results HTTP 404 Not Found: {body}"),
+            );
+            f.http = Some((404, body.to_string()));
+            Some(anyhow::Error::new(f))
+        } else {
+            Some(anyhow::anyhow!(
+                "Message Batches API HTTP {status}: unavailable"
+            ))
         }
     }
 
@@ -401,9 +443,16 @@ impl BatchApi for Api {
                 .map(|i| (i.custom_id.clone(), id_of(&item_prompt(i))))
                 .collect(),
         );
+        drop(batches);
+        if self.kill_after_accepting {
+            panic!("simulated kill: the process died after the provider accepted batch {id}");
+        }
         Ok(id)
     }
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
+        if let Some(e) = self.broken_answer(batch_id) {
+            return Err(e);
+        }
         let n = self.polls.fetch_add(1, Ordering::SeqCst);
         if let Some(probe) = &self.probe {
             probe(n);
@@ -429,6 +478,9 @@ impl BatchApi for Api {
         Ok(())
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        if let Some(e) = self.broken_answer(batch_id) {
+            return Err(e);
+        }
         if self.fetch_fails {
             anyhow::bail!("Message Batches API HTTP 503: results unavailable");
         }
@@ -1614,4 +1666,437 @@ async fn a_long_retry_after_keeps_touching_the_job_and_labels_it_paused() {
         "the hold kept touching the job (idle {idle} ms)"
     );
     assert_eq!(label.as_deref(), Some("paused: rate limited"));
+}
+
+// ── WO7b F1: a batch that is gone for good is settled and its members sent once more ────────────
+
+/// A batch the first process submitted whose results could not be fetched, saved under
+/// `gone_id` so a stub can answer for it by name. Returns the checkpoint's single record.
+async fn save_unsettled_batch(cp: &StageCheckpoint, all: &[&str], gone_id: &str) -> BatchRecord {
+    let first = Api::new().failing_fetch();
+    let mut stage = Scripted::new(all);
+    let mut c = ctx(&first.realtime, Some(&first));
+    c.checkpoint = Some(cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(
+        !out.failed.is_empty(),
+        "the unabsorbed members wait on the batch"
+    );
+    let mut records = cp.batches();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].settled);
+    records[0].batch_id = gone_id.to_string();
+    cp.save_batches(&records).unwrap();
+    records.remove(0)
+}
+
+fn cap_meter() -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        review: Default::default(),
+        efficiency: Default::default(),
+        max_cost_usd: Some(1000.0),
+        estimate_hint_usd: None,
+        fix_model: None,
+        clone_judge_model: None,
+        consensus: false,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_saved_batch_the_provider_no_longer_has_is_settled_as_gone_and_its_members_sent_once_more(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3", "a4", "a5", "a6"];
+
+    // Process 1: a1 and a2 are absorbed in real time.
+    let rt = Realtime::new(|id, _| {
+        if id == "a1" || id == "a2" {
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        } else {
+            (Duration::from_secs(1), Err(content_error("boom")))
+        }
+    });
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&rt, None);
+    c.checkpoint = Some(&cp);
+    run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 4 },
+        &c,
+    )
+    .await;
+    // Process 2: the other four go out as a batch nobody can fetch; the id is then saved as one
+    // the provider has since dropped.
+    let record = save_unsettled_batch(&cp, &all, "msgbatch_gone").await;
+    assert_eq!(record.items.len(), 4);
+
+    // Process 3: the provider answers 404 for the saved id. It is settled as gone, its four
+    // unsettled members are submitted ONCE as a new batch, and the run completes.
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(sorted(out.resumed.clone()), ids(&["a1", "a2"]));
+    assert_eq!(sorted(out.absorbed.clone()), ids(&["a3", "a4", "a5", "a6"]));
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1, "submitted once");
+    assert_eq!(
+        sorted(api.submitted_item_ids()[0].clone()),
+        ids(&["a3", "a4", "a5", "a6"]),
+        "exactly the unsettled members"
+    );
+    assert_eq!(api.realtime.call_count(), 0);
+    let records = cp.batches();
+    assert!(
+        records.iter().all(|r| r.settled),
+        "the gone batch is settled, not left live: {records:?}"
+    );
+    assert!(out.failed.iter().all(|f| f.live_batch.is_none()));
+    let notes = meter.cost_cap_record().unwrap().notes.join("\n");
+    assert!(
+        notes.contains("msgbatch_gone") && notes.contains("no longer exists"),
+        "the gone batch is disclosed: {notes}"
+    );
+    assert!(
+        !notes.contains("  "),
+        "a note is a sentence, not a wrapped source line: {notes}"
+    );
+
+    // Process 4: nothing is left to do, and the gone id is never asked about again.
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.resumed.len(), 6);
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(api.polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_transient_fetch_failure_on_resume_keeps_the_batch_live_and_resubmits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    save_unsettled_batch(&cp, &all, "msgbatch_busy").await;
+
+    let api = Api::new().breaking("msgbatch_busy", 503);
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.failed.len(), 3);
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.live_batch.as_deref() == Some("msgbatch_busy")));
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        0,
+        "not resubmitted"
+    );
+    assert!(
+        !cp.batches()[0].settled,
+        "still live: a later resume polls it"
+    );
+}
+
+// ── WO7b F2: a kill between the provider accepting a batch and its id being saved ───────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_kill_after_the_provider_accepts_a_batch_and_before_its_id_is_saved_is_disclosed_and_resubmitted(
+) {
+    use futures::FutureExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+
+    // Process 1 is killed with the provider holding a batch whose id was never saved.
+    let api = Api::new().killed_after_accepting();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let died = std::panic::AssertUnwindSafe(run_stage(STAGE, &mut stage, StageMode::Batch, &c))
+        .catch_unwind()
+        .await;
+    assert!(died.is_err(), "the stub killed the process");
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        cp.batches().is_empty(),
+        "the batch id never reached the checkpoint"
+    );
+
+    // Process 2 finds the intent with no saved batch: it says a batch may have been submitted and
+    // orphaned, then sends the items once.
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(sorted(out.absorbed.clone()), ids(&all));
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        1,
+        "one resubmission"
+    );
+    assert_eq!(sorted(api.submitted_item_ids()[0].clone()), ids(&all));
+    let notes = meter.cost_cap_record().unwrap().notes;
+    let orphan_lines = notes
+        .iter()
+        .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+        .count();
+    assert_eq!(
+        orphan_lines, 1,
+        "the possible orphan is on the ledger once: {notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("3 item")),
+        "the line says how many items it covered: {notes:?}"
+    );
+    assert!(
+        notes.iter().all(|n| !n.contains("  ")),
+        "a note is a sentence, not a wrapped source line: {notes:?}"
+    );
+    assert!(
+        cp.intents().is_empty(),
+        "the intent is cleared once the batch id is saved"
+    );
+    assert!(
+        cp.batches()[0].nonce.is_some(),
+        "the saved batch carries the nonce of its intent"
+    );
+
+    // Process 3: the batch was saved and settled this time; the old intent is not reported again.
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.resumed.len(), 3);
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert!(meter.cost_cap_record().unwrap().notes.is_empty());
+}
+
+/// The intent is cleared only once the batch list that carries its nonce is on disk. If the list
+/// cannot be written, the intent must survive: a kill after that would otherwise leave a provider
+/// batch nobody can find, with nothing on file to say so.
+#[tokio::test(start_paused = true)]
+async fn the_submit_intent_survives_a_failed_save_of_the_batch_list_and_the_next_resume_discloses_it_once(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+
+    // A directory where the batch list belongs: the save's rename onto it fails.
+    let list = dir.path().join("calibration.batches.json");
+    std::fs::create_dir(&list).unwrap();
+
+    // Process 1: the provider accepts the batch, the list cannot be written, and the results
+    // cannot be fetched either, so nothing is absorbed.
+    let api = Api::new().failing_fetch();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(!out.is_complete());
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+    let intents = cp.intents();
+    assert_eq!(intents.len(), 1, "the intent was not cleared: {intents:?}");
+    assert_eq!(
+        sorted(intents[0].items.values().cloned().collect()),
+        ids(&all),
+        "it lists the three items"
+    );
+    assert!(cp.batches().is_empty(), "no batch list was written");
+
+    // The disk is fixed; the next resume tells the operator once and sends the items again.
+    std::fs::remove_dir(&list).unwrap();
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        1,
+        "one resubmission"
+    );
+    let notes = meter.cost_cap_record().unwrap().notes;
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+            .count(),
+        1,
+        "the orphan is disclosed once: {notes:?}"
+    );
+    assert!(cp.intents().is_empty());
+}
+
+// ── WO7b D1: the notes are kept whether or not a spend limit was set ────────────────────────────
+
+fn uncapped_meter() -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls::default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gone_batch_is_kept_on_the_meter_when_no_spend_limit_was_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    save_unsettled_batch(&cp, &all, "msgbatch_gone").await;
+
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let meter = uncapped_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+
+    assert!(
+        meter.cost_cap_record().is_none(),
+        "no limit, so no cap record to carry it"
+    );
+    let notes = meter.notes().join("\n");
+    assert!(
+        notes.contains("msgbatch_gone") && notes.contains("no longer exists"),
+        "the gone batch is on the meter: {notes}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_orphaned_submission_is_kept_on_the_meter_when_no_spend_limit_was_set() {
+    use futures::FutureExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    let api = Api::new().killed_after_accepting();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let died = std::panic::AssertUnwindSafe(run_stage(STAGE, &mut stage, StageMode::Batch, &c))
+        .catch_unwind()
+        .await;
+    assert!(died.is_err(), "the stub killed the process");
+
+    let api = Api::new();
+    let meter = uncapped_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+
+    assert!(meter.cost_cap_record().is_none());
+    let notes = meter.notes();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+            .count(),
+        1,
+        "the possible orphan is on the meter once: {notes:?}"
+    );
+}
+
+// ── WO7b F11: a window is admitted on the bytes of its real requests ────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_window_of_large_requests_is_refused_at_admission_though_the_old_constant_would_admit_it()
+{
+    // Ten requests of about 300 KB each: roughly 100,000 estimated tokens a request, about $0.15
+    // a request at the batch price of the stage model, $1.50 for the window. The limit is $1.00.
+    let mut stage = Scripted::numbered(10);
+    stage.padding = 300_000;
+    let api = Api::new();
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        review: Default::default(),
+        efficiency: Default::default(),
+        max_cost_usd: Some(1.0),
+        estimate_hint_usd: None,
+        fix_model: None,
+        clone_judge_model: None,
+        consensus: false,
+    });
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    // The projection stage 1 used before: 10,000 bytes a site, priced as the stage model.
+    let constant = crate::llm::input_cost_usd(
+        MODEL,
+        10_000u64.div_ceil(3),
+        crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+    )
+    .expect("the stage model is priced");
+    c.settings.per_item_usd = Some(constant);
+    assert!(
+        meter.batch_refusal_reason(Some(constant * 10.0)).is_none(),
+        "the constant projection admits this window"
+    );
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        0,
+        "nothing was submitted"
+    );
+    assert!(out.absorbed.is_empty());
+    assert_eq!(out.failed.len(), 10, "every item is a failed part");
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.class == FailureClass::SpendLimit));
+    let record = meter.cost_cap_record().unwrap();
+    assert!(
+        record.notes.iter().any(|n| n.contains("NOT submitted")),
+        "{:?}",
+        record.notes
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
+    let mut stage = Scripted::numbered(10);
+    let api = Api::new();
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        review: Default::default(),
+        efficiency: Default::default(),
+        max_cost_usd: Some(1.0),
+        estimate_hint_usd: None,
+        fix_model: None,
+        clone_judge_model: None,
+        consensus: false,
+    });
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.meter = Some(&meter);
+    // No pre-flight hint at all: the real request sizes are the projection.
+    c.settings.per_item_usd = None;
+
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
 }

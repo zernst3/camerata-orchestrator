@@ -3064,3 +3064,177 @@ async fn detail_regeneration_resumes_from_its_checkpoint_without_asking_again() 
         "the usage is not zero"
     );
 }
+
+// ── WO7c / F5: the stage goes out as a Message Batch in a batch run ──────────────────────────────
+
+mod batch_route {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ai_audit::loop_batch::LoopBatch;
+    use crate::ai_audit::stage_batch::StageRoute;
+
+    fn input() -> Vec<Finding> {
+        vec![
+            finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}")),
+            Finding {
+                line: 49,
+                ..finding(&format!("{TITLE} 2{HEADLINE_SEP}{SHORT}"))
+            },
+        ]
+    }
+
+    async fn run(
+        llm: &dyn LlmPort,
+        route: StageRoute<'_>,
+        meter: Option<&UsageMeter>,
+    ) -> (Vec<Finding>, Vec<FailedPass>) {
+        super::super::detail_regen::regenerate_full_details_in(
+            llm,
+            REPO,
+            input(),
+            &files(),
+            &selected(),
+            &nonce(),
+            None,
+            meter,
+            route,
+        )
+        .await
+    }
+
+    fn details(rows: &[Finding]) -> Vec<String> {
+        rows.iter().map(|f| f.detail.clone()).collect()
+    }
+
+    fn capped(cap: f64) -> UsageMeter {
+        UsageMeter::with_controls(RunControls {
+            review: Default::default(),
+            efficiency: EfficiencyConfig::default(),
+            max_cost_usd: Some(cap),
+            estimate_hint_usd: None,
+            fix_model: None,
+            clone_judge_model: None,
+            consensus: false,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_run_sends_the_detail_rewrites_as_a_batch_and_absorbs_them_as_in_real_time() {
+        let real_time = RoleLlm::new("{}", Regen::Writes);
+        let (expected, expected_failed) = run(&real_time, StageRoute::default(), None).await;
+
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let route = StageRoute {
+            batch: true,
+            job: None,
+        };
+        let (out, failed) = run(&seam, route, None).await;
+
+        assert!(api.submit_calls() >= 1, "the rewrites went out as a batch");
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            api.submitted_prompts().len(),
+            "every request was a batch item, none a real-time call"
+        );
+        assert_eq!(details(&out), details(&expected), "absorbed the same way");
+        assert!(out[0].detail.contains("finding at line 9"));
+        assert_eq!(failed.len(), expected_failed.len());
+        assert!(failed.is_empty(), "{failed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_real_time_run_submits_no_batch_for_the_detail_rewrites() {
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let (out, failed) = run(&seam, StageRoute::default(), None).await;
+
+        assert_eq!(api.submit_calls(), 0, "no batch in a real-time run");
+        assert!(
+            !stub.prompts(Role::Regen).is_empty(),
+            "the rewrites were real-time calls"
+        );
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(out[0].detail.contains("finding at line 9"));
+    }
+
+    /// D4: a batch whose results could not be fetched may still be running and billed. The later
+    /// rounds and the end-of-run second try leave its findings alone: they stay pending, the
+    /// failed part names the batch and a resume polls it.
+    #[tokio::test(start_paused = true)]
+    async fn a_detail_batch_whose_results_cannot_be_fetched_is_never_submitted_again() {
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let route = StageRoute {
+            batch: true,
+            job: None,
+        };
+        let (out, failed) = run(&seam, route, None).await;
+
+        assert_eq!(
+            api.submit_calls(),
+            1,
+            "the findings were not sent again while their first batch may still be billed"
+        );
+        assert!(stub.prompts(Role::Regen).is_empty());
+        assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+        let part = failed
+            .iter()
+            .find(|f| f.pass == STAGE_DETAIL)
+            .expect("a failed detail part");
+        assert!(
+            part.reason.contains("msgbatch_0"),
+            "the failed part names the live batch: {}",
+            part.reason
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_capped_batch_run_prices_the_rewrite_window_from_its_real_bytes() {
+        // A limit no request of this size can fit under: refused before anything is sent, and
+        // the stage is a disclosed not-run stage, never a silent skip.
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let meter = capped(0.000_001);
+        let route = StageRoute {
+            batch: true,
+            job: None,
+        };
+        let (out, failed) = run(&seam, route, Some(&meter)).await;
+
+        assert_eq!(api.submit_calls(), 0, "the over-limit window was not sent");
+        assert!(stub.prompts(Role::Regen).is_empty());
+        let record = meter.cost_cap_record().unwrap();
+        assert!(
+            record
+                .not_run_stages
+                .iter()
+                .any(|s| s.stage == STAGE_DETAIL),
+            "{:?}",
+            record.not_run_stages
+        );
+        assert!(
+            record.notes.iter().any(|n| n.contains("NOT submitted")),
+            "{:?}",
+            record.notes
+        );
+        assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+        assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+
+        // The same stage under a limit its real bytes fit: admitted and submitted.
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let meter = capped(100.0);
+        let (out, failed) = run(&seam, route, Some(&meter)).await;
+        assert!(api.submit_calls() >= 1);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(out[0].detail.contains("finding at line 9"));
+    }
+}

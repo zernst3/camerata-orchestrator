@@ -81,7 +81,7 @@ impl std::error::Error for RequestTooLarge {}
 
 /// Check `req` against its model's window before it is sent. An oversized request is an error
 /// and is never sent.
-pub(super) fn ensure_request_fits(req: &LlmRequest) -> Result<(), RequestTooLarge> {
+pub(crate) fn ensure_request_fits(req: &LlmRequest) -> Result<(), RequestTooLarge> {
     let model = resolve_audit_model(Some(req.model.as_str()));
     let limit = input_limit_tokens(&model, req.max_tokens);
     let estimated = estimate_tokens(request_bytes(req));

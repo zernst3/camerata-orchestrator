@@ -363,13 +363,13 @@ fn parse_fix_specifics_is_empty_on_garbage_input() {
 /// Returns a DIFFERENT canned response on each successive call (round-robin once
 /// exhausted) — drives the regenerate-on-rejection path deterministically: round 0
 /// returns a bad fix, round 1 returns a corrected one.
-struct SequencedCompleter {
+pub(super) struct SequencedCompleter {
     responses: std::sync::Mutex<std::collections::VecDeque<String>>,
-    calls: std::sync::atomic::AtomicUsize,
+    pub(super) calls: std::sync::atomic::AtomicUsize,
 }
 
 impl SequencedCompleter {
-    fn new(responses: &[&str]) -> Self {
+    pub(super) fn new(responses: &[&str]) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses.iter().map(|s| s.to_string()).collect()),
             calls: std::sync::atomic::AtomicUsize::new(0),

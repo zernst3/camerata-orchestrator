@@ -47,7 +47,9 @@
 //! the same path every other degraded stage uses. So the export can hold a short detail only with
 //! the marker beside it.
 
-use super::stage_batch::{run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings};
+use super::stage_batch::{
+    mode_and_api, run_stage, ItemReject, StageCtx, StageItems, StageRoute, StageSettings,
+};
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::stage_telemetry::DetailRejections;
@@ -1370,6 +1372,9 @@ impl StageItems for DetailRound<'_> {
 /// one. `last_error` keeps the text of the most recent failed call, for the failed pass's reason;
 /// `rejections` counts why entries were turned down; `transport_failed` holds the findings whose
 /// latest attempt failed in transport (the only ones the end-of-run second try sends again);
+/// `held` maps a finding to the batch that carries it when that batch was accepted but its results
+/// could not be fetched (D4): the finding is never sent again, because the batch may still be
+/// running and billed, and a resume polls it;
 /// `why` keeps, per finding, the reason its latest reply was turned down. `round` names the round
 /// for the checkpoint, so a restart replays a round's finished batches and asks the rest.
 #[allow(clippy::too_many_arguments)]
@@ -1390,9 +1395,11 @@ async fn run_detail_round(
     rejections: &mut DetailRejections,
     trail: &mut super::StageTrail,
     transport_failed: &mut std::collections::HashSet<usize>,
+    held: &mut std::collections::HashMap<usize, String>,
     why: &mut std::collections::HashMap<usize, String>,
     wording: &mut WordingLedger,
     second_try: bool,
+    route: StageRoute<'_>,
 ) -> Vec<usize> {
     let keys = crate::inspections::site_keys_of(findings);
     let mut batches = std::collections::BTreeMap::new();
@@ -1462,25 +1469,20 @@ async fn run_detail_round(
         wording,
     };
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("detail_{repo}"));
+    // The round goes out as a Message Batch when the run is a batch run and the seam has a batch
+    // API (chosen per round, as stage 1 does); a real-time run stays real time.
+    let (mode, batch_api) = mode_and_api(llm, route.batch, super::PARALLEL_CONCURRENCY);
     let ctx = StageCtx {
         repo,
         model: &super::stage_model(model),
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter,
-        job: None,
+        job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: StageSettings::default(),
     };
-    let outcome = run_stage(
-        Stage::DetailRegeneration,
-        &mut stage,
-        StageMode::Parallel {
-            max_in_flight: super::PARALLEL_CONCURRENCY,
-        },
-        &ctx,
-    )
-    .await;
+    let outcome = run_stage(Stage::DetailRegeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. A refusal by the
     // spend limit or the outage stop is recorded by the meter; any other failure is on the
     // stage's trail, and a transport failure is the only one the second try sends again.
@@ -1505,7 +1507,20 @@ async fn run_detail_round(
             .collect();
         trail.note_failed_item(f.class, &f.reason, &attempts);
         *last_error = Some(f.reason.clone());
-        if f.class.is_retried_at_end() && !outage {
+        if let Some(batch_id) = &f.live_batch {
+            // The batch may still be running and billed: no round and no second try sends these
+            // findings again. They stay pending and the failed part names the batch.
+            for &idx in &bctx.batch {
+                held.insert(idx, batch_id.clone());
+                stage.why.insert(
+                    idx,
+                    format!(
+                        "batch {batch_id} was submitted and its results could not be fetched; it \
+                         may still be running and billed, so it was not submitted again"
+                    ),
+                );
+            }
+        } else if f.class.is_retried_at_end() && !outage {
             transport_failed.extend(bctx.batch.iter().copied());
         }
     }
@@ -1519,6 +1534,25 @@ async fn run_detail_round(
     still_pending.sort_unstable();
     still_pending.dedup();
     still_pending
+}
+
+/// The sentence a failed part adds for findings held by batches that were accepted but whose
+/// results could not be fetched (D4): the batch ids, and that they were not submitted again.
+/// Empty when no batch holds a finding.
+pub(super) fn held_batches_sentence<'a>(batch_ids: impl Iterator<Item = &'a String>) -> String {
+    let ids: std::collections::BTreeSet<&String> = batch_ids.collect();
+    if ids.is_empty() {
+        return String::new();
+    }
+    let list = ids
+        .into_iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "; findings in batch {list} were not submitted again, because that batch was accepted \
+         and may still be running and billed; a resume polls it"
+    )
 }
 
 /// Why each of `pending` still has no explanation, as the failed part records it: the place of
@@ -1558,12 +1592,40 @@ fn detail_rejections(
 pub(crate) async fn regenerate_full_details(
     llm: &dyn LlmPort,
     repo: &str,
+    findings: Vec<Finding>,
+    files: &[(String, String)],
+    directives: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
+    model: Option<&str>,
+    meter: Option<&UsageMeter>,
+) -> (Vec<Finding>, Vec<FailedPass>) {
+    regenerate_full_details_in(
+        llm,
+        repo,
+        findings,
+        files,
+        directives,
+        nonce,
+        model,
+        meter,
+        StageRoute::default(),
+    )
+    .await
+}
+
+/// [`regenerate_full_details`] on a run's route: as Message Batches when the run's scan mode is
+/// Batch and the model seam has a batch API (chosen per round), reporting to the run's job.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn regenerate_full_details_in(
+    llm: &dyn LlmPort,
+    repo: &str,
     mut findings: Vec<Finding>,
     files: &[(String, String)],
     directives: &[(String, String)],
     nonce: &crate::prompt_frame::FrameNonce,
     model: Option<&str>,
     meter: Option<&UsageMeter>,
+    route: StageRoute<'_>,
 ) -> (Vec<Finding>, Vec<FailedPass>) {
     if findings.is_empty() {
         return (findings, Vec::new());
@@ -1583,15 +1645,23 @@ pub(crate) async fn regenerate_full_details(
     // Why each finding's latest reply was turned down, for the failed part's record.
     let mut why: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut wording = WordingLedger::default();
+    // Findings whose batch may still be running and billed (D4), by the batch that carries them.
+    let mut held: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
     if !blocked {
         for round in 0..DETAIL_ROUNDS {
-            if pending.is_empty() {
+            // A finding held by a live batch is not asked again: the batch may still be billed.
+            let ask: Vec<usize> = pending
+                .iter()
+                .copied()
+                .filter(|i| !held.contains_key(i))
+                .collect();
+            if ask.is_empty() {
                 break;
             }
-            pending = run_detail_round(
+            let mut next = run_detail_round(
                 llm,
                 repo,
                 &system,
@@ -1601,7 +1671,7 @@ pub(crate) async fn regenerate_full_details(
                 files,
                 &directives,
                 &mut findings,
-                &pending,
+                &ask,
                 // Each round is smaller: a cut-off or a muddled long reply is the usual reason a
                 // batch fails, and a smaller one is both shorter and easier to keep straight.
                 round_batch_size(round),
@@ -1610,11 +1680,17 @@ pub(crate) async fn regenerate_full_details(
                 &mut rejections,
                 &mut trail,
                 &mut transport_failed,
+                &mut held,
                 &mut why,
                 &mut wording,
                 false,
+                route,
             )
             .await;
+            next.extend(held.keys().copied());
+            next.sort_unstable();
+            next.dedup();
+            pending = next;
         }
         // END-OF-RUN SECOND TRY, for transport trouble only: a finding whose last attempt could
         // not reach the provider gets one more try, one at a time (the smallest prompt), through
@@ -1663,9 +1739,11 @@ pub(crate) async fn regenerate_full_details(
                 &mut rejections,
                 &mut trail,
                 &mut transport_failed,
+                &mut held,
                 &mut why,
                 &mut wording,
                 true,
+                route,
             )
             .await;
             if !still.is_empty() {
@@ -1756,7 +1834,8 @@ pub(crate) async fn regenerate_full_details(
                         batch_mode::disclosable_error(e)
                     )
                 })
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                + &held_batches_sentence(pending.iter().filter_map(|i| held.get(i))),
             files_not_reviewed: 0,
             class: trail.class(),
             files: Vec::new(),

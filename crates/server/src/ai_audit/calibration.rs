@@ -17,7 +17,7 @@
 //! site, an absorb for each reply, one retry for a reply that was cut off.
 
 use super::stage_batch::{
-    run_stage, ItemReject as RunnerReject, StageCtx, StageItems, StageMode, StageSettings,
+    mode_and_api, run_stage, ItemReject as RunnerReject, StageCtx, StageItems, StageSettings,
 };
 use super::*;
 use crate::llm::LlmResponse;
@@ -624,13 +624,15 @@ pub(super) const VERIFY_TOKENS_PER_FINDING: u32 = 150;
 /// not a batch (every site is its own call).
 pub(super) const CALIBRATION_BATCH_SIZE: usize = 40;
 
-/// About how much input one site's request carries, in bytes: the shared prompt, the site and the
-/// window of code around it. The batch spend gate projects a window as this many bytes a site, so
-/// a capped run with no pre-flight estimate does not refuse its first window as unenforceable.
+/// About how much input one site's request carries, in bytes, for the FALLBACK projection only.
+/// The batch spend gate projects a window from the bytes of the requests the runner is about to
+/// send ([`super::stage_batch::StageSettings::per_item_usd`] is read only where a request is not
+/// built or its model is not priced), so a window of large sites cannot outrun the limit on this
+/// figure.
 const SITE_INPUT_BYTES: u64 = 10_000;
 
-/// The projected input dollars of one site's request on `model`, at the batch price and three
-/// characters a token. `None` for a model the price table does not know.
+/// The fallback projected input dollars of one site's request on `model`, at the batch price and
+/// three characters a token. `None` for a model the price table does not know.
 fn site_input_usd(model: &str) -> Option<f64> {
     crate::llm::input_cost_usd(
         model,
@@ -1228,14 +1230,7 @@ pub async fn verify_findings(
     };
 
     let model = stage_model(calibration_model);
-    let batch_api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
-    let mode = if inputs.batch && batch_api.is_some() {
-        StageMode::Batch
-    } else {
-        StageMode::Parallel {
-            max_in_flight: inputs.concurrency.max(1),
-        }
-    };
+    let (mode, batch_api) = mode_and_api(llm, inputs.batch, inputs.concurrency);
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("calibration_{repo}"));
     let ctx = StageCtx {
         repo,

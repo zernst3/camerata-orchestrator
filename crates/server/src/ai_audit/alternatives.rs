@@ -564,6 +564,7 @@ pub(crate) fn normalize_requested_path(raw: &str) -> String {
 /// ONCE as a smaller batch; a rule still unanswered then gets no entry (it keeps its default
 /// directive) and the second value of the result is the plain-words reason the caller records
 /// as a pass, naming those rules. `None` when every rule was decided.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn recommend_alternatives(
     llm: &dyn LlmPort,
@@ -575,6 +576,37 @@ pub(super) async fn recommend_alternatives(
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
+) -> anyhow::Result<(Vec<RuleRecommendation>, Option<String>)> {
+    recommend_alternatives_in(
+        llm,
+        repo,
+        files,
+        map_files,
+        nonce,
+        alternatives,
+        audit_model,
+        feedback,
+        meter,
+        stage_batch::StageRoute::default(),
+    )
+    .await
+}
+
+/// [`recommend_alternatives`] on a run's route: each call goes out as a Message Batch when the
+/// run's scan mode is Batch and the model seam has a batch API (chosen per call), reporting to
+/// the run's job.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn recommend_alternatives_in(
+    llm: &dyn LlmPort,
+    repo: &str,
+    files: &[(String, String)],
+    map_files: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
+    alternatives: &[RuleAlternatives],
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+    route: stage_batch::StageRoute<'_>,
 ) -> anyhow::Result<(Vec<RuleRecommendation>, Option<String>)> {
     if alternatives.is_empty() {
         return Ok((Vec::new(), None));
@@ -736,6 +768,7 @@ pub(super) async fn recommend_alternatives(
                 audit_model,
                 feedback,
                 meter,
+                route,
             };
             let resp = match ask.send(&pending, &session, &role).await {
                 Ok(resp) => resp,
@@ -995,6 +1028,8 @@ pub(super) struct AlternativesAsk<'a> {
     audit_model: Option<&'a str>,
     feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
     meter: Option<&'a UsageMeter>,
+    /// How the call goes out (a batch in a batch run) and the job it reports to.
+    route: stage_batch::StageRoute<'a>,
 }
 
 impl AlternativesAsk<'_> {
@@ -1018,6 +1053,7 @@ impl AlternativesAsk<'_> {
             audit_model,
             feedback,
             meter,
+            route,
         } = *self;
         // The shared prefix (repo map, then digest) leads and the rules, which differ per batch,
         // trail, so the digest the stage re-sends with every rule batch is one cached prefix.
@@ -1072,23 +1108,20 @@ impl AlternativesAsk<'_> {
         };
         let checkpoint = crate::checkpoint::stage_checkpoint(&format!("alternatives_{repo}"));
         let model = stage_model(audit_model);
+        // A one-item Message Batch when the run is a batch run and the seam has a batch API
+        // (chosen per call, as stage 1 does); a real-time run sends the one call as before.
+        let (mode, batch_api) = stage_batch::mode_and_api(llm, route.batch, 1);
         let ctx = stage_batch::StageCtx {
             repo,
             model: &model,
             realtime: llm,
-            batch: None,
+            batch: batch_api,
             meter,
-            job: None,
+            job: route.job,
             checkpoint: checkpoint.as_ref(),
             settings: stage_batch::StageSettings::default(),
         };
-        let outcome = stage_batch::run_stage(
-            Stage::Alternatives,
-            &mut call,
-            stage_batch::StageMode::Parallel { max_in_flight: 1 },
-            &ctx,
-        )
-        .await;
+        let outcome = stage_batch::run_stage(Stage::Alternatives, &mut call, mode, &ctx).await;
         if let Some((store, skey)) = feedback {
             store.set_status(
                 skey,
@@ -1106,7 +1139,12 @@ impl AlternativesAsk<'_> {
                 Some(f) => {
                     let mut failure = camerata_llm::failure::LlmCallFailure::new(f.class, f.reason);
                     failure.attempts = f.attempts;
-                    anyhow::Error::new(failure)
+                    let err = anyhow::Error::new(failure);
+                    match f.live_batch {
+                        // The batch may still be running and billed: no second try covers it.
+                        Some(batch_id) => err.context(super::failures::LiveBatchHeld(batch_id)),
+                        None => err,
+                    }
                 }
                 None => anyhow::anyhow!("the recommendation call did not run"),
             });
