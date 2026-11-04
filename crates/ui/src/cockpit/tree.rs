@@ -497,12 +497,12 @@ fn SiteTable(
                     // The Decision cell wraps instead, with "inherited" on its own line.
                     colgroup {
                         col { style: "width: 22px" }
-                        col { style: "width: 12%" }
-                        col { style: "width: 8%" }
+                        col { style: "width: 15%" }
+                        col { style: "width: 9%" }
                         col { style: "width: 9%" }
                         col { style: "width: 20%" }
-                        col { style: "width: 20%" }
-                        col { style: "width: 7%" }
+                        col { style: "width: 14%" }
+                        col { style: "width: 9%" }
                         col { style: "width: 8%" }
                         col { style: "width: 16%" }
                     }

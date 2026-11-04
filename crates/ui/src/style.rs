@@ -7077,6 +7077,10 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-row .col-headline { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-row .col-s1, .site-row .col-s2 { white-space: nowrap; color: var(--ink-soft); }
 .site-row .col-s2 { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+/* Markers wrap onto a second line rather than clip: a cut chip ("new si...") reads as a different marker. */
+.site-table td.col-markers { white-space: normal; overflow: visible; }
+.site-table td.col-markers .mark-cell { display: flex; width: 100%; }
+.site-table td.col-markers .mark-cell > span { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .dec-decided { color: var(--good); font-weight: 700; }
 .dec-unresolved { color: var(--ink-faint); }
 .site-table td.col-dec { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }

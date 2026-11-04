@@ -220,8 +220,14 @@ fn the_decision_cell_is_not_cut_by_the_stylesheet_and_has_the_room_for_its_word(
     // Eight percentage columns after the 22px tick, then Decision is the last of them.
     assert_eq!(widths.len(), 8, "{widths:?}");
     assert!(widths[7] >= 16, "Decision gets at least 16%: {widths:?}");
-    assert!(widths[0] <= 12, "two chips do not need more: {widths:?}");
-    assert!(widths[4] >= 20, "Headline takes the remainder: {widths:?}");
+    // Markers need room for two chips to read whole (wave 13 D8: at 12% "new since" and
+    // "different object" clipped); Severity and Stage 1 hold their headers (D7).
+    assert!(widths[0] >= 15, "two chips read whole: {widths:?}");
+    assert!(
+        widths[1] >= 9 && widths[5] >= 9,
+        "Severity and Stage 1 headers fit: {widths:?}"
+    );
+    assert!(widths[4] >= 12, "Headline takes the remainder: {widths:?}");
     assert_eq!(widths.iter().sum::<u32>(), 100, "{widths:?}");
 }
 
