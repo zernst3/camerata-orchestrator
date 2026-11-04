@@ -368,6 +368,7 @@ mod resume_by_member {
                     tag: "abcdef".to_string(),
                     round: "r1".to_string(),
                 }],
+                batch_id: None,
             })
             .unwrap();
 

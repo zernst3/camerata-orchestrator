@@ -761,6 +761,7 @@ fn line_for(key: &str, resp: &LlmResponse) -> AbsorbedLine {
         cache_creation_input_tokens: resp.cache_creation_input_tokens,
         text: resp.text.clone(),
         members: Vec::new(),
+        batch_id: None,
     }
 }
 
@@ -1767,7 +1768,9 @@ pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_
     let Some(cp) = ctx.checkpoint else {
         return out;
     };
-    let mut replayed: BTreeSet<String> = BTreeSet::new();
+    // (key, batch id) of every live row an earlier process already read: a key alone is reused
+    // by every process (rounds restart at r0), so it does not say the row was read.
+    let mut replayed: BTreeSet<(String, String)> = BTreeSet::new();
     for line in cp.absorbed_in_order() {
         if line.members.is_empty() {
             continue;
@@ -1784,7 +1787,9 @@ pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_
             &line.members,
             resp,
         );
-        replayed.insert(line.key);
+        if let Some(batch_id) = line.batch_id {
+            replayed.insert((line.key, batch_id));
+        }
     }
     let Some(api) = ctx.batch else {
         return out;
@@ -1902,7 +1907,7 @@ fn read_held_rows<H: HeldRows>(
     record: &BatchRecord,
     rows: Vec<BatchResultRow>,
     ttl: CacheTtl,
-    replayed: &BTreeSet<String>,
+    replayed: &BTreeSet<(String, String)>,
 ) {
     let mut by_cid: HashMap<String, BatchResultRow> =
         rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
@@ -1911,9 +1916,9 @@ fn read_held_rows<H: HeldRows>(
     for (cid, members) in &record.members {
         let key = record.items.get(cid).cloned().unwrap_or_default();
         let row = by_cid.remove(cid);
-        // A reply an earlier process stored was read above; reading it again would absorb it
-        // twice.
-        if replayed.contains(&key) {
+        // A row an earlier process read from this batch was read above; reading it again would
+        // absorb it twice. Another process's reply under the same key is not this row.
+        if replayed.contains(&(key.clone(), record.batch_id.clone())) {
             continue;
         }
         match row {
@@ -1928,6 +1933,7 @@ fn read_held_rows<H: HeldRows>(
                 if let Some(cp) = ctx.checkpoint {
                     let mut line = line_for(&key, &resp);
                     line.members.clone_from(members);
+                    line.batch_id = Some(record.batch_id.clone());
                     if let Err(e) = cp.record_absorbed(&line) {
                         checkpoint_trouble(ctx, "absorbed item", &e);
                     }

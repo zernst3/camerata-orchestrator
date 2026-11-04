@@ -3347,6 +3347,7 @@ mod resume_by_member {
                     tag: "abcdef".to_string(),
                     round: "r1".to_string(),
                 }],
+                batch_id: None,
             })
             .unwrap();
 
@@ -3536,6 +3537,7 @@ mod resume_by_member {
             cache_creation_input_tokens: 0,
             text: "I could not write these.".to_string(),
             members,
+            batch_id: None,
         })
         .unwrap();
 
@@ -3552,13 +3554,15 @@ mod resume_by_member {
             "{failed:?}"
         );
         let again = cp.batches();
+        assert_eq!(again.iter().filter(|r| !r.settled).count(), 1, "{again:?}");
         assert_eq!(
-            again.iter().filter(|r| !r.settled).count(),
-            1,
-            "{again:?}"
-        );
-        assert_eq!(
-            again.iter().find(|r| !r.settled).unwrap().items.values().next(),
+            again
+                .iter()
+                .find(|r| !r.settled)
+                .unwrap()
+                .items
+                .values()
+                .next(),
             Some(&key),
             "process 2's batch carries the key process 1 used"
         );

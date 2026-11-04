@@ -177,6 +177,12 @@ pub struct AbsorbedLine {
     /// thing (stage 1's site), which a resume matches by `key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<BatchMember>,
+    /// The provider batch this line was read from when a resume read a live batch's row (set
+    /// only there). Every process names its rounds `r0..`, so the key alone does not say which
+    /// batch a reply came from; a resume skips a live row only when this batch has already been
+    /// read under this key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
 }
 
 /// One finding a call asked about: which finding, and how the reply names it. A resume reads a
@@ -279,9 +285,10 @@ impl StageCheckpoint {
     }
 
     /// Every absorbed item in the order it was recorded (a later line for the same key replaces
-    /// an earlier one and takes its place). A reply read finding by finding depends on the order
-    /// the earlier process read them in: a finding a first reply left out is written by a later
-    /// one.
+    /// an earlier one and takes its place, except a reply read finding by finding, which is kept:
+    /// every process names its rounds from `r0`, so two processes can record different replies
+    /// under one key). A reply read finding by finding depends on the order the earlier process
+    /// read them in: a finding a first reply left out is written by a later one.
     pub fn absorbed_in_order(&self) -> Vec<AbsorbedLine> {
         let Ok(text) = std::fs::read_to_string(&self.absorbed) else {
             return Vec::new();
@@ -289,7 +296,9 @@ impl StageCheckpoint {
         let mut lines: Vec<AbsorbedLine> = Vec::new();
         for line in text.lines() {
             if let Ok(parsed) = serde_json::from_str::<AbsorbedLine>(line) {
-                lines.retain(|l| l.key != parsed.key);
+                if parsed.members.is_empty() {
+                    lines.retain(|l| l.key != parsed.key);
+                }
                 lines.push(parsed);
             }
         }
@@ -487,6 +496,7 @@ mod tests {
             cache_creation_input_tokens: 0,
             text: text.to_string(),
             members: Vec::new(),
+            batch_id: None,
         }
     }
 
@@ -534,7 +544,7 @@ mod tests {
         // The members survive the file; a line written without them reads back with none.
         cp.record_absorbed(&first).unwrap();
         let back = cp.absorbed_in_order();
-        assert_eq!(back[1].members, first.members);
+        assert_eq!(back.last().unwrap().members, first.members);
         assert!(back[0].members.is_empty());
     }
 
@@ -575,6 +585,7 @@ mod tests {
         assert_eq!(got[0].key, "site-1");
         assert_eq!(got[0].text, "reply");
         assert!(got[0].members.is_empty());
+        assert_eq!(got[0].batch_id, None);
         assert_eq!(cp.absorbed().len(), 1);
     }
 
