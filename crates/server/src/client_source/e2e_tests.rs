@@ -551,6 +551,22 @@ fn exports_never_touch_resolve_repo_dir_or_read_the_repo() {
     .collect();
     let files: Vec<(String, &str)> = [
         ("report_export.rs", include_str!("../report_export.rs")),
+        (
+            "report_export/json_types.rs",
+            include_str!("../report_export/json_types.rs"),
+        ),
+        (
+            "report_export/marking.rs",
+            include_str!("../report_export/marking.rs"),
+        ),
+        (
+            "report_export/citations_fixes.rs",
+            include_str!("../report_export/citations_fixes.rs"),
+        ),
+        (
+            "report_export/classification.rs",
+            include_str!("../report_export/classification.rs"),
+        ),
         ("xlsx_export.rs", include_str!("../xlsx_export.rs")),
         ("onboard/report.rs", include_str!("../onboard/report.rs")),
         (
