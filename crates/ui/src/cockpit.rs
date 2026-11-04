@@ -3445,6 +3445,7 @@ mod pane_context;
 mod remediation;
 mod review;
 mod review_findings;
+pub(crate) mod review_settings;
 pub mod rules;
 mod saved_inspections;
 pub mod scan;
