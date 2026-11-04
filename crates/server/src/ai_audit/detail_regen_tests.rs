@@ -3238,3 +3238,179 @@ mod batch_route {
         assert!(out[0].detail.contains("finding at line 9"));
     }
 }
+
+// ── WO7c: a live batch is settled finding by finding on resume ───────────────────────────────────
+
+/// A batch that was live when the process stopped is read by each member's site key. The resumed
+/// run need not build the batch the first one did: the rows reach the findings they were written
+/// for, a finding already done stays done, and a row for a finding no longer in the run is told
+/// to the operator, never written into another finding.
+mod resume_by_member {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ai_audit::loop_batch::LoopBatch;
+    use crate::ai_audit::stage_batch::StageRoute;
+    use crate::checkpoint::{with_run_checkpoints, AbsorbedLine, BatchMember, StageCheckpoint};
+
+    const BATCH: StageRoute<'static> = StageRoute {
+        batch: true,
+        job: None,
+    };
+
+    fn at(line: usize) -> Finding {
+        Finding {
+            line,
+            ..finding(&format!("{TITLE} {line}{HEADLINE_SEP}{SHORT}"))
+        }
+    }
+
+    async fn run(
+        dir: &std::path::Path,
+        llm: &dyn LlmPort,
+        findings: Vec<Finding>,
+        meter: Option<&UsageMeter>,
+    ) -> (Vec<Finding>, Vec<FailedPass>) {
+        with_run_checkpoints(
+            Some(dir.to_path_buf()),
+            super::super::detail_regen::regenerate_full_details_in(
+                llm,
+                REPO,
+                findings,
+                &files(),
+                &selected(),
+                &nonce(),
+                None,
+                meter,
+                BATCH,
+            ),
+        )
+        .await
+    }
+
+    /// The first process: its one batch of lines 9, 49 and 89 goes out and its results cannot be
+    /// fetched, so it is saved unsettled.
+    async fn first_process_with_a_live_batch(
+        dir: &std::path::Path,
+    ) -> (Arc<LoopBatch>, Arc<RoleLlm>) {
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let (_, failed) = run(dir, &seam, vec![at(9), at(49), at(89)], None).await;
+        assert_eq!(api.submit_calls(), 1);
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_0")),
+            "the failed part names the live batch: {failed:?}"
+        );
+        assert!(stub.prompts(Role::Regen).is_empty(), "nothing was fetched");
+        (api, stub)
+    }
+
+    fn wrote(f: &Finding, line: usize) -> bool {
+        f.detail.contains(&format!("(finding at line {line})"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_batch_reaches_its_findings_whatever_batch_the_resumed_round_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        // The resumed run lists a new finding first (so every index moves) and line 9, which
+        // another reply already wrote, so the round it builds is not the first process's batch.
+        let second = vec![at(29), at(9), at(49), at(89)];
+        let keys = crate::inspections::site_keys_of(&second);
+        let elsewhere = format!(
+            r#"{{"details":[{{"id":"abcdef","path":"{HANDLER}","line":9,"detail":"{}"}}]}}"#,
+            full_for(9)
+        );
+        StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"))
+            .record_absorbed(&AbsorbedLine {
+                key: "r1:elsewhere".to_string(),
+                model: "stub".to_string(),
+                backend: "api".to_string(),
+                cost_usd: Some(0.01),
+                input_tokens: Some(1_000),
+                output_tokens: Some(100),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                text: elsewhere,
+                members: vec![BatchMember {
+                    key: keys[1].clone(),
+                    tag: "abcdef".to_string(),
+                    round: "r1".to_string(),
+                }],
+            })
+            .unwrap();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, second, Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([29, 9, 49, 89]) {
+            assert!(
+                wrote(row, line),
+                "line {line} has its own explanation: {row:?}"
+            );
+            for other in [9, 29, 49, 89].into_iter().filter(|l| *l != line) {
+                assert!(
+                    !wrote(row, other),
+                    "line {line} carries the explanation of line {other}"
+                );
+            }
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding was submitted; the held members were not sent again"
+        );
+        let prompts = api.submitted_prompts();
+        assert_eq!(prompts.len(), 2, "the first batch and the new finding's");
+        for held in [9, 49, 89] {
+            assert!(
+                !prompts[1].contains(&format!("{HANDLER}:{held}\n")),
+                "line {held} was sent again: {}",
+                prompts[1]
+            );
+        }
+        assert!(prompts[1].contains(&format!("{HANDLER}:29\n")));
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            2,
+            "the held batch was fetched once, the new batch once"
+        );
+        let notes = meter.notes();
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.contains("no longer") || n.contains("wasted")),
+            "nothing was wasted: {notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_returned_row_for_a_finding_no_longer_in_the_run_is_disclosed_and_absorbed_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(9), at(49)], Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(wrote(&out[0], 9) && wrote(&out[1], 49), "{out:?}");
+        assert!(
+            !out.iter().any(|f| wrote(f, 89)),
+            "the entry for the finding that is gone was written into another finding"
+        );
+        assert_eq!(api.submit_calls(), 1, "nothing was submitted again");
+        let notes = meter.notes();
+        assert!(
+            notes.iter().any(|n| n.contains("no longer in this run")),
+            "the wasted share is on the ledger: {notes:?}"
+        );
+    }
+}

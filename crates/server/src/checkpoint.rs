@@ -171,6 +171,25 @@ pub struct AbsorbedLine {
     /// from nothing without paying for the item again.
     #[serde(default)]
     pub text: String,
+    /// The findings the reply was about, for a stage whose item is one call about several
+    /// findings. A resume settles the reply finding by finding (see [`BatchMember`]), so it does
+    /// not depend on the next run building the same call. Empty for a stage whose item is one
+    /// thing (stage 1's site), which a resume matches by `key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<BatchMember>,
+}
+
+/// One finding a call asked about: which finding, and how the reply names it. A resume reads a
+/// returned reply by these, not by the call's own key, so a batch that was live when the process
+/// stopped reaches its findings whatever batches the resumed run would build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchMember {
+    /// The finding's site key: what identifies it from one run of the audit to the next.
+    pub key: String,
+    /// The id the call gave the finding, which the reply's entry for it carries.
+    pub tag: String,
+    /// The round (or second try) the finding was asked in.
+    pub round: String,
 }
 
 /// One batch the stage submitted.
@@ -182,6 +201,11 @@ pub struct BatchRecord {
     pub ttl: String,
     /// The batch's `custom_id` for each item, mapped to the item's key.
     pub items: BTreeMap<String, String>,
+    /// For a stage whose items are calls about several findings: the findings each item (by
+    /// `custom_id`) asked about. When present, a resume settles the batch's rows by these, never
+    /// by the item key. Empty for a stage whose items are single things.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub members: BTreeMap<String, Vec<BatchMember>>,
     /// True once every row of the batch has been absorbed or recorded as failed. A batch that has
     /// not settled is polled again on resume, never submitted again.
     #[serde(default)]
@@ -248,6 +272,24 @@ impl StageCheckpoint {
             }
         }
         by_key.into_values().collect()
+    }
+
+    /// Every absorbed item in the order it was recorded (a later line for the same key replaces
+    /// an earlier one and takes its place). A reply read finding by finding depends on the order
+    /// the earlier process read them in: a finding a first reply left out is written by a later
+    /// one.
+    pub fn absorbed_in_order(&self) -> Vec<AbsorbedLine> {
+        let Ok(text) = std::fs::read_to_string(&self.absorbed) else {
+            return Vec::new();
+        };
+        let mut lines: Vec<AbsorbedLine> = Vec::new();
+        for line in text.lines() {
+            if let Ok(parsed) = serde_json::from_str::<AbsorbedLine>(line) {
+                lines.retain(|l| l.key != parsed.key);
+                lines.push(parsed);
+            }
+        }
+        lines
     }
 
     /// Append one absorbed item.
@@ -440,6 +482,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             text: text.to_string(),
+            members: Vec::new(),
         }
     }
 
@@ -477,6 +520,7 @@ mod tests {
             batch_id: "msgbatch_1".to_string(),
             ttl: "1h".to_string(),
             items: BTreeMap::from([("s1".to_string(), "site-1".to_string())]),
+            members: BTreeMap::new(),
             settled: false,
             nonce: Some("n1".to_string()),
         };

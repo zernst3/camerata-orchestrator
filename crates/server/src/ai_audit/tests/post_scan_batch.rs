@@ -272,3 +272,152 @@ async fn an_alternatives_batch_whose_results_cannot_be_fetched_is_never_submitte
         "the error names the live batch: {err:#}"
     );
 }
+
+// ── WO7c: a live fix batch is settled finding by finding on resume ───────────────────────────────
+
+mod resume_by_member {
+    use super::*;
+    use crate::checkpoint::{with_run_checkpoints, AbsorbedLine, BatchMember, StageCheckpoint};
+
+    /// Three fixes, written by position: the first, second and third finding of the batch asked.
+    const THREE_FIXES: &str = r#"{"fixes":[
+        {"index":0,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts for the first site."},
+        {"index":1,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts for the second site."},
+        {"index":2,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts for the third site."}]}"#;
+
+    /// A file with the redirect call on lines 2, 22, 42 and 62, so each finding has code round it.
+    fn files() -> Vec<(String, String)> {
+        let mut text = String::from("export function safeInternalPath(p: string) {}\n");
+        for line in 2..=70 {
+            if line % 20 == 2 {
+                text.push_str("export function handler() { rawRedirect(p) }\n");
+            } else {
+                text.push_str(&format!("// line {line}\n"));
+            }
+        }
+        vec![("app/auth/signout/route.ts".to_string(), text)]
+    }
+
+    fn at(line: usize) -> Finding {
+        fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/auth/signout/route.ts",
+            line,
+            "rawRedirect(p) is called with an unvalidated path \u{2014} an open redirect.",
+            "rawRedirect(p)",
+        )
+    }
+
+    async fn run(
+        dir: &std::path::Path,
+        llm: &dyn LlmPort,
+        findings: Vec<Finding>,
+        meter: Option<&UsageMeter>,
+    ) -> (Vec<Finding>, Vec<FailedPass>) {
+        with_run_checkpoints(
+            Some(dir.to_path_buf()),
+            generate_fix_specifics_in(llm, "o/r", findings, &files(), None, meter, None, BATCH),
+        )
+        .await
+    }
+
+    async fn first_process_with_a_live_batch(
+        dir: &std::path::Path,
+    ) -> (Arc<LoopBatch>, Arc<SequencedCompleter>) {
+        let stub = Arc::new(SequencedCompleter::new(&[THREE_FIXES]));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let (_, failed) = run(dir, &seam, vec![at(2), at(22), at(42)], None).await;
+        assert_eq!(api.submit_calls(), 1);
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_0")),
+            "the failed part names the live batch: {failed:?}"
+        );
+        assert_eq!(stub.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        (api, stub)
+    }
+
+    fn fix_of(f: &Finding) -> &str {
+        f.fix_specific.as_deref().unwrap_or_default()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_batch_reaches_its_findings_whatever_batch_the_resumed_round_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        // A new finding listed first (every index moves) and line 2, which another reply wrote.
+        let second = vec![at(62), at(2), at(22), at(42)];
+        let keys = crate::inspections::site_keys_of(&second);
+        StageCheckpoint::new(dir.path(), "fix_o/r")
+            .record_absorbed(&AbsorbedLine {
+                key: "r1:elsewhere".to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: Some(0.01),
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                text: r#"{"fixes":[{"id":"abcdef","fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts, written elsewhere."}]}"#.to_string(),
+                members: vec![BatchMember {
+                    key: keys[1].clone(),
+                    tag: "abcdef".to_string(),
+                    round: "r1".to_string(),
+                }],
+            })
+            .unwrap();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, second, Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(fix_of(&out[1]).ends_with("written elsewhere."), "{out:?}");
+        assert!(fix_of(&out[2]).ends_with("for the second site."), "{out:?}");
+        assert!(fix_of(&out[3]).ends_with("for the third site."), "{out:?}");
+        assert!(
+            fix_of(&out[0]).ends_with("for the first site."),
+            "the new finding's own request answered it: {out:?}"
+        );
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding was submitted; the held members were not sent again"
+        );
+        let notes = meter.notes();
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.contains("no longer") || n.contains("wasted")),
+            "nothing was wasted: {notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_returned_row_for_a_finding_no_longer_in_the_run_is_disclosed_and_absorbed_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(2), at(22)], Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(fix_of(&out[0]).ends_with("for the first site."), "{out:?}");
+        assert!(fix_of(&out[1]).ends_with("for the second site."), "{out:?}");
+        assert!(
+            !out.iter().any(|f| fix_of(f).contains("third")),
+            "the fix for the finding that is gone was written into another finding"
+        );
+        assert_eq!(api.submit_calls(), 1, "nothing was submitted again");
+        let notes = meter.notes();
+        assert!(
+            notes.iter().any(|n| n.contains("no longer in this run")),
+            "the wasted share is on the ledger: {notes:?}"
+        );
+    }
+}

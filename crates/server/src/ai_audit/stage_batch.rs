@@ -736,6 +736,7 @@ fn line_for(key: &str, resp: &LlmResponse) -> AbsorbedLine {
         cache_read_input_tokens: resp.cache_read_input_tokens,
         cache_creation_input_tokens: resp.cache_creation_input_tokens,
         text: resp.text.clone(),
+        members: Vec::new(),
     }
 }
 
@@ -1818,6 +1819,7 @@ where
                 .zip(sub)
                 .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                 .collect(),
+            members: BTreeMap::new(),
             settled: false,
             nonce: Some(nonce),
         };

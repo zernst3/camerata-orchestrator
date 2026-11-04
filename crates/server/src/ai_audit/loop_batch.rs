@@ -50,6 +50,13 @@ impl LoopBatch {
         self.fail_next_fetch.store(true, Ordering::SeqCst);
     }
 
+    /// Let the batches that could not be fetched be fetched again: the connection came back (a
+    /// resumed process reaches the provider).
+    pub(crate) fn heal(&self) {
+        self.fail_next_fetch.store(false, Ordering::SeqCst);
+        *self.doomed.lock().unwrap() = None;
+    }
+
     /// How many batches were submitted.
     pub(crate) fn submit_calls(&self) -> usize {
         self.submits.load(Ordering::SeqCst)
