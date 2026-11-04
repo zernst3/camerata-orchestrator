@@ -257,11 +257,11 @@ fn tree_markers_opens_the_node_carrying_the_markers_and_puts_it_near_the_top() {
         ] {
             assert!(mine.contains(chip), "{id}: the focused node shows {chip}");
         }
-        // Near the top: no more than one screen of site rows above it (a row is about 30px, a
-        // screen at the spec's smaller width is 1000px of the 1400 the screenshots are taken at).
+        // Near the top: a row is 30 to 45px, so ten rows above it leave its own rows, and the
+        // chips on them, inside the 1400px the screenshots are taken at.
         let rows_above = html[..head].matches("class=\"site-row").count();
         assert!(
-            rows_above <= 22,
+            rows_above <= 10,
             "{id}: {rows_above} site rows sit above the focused node"
         );
     }

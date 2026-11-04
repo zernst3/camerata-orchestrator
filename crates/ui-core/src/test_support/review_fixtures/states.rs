@@ -239,6 +239,45 @@ fn subs_covering_every_marker(ds: &ReviewDataSet) -> Vec<String> {
     chosen
 }
 
+/// The markers page: each sub-group of the cover shows only as many rows as it takes to show the
+/// markers it was chosen for (a real first page with a "show next" row under it), so the node the
+/// page focuses is not buried under rows that carry no chip.
+fn tree_body_of_cover(ds: &ReviewDataSet, subs: &[String]) -> TreeBody {
+    let mut body = tree_body(ds, subs);
+    // Where each marker first shows on a cover page: (row index, sub-group).
+    let first_at = |m: &Marker, sub: &String| -> Option<usize> {
+        body.pages
+            .get(sub)?
+            .rows
+            .iter()
+            .position(|r| r.markers.contains(m))
+    };
+    // The focused (first) sub-group shows all of its own markers; each other marker is shown
+    // where it shows soonest, so no sub-group is opened deeper than a chip needs.
+    let mut need: BTreeMap<String, usize> = BTreeMap::new();
+    for m in Marker::PRECEDENCE {
+        let owner = subs
+            .first()
+            .filter(|f| first_at(&m, f).is_some())
+            .or_else(|| {
+                subs.iter()
+                    .filter(|s| first_at(&m, s).is_some())
+                    .min_by_key(|s| first_at(&m, s))
+            });
+        if let Some(owner) = owner {
+            let at = first_at(&m, owner).unwrap_or(0) + 1;
+            let slot = need.entry(owner.clone()).or_insert(0);
+            *slot = (*slot).max(at);
+        }
+    }
+    for (sub, rows) in need {
+        if let Some(short) = ds.sites_page(&sub, None, rows) {
+            body.pages.insert(sub, short);
+        }
+    }
+    body
+}
+
 fn tree_body(ds: &ReviewDataSet, subs: &[String]) -> TreeBody {
     let (open_nodes, pages) = open_subs(ds, subs);
     TreeBody {
@@ -406,7 +445,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let subs = subs_covering_every_marker(&ds);
             StateFixture {
                 shell: shell_of(&ds),
-                body: Body::Tree(tree_body(&ds, &subs)),
+                body: Body::Tree(tree_body_of_cover(&ds, &subs)),
             }
         }
         "tree/node-prompt" => {
@@ -485,7 +524,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         "tree/narrow" => {
             let ds = base();
             let subs = subs_covering_every_marker(&ds);
-            let mut body = tree_body(&ds, &subs);
+            let mut body = tree_body_of_cover(&ds, &subs);
             body.narrow = true;
             body.selected_site = subs
                 .first()
