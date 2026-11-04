@@ -6,8 +6,7 @@ use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
-    EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, Marker, SiteRow, TreeLevel,
-    SITES_PAGE_SIZE,
+    EscalationBudgetOutcome, EscalationBudgetReq, Marker, SiteRow, TreeLevel, SITES_PAGE_SIZE,
 };
 
 use super::dataset::{build, EngineMode, Params, ReviewDataSet};
@@ -98,6 +97,7 @@ fn empty_params() -> Params {
         p.duplicates = 0;
         p.decided_subgroups = 0;
         p.decided_rules = 0;
+        p.decision_gaps = 0;
         p.new_since_decision = 0;
         p.site_decisions = 0;
         p.added = 0;
@@ -756,12 +756,12 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let ds = build(&params(|p| {
                 p.held = 0;
                 p.merged_without_decision = 0;
-                p.new_since_decision = 0;
+                p.decision_gaps = 0;
             }));
             StateFixture {
                 shell: shell_of(&ds),
                 body: Body::Export(ExportBody {
-                    gate: ExportGateView::default(),
+                    gate: ds.gate.clone(),
                 }),
             }
         }

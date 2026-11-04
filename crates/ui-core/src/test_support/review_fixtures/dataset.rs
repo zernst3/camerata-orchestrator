@@ -92,6 +92,9 @@ pub struct Params {
     pub duplicates: usize,
     pub decided_subgroups: usize,
     pub decided_rules: usize,
+    /// Covered sites whose inherited record is missing: decided sub-group members with no
+    /// per-site record. The only thing that feeds the export gate's `node_decisions_missing_members`.
+    pub decision_gaps: usize,
     pub new_since_decision: usize,
     pub site_decisions: usize,
     pub thrown_out: usize,
@@ -150,6 +153,7 @@ impl Params {
             duplicates: 7,
             decided_subgroups: 6,
             decided_rules: 1,
+            decision_gaps: 2,
             new_since_decision: 5,
             site_decisions: 60,
             thrown_out: 6,
@@ -184,6 +188,7 @@ impl Params {
             duplicates: 150,
             decided_subgroups: 140,
             decided_rules: 6,
+            decision_gaps: 3,
             new_since_decision: 90,
             site_decisions: 900,
             thrown_out: 40,
@@ -1058,6 +1063,9 @@ pub fn build(p: &Params) -> ReviewDataSet {
     ];
     let mut nsd_left = p.new_since_decision;
     let mut nsd_for: Vec<(usize, String)> = Vec::new();
+    // Gaps: (row index, decision id) of a covered member that holds no record of its own.
+    let mut gaps_left = p.decision_gaps;
+    let mut gap_for: Vec<(usize, String)> = Vec::new();
     for (n, node) in picked_subs.iter().chain(picked_rules.iter()).enumerate() {
         let members = if node.starts_with("sub:") {
             &sub_members[node]
@@ -1081,7 +1089,17 @@ pub fn build(p: &Params) -> ReviewDataSet {
             }
             covered.push(i);
         }
-        for &i in &covered {
+        // The decision covers every member in `covered`, but one record is missing: the gap the
+        // export gate refuses (the server's `group_decision_gaps`). Sub-groups only, and never the
+        // last member, so the decided group keeps a record to show.
+        let mut recorded = covered.clone();
+        if gaps_left > 0 && node.starts_with("sub:") && recorded.len() > 1 {
+            if let Some(i) = recorded.pop() {
+                gaps_left -= 1;
+                gap_for.push((i, id.clone()));
+            }
+        }
+        for &i in &recorded {
             rows[i].decision = Some(DecisionView {
                 id: format!("{id}-{i}"),
                 state: state.clone(),
@@ -1129,7 +1147,11 @@ pub fn build(p: &Params) -> ReviewDataSet {
             break;
         }
         let i = normal[k];
-        if special[i] || rows[i].decision.is_some() || rows[i].new_since_decision.is_some() {
+        if special[i]
+            || rows[i].decision.is_some()
+            || rows[i].new_since_decision.is_some()
+            || gap_for.iter().any(|(g, _)| *g == i)
+        {
             continue;
         }
         let merge_target = rows[normal[1.min(normal.len() - 1)]].site_key.clone();
@@ -1176,7 +1198,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
         .filter(|(n, _)| n % 3 == 0)
     {
         if let Some(i) = rows.iter().position(|r| r.site_key == c.key) {
-            if rows[i].decision.is_none() {
+            if rows[i].decision.is_none() && !gap_for.iter().any(|(g, _)| *g == i) {
                 rows[i].decision = Some(DecisionView {
                     id: format!("dec-esc-{i}"),
                     state: DecisionState::Confirmed,
@@ -1209,7 +1231,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
         rows,
         candidates,
         budget,
-        &node_decisions,
+        (&node_decisions, &gap_for),
         &verdicts,
     )
 }
@@ -1250,7 +1272,7 @@ fn assemble(
     rows: Vec<SiteRow>,
     candidates: Vec<EscalationCandidate>,
     budget: EscalationBudget,
-    node_decisions: &[NodeDecisionRecord],
+    (node_decisions, gap_for): (&[NodeDecisionRecord], &[(usize, String)]),
     verdicts: &BTreeMap<String, EngineCheckVerdict>,
 ) -> ReviewDataSet {
     // Node membership at every level.
@@ -1431,18 +1453,19 @@ fn assemble(
             .unwrap_or_default()
             .to_string(),
     };
+    // A gap is a covered site with no per-site record. New-since rows are not covered, so they
+    // never reach the gate.
     let mut gaps: BTreeMap<String, NodeDecisionGap> = BTreeMap::new();
-    for r in &live {
-        if let Some(n) = &r.new_since_decision {
-            gaps.entry(n.decision_id.clone())
-                .or_insert_with(|| NodeDecisionGap {
-                    decision_id: n.decision_id.clone(),
-                    node_id: n.node_id.clone(),
-                    missing: Vec::new(),
-                })
-                .missing
-                .push(r.site_key.clone());
-        }
+    for (i, decision_id) in gap_for {
+        let record = node_decisions.iter().find(|d| d.id == *decision_id);
+        gaps.entry(decision_id.clone())
+            .or_insert_with(|| NodeDecisionGap {
+                decision_id: decision_id.clone(),
+                node_id: record.map(|d| d.node.clone()).unwrap_or_default(),
+                missing: Vec::new(),
+            })
+            .missing
+            .push(rows[*i].site_key.clone());
     }
     let gate = ExportGateView {
         held: held_rows

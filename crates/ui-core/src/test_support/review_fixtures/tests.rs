@@ -188,7 +188,16 @@ fn a_node_decision_covers_what_it_says_and_leaves_out_the_rest() {
                     == Some(n.id.as_str())
             })
             .count();
-        assert_eq!(d.covered, inherited, "{}", n.id);
+        // The decision covers a record-holding member and a gap member alike (the gap is the
+        // covered site with no record of its own).
+        let gap_members = ds
+            .gate
+            .node_decisions_missing_members
+            .iter()
+            .filter(|g| g.node_id == n.id)
+            .map(|g| g.missing.len())
+            .sum::<usize>();
+        assert_eq!(d.covered, inherited + gap_members, "{}", n.id);
         assert!(d.covered > 0);
     }
 }
@@ -221,10 +230,45 @@ fn the_shell_agrees_with_the_rows_and_the_gate() {
             h.key
         );
     }
+    // A gap is a covered site that holds no record (the server's `group_decision_gaps`); it is
+    // neither decided nor new since the decision.
+    let gaps = &ds.gate.node_decisions_missing_members;
+    assert!(!gaps.is_empty(), "the blocked gate needs a real gap");
+    for gap in gaps {
+        assert!(!gap.missing.is_empty());
+        for key in &gap.missing {
+            let row = ds.row(key).unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                row.decision.is_none(),
+                "a gap site holds no decision: {key}"
+            );
+            assert!(
+                row.new_since_decision.is_none(),
+                "a gap site is not a new-since row: {key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn new_since_rows_alone_never_feed_the_export_gate() {
+    let mut p = Params::base(SEED);
+    p.decision_gaps = 0;
+    let ds = build(&p);
     assert!(
-        !ds.gate.node_decisions_missing_members.is_empty(),
-        "new since decision rows show in the gate"
+        ds.rows.iter().any(|r| r.new_since_decision.is_some()),
+        "the set still has new-since rows"
     );
+    assert!(ds.gate.node_decisions_missing_members.is_empty());
+    let mut q = Params::base(SEED);
+    q.decision_gaps = 2;
+    let gaps: usize = build(&q)
+        .gate
+        .node_decisions_missing_members
+        .iter()
+        .map(|g| g.missing.len())
+        .sum();
+    assert_eq!(gaps, 2, "one missing record per requested gap");
 }
 
 #[test]
@@ -660,6 +704,13 @@ fn settings_and_export_states() {
         panic!()
     };
     assert!(!clear.gate.is_blocked());
+    let cleared = fixture("export/clear").unwrap();
+    let shell = cleared.shell.ready().unwrap();
+    assert!(
+        shell.stale.new_since_decision > 0,
+        "export/clear clears the gate without zeroing new-since"
+    );
+    assert_eq!(shell.export_gate, clear.gate);
     assert!(!fixture("export/clear")
         .unwrap()
         .shell
