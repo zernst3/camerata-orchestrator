@@ -51,6 +51,7 @@ use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
     plan_item_ranges, poll_and_fetch, BatchApi, JobCancelled, PollProgress, RoundContext,
 };
+use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
 use super::*;
 use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint, SubmitIntent};
@@ -1357,6 +1358,38 @@ fn round_ctx<'a>(stage: Stage, ctx: &'a StageCtx<'a>, api: &'a dyn BatchApi) -> 
     }
 }
 
+/// The projected input dollars of submitting `sub`, from the bytes of the requests the runner is
+/// about to send (each estimated as the size check does, at the batch price of the stage's model),
+/// so a window of large items cannot outrun the spend limit on a low guess. Only when a request is
+/// not built, or the model is not in the price table, does the stage's own per-item figure
+/// ([`StageSettings::per_item_usd`]) stand in; with neither there is no projection at all and the
+/// gate refuses (a limit that cannot be enforced admits nothing).
+fn projected_input_usd<Id>(ctx: &StageCtx<'_>, sub: &[Work<Id>]) -> Option<f64> {
+    let fallback = |n: usize| ctx.settings.per_item_usd.map(|p| p * n as f64);
+    let mut total = 0.0;
+    let mut unbuilt = 0usize;
+    for w in sub {
+        let Some(req) = w.req.as_deref() else {
+            unbuilt += 1;
+            continue;
+        };
+        let tokens = estimate_tokens(super::request_budget::request_bytes(req)) as u64;
+        let Some(usd) = crate::llm::input_cost_usd(
+            ctx.model,
+            tokens,
+            crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+        ) else {
+            // An unpriced model prices no request: the stage's figure covers the whole window.
+            return fallback(sub.len());
+        };
+        total += usd;
+    }
+    if unbuilt > 0 {
+        total += fallback(unbuilt)?;
+    }
+    Some(total)
+}
+
 /// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
 /// and nothing was accepted).
 fn clear_submit_intent(ctx: &StageCtx<'_>) {
@@ -1629,9 +1662,7 @@ where
             continue;
         }
         if let Some(m) = ctx.meter {
-            if let Some(why) =
-                m.batch_refusal_reason(ctx.settings.per_item_usd.map(|p| p * sub.len() as f64))
-            {
+            if let Some(why) = m.batch_refusal_reason(projected_input_usd(ctx, sub)) {
                 eprintln!("[camerata-server] {why}");
                 m.record_note(why.clone());
                 m.record_stage_not_run(ctx.repo, admission_name(stage), true);
