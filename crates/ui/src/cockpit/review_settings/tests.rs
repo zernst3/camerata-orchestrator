@@ -126,7 +126,7 @@ fn an_invalid_value_shows_its_hint_in_red_and_disables_apply() {
     assert!(tag_with_class(&html, "review-settings-apply").contains("disabled"));
     let v = view();
     assert!(
-        !html.contains(&format!("\u{2192} budget")),
+        !html.contains("\u{2192} budget"),
         "no budget is claimed for a rate that cannot be applied: {html}"
     );
     assert!(html.contains(&format!(
