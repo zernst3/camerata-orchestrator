@@ -96,6 +96,15 @@ fn merge_problems(reviewed: &ReviewedReport) -> Vec<Problem> {
     }
 }
 
+fn at_discarded(report: &ScanReport, path: &str) -> Finding {
+    report
+        .discarded
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("no discarded row in {path}"))
+        .clone()
+}
+
 fn at(report: &ScanReport, path: &str) -> Finding {
     report
         .findings
@@ -372,7 +381,61 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
 
 #[test]
 fn an_edit_never_reaches_client_output_as_internal_text() {
-    let sealed = report_of_three().seal();
+    // Four more kinds of reviewer text a reviewed run carries (review F8, wave 6): the client's
+    // acknowledgement of an Ignored row, a finding the reviewer added with its reason, and the
+    // reason a thrown-out finding was put back.
+    let mut report = report_of_three();
+    report.findings.push(second_row("src/acked.rs", 51));
+    let mut thrown = second_row("src/thrown.rs", 61);
+    crate::engine_discard::mark(&mut thrown, "its headline is a placeholder");
+    report.discarded.push(thrown);
+    let unrestored = report.clone().seal();
+    let thrown_key = at_discarded(unrestored.as_scan_report(), "src/thrown.rs").site_key;
+    let restore = decision(
+        "dec-000007",
+        &thrown_key,
+        DecisionState::EngineRestored,
+        "SECRET-RESTORE-REASON the engine was wrong to throw it out",
+    );
+    let ruling = decision(
+        "dec-000008",
+        &thrown_key,
+        DecisionState::Confirmed,
+        "real after all",
+    );
+    let sealed = report.seal_with_restored(&crate::decisions::restored_keys_of(&[restore.clone()]));
+    let acked = at(sealed.as_scan_report(), "src/acked.rs");
+    let mut accepted = decision(
+        "dec-000009",
+        &acked.site_key,
+        DecisionState::Ignored,
+        "behind the corporate proxy",
+    );
+    accepted.confirmed_by_client = Some(camerata_api_types::decisions::ClientAck {
+        by: "SECRET-ACK-BY cto@acme.test".to_string(),
+        at: NOW.to_string(),
+        note: "SECRET-ACK-NOTE signed off in the call".to_string(),
+    });
+    let mut added = second_row("src/added.rs", 71);
+    added.captures.insert(
+        crate::report_export::overlay::PROVENANCE_CAPTURE.to_string(),
+        crate::report_export::overlay::REVIEWER_PROVENANCE.to_string(),
+    );
+    added.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+    added.site_key = crate::report_export::key_for_added(&sealed.as_scan_report().findings, &added);
+    let added_row = crate::edits::AddedFinding {
+        finding: added.clone(),
+        reason: "SECRET-ADDED-REASON the engine missed this copy".to_string(),
+        by: "SECRET-REVIEWER".to_string(),
+        at: NOW.to_string(),
+        run_id: "insp-1".to_string(),
+    };
+    let added_ruling = decision(
+        "dec-000010",
+        &added.site_key,
+        DecisionState::Confirmed,
+        "a real second copy",
+    );
     let edited = at(sealed.as_scan_report(), "src/users.rs");
     let merged = at(sealed.as_scan_report(), "src/orders.rs");
     let target = at(sealed.as_scan_report(), "src/db.rs");
@@ -404,7 +467,8 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
         DecisionState::MergedInto(target.site_key.clone()),
         "SECRET-MERGE-REASON",
     );
-    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&merge), &edits, &[]);
+    let records = vec![merge, restore, ruling, accepted, added_ruling];
+    let reviewed = apply_overlay(&sealed, &records, &edits, std::slice::from_ref(&added_row));
     let package = package_of(&reviewed);
     let data_json = package.data_json.clone();
     let pdf_data = package.data_json.clone();
@@ -416,6 +480,10 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
         "SECRET-REVIEWER",
         "SECRET-SPLIT-REASON",
         "SECRET-MERGE-REASON",
+        "SECRET-ACK-NOTE",
+        "SECRET-ACK-BY",
+        "SECRET-ADDED-REASON",
+        "SECRET-RESTORE-REASON",
     ];
     let mut outputs: Vec<(String, String)> = text_entries(&zip);
     outputs.push(("PDF data".to_string(), data_json));
@@ -444,6 +512,16 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     let findings =
         String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["findings.json"]).into_owned();
     assert!(findings.contains("Merged into src/db.rs:12"), "{findings}");
+    // The rows whose reasons are secret are in the package, so the secrets could have leaked: the
+    // acknowledged Ignored row (as accepted risk, with the decision's own reason), the finding
+    // the reviewer added and the one that was put back.
+    for path in ["src/acked.rs", "src/added.rs", "src/thrown.rs"] {
+        assert!(findings.contains(path), "{path} is not in the package");
+    }
+    assert!(
+        findings.contains("behind the corporate proxy"),
+        "the accepted risk carries the reviewer's reason, not the client's note"
+    );
 
     // WO9: the new outputs are held to the same rule one by one. The name the reviewer gave the
     // sub-group is the group's label and its cause on the plan, the tree, the tickets and in the
