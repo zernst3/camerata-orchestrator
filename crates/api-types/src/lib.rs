@@ -73,6 +73,7 @@ pub mod model_registry;
 pub mod project;
 pub mod review;
 pub mod review_timing;
+pub mod review_view;
 pub mod run;
 pub mod site_key;
 pub mod snippet;
