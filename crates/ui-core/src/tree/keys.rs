@@ -113,10 +113,11 @@ pub fn tree_keys_armed(focus: PaneFocus) -> bool {
     tree_command(focus, "ArrowDown", KeyMods::none(), CursorKind::Node).is_some()
 }
 
-/// The indicator's text.
+/// The indicator's text. It names only keys that act: O (code) and B (stack) are mapped but not
+/// wired in the host yet, so they are left out until WO11.
 pub fn keys_hint(armed: bool, prompt_open: bool) -> &'static str {
     if armed {
-        "Keys: \u{2191}\u{2193} move \u{b7} \u{2192} open \u{b7} \u{2190} close \u{b7} Enter into the sites \u{b7} C I F T decide \u{b7} Space tick an outlier \u{b7} E edit the summary \u{b7} O code \u{b7} B stack"
+        "Keys: \u{2191}\u{2193} move \u{b7} \u{2192} open \u{b7} \u{2190} close \u{b7} Enter into the sites \u{b7} C I F T decide \u{b7} Space tick an outlier \u{b7} E edit the summary"
     } else if prompt_open {
         "Keys are off while you type. Enter commits, Esc cancels."
     } else {
@@ -288,6 +289,24 @@ mod tests {
         );
         assert_eq!(press(PaneFocus::Cursor, " ", CursorKind::Site), None);
         assert_eq!(press(PaneFocus::Cursor, " ", CursorKind::Node), None);
+    }
+
+    #[test]
+    fn the_armed_hint_names_no_key_that_does_nothing() {
+        // O (code) and B (stack) are mapped but the host does not act on them yet; the hint
+        // must not advertise them until WO11 wires the viewer and the stack.
+        let hint = keys_hint(true, false);
+        assert!(!hint.contains("O code"), "{hint}");
+        assert!(!hint.contains("B stack"), "{hint}");
+        // The map entries stay: the keys still resolve to their commands.
+        assert_eq!(
+            press(PaneFocus::Cursor, "o", CursorKind::Site),
+            Some(TreeCommand::OpenCode)
+        );
+        assert_eq!(
+            press(PaneFocus::Cursor, "b", CursorKind::Node),
+            Some(TreeCommand::OpenStack)
+        );
     }
 
     #[test]
