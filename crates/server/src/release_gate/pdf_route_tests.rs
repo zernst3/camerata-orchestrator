@@ -406,6 +406,67 @@ async fn the_pdf_route_refuses_each_held_kind_the_package_route_refuses() {
     );
 }
 
+/// A held package that also leaks a secret is refused naming BOTH, on both routes, with no
+/// Typst: the reviewer fixes everything in one pass, not one refusal at a time (Fable wave 12 F1).
+/// The finding's path carries the secret, so it is in `findings.json` and every other file, and
+/// the row also has an Engine Check No nobody corrected.
+#[tokio::test]
+async fn a_held_package_that_also_has_a_secret_is_refused_naming_both() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+    let leaking_path = format!("src/{}.rs", planted.value);
+    let mut report = scan_report();
+    report.findings[0].path = leaking_path.clone();
+    let key = site_key(&report, &leaking_path);
+    let (state, id) = state_with(report);
+    let run_id = state.inspections.latest(&id).expect("the run").id;
+    state
+        .engine_check
+        .record(
+            &id,
+            &key,
+            &EngineCheckVerdictReq {
+                right: false,
+                wrong: Some(EngineCheckError::WrongSeverity),
+                correction: None,
+                by: "reviewer".to_string(),
+            },
+            &run_id,
+            NOW,
+        )
+        .expect("the verdict is recorded");
+
+    for route in ["package", "pdf"] {
+        let resp = match route {
+            "package" => without_typst(package_route(state.clone(), &id, request())).await,
+            _ => without_typst(pdf_route(state.clone(), &id, request())).await,
+        };
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{route}: refused"
+        );
+        let body = body_json(resp).await;
+        let named = sites_named(&body);
+        assert!(
+            named
+                .iter()
+                .any(|(c, _, _)| c == CheckId::EngineCheckNoWithoutCorrection.label()),
+            "{route}: names the Engine Check hold: {body}"
+        );
+        assert!(
+            named.iter().any(|(c, _, _)| c == CheckId::Secrets.label()),
+            "{route}: names the secret: {body}"
+        );
+        assert!(
+            named
+                .iter()
+                .any(|(c, f, _)| c == CheckId::Secrets.label() && f == "findings.json"),
+            "{route}: the secret is found in every package file, findings.json among them: {body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_pdf_route_refuses_an_incomplete_run_for_a_client() {
     use crate::ai_audit::{FailedPass, FailureClass};
