@@ -1060,6 +1060,12 @@ pub(super) struct FixBatch {
     reasking: Vec<bool>,
     request_key: String,
     req: LlmRequest,
+    /// What a resume reads the reply by: each finding's site key and line, the id it was asked
+    /// under and the round.
+    members: Vec<crate::checkpoint::BatchMember>,
+    /// How many findings the call asked about in all (the share of a reply that bought nothing
+    /// is counted against this). `batch.len()` for a call of this round.
+    asked: usize,
 }
 
 /// The calls of one fix round in the shape the shared batch runner takes: one item per batch,
@@ -1078,10 +1084,89 @@ pub(super) struct FixRound<'a> {
     batches: std::collections::BTreeMap<String, FixBatch>,
     order: Vec<String>,
     still_pending: Vec<usize>,
+    /// What a stored reply is read against on resume (see [`stage_batch::HeldRows`]); `None` in
+    /// a round.
+    resume: Option<FixResume>,
+}
+
+/// What reading a stored reply for its findings needs beyond a round's own state.
+pub(super) struct FixResume {
+    /// Site key to the finding's index in the run.
+    index: std::collections::HashMap<String, usize>,
+    /// The findings in the run that have no fix yet.
+    open: std::collections::BTreeSet<usize>,
+}
+
+/// The key a stored reply is read under (never an item of a round).
+const HELD_KEY: &str = "held";
+
+impl stage_batch::HeldRows for FixRound<'_> {
+    fn member_state(&self, member: &crate::checkpoint::BatchMember) -> stage_batch::MemberState {
+        use stage_batch::MemberState;
+        let Some(state) = &self.resume else {
+            return MemberState::Gone;
+        };
+        match state.index.get(&member.key) {
+            Some(&idx) if self.findings[idx].line == member.line => {
+                if state.open.contains(&idx) {
+                    MemberState::Open
+                } else {
+                    MemberState::Done
+                }
+            }
+            _ => MemberState::Gone,
+        }
+    }
+
+    fn absorb_held(&mut self, held: stage_batch::HeldReply<'_>, resp: crate::llm::LlmResponse) {
+        let Some(state) = &self.resume else {
+            return;
+        };
+        let batch: Vec<usize> = held
+            .open
+            .iter()
+            .filter_map(|m| state.index.get(&m.key).copied())
+            .collect();
+        // A finding that failed a check in an earlier reply is on its one re-ask.
+        let reasking: Vec<bool> = batch
+            .iter()
+            .map(|idx| self.wording.replies.contains_key(idx))
+            .collect();
+        self.ledger.sent(&batch);
+        self.batches.insert(
+            HELD_KEY.to_string(),
+            FixBatch {
+                batch: batch.clone(),
+                ids: held.open.iter().map(|m| m.tag.clone()).collect(),
+                reasking,
+                request_key: String::new(),
+                req: LlmRequest::new(String::new()),
+                members: held.open.to_vec(),
+                asked: held.asked,
+            },
+        );
+        let _ = stage_batch::StageItems::absorb(self, &HELD_KEY.to_string(), resp);
+        self.batches.remove(HELD_KEY);
+        // The reply settled these findings: what it fixed leaves the open set; what it left
+        // unfixed (and not settled from its wording replies) stays open, to be asked.
+        if let Some(state) = self.resume.as_mut() {
+            for idx in &batch {
+                state.open.remove(idx);
+            }
+            state.open.extend(self.still_pending.drain(..));
+        }
+    }
 }
 
 impl stage_batch::StageItems for FixRound<'_> {
     type Id = String;
+
+    fn members(&self, key: &String) -> Vec<crate::checkpoint::BatchMember> {
+        self.batches
+            .get(key)
+            .map(|b| b.members.clone())
+            .unwrap_or_default()
+    }
 
     fn items(&self) -> Vec<(String, LlmRequest)> {
         self.order
@@ -1109,6 +1194,7 @@ impl stage_batch::StageItems for FixRound<'_> {
         let ids = &bctx.ids;
         let reasking = &bctx.reasking;
         let request_key = &bctx.request_key;
+        let asked = bctx.asked;
         let findings = &mut *self.findings;
         let files = self.files;
         let repo_names = self.repo_names;
@@ -1188,11 +1274,7 @@ impl stage_batch::StageItems for FixRound<'_> {
         let rejected = turned_down.len();
         if rejected > 0 {
             if let Some(m) = meter {
-                m.record_wasted_share(
-                    Stage::FixGeneration,
-                    &resp,
-                    rejected as f64 / batch.len() as f64,
-                );
+                m.record_wasted_share(Stage::FixGeneration, &resp, rejected as f64 / asked as f64);
             }
         }
         Ok(())
@@ -1201,6 +1283,87 @@ impl stage_batch::StageItems for FixRound<'_> {
     fn retry(&self, _key: &String, _reject: &stage_batch::ItemReject) -> Option<LlmRequest> {
         None
     }
+}
+
+/// Resume, before the first round: every reply an earlier process stored and every batch it left
+/// live is read finding by finding ([`stage_batch::HeldRows`]), so a reply reaches its findings
+/// whatever batches this run would build. Returns the findings still without a fix, for the rounds
+/// to ask. A batch that cannot be fetched now holds its findings in the ledger: they are not asked
+/// again while it may still be billed.
+#[allow(clippy::too_many_arguments)]
+async fn resume_held_fixes(
+    llm: &dyn LlmPort,
+    repo: &str,
+    fix_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    files: &[(String, String)],
+    repo_names: &RepoNames<'_>,
+    findings: &mut [Finding],
+    feedback: &mut std::collections::HashMap<usize, String>,
+    wording: &mut FixWording,
+    pending: Vec<usize>,
+    ledger: &mut FixLedger,
+    trail: &mut StageTrail,
+    route: stage_batch::StageRoute<'_>,
+) -> Vec<usize> {
+    let Some(checkpoint) = crate::checkpoint::stage_checkpoint(&format!("fix_{repo}")) else {
+        return pending;
+    };
+    let index: std::collections::HashMap<String, usize> =
+        crate::inspections::site_keys_of(findings)
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| (key, i))
+            .collect();
+    let model = stage_model(fix_model);
+    let (_, batch_api) = stage_batch::mode_and_api(llm, route.batch, PARALLEL_CONCURRENCY);
+    let ctx = stage_batch::StageCtx {
+        repo,
+        model: &model,
+        realtime: llm,
+        batch: batch_api,
+        meter,
+        job: route.job,
+        checkpoint: Some(&checkpoint),
+        settings: stage_batch::StageSettings::default(),
+    };
+    let mut stage = FixRound {
+        llm,
+        meter,
+        files,
+        repo_names,
+        findings,
+        feedback,
+        wording,
+        ledger,
+        batches: std::collections::BTreeMap::new(),
+        order: Vec::new(),
+        still_pending: Vec::new(),
+        resume: Some(FixResume {
+            index: index.clone(),
+            open: pending.into_iter().collect(),
+        }),
+    };
+    let resumed = stage_batch::resume_held(Stage::FixGeneration, &mut stage, &ctx).await;
+    let open: Vec<usize> = stage
+        .resume
+        .take()
+        .map(|r| r.open.into_iter().collect())
+        .unwrap_or_default();
+    drop(stage);
+    for live in resumed.live {
+        let idxs: Vec<usize> = live
+            .keys
+            .iter()
+            .filter_map(|key| index.get(key).copied())
+            .collect();
+        for &idx in &idxs {
+            ledger.held.insert(idx, live.batch_id.clone());
+        }
+        ledger.miss(&idxs, FixMiss::TransportFailed);
+        trail.note_failed_item(live.class, &live.reason, &live.attempts);
+    }
+    open
 }
 
 /// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
@@ -1278,6 +1441,16 @@ pub(super) async fn run_fix_specifics_round(
         let request_key = crate::run_store::journal::request_key(&req);
         let key = crate::checkpoint::batch_key(round, batch.iter().map(|&i| site_keys[i].as_str()));
         order.push(key.clone());
+        let members = batch
+            .iter()
+            .zip(&ids)
+            .map(|(&i, id)| crate::checkpoint::BatchMember {
+                key: site_keys[i].clone(),
+                line: findings[i].line,
+                tag: id.clone(),
+                round: round.to_string(),
+            })
+            .collect();
         batches.insert(
             key,
             FixBatch {
@@ -1286,6 +1459,8 @@ pub(super) async fn run_fix_specifics_round(
                 reasking,
                 request_key,
                 req,
+                members,
+                asked: batch.len(),
             },
         );
     }
@@ -1301,6 +1476,7 @@ pub(super) async fn run_fix_specifics_round(
         batches,
         order,
         still_pending: Vec::new(),
+        resume: None,
     };
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("fix_{repo}"));
     let model = stage_model(fix_model);
@@ -1561,6 +1737,25 @@ pub async fn generate_fix_specifics_in(
     let mut pending = indices;
     let mut feedback: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut wording = FixWording::default();
+
+    // What an earlier process stored (replies, batches left live) reaches its findings first.
+    pending = resume_held_fixes(
+        llm,
+        repo,
+        fix_model,
+        meter,
+        files,
+        &repo_names,
+        &mut findings,
+        &mut feedback,
+        &mut wording,
+        pending,
+        &mut ledger,
+        &mut trail,
+        route,
+    )
+    .await;
+    pending = ledger.with_held(pending);
 
     for attempt in 0..=MAX_FIX_REGENERATIONS {
         // A finding held by a live batch is not asked again: the batch may still be billed.
