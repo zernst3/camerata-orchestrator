@@ -65,22 +65,6 @@ const SPEC_STATES: &[&str] = &[
 /// The states still placeholders, with the work order that owns each. A work order that builds a
 /// screen deletes its lines here in the same commit that registers the real renderer.
 const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
-    ("queue/empty", "WO11"),
-    ("queue/loading", "WO11"),
-    ("queue/error", "WO11"),
-    ("queue/at-budget", "WO11"),
-    ("queue/over-budget", "WO11"),
-    ("queue/line-lowered", "WO11"),
-    ("queue/rate-changed-toast", "WO11"),
-    ("queue/30k", "WO11"),
-    ("engine/lane-off", "WO11"),
-    ("engine/loading", "WO11"),
-    ("engine/card-pending", "WO11"),
-    ("engine/no-list-open", "WO11"),
-    ("engine/no-pending-correction", "WO11"),
-    ("engine/no-corrected", "WO11"),
-    ("engine/all-verdicts", "WO11"),
-    ("engine/small-category", "WO11"),
     ("detail/empty", "WO11"),
     ("detail/plain", "WO11"),
     ("detail/escalated", "WO11"),
@@ -148,11 +132,11 @@ fn placeholders_are_listed_with_their_owner() {
 fn a_placeholder_page_says_what_is_not_built_and_who_owns_it() {
     let state = registry()
         .into_iter()
-        .find(|s| s.id() == "queue/30k")
-        .expect("queue/30k is registered");
+        .find(|s| s.id() == "detail/plain")
+        .expect("detail/plain is registered");
     let html = state.render();
     assert!(
-        html.contains("not built: queue/30k, owned by WO11"),
+        html.contains("not built: detail/plain, owned by WO11"),
         "{html}"
     );
 }

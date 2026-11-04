@@ -1238,6 +1238,10 @@ pub(crate) fn TreeHost() -> Element {
             let Some(wanted) = door.0.read().clone() else {
                 return;
             };
+            // A door to another lane (an Engine Check card) is that lane's to take.
+            if wanted.lane() != camerata_ui_core::tree::shell::Lane::Tree {
+                return;
+            }
             if loaded_tree.read().is_none() {
                 return;
             }
@@ -1251,6 +1255,7 @@ pub(crate) fn TreeHost() -> Element {
                         state.write().focus_node(&id);
                         fetch.call(requests);
                     }
+                    Door::EngineCard { .. } => {}
                     Door::Site {
                         key,
                         rule_id,

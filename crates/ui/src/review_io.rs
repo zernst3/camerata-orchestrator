@@ -18,13 +18,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use camerata_api_types::decisions::{
-    Decision, DecisionError, DecisionRecorded, DecisionState, NewDecisionReq, RevokeResp,
+    Decision, DecisionError, DecisionRecorded, DecisionState, NeededMeReq, NewDecisionReq,
+    RevokeResp,
 };
 use camerata_api_types::edits::{Edit, EditError, EditRecorded, NewEditReq};
 use camerata_api_types::review_view::{
-    EngineCheckLane, EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, QueueView,
-    ReviewSettingsView, ReviewShellView, ReviewViewError, SampleSizeReq, SampleSizeResp, SiteRow,
-    SitesPage, TreeView, SITES_PAGE_SIZE,
+    EngineCheckLane, EngineCheckVerdict, EngineCheckVerdictReq, EscalationBudgetOutcome,
+    EscalationBudgetReq, ExportGateView, QueueView, ReviewSettingsView, ReviewShellView,
+    ReviewViewError, SampleSizeReq, SampleSizeResp, SiteRow, SitesPage, TreeView, SITES_PAGE_SIZE,
 };
 use camerata_ui_core::tree::state::SitesRequest;
 use serde::de::DeserializeOwned;
@@ -58,6 +59,23 @@ pub trait ReviewWrites {
     /// `POST step-models { step, model }` for a stage (`audit`, `calibration`, `group_review`,
     /// `fix`).
     fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()>;
+
+    // ── The queue's and the Engine Check lane's writes (spec sections 6 and 7). ──
+
+    /// `POST review/engine-check/:key`: one Yes or No on one sampled row. A No with no
+    /// `correction` holds the row from the client export until it is corrected.
+    fn post_engine_verdict<'a>(
+        &'a self,
+        key: &'a str,
+        req: EngineCheckVerdictReq,
+    ) -> SourceFuture<'a, EngineCheckVerdict>;
+    /// `POST decisions/:id/needed-me`: whether the reviewer needed to see an escalated site, set
+    /// on the decision itself. Answers the updated decision.
+    fn set_needed_me<'a>(
+        &'a self,
+        decision_id: &'a str,
+        needed_me: bool,
+    ) -> SourceFuture<'a, Decision>;
 }
 
 /// The reads and writes a host holds. Cloning shares the same source.
@@ -301,6 +319,33 @@ impl ReviewWrites for HttpReviewSource {
             step_models_outcome(&reply)
         })
     }
+
+    fn post_engine_verdict<'a>(
+        &'a self,
+        key: &'a str,
+        req: EngineCheckVerdictReq,
+    ) -> SourceFuture<'a, EngineCheckVerdict> {
+        Box::pin(async move {
+            // A site key holds NUL bytes and slashes: one percent-encoded path segment.
+            let segment = camerata_ui_core::engine_check::path_segment(key);
+            self.post_json(&format!("review/engine-check/{segment}"), &req)
+                .await
+        })
+    }
+
+    fn set_needed_me<'a>(
+        &'a self,
+        decision_id: &'a str,
+        needed_me: bool,
+    ) -> SourceFuture<'a, Decision> {
+        Box::pin(async move {
+            self.post_json(
+                &format!("decisions/{decision_id}/needed-me"),
+                &NeededMeReq { needed_me },
+            )
+            .await
+        })
+    }
 }
 
 /// The step-models route's reply as a result: `Ok` when `ok` is true, else its own message.
@@ -332,6 +377,10 @@ pub enum Written {
     SampleSize(usize),
     /// A stage's model, as (step key, model id).
     StageModel(String, String),
+    /// An Engine Check verdict, as (site key, request).
+    EngineVerdict(String, EngineCheckVerdictReq),
+    /// The Needed me flag, as (decision id, value).
+    NeededMe(String, bool),
 }
 
 /// A write side that records what it is given and answers with a made-up record. For tests and
@@ -484,6 +533,75 @@ impl ReviewWrites for RecordingWrites {
             }
         };
         Box::pin(std::future::ready(result))
+    }
+
+    fn post_engine_verdict<'a>(
+        &'a self,
+        key: &'a str,
+        req: EngineCheckVerdictReq,
+    ) -> SourceFuture<'a, EngineCheckVerdict> {
+        Box::pin(std::future::ready(self.engine_verdict(key, req)))
+    }
+
+    fn set_needed_me<'a>(
+        &'a self,
+        decision_id: &'a str,
+        needed_me: bool,
+    ) -> SourceFuture<'a, Decision> {
+        Box::pin(std::future::ready(self.needed_me(decision_id, needed_me)))
+    }
+}
+
+impl RecordingWrites {
+    fn engine_verdict(
+        &self,
+        key: &str,
+        req: EngineCheckVerdictReq,
+    ) -> Result<EngineCheckVerdict, ReviewSourceError> {
+        if let Some(e) = self.refused() {
+            return Err(e);
+        }
+        let verdict = EngineCheckVerdict {
+            key: key.to_string(),
+            run_id: "insp-1".to_string(),
+            right: req.right,
+            wrong: req.wrong,
+            correction: req.correction.clone(),
+            by: "reviewer".to_string(),
+            at: "2026-11-04T09:00:00Z".to_string(),
+            carried_from: None,
+        };
+        self.log
+            .borrow_mut()
+            .push(Written::EngineVerdict(key.to_string(), req));
+        Ok(verdict)
+    }
+
+    fn needed_me(&self, decision_id: &str, needed_me: bool) -> Result<Decision, ReviewSourceError> {
+        if let Some(e) = self.refused() {
+            return Err(e);
+        }
+        self.log
+            .borrow_mut()
+            .push(Written::NeededMe(decision_id.to_string(), needed_me));
+        Ok(Decision {
+            id: decision_id.to_string(),
+            key: String::new(),
+            state: DecisionState::Confirmed,
+            reason: String::new(),
+            scope: camerata_api_types::decisions::Scope::Site,
+            applies_to: Vec::new(),
+            except: Vec::new(),
+            inherited_from: None,
+            decided_by: "reviewer".to_string(),
+            decided_at: "2026-11-04T09:00:00Z".to_string(),
+            run_id: "insp-1".to_string(),
+            engine_version: "0.0.0-test".to_string(),
+            needed_me: Some(needed_me),
+            sample_verdict: None,
+            confirmed_by_client: None,
+            revoked_at: None,
+        })
     }
 }
 

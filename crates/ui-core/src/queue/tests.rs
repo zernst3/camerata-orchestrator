@@ -373,7 +373,12 @@ fn the_cells_read_the_reason_the_node_and_the_door() {
         .unwrap();
     assert!(!reason_cell(within).contains("(over)"));
     assert!(reason_cell(within).chars().next().unwrap().is_uppercase());
-    assert!(node_cell(within).contains(" > "), "{}", node_cell(within));
+    assert_eq!(
+        Some(node_cell(within).as_str()),
+        within.node_path.last().map(|c| c.label.as_str()),
+        "the cell is the sub-group; the whole path is its title"
+    );
+    assert!(node_title(within).contains(" > "), "{}", node_title(within));
     assert_eq!(
         node_id_of(within),
         within.node_path.last().map(|c| c.id.as_str())

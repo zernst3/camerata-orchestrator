@@ -409,14 +409,12 @@ pub fn reason_cell(row: &QueueRow) -> String {
     }
 }
 
-/// The Node column: the rule and the sub-group, `Rule > Sub-group`; the whole path is the title.
+/// The Node column: the sub-group the row sits in, on one line; the whole path is the title.
 pub fn node_cell(row: &QueueRow) -> String {
-    let n = row.node_path.len();
-    row.node_path[n.saturating_sub(2)..]
-        .iter()
-        .map(|c| c.label.as_str())
-        .collect::<Vec<_>>()
-        .join(" > ")
+    row.node_path
+        .last()
+        .map(|c| c.label.clone())
+        .unwrap_or_default()
 }
 
 /// The whole path, for the Node column's tooltip.
