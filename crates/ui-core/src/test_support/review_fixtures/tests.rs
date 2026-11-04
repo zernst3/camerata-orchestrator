@@ -460,6 +460,18 @@ fn the_not_group_reviewed_set_has_no_stage_two_columns() {
     assert!(!ds.tree.group_reviewed && !ds.shell.group_reviewed);
     assert!(ds.rows.iter().all(|r| r.stage2.is_none()));
     assert!(ds.candidates.is_empty());
+    assert!(
+        ds.tree.nodes.iter().all(|n| n.summary.is_none()),
+        "no node carries a model summary when the group review did not run"
+    );
+    assert!(
+        dataset_base()
+            .tree
+            .nodes
+            .iter()
+            .all(|n| n.summary.is_some()),
+        "the reviewed set keeps its summaries"
+    );
 }
 
 #[test]

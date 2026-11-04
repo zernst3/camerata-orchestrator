@@ -167,6 +167,12 @@ fn tree_not_group_reviewed_says_so_and_shows_no_summary() {
     let html = page("tree/not-group-reviewed");
     assert!(html.contains(NOT_GROUP_REVIEWED));
     assert!(html.contains("review-note"));
+    // The banner says there are no summaries; the node pane must not show one.
+    assert!(html.contains("No summary for this node."), "{html}");
+    assert!(
+        !html.contains("Summary (model)"),
+        "a model summary cannot exist when the group review did not run"
+    );
 }
 
 #[test]

@@ -1497,7 +1497,10 @@ fn assemble(
                 id: id.to_string(),
                 level,
                 parent: parent.map(str::to_string),
-                summary: Some(format!("{} sites under {label}.", counts.sites)),
+                // The group review writes the summaries; without it there are none.
+                summary: p
+                    .group_reviewed
+                    .then(|| format!("{} sites under {label}.", counts.sites)),
                 label,
                 kind,
                 cause,

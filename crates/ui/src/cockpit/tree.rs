@@ -702,7 +702,15 @@ fn NodeSide(
                 p { class: "node-summary-none", "{cause}" }
             }
             div { class: "node-summary-head",
-                span { if edited { "Summary (edited by you)" } else { "Summary (model)" } }
+                span {
+                    if edited {
+                        "Summary (edited by you)"
+                    } else if node.summary.is_some() {
+                        "Summary (model)"
+                    } else {
+                        "Summary"
+                    }
+                }
                 if !editing_summary {
                     button {
                         class: "btn-edit-sm",
