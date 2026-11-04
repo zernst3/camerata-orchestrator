@@ -659,6 +659,9 @@ mod run_complete_tests;
 #[cfg(test)]
 mod unsynced_tests;
 
+#[cfg(test)]
+mod pdf_route_tests;
+
 /// A clean report, for other modules' tests.
 #[cfg(test)]
 pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {

@@ -963,33 +963,28 @@ fn the_unreleased_zip_wrapper_is_never_called_by_production_code() {
 }
 
 #[test]
-fn compile_pdf_from_data_is_called_from_release_and_the_pdf_route_only() {
+fn compile_pdf_from_data_is_called_from_the_release_assembly_only() {
+    // The PDF-only route once compiled its own PDF after a partial gate. It now takes its PDF from
+    // the package assembly and passes the full release gate (`gated_release`), so no route calls
+    // the compile: only the assembly (release_gate.rs) and the wrapper's home (report_export.rs).
     let sites = production_call_sites("compile_pdf_from_data");
     let allowed = |s: &String| {
-        s.starts_with("server/src/release_gate.rs")
-            || s.starts_with("server/src/lib.rs")
-            || s.starts_with("server/src/report_export.rs")
+        s.starts_with("server/src/release_gate.rs") || s.starts_with("server/src/report_export.rs")
     };
     let outside: Vec<&String> = sites.iter().filter(|s| !allowed(s)).collect();
     assert!(
         outside.is_empty(),
         "compile_pdf_from_data( called elsewhere: {outside:?}"
     );
-    // lib.rs: exactly the PDF-only route, and it checks data.json first.
     let lib = production_part(include_str!("../lib.rs"));
     let route_start = lib
         .find("async fn export_audit_report(")
         .expect("the PDF route");
     let route = &lib[route_start..];
-    let gate_at = route
-        .find("check_pdf_data(")
-        .expect("the PDF route is gated");
-    let compile_at = route
-        .find("compile_pdf_from_data(")
-        .expect("the PDF route compiles");
+    let route = &route[..route.find("\n}\n").expect("the end of the route")];
     assert!(
-        gate_at < compile_at,
-        "the gate must run BEFORE the PDF is compiled"
+        route.contains("gated_release("),
+        "the PDF route passes the same release gate as the package route"
     );
 }
 
