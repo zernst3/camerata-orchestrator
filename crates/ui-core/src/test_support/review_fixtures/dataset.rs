@@ -1580,6 +1580,7 @@ fn assemble(
             .map(HoldReason::phrase)
             .unwrap_or_default()
             .to_string(),
+        node_id: r.group_path.get(2).cloned().unwrap_or_default(),
     };
     // A gap is a covered site with no per-site record. New-since rows are not covered, so they
     // never reach the gate.

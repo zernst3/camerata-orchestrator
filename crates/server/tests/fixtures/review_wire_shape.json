@@ -333,6 +333,7 @@
         "detail": "string",
         "key": "string",
         "line": "number",
+        "node_id": "string",
         "path": "string",
         "reason": "string",
         "rule_id": "string"
@@ -343,6 +344,7 @@
         "detail": "string",
         "key": "string",
         "line": "number",
+        "node_id": "string",
         "path": "string",
         "reason": "string",
         "rule_id": "string"
@@ -630,6 +632,7 @@
           "detail": "string",
           "key": "string",
           "line": "number",
+          "node_id": "string",
           "path": "string",
           "reason": "string",
           "rule_id": "string"
@@ -640,6 +643,7 @@
           "detail": "string",
           "key": "string",
           "line": "number",
+          "node_id": "string",
           "path": "string",
           "reason": "string",
           "rule_id": "string"

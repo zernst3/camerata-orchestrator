@@ -11,9 +11,14 @@ use super::thousands;
 /// Where a row's `open` button goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Door {
-    /// Focus this site in the tree lane. The rule id finds its place: the sites route reads one
-    /// node, and every site of a rule is under the rule's node.
-    Site { key: String, rule_id: String },
+    /// Focus this site in the tree lane. `node_id` is the sub-group the row sits in, and the
+    /// sites route reads that node. The rule id is the fallback for a row with no place of its
+    /// own (`rule:{rule_id}`), and is right only for a native rule.
+    Site {
+        key: String,
+        rule_id: String,
+        node_id: String,
+    },
     /// Open this node in the tree lane.
     Node { id: String },
 }
@@ -64,6 +69,7 @@ fn held_row(kind: GateRowKind, r: &HeldRow) -> GateRow {
         door: Door::Site {
             key: r.key.clone(),
             rule_id: r.rule_id.clone(),
+            node_id: r.node_id.clone(),
         },
     }
 }
@@ -165,6 +171,7 @@ mod tests {
                         == Door::Site {
                             key: h.key.clone(),
                             rule_id: h.rule_id.clone(),
+                            node_id: h.node_id.clone(),
                         }
                 })
                 .unwrap_or_else(|| panic!("no line with a door to {}", h.path));

@@ -329,6 +329,20 @@ fn the_shell_agrees_with_the_rows_and_the_gate() {
 }
 
 #[test]
+fn every_held_row_names_the_sub_group_it_sits_in() {
+    let ds = dataset_base();
+    for h in ds.gate.held.iter().chain(&ds.gate.merged_without_decision) {
+        let row = ds.row(&h.key).unwrap_or_else(|| panic!("{}", h.key));
+        assert_eq!(
+            Some(&h.node_id),
+            row.group_path.get(2),
+            "{} names its sub-group, as the server's held row does",
+            h.key
+        );
+    }
+}
+
+#[test]
 fn new_since_rows_alone_never_feed_the_export_gate() {
     let mut p = Params::base(SEED);
     p.decision_gaps = 0;

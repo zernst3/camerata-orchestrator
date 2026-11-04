@@ -1229,18 +1229,25 @@ pub(crate) fn TreeHost() -> Element {
                         state.write().focus_node(&id);
                         fetch.call(requests);
                     }
-                    Door::Site { key, rule_id } => {
-                        if let Some(sub) = locate_site(&*api.reads, &idx, &rule_id, &key).await {
+                    Door::Site {
+                        key,
+                        rule_id,
+                        node_id,
+                    } => match locate_site(&*api.reads, &idx, &node_id, &rule_id, &key).await {
+                        Ok(Some(sub)) => {
                             let requests = state.write().open_path(&idx, &sub);
                             fetch.call(requests);
                             state.write().focus_site(&sub, &key);
-                        } else {
-                            toast.call((
-                                crate::toast::ToastKind::Info,
-                                "That row is not in the tree any more.".to_string(),
-                            ));
                         }
-                    }
+                        Ok(None) => toast.call((
+                            crate::toast::ToastKind::Info,
+                            "That row is not in the tree any more.".to_string(),
+                        )),
+                        Err(message) => toast.call((
+                            crate::toast::ToastKind::Error,
+                            format!("Could not read the sites to find that row: {message}"),
+                        )),
+                    },
                 }
                 door_slot.set(None);
             });
@@ -1694,27 +1701,39 @@ pub(crate) async fn commit_summary(
     Ok(())
 }
 
-/// The sub-group a site sits in, found by reading the pages of its rule (every site of a rule is
-/// under the rule's node, and the sites route reads one node; there is no read by key). `None`
-/// when the tree has no such rule or the rule's sites do not include the key.
+/// The sub-group a site sits in, found by reading the pages of its node (the sites route reads one
+/// node; there is no read by key). `Ok(None)` when the tree has no such node or its sites do not
+/// include the key; `Err` when a page could not be read, so the panel can say so.
 pub(crate) async fn locate_site(
     source: &dyn camerata_ui::review_source::ReviewSource,
     index: &TreeIndex,
+    node_id: &str,
     rule_id: &str,
     key: &str,
-) -> Option<String> {
-    let rule_node = format!("rule:{rule_id}");
-    index.node(&rule_node)?;
+) -> Result<Option<String>, String> {
+    // The row's own sub-group when the server named it; else the rule node its id spells, which
+    // is right only for a native rule (a model-named or tool row lives elsewhere).
+    let read_node = if node_id.is_empty() {
+        format!("rule:{rule_id}")
+    } else {
+        node_id.to_string()
+    };
+    if index.node(&read_node).is_none() {
+        return Ok(None);
+    }
     let mut cursor: Option<String> = None;
     loop {
         let page = source
-            .sites_page(&rule_node, cursor.as_deref(), SITES_PAGE_SIZE)
+            .sites_page(&read_node, cursor.as_deref(), SITES_PAGE_SIZE)
             .await
-            .ok()?;
+            .map_err(|e| e.message)?;
         if let Some(row) = page.rows.iter().find(|r| r.site_key == key) {
-            return row.group_path.get(2).cloned();
+            return Ok(row.group_path.get(2).cloned());
         }
-        cursor = Some(page.next_cursor?);
+        let Some(next) = page.next_cursor else {
+            return Ok(None);
+        };
+        cursor = Some(next);
     }
 }
 

@@ -194,7 +194,7 @@ async fn editing_a_summary_posts_to_the_edits_route_keyed_by_the_node() {
 }
 
 #[tokio::test]
-async fn a_held_row_is_found_under_its_rule_and_the_door_lands_on_its_sub_group() {
+async fn a_held_row_is_found_under_its_sub_group_and_the_door_lands_on_it() {
     let ds = dataset_base();
     let reads = FixtureReviewSource::base();
     let index = TreeIndex::new(&ds.tree);
@@ -203,20 +203,102 @@ async fn a_held_row_is_found_under_its_rule_and_the_door_lands_on_its_sub_group(
         .iter()
         .find(|r| r.held == Some(HoldReason::EvidenceUnverified))
         .unwrap();
-    let sub = locate_site(&reads, &index, &held.rule_id, &held.site_key)
+    let node = held.group_path[2].clone();
+    let sub = locate_site(&reads, &index, &node, &held.rule_id, &held.site_key)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(Some(&sub), held.group_path.get(2));
     assert!(index.holds_sites(&sub));
-    // A rule the tree does not have, and a key it does not hold, are not found.
+    // A row with no place of its own falls back to the rule node its id names.
+    let by_rule = locate_site(&reads, &index, "", &held.rule_id, &held.site_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(&by_rule), held.group_path.get(2));
+    // A rule the tree does not have, a node it does not have, and a key it does not hold are
+    // not found.
     assert_eq!(
-        locate_site(&reads, &index, "NOPE-9", &held.site_key).await,
-        None
+        locate_site(&reads, &index, "", "NOPE-9", &held.site_key).await,
+        Ok(None)
     );
     assert_eq!(
-        locate_site(&reads, &index, &held.rule_id, "no\0such\0key\x01").await,
-        None
+        locate_site(
+            &reads,
+            &index,
+            "sub:NOPE-9/1",
+            &held.rule_id,
+            &held.site_key
+        )
+        .await,
+        Ok(None)
     );
+    assert_eq!(
+        locate_site(&reads, &index, &node, &held.rule_id, "no\0such\0key\x01").await,
+        Ok(None)
+    );
+}
+
+#[tokio::test]
+async fn a_model_named_row_and_a_tool_row_open_though_their_id_names_no_rule_node() {
+    // The finding's own id is not its rule node: `AI-0042` sits under `rule:ai/<category>`, a
+    // tool row under the tool's rule. Both rows keep the places the tree gave them.
+    let mut ds = dataset_base();
+    let mut picks = ds
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.held.is_some() && r.thrown_out_reason.is_none())
+        .map(|(i, _)| i);
+    let (ai, tool) = (picks.next().unwrap(), picks.next().unwrap());
+    ds.rows[ai].rule_id = "AI-0042".to_string();
+    ds.rows[tool].rule_id = "no-eval".to_string();
+    let index = TreeIndex::new(&ds.tree);
+    let reads = FixtureReviewSource::new(ds.clone());
+    for i in [ai, tool] {
+        let row = &ds.rows[i];
+        assert!(
+            index.node(&format!("rule:{}", row.rule_id)).is_none(),
+            "the id names no node ({})",
+            row.rule_id
+        );
+        // What the server now sends: the row's own sub-group.
+        let found = locate_site(
+            &reads,
+            &index,
+            &row.group_path[2],
+            &row.rule_id,
+            &row.site_key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.as_ref(), row.group_path.get(2), "{}", row.rule_id);
+        // The old reading, built from the id, misses it.
+        assert_eq!(
+            locate_site(&reads, &index, "", &row.rule_id, &row.site_key).await,
+            Ok(None),
+            "{}",
+            row.rule_id
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_page_read_is_an_error_not_a_missing_row() {
+    let ds = dataset_base();
+    let index = TreeIndex::new(&ds.tree);
+    let reads = FixtureReviewSource::failing("the server is down");
+    let held = ds.rows.iter().find(|r| r.held.is_some()).unwrap();
+    let err = locate_site(
+        &reads,
+        &index,
+        &held.group_path[2],
+        &held.rule_id,
+        &held.site_key,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("the server is down"), "{err}");
 }
 
 #[test]

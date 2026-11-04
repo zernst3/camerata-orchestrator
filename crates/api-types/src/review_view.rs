@@ -720,6 +720,12 @@ pub struct HeldRow {
     pub reason: HoldReason,
     /// Extra words for the panel line (the merge target, for a merge).
     pub detail: String,
+    /// The sub-group node the row sits in (the row's own place in the tree, `group_path[2]`).
+    /// The finding's `rule_id` does not name its rule node: a model-named row lives under
+    /// `rule:ai/<category>` and a tool row under its native rule or `rule:<tool>/<id>`. Blank
+    /// when the row was never placed.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 /// A group decision that has no record of its own for some site it covers.
