@@ -52,7 +52,11 @@ async fn only_the_oversized_batch_is_refused_and_the_other_batches_are_still_jud
 
     let outcome = judge(Some(&stub), &all, set).await;
 
-    assert_eq!(stub.call_count(), 1, "the first batch went out, the second did not");
+    assert_eq!(
+        stub.call_count(),
+        1,
+        "the first batch went out, the second did not"
+    );
     assert_eq!(outcome.model_calls, 1);
     assert_eq!(outcome.failed.len(), 1);
     let counts = &outcome.counts[&RULE];

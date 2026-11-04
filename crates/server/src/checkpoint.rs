@@ -512,7 +512,8 @@ mod tests {
 
     #[test]
     fn a_batch_record_written_before_nonces_existed_still_reads() {
-        let old = r#"[{"batch_id":"msgbatch_1","ttl":"1h","items":{"s1":"site-1"},"settled":false}]"#;
+        let old =
+            r#"[{"batch_id":"msgbatch_1","ttl":"1h","items":{"s1":"site-1"},"settled":false}]"#;
         let dir = tempfile::tempdir().unwrap();
         let cp = StageCheckpoint::new(dir.path(), "calibration");
         std::fs::write(dir.path().join("calibration.batches.json"), old).unwrap();
