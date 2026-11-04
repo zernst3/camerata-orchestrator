@@ -2896,6 +2896,14 @@ html, body {
 .review-settings-effect { font-size: 11.5px; color: var(--ink-soft); }
 .review-settings-note { margin: 4px 0 0; max-width: 64ch; line-height: 1.5; }
 .review-settings-apply { margin-bottom: 0; }
+/* The global theme's amber bevel, drop shadow and text shadow outlive .btn-run:disabled's colours
+   and make an inert Apply read as a live secondary button. The doubled class out-ranks the theme. */
+.review-settings-apply.review-settings-apply:disabled {
+  border-color: var(--line);
+  box-shadow: none;
+  text-shadow: none;
+}
+.review-settings-apply:disabled::after { display: none; }
 .review-settings-banner {
   margin: 0 0 12px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; color: var(--ink);
   background: rgba(220,38,38,0.12); border: 1px solid var(--danger-color); border-radius: 8px;
