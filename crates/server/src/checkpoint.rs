@@ -539,6 +539,46 @@ mod tests {
     }
 
     #[test]
+    fn replies_of_two_processes_under_one_round_key_are_both_kept_in_order() {
+        // Every process names its rounds from r0, so two processes can record a reply for the
+        // same key about the same findings. Both are real replies a resume must read in order.
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "detail");
+        let member = BatchMember {
+            key: "site-1".to_string(),
+            line: 7,
+            tag: "aaaaaa".to_string(),
+            round: "r0".to_string(),
+        };
+        for text in ["process one", "process two"] {
+            let mut l = line("r0:a", text);
+            l.members = vec![member.clone()];
+            cp.record_absorbed(&l).unwrap();
+        }
+        let texts: Vec<String> = cp.absorbed_in_order().into_iter().map(|l| l.text).collect();
+        assert_eq!(texts, ["process one", "process two"]);
+    }
+
+    #[test]
+    fn a_checkpoint_line_written_before_members_and_batch_ids_existed_still_loads() {
+        let old = concat!(
+            r#"{"key":"site-1","model":"m","backend":"api","cost_usd":0.5,"input_tokens":10,"#,
+            r#""output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"#,
+            r#""text":"reply"}"#,
+            "\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        std::fs::write(dir.path().join("calibration.jsonl"), old).unwrap();
+        let got = cp.absorbed_in_order();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].key, "site-1");
+        assert_eq!(got[0].text, "reply");
+        assert!(got[0].members.is_empty());
+        assert_eq!(cp.absorbed().len(), 1);
+    }
+
+    #[test]
     fn stage_checkpoints_are_named_per_stage_and_the_batch_list_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let a = StageCheckpoint::new(dir.path(), "calibration");

@@ -3508,6 +3508,86 @@ mod resume_by_member {
         );
     }
 
+    /// Every process names its rounds `r0..`, so a resumed round 0 can build the batch an
+    /// earlier process already sent under the same key. Process 1 had its round-0 reply turned
+    /// down whole; process 2 builds the same key again and stops with that batch live. Process 3
+    /// must fetch process 2's batch once, pay for it on the ledger and write the details, not
+    /// take the row for the stored reply of process 1.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_batch_under_a_key_an_earlier_process_used_is_read_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        // Process 1: its round-0 batch came back as prose and was turned down whole.
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let mut records = cp.batches();
+        assert_eq!(records.len(), 1);
+        let key = records[0].items.values().next().unwrap().clone();
+        let members: Vec<BatchMember> = records[0].members.values().flatten().cloned().collect();
+        records[0].settled = true;
+        cp.save_batches(&records).unwrap();
+        cp.record_absorbed(&AbsorbedLine {
+            key: key.clone(),
+            model: "stub".to_string(),
+            backend: "api".to_string(),
+            cost_usd: Some(0.01),
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            text: "I could not write these.".to_string(),
+            members,
+        })
+        .unwrap();
+
+        // Process 2: replays that reply (all three findings stay open), builds round 0 again
+        // under the same key, and stops with the batch live.
+        api.heal();
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (_, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert_eq!(api.submit_calls(), 2, "process 2 asked the findings again");
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_1")),
+            "{failed:?}"
+        );
+        let again = cp.batches();
+        assert_eq!(
+            again.iter().filter(|r| !r.settled).count(),
+            1,
+            "{again:?}"
+        );
+        assert_eq!(
+            again.iter().find(|r| !r.settled).unwrap().items.values().next(),
+            Some(&key),
+            "process 2's batch carries the key process 1 used"
+        );
+
+        // Process 3: the connection is back.
+        api.heal();
+        let meter = UsageMeter::default();
+        let (out, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([9, 49, 89]) {
+            assert!(wrote(row, line), "line {line} was not written: {row:?}");
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "process 2's batch was read, not sent a third time"
+        );
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            1,
+            "the live batch was fetched once"
+        );
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            2_000,
+            "process 1's stored reply and the paid reply of process 2's batch are both on the ledger"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_row_read_on_one_resume_is_not_read_or_paid_for_again_on_the_next() {
         let dir = tempfile::tempdir().unwrap();
