@@ -120,6 +120,7 @@ pub(crate) fn ReviewShellHost(
     children: Element,
 ) -> Element {
     let api = use_context_provider(|| ReviewApi::http(crate::bff_base(), project_id.clone()));
+    use_context_provider(|| camerata_ui::review_io::ReviewProject(project_id.clone()));
     // One counter for everything that reads the shell: the results screen provides it so the
     // export panel's gate re-reads after a decision too; a shell mounted alone makes its own.
     let own = use_signal(|| 0u32);

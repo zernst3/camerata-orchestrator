@@ -7153,4 +7153,73 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   .gate-reason { grid-row: 2; grid-column: 2 / 4; }
 }
 .export-clear { margin: 10px 0; }
+/* The site detail (review UI spec section 8): the pane a focused site opens in every lane. */
+.site-detail-page { max-width: 760px; margin: 12px auto; padding: 0 16px; }
+.site-detail { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; min-width: 0; }
+.site-detail-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.site-detail-head .pane-pos { margin-left: auto; }
+.site-detail-doors { display: inline-flex; gap: 4px; }
+.site-detail-crumb {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px;
+  font-size: 11px; color: var(--ink-faint); overflow-wrap: anywhere;
+}
+.site-detail-level { color: var(--ink-soft); }
+.site-detail-held {
+  margin: 4px 0; padding: 4px 8px; border: 1px solid var(--danger-color); border-radius: 4px;
+  background: rgba(220, 38, 38, 0.08); color: var(--danger-color); font-weight: 700;
+}
+.site-detail-notice {
+  margin: 4px 0; padding: 4px 8px; border-left: 3px solid var(--good); color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.site-detail-notice.warn { border-left-color: var(--warning-color); color: var(--warning-color); font-weight: 600; }
+.site-detail-undo { margin: 4px 0; }
+.site-detail-line {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 2px 0;
+}
+.site-detail-label { flex: none; width: 104px; color: var(--ink-faint); }
+.site-detail-value { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+.site-detail-multi .site-detail-value { white-space: pre-wrap; }
+.site-detail-note { color: var(--ink-soft); font-size: 11.5px; }
+.site-detail-edit { flex: none; margin-left: auto; padding: 1px 8px; font-size: 11px; }
+.site-detail-meta {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 14px; margin: 2px 0;
+}
+.site-detail-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.site-detail-item .site-detail-label { width: 72px; }
+.site-detail-stale {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0 0 4px 112px;
+  padding-left: 8px; border-left: 3px solid var(--line); color: var(--ink-soft);
+}
+.site-detail-stale-text { overflow-wrap: anywhere; }
+.site-detail-line-action { padding: 1px 8px; font-size: 11px; }
+.dec-stale { color: var(--warning-color); font-weight: 700; }
+.site-detail-chord { margin: 6px 0 0; padding: 4px 8px; border: 1px dashed var(--accent); color: var(--ink); }
+.site-detail-actions { margin-top: 6px; }
+.site-detail-form { margin: 6px 0; }
+.site-detail-input { width: 100%; box-sizing: border-box; font-family: inherit; }
+.site-detail-error { margin: 4px 0; }
+.site-detail-grid {
+  display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 4px 8px; align-items: center; margin: 4px 0;
+}
+.site-detail-grid > label { color: var(--ink-faint); }
+.site-detail-grid .addressee-input { width: 100%; box-sizing: border-box; }
+.site-detail-line-load { display: flex; gap: 6px; align-items: center; }
+.site-detail-line-load .addressee-input { flex: 1 1 auto; }
+.site-detail-snippet { margin: 2px 0 6px; }
+.site-detail-snippet-note { margin: 2px 0 6px; color: var(--ink-faint); }
+.site-detail-snippet-note.warn { color: var(--warning-color); }
+.site-detail-candidates {
+  list-style: none; margin: 4px 0; padding: 0; max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.site-detail-candidate, .site-detail-candidate-none {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 4px 8px;
+  border-bottom: 1px solid var(--line-soft); cursor: pointer;
+}
+.site-detail-candidate:last-child { border-bottom: none; }
+.site-detail-candidate:hover { background: rgba(255, 255, 255, 0.04); }
+.site-detail-candidate.picked { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.site-detail-candidate-rule { color: var(--ink-soft); }
+.site-detail-candidate-none { color: var(--ink-faint); cursor: default; }
 "#;

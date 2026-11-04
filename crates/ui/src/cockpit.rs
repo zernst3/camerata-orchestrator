@@ -3451,6 +3451,7 @@ pub(crate) mod review_shell;
 pub mod rules;
 mod saved_inspections;
 pub mod scan;
+pub(crate) mod site_detail;
 mod stack;
 pub mod table;
 #[cfg(test)]
