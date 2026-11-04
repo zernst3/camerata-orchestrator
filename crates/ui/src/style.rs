@@ -7046,7 +7046,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-row .col-s2 { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 .dec-decided { color: var(--good); font-weight: 700; }
 .dec-unresolved { color: var(--ink-faint); }
-.dec-inherited { margin-left: 4px; font-size: 10px; color: var(--ink-faint); }
+.site-table td.col-dec { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.dec-inherited { display: block; margin-left: 0; font-size: 10px; color: var(--ink-faint); }
 .tree-badge {
   display: inline-block; font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 7px;
   border: 1px solid transparent; white-space: nowrap;

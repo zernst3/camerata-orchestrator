@@ -190,6 +190,41 @@ fn the_undo_bar_sits_above_both_columns_and_sticks_so_a_narrow_window_cannot_bur
 }
 
 #[test]
+fn the_decision_cell_is_not_cut_by_the_stylesheet_and_has_the_room_for_its_word() {
+    // "Confirmed" over "inherited" must read whole: a pattern decision that clips to "Confirmed
+    // i" looks like the reviewer's own.
+    let rule = |sel: &str| -> String {
+        GLOBAL_CSS
+            .split('}')
+            .find(|r| r.contains(sel))
+            .unwrap_or_else(|| panic!("no rule for {sel}"))
+            .to_string()
+    };
+    let cell = rule(".site-table td.col-dec");
+    assert!(cell.contains("overflow: visible"), "{cell}");
+    assert!(cell.contains("white-space: normal"), "{cell}");
+    assert!(
+        !cell.contains("ellipsis") || cell.contains("text-overflow: clip"),
+        "{cell}"
+    );
+    assert!(rule(".dec-inherited").contains("display: block"));
+
+    let html = page("tree/markers");
+    let widths: Vec<u32> = html
+        .split("<col style=\"width: ")
+        .skip(1)
+        .take(9)
+        .filter_map(|c| c.split('%').next()?.parse().ok())
+        .collect();
+    // Eight percentage columns after the 22px tick, then Decision is the last of them.
+    assert_eq!(widths.len(), 8, "{widths:?}");
+    assert!(widths[7] >= 16, "Decision gets at least 16%: {widths:?}");
+    assert!(widths[0] <= 12, "two chips do not need more: {widths:?}");
+    assert!(widths[4] >= 20, "Headline takes the remainder: {widths:?}");
+    assert_eq!(widths.iter().sum::<u32>(), 100, "{widths:?}");
+}
+
+#[test]
 fn tree_not_group_reviewed_says_so_and_shows_no_summary() {
     let html = page("tree/not-group-reviewed");
     assert!(html.contains(NOT_GROUP_REVIEWED));

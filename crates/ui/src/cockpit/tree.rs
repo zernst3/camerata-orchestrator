@@ -485,16 +485,17 @@ fn SiteTable(
                 table { class: "site-table",
                     // Fixed widths so every column, the Decision column included, is on screen
                     // at the spec's 1440 and 1000 pixel widths; long cells clip with a tooltip.
+                    // The Decision cell wraps instead, with "inherited" on its own line.
                     colgroup {
                         col { style: "width: 22px" }
-                        col { style: "width: 18%" }
-                        col { style: "width: 9%" }
-                        col { style: "width: 9%" }
-                        col { style: "width: 20%" }
-                        col { style: "width: 14%" }
+                        col { style: "width: 12%" }
                         col { style: "width: 8%" }
                         col { style: "width: 9%" }
-                        col { style: "width: 13%" }
+                        col { style: "width: 20%" }
+                        col { style: "width: 20%" }
+                        col { style: "width: 7%" }
+                        col { style: "width: 8%" }
+                        col { style: "width: 16%" }
                     }
                     thead {
                         tr {
