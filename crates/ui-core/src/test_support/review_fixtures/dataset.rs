@@ -129,6 +129,9 @@ pub struct Params {
     pub moved: usize,
     pub duplicates: usize,
     pub decided_subgroups: usize,
+    /// Sub-groups of which every member is decided by one group decision (no outlier, no held
+    /// row, no new member), so the tree draws its green check.
+    pub fully_decided_subgroups: usize,
     pub decided_rules: usize,
     /// Covered sites whose inherited record is missing: decided sub-group members with no
     /// per-site record. The only thing that feeds the export gate's `node_decisions_missing_members`.
@@ -192,6 +195,7 @@ impl Params {
             moved: 6,
             duplicates: 7,
             decided_subgroups: 6,
+            fully_decided_subgroups: 2,
             decided_rules: 1,
             decision_gaps: 2,
             new_since_decision: 5,
@@ -231,6 +235,7 @@ impl Params {
             moved: 60,
             duplicates: 150,
             decided_subgroups: 140,
+            fully_decided_subgroups: 20,
             decided_rules: 6,
             decision_gaps: 3,
             new_since_decision: 90,
@@ -1137,12 +1142,28 @@ pub fn build(p: &Params) -> ReviewDataSet {
         .map(|(k, _)| k)
         .collect();
     let stride = (big_subs.len() / p.decided_subgroups.max(1)).max(1);
-    let picked_subs: Vec<String> = big_subs
+    let mut picked_subs: Vec<String> = big_subs
         .iter()
         .step_by(stride)
         .take(p.decided_subgroups)
         .map(|s| (*s).clone())
         .collect();
+    // Sub-groups no outlier, held row, edit or marker touches, decided whole: they come last, so
+    // the new-since and missing-record rows the earlier groups carry are already placed.
+    let whole: Vec<String> = sub_members
+        .iter()
+        .filter(|(k, m)| {
+            !picked_subs.contains(k) && m.len() >= 2 && m.iter().all(|&i| is_free(&special, i))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let whole_stride = (whole.len() / p.fully_decided_subgroups.max(1)).max(1);
+    picked_subs.extend(
+        whole
+            .into_iter()
+            .step_by(whole_stride)
+            .take(p.fully_decided_subgroups),
+    );
     let big_rules: Vec<&String> = rule_members
         .keys()
         .filter(|k| {

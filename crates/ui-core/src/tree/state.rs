@@ -18,7 +18,7 @@ use super::is_outlier;
 // ── The tree's shape ──────────────────────────────────────────────────────────────────────
 
 /// A [`TreeView`] indexed for walking: children by parent, nodes by id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TreeIndex {
     nodes: Vec<TreeNodeView>,
     by_id: HashMap<String, usize>,
@@ -85,6 +85,19 @@ impl TreeIndex {
     pub fn holds_sites(&self, id: &str) -> bool {
         self.node(id)
             .is_some_and(|n| n.level == TreeLevel::Subgroup)
+    }
+
+    /// The labels from the top level node down to `id`, as `(id, label)`, for the breadcrumb.
+    pub fn breadcrumb(&self, id: &str) -> Vec<(String, String)> {
+        self.path_to(id)
+            .into_iter()
+            .map(|node| {
+                let label = self
+                    .node(&node)
+                    .map_or_else(String::new, |n| n.label.clone());
+                (node, label)
+            })
+            .collect()
     }
 
     /// `id` and every node above it, root first.

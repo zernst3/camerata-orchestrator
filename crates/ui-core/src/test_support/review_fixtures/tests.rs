@@ -859,3 +859,26 @@ fn every_fixture_key_has_the_real_shape_with_three_nuls() {
         }
     }
 }
+
+/// A node whose every site is decided is there to be drawn with its check (spec section 2).
+#[test]
+fn the_base_set_has_a_fully_decided_sub_group_and_the_node_decided_state_opens_it() {
+    let ds = dataset_base();
+    let whole: Vec<&str> = ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| n.level == TreeLevel::Subgroup && n.counts.sites > 0)
+        .filter(|n| n.counts.decided == n.counts.sites && n.decision.is_some())
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(!whole.is_empty(), "no sub-group is decided whole");
+    let fx = fixture("tree/node-decided").unwrap();
+    let Body::Tree(t) = fx.body else {
+        panic!("not a tree body");
+    };
+    assert!(
+        whole.iter().any(|w| t.open_nodes.iter().any(|o| o == w)),
+        "the state opens a fully decided sub-group"
+    );
+}

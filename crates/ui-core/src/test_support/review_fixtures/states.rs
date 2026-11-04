@@ -96,6 +96,7 @@ fn empty_params() -> Params {
         p.moved = 0;
         p.duplicates = 0;
         p.decided_subgroups = 0;
+        p.fully_decided_subgroups = 0;
         p.decided_rules = 0;
         p.decision_gaps = 0;
         p.new_since_decision = 0;
@@ -421,9 +422,23 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                         .find(|n| n.id == *s)
                         .map_or(0, |n| n.counts.new_since_decision)
                 })?;
+            // A sub-group every site of which is decided, so its green check is on the page.
+            let whole = ds
+                .tree
+                .nodes
+                .iter()
+                .find(|n| {
+                    n.level == TreeLevel::Subgroup
+                        && n.id != sub
+                        && n.decision.is_some()
+                        && n.counts.sites > 0
+                        && n.counts.decided == n.counts.sites
+                })
+                .map(|n| n.id.clone());
+            let subs: Vec<String> = std::iter::once(sub).chain(whole).collect();
             StateFixture {
                 shell: shell_of(&ds),
-                body: Body::Tree(tree_body(&ds, std::slice::from_ref(&sub))),
+                body: Body::Tree(tree_body(&ds, &subs)),
             }
         }
         "tree/not-group-reviewed" => {

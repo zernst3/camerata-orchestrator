@@ -26,6 +26,27 @@ use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::review::{EscalationReason, EscalationState, OutlierReason};
 use camerata_api_types::review_view::{Marker, NodeCountsView, SiteRow, TreeLevel};
 
+// ── What a screen is showing ──────────────────────────────────────────────────────────────
+
+/// A view that may still be loading or may have failed (the empty, loading and error states of
+/// spec section 5 for every screen that reads the server).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewStatus<T> {
+    Loading,
+    /// The server's reason, in words.
+    Failed(String),
+    Ready(T),
+}
+
+impl<T> ViewStatus<T> {
+    pub fn ready(&self) -> Option<&T> {
+        match self {
+            Self::Ready(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 // ── Keys in the DOM ───────────────────────────────────────────────────────────────────────
 
 /// A site key or node id as a token that is safe in an element id, an `href`, a `data-`

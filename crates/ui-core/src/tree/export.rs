@@ -11,8 +11,9 @@ use super::thousands;
 /// Where a row's `open` button goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Door {
-    /// Focus this site in the tree lane.
-    Site { key: String },
+    /// Focus this site in the tree lane. The rule id finds its place: the sites route reads one
+    /// node, and every site of a rule is under the rule's node.
+    Site { key: String, rule_id: String },
     /// Open this node in the tree lane.
     Node { id: String },
 }
@@ -60,7 +61,10 @@ fn held_row(kind: GateRowKind, r: &HeldRow) -> GateRow {
         } else {
             r.detail.clone()
         },
-        door: Door::Site { key: r.key.clone() },
+        door: Door::Site {
+            key: r.key.clone(),
+            rule_id: r.rule_id.clone(),
+        },
     }
 }
 
@@ -156,7 +160,13 @@ mod tests {
         for h in gate.held.iter().chain(&gate.merged_without_decision) {
             let row = rows
                 .iter()
-                .find(|r| r.door == Door::Site { key: h.key.clone() })
+                .find(|r| {
+                    r.door
+                        == Door::Site {
+                            key: h.key.clone(),
+                            rule_id: h.rule_id.clone(),
+                        }
+                })
                 .unwrap_or_else(|| panic!("no line with a door to {}", h.path));
             assert_eq!(row.place, format!("{}:{}", h.path, h.line));
             assert_eq!(row.rule_id, h.rule_id);
