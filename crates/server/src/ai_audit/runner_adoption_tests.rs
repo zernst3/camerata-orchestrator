@@ -709,7 +709,10 @@ fn fn_body<'s>(src: &'s str, header: &str) -> &'s str {
 /// call, fails here.
 #[test]
 fn every_post_scan_stage_runs_through_run_stage() {
-    const AUDIT: &str = include_str!("../ai_audit.rs");
+    const AUDIT: &str = concat!(
+        include_str!("alternatives.rs"),
+        include_str!("fix_stage.rs")
+    );
     const CALIBRATION: &str = include_str!("calibration.rs");
     const GROUP_REVIEW: &str = include_str!("group_review.rs");
     const DETAIL: &str = include_str!("detail_regen.rs");
