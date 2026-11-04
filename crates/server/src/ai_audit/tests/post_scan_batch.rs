@@ -135,6 +135,32 @@ async fn a_capped_batch_run_prices_the_fix_window_from_its_real_bytes() {
     assert!(out[0].fix_specific.is_some());
 }
 
+/// D4: a batch whose results could not be fetched may still be running and billed. Every later
+/// round and the end-of-run second try left it alone: the findings stay pending, the failed part
+/// names the batch and a resume polls it.
+#[tokio::test(start_paused = true)]
+async fn a_fix_batch_whose_results_cannot_be_fetched_is_never_submitted_again() {
+    let stub = Arc::new(SequencedCompleter::new(&[FIX_REPLY]));
+    let api = LoopBatch::new(stub.clone());
+    api.fail_next_fetch();
+    let seam = api.seam();
+    let (out, failed) = fix_with(&seam, BATCH, None).await;
+
+    assert_eq!(
+        api.submit_calls(),
+        1,
+        "the finding was not sent again while its first batch may still be billed"
+    );
+    assert_eq!(stub.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(out[0].fix_specific.is_none());
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].reason.contains("msgbatch_0"),
+        "the failed part names the live batch: {}",
+        failed[0].reason
+    );
+}
+
 // ── alternatives ────────────────────────────────────────────────────────────────────────────
 
 async fn alternatives_with(
@@ -227,4 +253,22 @@ async fn a_capped_batch_run_prices_the_alternatives_window_from_its_real_bytes()
     let (recs, _) = alternatives_with(&seam, BATCH, Some(&meter)).await.unwrap();
     assert_eq!(api.submit_calls(), 1);
     assert_eq!(recs.len(), 1);
+}
+
+/// D4: the same for the alternatives call: no second try while its batch may still be billed.
+#[tokio::test(start_paused = true)]
+async fn an_alternatives_batch_whose_results_cannot_be_fetched_is_never_submitted_again() {
+    let stub = Arc::new(SequencedCompleter::new(&[ALTERNATIVES_REPLY]));
+    let api = LoopBatch::new(stub.clone());
+    api.fail_next_fetch();
+    let seam = api.seam();
+    let result = alternatives_with(&seam, BATCH, None).await;
+
+    assert_eq!(api.submit_calls(), 1, "the call was not sent again");
+    assert_eq!(stub.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let err = result.expect_err("the call got no reply");
+    assert!(
+        format!("{err:#}").contains("msgbatch_0"),
+        "the error names the live batch: {err:#}"
+    );
 }

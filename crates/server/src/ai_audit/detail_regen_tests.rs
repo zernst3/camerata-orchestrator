@@ -3161,6 +3161,39 @@ mod batch_route {
         assert!(out[0].detail.contains("finding at line 9"));
     }
 
+    /// D4: a batch whose results could not be fetched may still be running and billed. The later
+    /// rounds and the end-of-run second try leave its findings alone: they stay pending, the
+    /// failed part names the batch and a resume polls it.
+    #[tokio::test(start_paused = true)]
+    async fn a_detail_batch_whose_results_cannot_be_fetched_is_never_submitted_again() {
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let route = StageRoute {
+            batch: true,
+            job: None,
+        };
+        let (out, failed) = run(&seam, route, None).await;
+
+        assert_eq!(
+            api.submit_calls(),
+            1,
+            "the findings were not sent again while their first batch may still be billed"
+        );
+        assert!(stub.prompts(Role::Regen).is_empty());
+        assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+        let part = failed
+            .iter()
+            .find(|f| f.pass == STAGE_DETAIL)
+            .expect("a failed detail part");
+        assert!(
+            part.reason.contains("msgbatch_0"),
+            "the failed part names the live batch: {}",
+            part.reason
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_capped_batch_run_prices_the_rewrite_window_from_its_real_bytes() {
         // A limit no request of this size can fit under: refused before anything is sent, and

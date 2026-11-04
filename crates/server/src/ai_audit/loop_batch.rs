@@ -7,7 +7,7 @@
 //! stage run in batch mode and the same stage run in real time see the same replies, and a test
 //! can say what was absorbed, and how.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::batch_mode::{BatchApi, BatchSeam};
@@ -21,6 +21,11 @@ pub(crate) struct LoopBatch {
     /// `(custom id, request)` per accepted batch; the batch id is `msgbatch_<index>`.
     batches: Mutex<Vec<Vec<(String, LlmRequest)>>>,
     submits: AtomicUsize,
+    /// When set, the batch fetched next never gives its results back (see `doomed`): it was
+    /// accepted, so it may still be running and billed, but every try to fetch it fails.
+    fail_next_fetch: AtomicBool,
+    /// The batch whose every fetch attempt fails as a dropped connection.
+    doomed: Mutex<Option<String>>,
 }
 
 impl LoopBatch {
@@ -29,12 +34,20 @@ impl LoopBatch {
             stub,
             batches: Mutex::new(Vec::new()),
             submits: AtomicUsize::new(0),
+            fail_next_fetch: AtomicBool::new(false),
+            doomed: Mutex::new(None),
         })
     }
 
     /// The model seam a stage is handed: real-time calls go to the stub, batches to this double.
     pub(crate) fn seam(self: &Arc<Self>) -> BatchSeam {
         BatchSeam::new(self.clone() as Arc<dyn BatchApi>)
+    }
+
+    /// Make every fetch attempt of the next batch fetched fail in transport (the runner tries a
+    /// fetch more than once, so one failed attempt would only be retried).
+    pub(crate) fn fail_next_fetch(&self) {
+        self.fail_next_fetch.store(true, Ordering::SeqCst);
     }
 
     /// How many batches were submitted.
@@ -107,6 +120,12 @@ impl BatchApi for LoopBatch {
         Ok(())
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        if self.fail_next_fetch.swap(false, Ordering::SeqCst) {
+            *self.doomed.lock().unwrap() = Some(batch_id.to_string());
+        }
+        if self.doomed.lock().unwrap().as_deref() == Some(batch_id) {
+            anyhow::bail!("error sending request: connection reset by peer");
+        }
         let n: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
         let members = self.batches.lock().unwrap()[n].clone();
         let mut rows = Vec::new();

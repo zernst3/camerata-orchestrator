@@ -770,6 +770,13 @@ pub(super) fn fix_rejections(
         .map(|&i| {
             let f = &findings[i];
             let earlier = feedback.get(&i).map(String::as_str);
+            if let Some(batch_id) = ledger.held.get(&i) {
+                return format!(
+                    "{}:{} {}: batch {batch_id} was submitted and its results could not be \
+                     fetched; it may still be running and billed, so it was not submitted again",
+                    f.path, f.line, f.rule_id
+                );
+            }
             let why = match (ledger.last_miss.get(&i), earlier) {
                 (Some(FixMiss::TransportFailed), Some(e)) => {
                     format!(
@@ -960,9 +967,30 @@ pub(super) struct FixLedger {
     /// Findings whose latest attempt failed in transport (see [`second_try_allowed`]): the only
     /// ones the end-of-run second try sends again.
     retry_at_end: std::collections::HashSet<usize>,
+    /// Findings whose batch was accepted but whose results could not be fetched (D4), by batch
+    /// id. The batch may still be running and billed, so no round and no second try sends them
+    /// again: they stay pending, the failed part names the batch and a resume polls it.
+    held: std::collections::HashMap<usize, String>,
 }
 
 impl FixLedger {
+    /// The members of `pending` a round may ask: those no live batch holds.
+    fn askable(&self, pending: &[usize]) -> Vec<usize> {
+        pending
+            .iter()
+            .copied()
+            .filter(|i| !self.held.contains_key(i))
+            .collect()
+    }
+
+    /// `pending`, as a round left it, plus every finding a live batch holds.
+    fn with_held(&self, mut pending: Vec<usize>) -> Vec<usize> {
+        pending.extend(self.held.keys().copied());
+        pending.sort_unstable();
+        pending.dedup();
+        pending
+    }
+
     fn miss(&mut self, batch: &[usize], why: FixMiss) {
         for &i in batch {
             self.last_miss.insert(i, why);
@@ -1327,7 +1355,12 @@ pub(super) async fn run_fix_specifics_round(
             })
             .collect();
         trail.note_failed_item(f.class, &f.reason, &attempts);
-        if f.class.is_retried_at_end() && !outage {
+        if let Some(batch_id) = &f.live_batch {
+            // The batch may still be running and billed: these findings are not sent again.
+            for &idx in &bctx.batch {
+                stage.ledger.held.insert(idx, batch_id.clone());
+            }
+        } else if f.class.is_retried_at_end() && !outage {
             stage.ledger.retryable_at_end(&bctx.batch);
         }
         stage.ledger.miss(&bctx.batch, FixMiss::TransportFailed);
@@ -1530,10 +1563,12 @@ pub async fn generate_fix_specifics_in(
     let mut wording = FixWording::default();
 
     for attempt in 0..=MAX_FIX_REGENERATIONS {
-        if pending.is_empty() {
+        // A finding held by a live batch is not asked again: the batch may still be billed.
+        let ask = ledger.askable(&pending);
+        if ask.is_empty() {
             break;
         }
-        pending = run_fix_specifics_round(
+        let next = run_fix_specifics_round(
             llm,
             repo,
             &system,
@@ -1546,7 +1581,7 @@ pub async fn generate_fix_specifics_in(
             &mut findings,
             &mut feedback,
             &mut wording,
-            &pending,
+            &ask,
             FIX_BATCH_SIZE,
             &format!("r{attempt}"),
             &mut ledger,
@@ -1555,13 +1590,15 @@ pub async fn generate_fix_specifics_in(
             route,
         )
         .await;
+        pending = ledger.with_held(next);
     }
 
     // C6-B3.4: one FINAL, cheap-reliability pass over whatever's still pending — SOLO
     // (batch_size = 1) rather than batched. See this function's doc comment for why a
     // smaller prompt is worth one extra call per still-pending finding.
-    if !pending.is_empty() {
-        pending = run_fix_specifics_round(
+    let ask = ledger.askable(&pending);
+    if !ask.is_empty() {
+        let next = run_fix_specifics_round(
             llm,
             repo,
             &system,
@@ -1574,7 +1611,7 @@ pub async fn generate_fix_specifics_in(
             &mut findings,
             &mut feedback,
             &mut wording,
-            &pending,
+            &ask,
             1,
             "solo",
             &mut ledger,
@@ -1583,6 +1620,7 @@ pub async fn generate_fix_specifics_in(
             route,
         )
         .await;
+        pending = ledger.with_held(next);
     }
 
     // END-OF-RUN SECOND TRY, for transport trouble only. A finding whose last attempt could not
@@ -1736,6 +1774,8 @@ pub async fn generate_fix_specifics_in(
                  {instantiated} have the rule's own authored fix to show as a Standard fix \
                  once the part completes, and {uncovered} have no authored fix (they would \
                  be held for manual review rather than shipped with no fix at all)"
+            ) + &super::detail_regen::held_batches_sentence(
+                unfinished.iter().filter_map(|i| ledger.held.get(i)),
             ),
             files_not_reviewed: 0,
             class: trail.class(),

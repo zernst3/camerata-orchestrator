@@ -301,10 +301,30 @@ pub(crate) fn error_with_both_tries(first: &anyhow::Error, second: anyhow::Error
     anyhow::Error::new(failure)
 }
 
+/// Rides on the error of a call whose Message Batch was accepted but whose results could not be
+/// fetched (D4). The batch may still be running and billed, so the call is not sent again: no
+/// second try covers it, and a resume polls the batch. Carries the batch id.
+#[derive(Debug)]
+pub(crate) struct LiveBatchHeld(pub(crate) String);
+
+impl std::fmt::Display for LiveBatchHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "batch {} was submitted and may still be running and billed, so it was not submitted \
+             again",
+            self.0
+        )
+    }
+}
+
 /// True when a failed call of a stage is worth the end-of-run second try: its class is transport
-/// or content, and the run has not stopped.
+/// or content, the run has not stopped, and its batch is not still live (a second copy of a
+/// running batch's call is paid for again).
 pub(crate) fn second_try_allowed(e: &anyhow::Error, meter: Option<&UsageMeter>) -> bool {
-    classify_pass_error(e).is_retried_at_end() && !meter.is_some_and(UsageMeter::outage_stopped)
+    classify_pass_error(e).is_retried_at_end()
+        && e.downcast_ref::<LiveBatchHeld>().is_none()
+        && !meter.is_some_and(UsageMeter::outage_stopped)
 }
 
 /// Why a pass failed when the outage stop refused a retry its reply needed (the pass was in

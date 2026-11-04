@@ -1139,7 +1139,12 @@ impl AlternativesAsk<'_> {
                 Some(f) => {
                     let mut failure = camerata_llm::failure::LlmCallFailure::new(f.class, f.reason);
                     failure.attempts = f.attempts;
-                    anyhow::Error::new(failure)
+                    let err = anyhow::Error::new(failure);
+                    match f.live_batch {
+                        // The batch may still be running and billed: no second try covers it.
+                        Some(batch_id) => err.context(super::failures::LiveBatchHeld(batch_id)),
+                        None => err,
+                    }
                 }
                 None => anyhow::anyhow!("the recommendation call did not run"),
             });
