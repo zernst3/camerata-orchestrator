@@ -316,6 +316,14 @@ async fn judge_rule(
             .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
             .with_cache_prefix_len(prefix_len)
             .with_model(req.judge_model.to_string());
+        // Design A7: every model request passes the size check before it is sent. One that does
+        // not fit the model's window is refused here, never cut and never sent; it is disclosed
+        // as the failed part below and its candidates stay undecided (not assessed, not clean).
+        if let Err(too_large) = crate::ai_audit::request_budget::ensure_request_fits(&request) {
+            first_failure.get_or_insert_with(|| too_large.to_string());
+            append(feedback, session, &format!("batch not sent: {too_large}"));
+            continue;
+        }
         // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
         let mut on_delta = |_: &str| {};
         outcome.model_calls += 1;

@@ -368,7 +368,7 @@ mod applies_to_routing_tests;
 mod candidate_passes;
 
 mod repo_map;
-mod request_budget;
+pub(crate) mod request_budget;
 pub(crate) use repo_map::RepoMap;
 
 #[cfg(test)]

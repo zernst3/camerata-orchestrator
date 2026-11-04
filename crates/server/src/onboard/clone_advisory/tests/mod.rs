@@ -20,6 +20,7 @@ mod redaction;
 mod repros;
 mod rows;
 mod seam;
+mod size_check;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;
 
