@@ -312,6 +312,28 @@ enum Command {
         zip: PathBuf,
     },
 
+    /// Write a demo review project (a fixture run, a reviewer's decisions, edits, Engine Check
+    /// verdicts and settings) into a data directory, through the server's own stores. For the
+    /// liveview build and the desktop smoke checklist. No model, no network. Refuses a data
+    /// directory with anything in it unless `--force`, and never deletes. See
+    /// `camerata::seed_review_cmd`'s module doc comment.
+    SeedReview {
+        /// The fixture folder (`run.json`, `overlays.json`, `moved.json`), for example
+        /// `crates/server/fixtures/review-demo`.
+        fixture: PathBuf,
+        /// The data directory to seed. The stores go under `<data-dir>/camerata`, where
+        /// `CAMERATA_DATA_DIR=<data-dir>` makes the server look.
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// `base` (one inspection) or `moved` (a second inspection after the code moved, so a
+        /// decision and an edit are stale and one site is new since a group decision).
+        #[arg(long, value_enum, default_value = "base")]
+        variant: camerata::seed_review_cmd::VariantArg,
+        /// Seed a data directory that is not empty, adding the project beside what is there.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Count a repo exactly as the inspection reads it: files and non-blank lines per language,
     /// plus what the noise filter excluded. No model, no network. This is the number a quote is
     /// priced on. See `camerata::count_cmd`'s module doc comment.
@@ -575,6 +597,20 @@ async fn main() -> anyhow::Result<()> {
             run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
         }
         Command::ReleaseGate { zip } => run_release_gate_cmd(&ReleaseGateArgs { zip }),
+        Command::SeedReview {
+            fixture,
+            data_dir,
+            variant,
+            force,
+        } => {
+            run_seed_review_cmd(&camerata::seed_review_cmd::SeedReviewArgs {
+                fixture,
+                data_dir,
+                variant,
+                force,
+            })
+            .await
+        }
         Command::Count { repo, json } => {
             println!(
                 "{}",
@@ -636,6 +672,22 @@ fn run_release_gate_cmd(args: &ReleaseGateArgs) -> anyhow::Result<()> {
         Err(e) => {
             eprintln!("camerata release-gate: {e}");
             std::process::exit(release_gate_cmd::EXIT_GATE_UNAVAILABLE);
+        }
+    }
+}
+
+/// `seed-review`'s handler: what was written to stdout, exit 0 seeded / 1 refused or failed.
+async fn run_seed_review_cmd(
+    args: &camerata::seed_review_cmd::SeedReviewArgs,
+) -> anyhow::Result<()> {
+    match camerata::seed_review_cmd::run_seed_review(args).await {
+        Ok(report) => {
+            print!("{report}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("camerata seed-review: {e}");
+            std::process::exit(1);
         }
     }
 }

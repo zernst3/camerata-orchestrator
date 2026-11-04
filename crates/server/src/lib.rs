@@ -120,6 +120,7 @@ pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
+pub mod seed;
 pub mod severity_bounds;
 pub mod stage_telemetry;
 pub mod stall_sweep;
