@@ -11,7 +11,8 @@ use camerata_api_types::decisions::{ClientAck, DecisionState, Scope};
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::{
     DisagreementField, EscalationBudget, EscalationCandidate, EscalationReason, EscalationState,
-    OutlierReason, ReviewLevel, Stage2Disagreement,
+    OutlierReason, ReviewLevel, Stage2Disagreement, ENGINE_VERIFIED, PERSONALLY_REVIEWED,
+    REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
     BreadcrumbItem, CategoryAllocation, CorrectionRef, DecisionView, DuplicateView, EditView,
@@ -416,6 +417,13 @@ fn cat_node(c: usize) -> String {
 const THROWN_CAT: &str = "cat:thrown-out";
 const THROWN_RULE: &str = "rule:THROWN-1";
 const THROWN_SUB: &str = "sub:THROWN-1/1";
+
+/// A review level read back from its wire form. The server computes the level in one place
+/// (`apply_overlay`) and a source scan keeps it so; a fixture decodes what the server would have
+/// written instead of building a level itself.
+fn level(wire: &str) -> Option<ReviewLevel> {
+    ReviewLevel::parse(wire)
+}
 
 // ── Rows ──────────────────────────────────────────────────────────────────────────────────
 
@@ -940,7 +948,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
             stale: false,
             reapplied_from: None,
         });
-        rows[i].review_level = Some(ReviewLevel::PersonallyReviewed);
+        rows[i].review_level = level(PERSONALLY_REVIEWED);
     }
     for (n, &i) in stale_edit_rows.iter().enumerate() {
         let field = fields[n % 2];
@@ -993,7 +1001,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
 
     for &i in &added_rows {
         rows[i].added_by_reviewer = true;
-        rows[i].review_level = Some(ReviewLevel::PersonallyReviewed);
+        rows[i].review_level = level(PERSONALLY_REVIEWED);
     }
 
     // Node decisions: sub-groups first, then whole rules.
@@ -1085,7 +1093,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                 needed_me: None,
                 confirmed_by_client: None,
             });
-            rows[i].review_level = Some(ReviewLevel::ReviewedAsPattern(node.clone()));
+            rows[i].review_level = level(&format!("{REVIEWED_AS_PATTERN_PREFIX}{node}"));
         }
         node_decisions.push(NodeDecisionRecord {
             node: node.clone(),
@@ -1157,7 +1165,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                 note: "Accepted for this release.".to_string(),
             }),
         });
-        rows[i].review_level = Some(ReviewLevel::PersonallyReviewed);
+        rows[i].review_level = level(PERSONALLY_REVIEWED);
         made += 1;
     }
     // Decisions on escalated rows (the "needed me" tally).
@@ -1180,7 +1188,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                     needed_me: Some(n % 2 == 0),
                     confirmed_by_client: None,
                 });
-                rows[i].review_level = Some(ReviewLevel::PersonallyReviewed);
+                rows[i].review_level = level(PERSONALLY_REVIEWED);
             }
         }
     }
@@ -1190,7 +1198,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
     // Everything else is engine verified, unless held.
     for r in &mut rows {
         if r.review_level.is_none() && r.held.is_none() && r.thrown_out_reason.is_none() {
-            r.review_level = Some(ReviewLevel::EngineVerified);
+            r.review_level = level(ENGINE_VERIFIED);
         }
         r.markers = markers_for(r);
     }
@@ -1793,7 +1801,7 @@ fn apply_engine_mode(p: &Params, rows: &mut [SiteRow]) -> BTreeMap<String, Engin
                     needed_me: None,
                     confirmed_by_client: None,
                 });
-                rows[i].review_level = Some(ReviewLevel::PersonallyReviewed);
+                rows[i].review_level = level(PERSONALLY_REVIEWED);
                 verdict.correction = Some(CorrectionRef::Decision(id));
             }
         }
