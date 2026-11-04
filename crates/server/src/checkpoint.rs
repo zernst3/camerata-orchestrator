@@ -544,6 +544,7 @@ mod tests {
         // The members survive the file; a line written without them reads back with none.
         cp.record_absorbed(&first).unwrap();
         let back = cp.absorbed_in_order();
+        assert_eq!(back.len(), 3);
         assert_eq!(back.last().unwrap().members, first.members);
         assert!(back[0].members.is_empty());
     }

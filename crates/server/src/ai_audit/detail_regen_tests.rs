@@ -3592,6 +3592,75 @@ mod resume_by_member {
         );
     }
 
+    /// A batch settled the ordinary way records each reply it absorbed with the id of the batch
+    /// it came from, so a resume can tell a row it already took from a reply another process
+    /// stored under the same key.
+    #[tokio::test(start_paused = true)]
+    async fn lines_written_by_a_settled_batch_carry_the_batch_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(9), at(49), at(89)], None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(out.len(), 3);
+
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let records = cp.batches();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert!(records[0].settled);
+        let lines: Vec<_> = cp
+            .absorbed_in_order()
+            .into_iter()
+            .filter(|l| !l.members.is_empty())
+            .collect();
+        assert!(!lines.is_empty(), "the batch's reply was recorded");
+        for line in &lines {
+            assert_eq!(
+                line.batch_id,
+                Some(records[0].batch_id.clone()),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// The process dies after it recorded a reply and before it marked the batch settled. The
+    /// next process replays the stored reply and polls the still-unsettled batch; it must not
+    /// read the same row a second time, or the ledger carries one reply twice.
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_still_unsettled_after_its_reply_was_recorded_is_not_paid_for_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (first, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        let fetched_before = stub.prompts(Role::Regen).len();
+
+        // The kill: the lines are on disk, the batch record still says unsettled.
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let mut records = cp.batches();
+        assert_eq!(records.len(), 1);
+        records[0].settled = false;
+        cp.save_batches(&records).unwrap();
+
+        let meter = UsageMeter::default();
+        let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(details(&again), details(&first));
+        assert_eq!(
+            stub.prompts(Role::Regen).len() - fetched_before,
+            1,
+            "the unsettled batch was fetched once"
+        );
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            1_000,
+            "one reply's tokens, not the same row read and paid for twice"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_row_read_on_one_resume_is_not_read_or_paid_for_again_on_the_next() {
         let dir = tempfile::tempdir().unwrap();
