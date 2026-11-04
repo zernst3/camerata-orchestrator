@@ -11,7 +11,7 @@ use camerata_api_types::edits::EditField;
 use camerata_api_types::review_view::{HoldReason, Marker, SiteRow};
 use camerata_ui_core::edits::{
     AckDraft, AddDraft, DetailContext, DetailKey, EditDraft, MergeDraft, Snippet, SplitChoice,
-    SplitDraft,
+    SplitDraft, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::test_support::review_fixtures::dataset_base;
 use dioxus::dioxus_core::{ElementId, Mutation, Mutations};
@@ -506,6 +506,38 @@ fn the_split_picker_offers_the_rules_sub_groups_and_a_new_one_with_a_label() {
     assert!(html.contains("Label of the new sub-group"));
     assert!(html.contains("test fixtures"));
     assert!(html.contains("A new sub-group needs a label."));
+}
+
+#[test]
+fn the_split_picker_values_are_indexes_and_new_selects_the_label_input() {
+    let row = plain();
+    let draft = |choice, new_label: &str| {
+        mode(DetailMode::Split(SplitDraft {
+            choice,
+            new_label: new_label.into(),
+            reason: String::new(),
+            error: None,
+        }))
+    };
+    let html = page(
+        row.clone(),
+        draft(SplitChoice::Existing("sub 2: grants".into()), ""),
+    );
+    assert!(html.contains(r#"<option value="0""#), "{html}");
+    assert!(html.contains(r#"<option value="1" selected"#), "{html}");
+    assert!(
+        html.contains(&format!(r#"<option value="{SPLIT_NEW_VALUE}""#)),
+        "{html}"
+    );
+    assert!(!html.contains("Label of the new sub-group"));
+    // The select never carries a raw NUL, whichever choice is current.
+    let new = page(row, draft(SplitChoice::New, ""));
+    assert!(!new.contains('\u{0}'), "a raw NUL in the markup");
+    assert!(
+        new.contains(&format!(r#"<option value="{SPLIT_NEW_VALUE}" selected"#)),
+        "{new}"
+    );
+    assert!(new.contains("Label of the new sub-group"));
 }
 
 #[test]

@@ -1423,3 +1423,35 @@ fn the_head_chips_carry_the_escalation_reason_and_rank_and_name_the_outlier() {
         "never twice"
     );
 }
+
+#[test]
+fn the_split_select_values_map_back_to_the_choice_and_never_carry_a_label() {
+    let subs: Vec<String> = vec!["sub 1: policies".into(), "a\u{0}b".into()];
+    // "New sub-group" has one value, and the same constant maps back to New.
+    assert_eq!(
+        split_option_value(&subs, &SplitChoice::New),
+        SPLIT_NEW_VALUE
+    );
+    assert_eq!(
+        split_choice_from_value(&subs, SPLIT_NEW_VALUE),
+        Some(SplitChoice::New)
+    );
+    // An existing sub-group is its position, whatever its label holds.
+    let second = SplitChoice::Existing("a\u{0}b".into());
+    let value = split_option_value(&subs, &second);
+    assert_eq!(value, "1");
+    assert!(!value.contains('\u{0}'));
+    assert_eq!(
+        split_choice_from_value(&subs, "0"),
+        Some(SplitChoice::Existing("sub 1: policies".into()))
+    );
+    assert_eq!(split_choice_from_value(&subs, &value), Some(second));
+    // A value the form never offered is nothing, not a sub-group named after it.
+    assert_eq!(split_choice_from_value(&subs, "7"), None);
+    assert_eq!(split_choice_from_value(&subs, "sub 1: policies"), None);
+    // A choice naming a label the rule no longer has falls back to the new-sub-group value.
+    assert_eq!(
+        split_option_value(&subs, &SplitChoice::Existing("gone".into())),
+        SPLIT_NEW_VALUE
+    );
+}

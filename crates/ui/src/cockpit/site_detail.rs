@@ -24,10 +24,11 @@ use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
     flagged_by_line, head_chips, held_line, merge_candidates, reapply_decision_request,
-    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line, stage1_line,
-    stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
-    Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
-    LineAction, LineTone, Snippet, SplitChoice, UndoAction,
+    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line,
+    split_choice_from_value, split_option_value, stage1_line, stage2_line, stale_edit_line,
+    stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control, DetailAction,
+    DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction, LineTone, Snippet,
+    SplitChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -740,12 +741,9 @@ fn SplitForm(
     ctx: DetailContext,
     on_event: Callback<DetailEvent>,
 ) -> Element {
-    const NEW: &str = "\u{0}new";
-    let current = match &draft.choice {
-        SplitChoice::Existing(label) => label.clone(),
-        SplitChoice::New => NEW.to_string(),
-    };
+    let current = split_option_value(&ctx.subgroups, &draft.choice);
     let is_new = draft.choice == SplitChoice::New;
+    let subgroups = ctx.subgroups.clone();
     rsx! {
         div { class: "queue-reason-prompt site-detail-form site-detail-split-form", id: "{DETAIL_FORM_ID}",
             label { class: "rule-modal-label", "Move this site to a sub-group" }
@@ -758,9 +756,9 @@ fn SplitForm(
                     });
                 },
                 onchange: move |e| {
-                    let v = e.value();
-                    let choice = if v == NEW { SplitChoice::New } else { SplitChoice::Existing(v) };
-                    on_event.call(DetailEvent::Form(DetailAction::Split(choice)));
+                    if let Some(choice) = split_choice_from_value(&subgroups, &e.value()) {
+                        on_event.call(DetailEvent::Form(DetailAction::Split(choice)));
+                    }
                 },
                 onkeydown: move |e: KeyboardEvent| {
                     e.stop_propagation();
@@ -768,10 +766,10 @@ fn SplitForm(
                         on_event.call(DetailEvent::Cancel);
                     }
                 },
-                for label in ctx.subgroups.clone() {
-                    option { key: "{label}", value: "{label}", selected: label == current, "{label}" }
+                for (i, label) in ctx.subgroups.clone().into_iter().enumerate() {
+                    option { key: "{i}", value: "{i}", selected: i.to_string() == current, "{label}" }
                 }
-                option { value: "new", selected: is_new, "New sub-group" }
+                option { value: "{SPLIT_NEW_VALUE}", selected: is_new, "New sub-group" }
             }
             if is_new {
                 label { class: "rule-modal-label", "Label of the new sub-group (it is also its cause)" }

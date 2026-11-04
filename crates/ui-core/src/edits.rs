@@ -509,6 +509,30 @@ pub enum SplitChoice {
     New,
 }
 
+/// The split select's value for "New sub-group". Existing sub-groups are offered by their
+/// position in the rule's list, so a label never has to survive as an HTML attribute.
+pub const SPLIT_NEW_VALUE: &str = "new";
+
+/// The select value that stands for `choice` among `subgroups`.
+pub fn split_option_value(subgroups: &[String], choice: &SplitChoice) -> String {
+    match choice {
+        SplitChoice::Existing(label) => subgroups
+            .iter()
+            .position(|s| s == label)
+            .map_or_else(|| SPLIT_NEW_VALUE.to_string(), |i| i.to_string()),
+        SplitChoice::New => SPLIT_NEW_VALUE.to_string(),
+    }
+}
+
+/// The choice a select value stands for, or `None` for a value the form never offered.
+pub fn split_choice_from_value(subgroups: &[String], value: &str) -> Option<SplitChoice> {
+    if value == SPLIT_NEW_VALUE {
+        return Some(SplitChoice::New);
+    }
+    let i: usize = value.parse().ok()?;
+    subgroups.get(i).map(|l| SplitChoice::Existing(l.clone()))
+}
+
 /// The sub-group name a split posts, or why it cannot.
 pub fn split_label(choice: &SplitChoice, new_label: &str) -> Result<String, String> {
     match choice {
