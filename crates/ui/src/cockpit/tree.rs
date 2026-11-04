@@ -187,6 +187,13 @@ pub(crate) fn TreeScreen(
         "tree-lane"
     };
     rsx! {
+        // Above both columns and stuck to the top: the right column drops under the table in a
+        // narrow window, and the five seconds of an undo are not worth spending on a scroll.
+        if let Some(banner) = undo {
+            div { class: "tree-undo-dock",
+                TreeUndoBar { banner, on_undo }
+            }
+        }
         div { class: "{narrow_class}",
             div { class: "tree-left",
                 if !group_reviewed && status == TreeStatus::Ready {
@@ -278,9 +285,6 @@ pub(crate) fn TreeScreen(
                 }
             }
             div { class: "tree-right",
-                if let Some(banner) = undo {
-                    TreeUndoBar { banner, on_undo }
-                }
                 if let Some(node) = focused_node {
                     NodeSide {
                         crumbs: index.breadcrumb(&node.id),

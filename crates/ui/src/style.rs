@@ -6980,6 +6980,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   color: var(--ink-soft); background: var(--surface); font-size: 12.5px;
 }
 
+.tree-undo-dock { position: sticky; top: 0; z-index: 5; background: var(--paper); }
+.tree-undo-dock .pane-undo { margin: 0 0 8px; }
 .tree-lane { display: flex; align-items: flex-start; gap: 12px; width: 100%; }
 .tree-left { flex: 0 0 55%; min-width: 0; box-sizing: border-box; }
 .tree-right {

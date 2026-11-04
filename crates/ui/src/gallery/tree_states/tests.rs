@@ -163,6 +163,33 @@ fn tree_node_decided_shows_the_decision_the_undo_bar_and_new_since() {
 }
 
 #[test]
+fn the_undo_bar_sits_above_both_columns_and_sticks_so_a_narrow_window_cannot_bury_it() {
+    for id in ["tree/node-decided", "tree/narrow"] {
+        let html = page(id);
+        let Some(bar) = html.find("pane-undo\"") else {
+            continue;
+        };
+        let lane = html.find("class=\"tree-lane").expect("the lane");
+        assert!(
+            bar < lane,
+            "{id}: the undo bar is drawn before the lane, not inside the right column that drops under the table at 1000"
+        );
+        let dock = html.find("tree-undo-dock").expect("the dock");
+        assert!(dock < bar, "{id}: the bar is inside the dock");
+    }
+    let html = page("tree/node-decided");
+    assert!(
+        html.contains("pane-undo"),
+        "node-decided shows the five second undo"
+    );
+    let rule = GLOBAL_CSS
+        .split('}')
+        .find(|r| r.contains(".tree-undo-dock"))
+        .expect("a rule for the dock");
+    assert!(rule.contains("position: sticky"), "{rule}");
+}
+
+#[test]
 fn tree_not_group_reviewed_says_so_and_shows_no_summary() {
     let html = page("tree/not-group-reviewed");
     assert!(html.contains(NOT_GROUP_REVIEWED));
