@@ -606,6 +606,9 @@
     }
   },
   "shell": {
+    "audited_shas": {
+      "acme/app": "string"
+    },
     "budget": {
       "budget": "number",
       "candidates": "number",

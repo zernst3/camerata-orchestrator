@@ -11,7 +11,7 @@
 //! Nothing here is new behaviour: the viewer and the stack keep every key, every prompt and every
 //! rule they have. What the tree adds is where they open from and what a decision does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use camerata_api_types::review_view::SiteRow;
@@ -50,12 +50,15 @@ fn node_of(sites: &[(String, SiteRow)], key: &str) -> Option<String> {
 ///
 /// - `sites`: every site loaded (the viewer's gutter and its next and previous file, the
 ///   stack's rows);
+/// - `audited_shas`: the commit each repo was inspected at, so the viewer reads the inspected
+///   files, keys its cache by that commit and says when the checkout has moved on;
 /// - `decide`: the lane's site decision `(node, key, state, reason)`, the one write path;
 /// - `focus_site`: put the lane's cursor on a site `(node, key)` (the viewer's close and the
 ///   stack's close leave it where the reviewer ended);
 /// - `region_id`: the DOM id of the lane's focusable region, which takes the keyboard back.
 pub(crate) fn use_code_bridge(
     sites: Memo<Vec<(String, SiteRow)>>,
+    audited_shas: ReadSignal<BTreeMap<String, String>>,
     project_id: String,
     decide: Callback<(String, String, TriageState, String)>,
     focus_site: Callback<(String, String)>,
@@ -219,6 +222,15 @@ pub(crate) fn use_code_bridge(
     // gutter and the stack's decision memory see the rows the lane has now.
     use_effect(move || {
         let all = views.read().clone();
+        // Keyed by the inspected commit, so a rerun at a new commit never serves a file the
+        // previous run opened, and the viewer's header and conflict banner know the commit.
+        let inspected: Arc<HashMap<String, String>> = Arc::new(
+            audited_shas
+                .read()
+                .iter()
+                .map(|(repo, sha)| (repo.clone(), sha.clone()))
+                .collect(),
+        );
         if let Some(mut slot) = viewer_slot {
             slot.0.set(Some(ViewerLink {
                 handle,
@@ -226,7 +238,7 @@ pub(crate) fn use_code_bridge(
                 visible_keys,
                 dispositions,
                 all_findings: all.clone(),
-                shas: Arc::new(HashMap::new()),
+                shas: inspected.clone(),
                 sha_conflicts: Arc::new(HashSet::new()),
                 project_id: project_id.clone(),
                 open: viewer_open,
@@ -257,7 +269,7 @@ pub(crate) fn use_code_bridge(
                 open: stack_open,
                 dispositions,
                 all_findings: all,
-                shas: Arc::new(HashMap::new()),
+                shas: inspected,
                 project_id: project_id.clone(),
                 undo_entry,
                 now_ms,

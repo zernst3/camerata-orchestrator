@@ -27,7 +27,7 @@
 //! So sort and filter are not offered on these rows: the sites arrive in the server's fixed order
 //! (severity, path, line), which is the order the spec's Severity and File:line sorts give.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use camerata_api_types::review_view::{SiteRow, TreeNodeView, TreeView, SITES_PAGE_SIZE};
@@ -1029,7 +1029,11 @@ pub(crate) struct ShellRefresh(pub Signal<u32>);
 
 /// The tree lane with its signals and its I/O.
 #[component]
-pub(crate) fn TreeHost() -> Element {
+pub(crate) fn TreeHost(
+    /// The commit each repo of the run was inspected at (the shell's `audited_shas`).
+    #[props(default)]
+    audited_shas: ReadSignal<BTreeMap<String, String>>,
+) -> Element {
     let api = use_context::<ReviewApi>();
     let refresh = try_use_context::<ShellRefresh>();
     let door = try_use_context::<DoorRequest>();
@@ -1276,6 +1280,7 @@ pub(crate) fn TreeHost() -> Element {
         .unwrap_or_default();
     let bridge = use_code_bridge(
         loaded_sites,
+        audited_shas,
         project,
         decide_site,
         use_callback(move |(node, key): (String, String)| state.write().focus_site(&node, &key)),

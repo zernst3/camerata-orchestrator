@@ -74,6 +74,11 @@ pub fn report_with(n_sql: usize) -> ScanReport {
     report.code_lines = 10_000;
     report.provenance.started_at = "2026-11-02T10:00:00Z".to_string();
     report.provenance.finished_at = "2026-11-02T10:05:00Z".to_string();
+    report.provenance.audited_refs = vec![camerata_server::onboard::AuditedRef {
+        repo: REPO.to_string(),
+        sha: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        ..camerata_server::onboard::AuditedRef::default()
+    }];
     for i in 0..n_sql {
         report.findings.push(row(
             SQL_RULE,

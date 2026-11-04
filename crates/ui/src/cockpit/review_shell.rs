@@ -162,6 +162,12 @@ pub(crate) fn ReviewShellHost(
     });
 
     let active = lane();
+    // The commit each repo was inspected at, for the code viewer and the stack the tree opens.
+    let audited_shas = shell
+        .read()
+        .ready()
+        .map(|v| v.audited_shas.clone())
+        .unwrap_or_default();
     rsx! {
         div {
             ReviewShell {
@@ -179,16 +185,20 @@ pub(crate) fn ReviewShellHost(
                     shell.set(ViewStatus::Loading);
                     refresh += 1;
                 },
-                {lane_body(active, &children)}
+                {lane_body(active, &children, audited_shas)}
             }
         }
     }
 }
 
 /// The lane that is showing. The Tree, the Flat view and Settings are built; the others say so.
-fn lane_body(active: Lane, flat: &Element) -> Element {
+fn lane_body(
+    active: Lane,
+    flat: &Element,
+    audited_shas: std::collections::BTreeMap<String, String>,
+) -> Element {
     match active {
-        Lane::Tree => rsx! { TreeHost {} },
+        Lane::Tree => rsx! { TreeHost { audited_shas } },
         Lane::Flat => flat.clone(),
         Lane::Settings => rsx! { SettingsLane {} },
         other => rsx! {
@@ -257,7 +267,7 @@ mod tests {
         let refresh = use_signal(|| 0u32);
         use_context_provider(|| ShellRefresh(refresh));
         let flat = rsx! { p { "the flat view" } };
-        lane_body(case.lane, &flat)
+        lane_body(case.lane, &flat, Default::default())
     }
 
     fn lane_html(lane: Lane) -> String {

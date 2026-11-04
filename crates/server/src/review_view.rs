@@ -259,6 +259,22 @@ impl<'a> ReviewComposer<'a> {
         self.tree.is_some_and(|t| t.group_reviewed)
     }
 
+    /// The commit each repo was inspected at, from the inspection's own record. A repo with no
+    /// recorded commit is left out (the viewer then reads the checkout).
+    fn audited_shas(&self) -> std::collections::BTreeMap<String, String> {
+        self.report
+            .provenance
+            .audited_refs
+            .iter()
+            .filter_map(|a| {
+                a.sha
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (a.repo.clone(), s.to_string()))
+            })
+            .collect()
+    }
+
     // ── section 4: the shell ──────────────────────────────────────────────────────────────
 
     /// `GET /api/projects/:id/review`.
@@ -309,6 +325,7 @@ impl<'a> ReviewComposer<'a> {
             export_gate: self.gate.clone(),
             stale,
             group_reviewed: self.group_reviewed(),
+            audited_shas: self.audited_shas(),
         }
     }
 

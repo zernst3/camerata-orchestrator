@@ -40,6 +40,16 @@ fn sub_group() -> (String, Vec<SiteRow>) {
     (node, rows)
 }
 
+/// The commit the run's repos were inspected at, as the shell carries it.
+fn inspected_shas() -> BTreeMap<String, String> {
+    let (_, rows) = sub_group();
+    rows.iter()
+        .map(|r| (r.repo.clone(), INSPECTED_SHA.to_string()))
+        .collect()
+}
+
+const INSPECTED_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
 fn harness() -> Element {
     use_context_provider(|| Signal::new(Vec::<Toast>::new()));
     let viewer = use_context_provider(|| ViewerSlot(Signal::new(None)));
@@ -50,8 +60,10 @@ fn harness() -> Element {
             .map(|r| (node.clone(), r.clone()))
             .collect::<Vec<(String, SiteRow)>>()
     });
+    let shas = use_signal(inspected_shas);
     let bridge = use_code_bridge(
         sites,
+        shas.into(),
         "p1".to_string(),
         Callback::new(|d: (String, String, TriageState, String)| {
             DECIDED.with(|l| l.borrow_mut().push(d))
@@ -94,6 +106,26 @@ fn links() -> (ViewerLink, StackLink) {
     let viewer = v.0.peek().clone().expect("the viewer link is registered");
     let stack = st.0.peek().clone().expect("the stack link is registered");
     (viewer, stack)
+}
+
+#[tokio::test]
+async fn both_links_carry_the_commit_the_run_was_inspected_at() {
+    let vdom = mounted().await;
+    let (_, rows) = sub_group();
+    let (viewer, stack) = links();
+    for row in &rows {
+        assert_eq!(
+            viewer.shas.get(&row.repo).map(String::as_str),
+            Some(INSPECTED_SHA),
+            "the viewer keys its files by the inspected commit"
+        );
+        assert_eq!(
+            stack.shas.get(&row.repo).map(String::as_str),
+            Some(INSPECTED_SHA),
+            "and so does the stack"
+        );
+    }
+    drop(vdom);
 }
 
 #[tokio::test]

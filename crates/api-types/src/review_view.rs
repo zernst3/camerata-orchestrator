@@ -370,6 +370,11 @@ pub struct ReviewShellView {
     /// False for an old inspection no group reviewer has read (spec section 5: "Not reviewed by
     /// the group reviewer").
     pub group_reviewed: bool,
+    /// The commit each repo of the run was inspected at (repo to full sha), from the inspection's
+    /// own record. A repo with no recorded commit is left out. The code viewer and the stacked
+    /// view read the files at these commits and say which one the reviewer is judging.
+    #[serde(default)]
+    pub audited_shas: std::collections::BTreeMap<String, String>,
 }
 
 // ── Section 5: the tree and its sites ─────────────────────────────────────────────────────
