@@ -1779,7 +1779,9 @@ fn read_held_reply<H: HeldRows>(
 /// changes nothing; each row is read once (a reply already stored is not read again from its
 /// batch). A batch that cannot be fetched now is reported in [`HeldResume::live`] and stays
 /// unsettled for a later resume; one the provider no longer has is settled as gone and its open
-/// findings are left for the round to ask once more.
+/// findings are left for the round to ask once more. A reply the stage turned down writes no line,
+/// so a process killed before its follow-up batch reads that row again on resume and the round asks
+/// it again: counted once on each process's meter, nothing dropped or hidden.
 pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_>) -> HeldResume {
     let mut out = HeldResume::default();
     let Some(cp) = ctx.checkpoint else {

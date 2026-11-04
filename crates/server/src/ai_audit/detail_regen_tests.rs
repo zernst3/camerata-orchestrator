@@ -3644,6 +3644,8 @@ mod resume_by_member {
         let meter = UsageMeter::default();
         let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
         assert!(failed.is_empty(), "{failed:?}");
+        // The unsettled batch is fetched, never submitted again.
+        assert_eq!(api.submit_calls(), 1);
         assert_eq!(details(&again), details(&first));
         assert_eq!(
             stub.prompts(Role::Regen).len() - fetched_before,
