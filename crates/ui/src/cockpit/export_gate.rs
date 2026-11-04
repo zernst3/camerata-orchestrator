@@ -56,9 +56,10 @@ pub(crate) fn ExportGateHost(
     #[props(default)] on_open: Callback<Door>,
     children: Element,
 ) -> Element {
+    // Read the context outside the hook: a hook may not be called inside another hook's closure.
+    let shared = try_use_context::<ReviewApi>();
     let api = use_hook(|| {
-        try_use_context::<ReviewApi>()
-            .unwrap_or_else(|| ReviewApi::http(crate::bff_base(), project_id.clone()))
+        shared.unwrap_or_else(|| ReviewApi::http(crate::bff_base(), project_id.clone()))
     });
     let door = try_use_context::<DoorRequest>();
     let refresh = try_use_context::<ShellRefresh>();
