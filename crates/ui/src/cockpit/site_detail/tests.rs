@@ -394,6 +394,38 @@ fn an_open_edit_swaps_the_value_for_its_control_a_required_reason_and_commit() {
 }
 
 #[test]
+fn an_open_edit_starts_on_the_rows_current_value() {
+    let row = plain();
+    let text_fields = [
+        (EditField::Headline, row.headline.clone(), "value=\""),
+        (EditField::Detail, row.detail.clone(), "<textarea"),
+        (EditField::Fix, row.fix.clone(), "<textarea"),
+    ];
+    for (field, value, marker) in text_fields {
+        let m = camerata_ui_core::edits::reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginEdit(field),
+            &row,
+            &ctx(),
+        );
+        let html = page(row.clone(), mode(m));
+        let form = &html[html.find(DETAIL_FORM_ID).unwrap()..];
+        let escaped = value.replace('\'', "&#39;");
+        if marker == "<textarea" {
+            let area = &form[form.find("<textarea").unwrap()..];
+            let inner = &area[area.find('>').unwrap() + 1..];
+            assert!(
+                inner.starts_with(&escaped),
+                "{field:?}: {}",
+                &inner[..60.min(inner.len())]
+            );
+        } else {
+            assert!(form.contains(&format!("value=\"{escaped}\"")), "{field:?}");
+        }
+    }
+}
+
+#[test]
 fn an_edit_form_shows_its_error_and_the_value_being_typed() {
     let row = plain();
     let draft = EditDraft {

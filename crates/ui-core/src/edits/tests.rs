@@ -1362,3 +1362,64 @@ fn the_context_names_the_crumbs_the_rules_the_other_sub_groups_and_the_loaded_si
     seen.dedup();
     assert_eq!(seen.len(), ctx.rule_ids.len());
 }
+
+#[test]
+fn the_head_chips_carry_the_escalation_reason_and_rank_and_name_the_outlier() {
+    let all = rows();
+    let esc = all
+        .iter()
+        .find(|r| {
+            r.markers.contains(&Marker::Escalated)
+                && r.stage2
+                    .as_ref()
+                    .is_some_and(|s| s.reason.is_some() && s.global_rank.is_some())
+        })
+        .expect("an escalated row");
+    let s2 = esc.stage2.as_ref().unwrap();
+    let chip = head_chips(esc)
+        .into_iter()
+        .find(|c| c.class.starts_with("mark-esc"))
+        .unwrap();
+    assert!(chip.label.starts_with("ESC"), "{}", chip.label);
+    assert!(
+        chip.label.contains(s2.reason.unwrap().phrase()),
+        "{}",
+        chip.label
+    );
+    assert!(
+        chip.label
+            .ends_with(&format!("#{}", s2.global_rank.unwrap())),
+        "{}",
+        chip.label
+    );
+    // The tree's own chip stays the short one.
+    let short = crate::tree::marker_chips(esc)
+        .into_iter()
+        .find(|c| c.class.starts_with("mark-esc"))
+        .unwrap();
+    assert!(short.label == "ESC" || short.label == "ESC over");
+
+    let outlier = all
+        .iter()
+        .find(|r| r.markers.contains(&Marker::Outlier))
+        .unwrap();
+    let chip = head_chips(outlier)
+        .into_iter()
+        .find(|c| c.class == "mark-outlier")
+        .unwrap();
+    assert!(chip.label.starts_with("outlier: "), "{}", chip.label);
+
+    // An added finding carries the edit mark whether or not the server marked it.
+    let mut added = plain();
+    added.added_by_reviewer = true;
+    assert!(head_chips(&added).iter().any(|c| c.class == "mark-edited"));
+    added.markers.push(Marker::Edited);
+    assert_eq!(
+        head_chips(&added)
+            .iter()
+            .filter(|c| c.class == "mark-edited")
+            .count(),
+        1,
+        "never twice"
+    );
+}

@@ -26,7 +26,7 @@ use camerata_api_types::review::{DisagreementField, EscalationState, ReviewLevel
 use camerata_api_types::review_view::{DecisionView, EditView, SiteRow, TreeLevel};
 
 use crate::tree::state::{TreeIndex, TreeState};
-use crate::tree::{decision_label, kind_tag_of, outlier_phrase, short_date};
+use crate::tree::{decision_label, kind_tag_of, marker_chips, outlier_phrase, short_date, Chip};
 use crate::triage::UNDO_WINDOW_MS;
 
 // ── The editable fields ───────────────────────────────────────────────────────────────────
@@ -1124,6 +1124,37 @@ pub fn held_line(row: &SiteRow) -> Option<String> {
 }
 
 // ── The head and the stage lines ──────────────────────────────────────────────────────────
+
+/// The chips of the detail's head: the row's markers with the detail's fuller words (spec
+/// section 8: `ESC unauthenticated reach #12`, `outlier: different object`), then a chip for a
+/// finding the reviewer added.
+pub fn head_chips(row: &SiteRow) -> Vec<Chip> {
+    let mut chips: Vec<Chip> = marker_chips(row)
+        .into_iter()
+        .map(|mut chip| {
+            if chip.class.starts_with("mark-esc") {
+                let s2 = row.stage2.as_ref();
+                if let Some(reason) = s2.and_then(|s| s.reason) {
+                    chip.label = format!("{} {}", chip.label, reason.phrase());
+                }
+                if let Some(rank) = s2.and_then(|s| s.global_rank) {
+                    chip.label = format!("{} #{rank}", chip.label);
+                }
+            } else if chip.class == "mark-outlier" {
+                chip.label = format!("outlier: {}", chip.label);
+            }
+            chip
+        })
+        .collect();
+    if row.added_by_reviewer && !chips.iter().any(|c| c.class == "mark-edited") {
+        chips.push(Chip {
+            class: "mark-edited",
+            label: "\u{270e} added".to_string(),
+            tip: "The reviewer added this finding; the engine did not report it.".to_string(),
+        });
+    }
+    chips
+}
 
 /// How closely the row was reviewed, in words; `None` for a row held for a ruling.
 pub fn review_level_text(level: Option<&ReviewLevel>) -> Option<String> {

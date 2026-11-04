@@ -7185,8 +7185,10 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-detail-meta {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 14px; margin: 2px 0;
 }
-.site-detail-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
-.site-detail-item .site-detail-label { width: 72px; }
+.site-detail-item { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 6px; min-width: 0; }
+.site-detail-item .site-detail-label { width: auto; flex: none; }
+.site-detail-item .site-detail-value { flex: 0 1 auto; }
+.site-detail-item .site-detail-edit { margin-left: 0; }
 .site-detail-stale {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0 0 4px 112px;
   padding-left: 8px; border-left: 3px solid var(--line); color: var(--ink-soft);

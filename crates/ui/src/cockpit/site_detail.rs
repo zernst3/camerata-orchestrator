@@ -23,15 +23,13 @@ use camerata_api_types::review_view::SiteRow;
 use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
-    flagged_by_line, held_line, merge_candidates, reapply_decision_request, reapply_done_message,
-    reduce, review_level_text, severity_note, snippet_at_line, stage1_line, stage2_line,
-    stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control,
-    DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction,
-    LineTone, Snippet, SplitChoice, UndoAction,
+    flagged_by_line, head_chips, held_line, merge_candidates, reapply_decision_request,
+    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line, stage1_line,
+    stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
+    Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
+    LineAction, LineTone, Snippet, SplitChoice, UndoAction,
 };
-use camerata_ui_core::tree::{
-    file_line, is_outlier, kind_tag_of, marker_chips, severity_badge, severity_label,
-};
+use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
 use dioxus::prelude::*;
 
@@ -124,14 +122,7 @@ pub(crate) fn SiteDetailView(
     children: Element,
 ) -> Element {
     let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag_of(&row));
-    let mut chips = marker_chips(&row);
-    if row.added_by_reviewer && !chips.iter().any(|c| c.class == "mark-edited") {
-        chips.push(camerata_ui_core::tree::Chip {
-            class: "mark-edited",
-            label: "\u{270e} added".to_string(),
-            tip: "The reviewer added this finding; the engine did not report it.".to_string(),
-        });
-    }
+    let chips = head_chips(&row);
     let line = decision_line(&row, &ctx);
     let level = review_level_text(row.review_level.as_ref());
     let held = held_line(&row);
@@ -544,6 +535,9 @@ fn ValueControl(
                 },
                 oninput: move |e| on_text.call(e.value()),
                 onkeydown: move |e: KeyboardEvent| key_in_field(&e, true, on_commit, on_cancel),
+                // The text is also the textarea's content, so a first paint (and the gallery
+                // page) shows it without a script setting the property.
+                "{value}"
             }
         },
         Control::Select(options) => rsx! {
@@ -639,6 +633,7 @@ fn ReasonInput(
                     _ => {}
                 }
             },
+            "{value}"
         }
     }
 }
@@ -898,9 +893,9 @@ fn AddForm(draft: AddDraft, ctx: DetailContext, on_event: Callback<DetailEvent>)
                 label { "Headline" }
                 input { class: "addressee-input", r#type: "text", value: "{draft.headline}", oninput: text(AddField::Headline) }
                 label { "Detail" }
-                textarea { class: "addressee-input", rows: "3", value: "{draft.detail}", oninput: text(AddField::Detail) }
+                textarea { class: "addressee-input", rows: "3", value: "{draft.detail}", oninput: text(AddField::Detail), "{draft.detail}" }
                 label { "Fix" }
-                textarea { class: "addressee-input", rows: "2", value: "{draft.fix}", oninput: text(AddField::Fix) }
+                textarea { class: "addressee-input", rows: "2", value: "{draft.fix}", oninput: text(AddField::Fix), "{draft.fix}" }
             }
             label { class: "rule-modal-label", "The code at that line (read-only)" }
             {snippet}
