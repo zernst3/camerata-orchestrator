@@ -879,10 +879,25 @@ fn check_pdf_data_blocks_a_secret_in_the_pdf_only_route() {
 // ---- source pins: one path to zip bytes, one path to a PDF ------------------------------------
 
 /// The production part of a source file: everything before its inline `#[cfg(test)]` module.
-fn production_part(source: &str) -> &str {
+///
+/// Only a module whose body is in place (`mod name {`) ends it. `mod name;` keeps its module in
+/// another file, so the code below that declaration is production code and stays in view.
+pub(super) fn production_part(source: &str) -> &str {
+    const MARK: &str = "\n#[cfg(test)]\nmod ";
+    let mut from = 0;
+    while let Some(found) = source[from..].find(MARK) {
+        let at = from + found;
+        let declaration = source[at + MARK.len()..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end();
+        if declaration.ends_with('{') {
+            return &source[..at];
+        }
+        from = at + MARK.len();
+    }
     source
-        .find("\n#[cfg(test)]\nmod ")
-        .map_or(source, |at| &source[..at])
 }
 
 fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -2023,4 +2038,14 @@ fn the_gate_catches_a_followed_convention_row_dropped_from_the_conventions_sheet
             .any(|p| p.location == "sheet \"Conventions\" rows, kind convention_observed"),
         "{failure}"
     );
+}
+
+#[test]
+fn production_part_cuts_only_at_an_inline_test_module() {
+    // A `mod tests;` declaration keeps its module in another file: the code below it is
+    // production code. Only `mod name {` (the module's body in place) ends the production part.
+    let declared = "fn a() {}\n#[cfg(test)]\nmod tests;\nasync fn b() {}\n";
+    assert_eq!(production_part(declared), declared);
+    let inline = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    assert_eq!(production_part(inline), "fn a() {}");
 }

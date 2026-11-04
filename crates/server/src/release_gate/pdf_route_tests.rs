@@ -15,7 +15,7 @@ use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
 use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdictReq};
 use serde_json::Value;
 
-use super::tests::scan_report;
+use super::tests::{production_part, scan_report};
 use super::CheckId;
 use crate::onboard::{Finding, ScanReport};
 use crate::report_export::overlay::{MERGED_INTO_CAPTURE, MERGED_LABEL_CAPTURE};
@@ -390,13 +390,6 @@ async fn the_pdf_route_still_renders_a_clear_report() {
 
 // ---- no route that writes a client-facing file can skip the gate --------------------------------
 
-/// The production part of a source file: everything before its inline `#[cfg(test)]` module.
-fn production_part(source: &str) -> &str {
-    source
-        .find("\n#[cfg(test)]\nmod ")
-        .map_or(source, |at| &source[..at])
-}
-
 /// (`server/src/...` path, text) of every non-test source file of the server crate.
 fn server_production_sources() -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -444,6 +437,71 @@ fn route_body<'a>(production: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// What marks a line as writing a client file: a download header, or the content type of any file
+/// the server can emit (PDF, zip, xlsx, CSV, JSON, Markdown, raw bytes). Compared lowercased.
+const FILE_NEEDLES: [&str; 11] = [
+    "content_disposition",
+    "content-disposition",
+    "application/pdf",
+    "application/zip",
+    "application/octet-stream",
+    "spreadsheetml",
+    "text/csv",
+    "application/json",
+    "text/markdown",
+    "mime::",
+    "text/plain",
+];
+
+/// The name of the function a line declares, in any form (`fn`, `async fn`, `pub fn`,
+/// `pub(crate) async fn`, `const fn`, `unsafe fn`).
+fn declared_fn(line: &str) -> Option<String> {
+    let mut rest = line.trim_start();
+    loop {
+        let before = rest;
+        for prefix in [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "async ",
+            "const ",
+            "unsafe ",
+        ] {
+            rest = rest.strip_prefix(prefix).unwrap_or(rest);
+        }
+        if rest == before {
+            break;
+        }
+    }
+    let name = rest.strip_prefix("fn ")?;
+    name.split(['(', '<']).next().map(str::to_string)
+}
+
+/// `path::fn` of every function in `source`'s production code, async or not, that sets a download
+/// header or names the content type of a client file.
+fn file_writing_fns(path: &str, source: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut current: Option<String> = None;
+    for line in production_part(source).lines() {
+        // Any function resets the attribution, so a helper written after a route is the helper's,
+        // never the route's.
+        if let Some(name) = declared_fn(line) {
+            current = Some(name);
+        }
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if FILE_NEEDLES.iter().any(|needle| lower.contains(needle)) {
+            found.insert(format!(
+                "{path}::{}",
+                current.clone().unwrap_or_else(|| "(none)".to_string())
+            ));
+        }
+    }
+    found
+}
+
 /// Every route that hands the caller a client-facing file (a download) and the gate call it must
 /// make. A new route that writes such a file adds a row here and calls the gate; one that is not
 /// listed fails the scan below.
@@ -452,47 +510,66 @@ const FILE_ROUTES: [(&str, &str); 2] = [
     ("export_product", "gated_release("),
 ];
 
+/// Routes that write a file for the OPERATOR only: not reviewed, not released by the gate, never
+/// a client deliverable. Each is named here so it cannot escape the scan, and each must say so in
+/// its first line, its panel and its saved filename (below). `(route, saved filename)`.
+///
+/// `export_deep_report` is the only one: the deep-tier lenses are model-written prose with no
+/// reviewer overlay and no gate. Making it a gated package artifact is a later work order; until
+/// then it is labelled for what it is.
+const OPERATOR_ONLY_ROUTES: [(&str, &str); 1] =
+    [("export_deep_report", "camerata-deep-report-INTERNAL.md")];
+
+/// What the operator-only deep report says on its first line, in the cockpit panel and on its
+/// saved name.
+const OPERATOR_ONLY_LABEL: &str = "Internal working notes, not reviewed, not for the client";
+
+/// Functions the scan finds that are not routes serving the audit deliverable, each with why it
+/// is not gated. `(site, reason)`.
+const NOT_CLIENT_FILES: [(&str, &str); 4] = [
+    (
+        "server/src/api_agent_driver.rs::call_anthropic_with_tools",
+        "an outbound request header to the model API, never a served file",
+    ),
+    (
+        "server/src/api_agent_driver.rs::call_openrouter_with_tools",
+        "an outbound request header to the model API, never a served file",
+    ),
+    (
+        "server/src/client_source/handlers.rs::get_record_text",
+        "a deletion record rendered from the store's own record (facts, no model-written prose), \
+         not an audit report",
+    ),
+    (
+        "server/src/routes/uow_routes.rs::default_attachment_mime_handler",
+        "a serde default for an attachment's MIME field, never a served file",
+    ),
+];
+
 #[test]
 fn every_route_that_writes_a_client_file_calls_the_release_gate() {
     let lib = production_part(include_str!("../lib.rs"));
 
     // The scan: every function in the server crate's production code that sets a download
-    // header or returns a PDF or zip body is a file route and must be in the table.
+    // header or returns a file body is a file route and must be in a table.
     let mut found = BTreeSet::new();
     for (path, source) in server_production_sources() {
-        let production = production_part(&source);
-        let mut current: Option<String> = None;
-        for line in production.lines() {
-            if let Some(name) = line
-                .trim_start()
-                .strip_prefix("async fn ")
-                .or_else(|| line.trim_start().strip_prefix("pub async fn "))
-                .or_else(|| line.trim_start().strip_prefix("pub(crate) async fn "))
-            {
-                current = name.split('(').next().map(str::to_string);
-            }
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if line.contains("CONTENT_DISPOSITION")
-                || line.contains("\"application/pdf\"")
-                || line.contains("\"application/zip\"")
-            {
-                found.insert(format!(
-                    "{path}::{}",
-                    current.clone().unwrap_or_else(|| "(none)".to_string())
-                ));
-            }
-        }
+        found.extend(file_writing_fns(&path, &source));
     }
     let expected: BTreeSet<String> = FILE_ROUTES
         .iter()
         .map(|(name, _)| format!("server/src/lib.rs::{name}"))
+        .chain(
+            OPERATOR_ONLY_ROUTES
+                .iter()
+                .map(|(name, _)| format!("server/src/lib.rs::{name}")),
+        )
+        .chain(NOT_CLIENT_FILES.iter().map(|(site, _)| (*site).to_string()))
         .collect();
     assert_eq!(
         found, expected,
-        "a route that writes a client file is not in FILE_ROUTES (or one listed no longer does)"
+        "a function that writes a file is in no table (FILE_ROUTES, OPERATOR_ONLY_ROUTES, \
+         NOT_CLIENT_FILES), or one listed no longer does"
     );
 
     for (name, gate) in FILE_ROUTES {
@@ -513,4 +590,122 @@ fn every_route_that_writes_a_client_file_calls_the_release_gate() {
             );
         }
     }
+}
+
+// ---- the scan itself is pinned: what it reads and what it recognises ---------------------------
+
+#[test]
+fn the_scan_reads_code_after_a_mod_tests_declaration() {
+    // vuln_intel.rs declares `mod tests;` near its top and keeps nine async fns below it; a cut
+    // at the first `#[cfg(test)] mod` would leave them unscanned.
+    let sources = server_production_sources();
+    let (_, source) = sources
+        .iter()
+        .find(|(path, _)| path == "server/src/vuln_intel.rs")
+        .expect("vuln_intel.rs is scanned");
+    let production = production_part(source);
+    assert!(
+        production.contains("async fn enrich_dependency_findings("),
+        "the scan must read past the `mod tests;` declaration"
+    );
+}
+
+#[test]
+fn a_helper_after_a_route_is_not_attributed_to_the_route() {
+    let source = "async fn export_product() {\n    gated_release();\n}\n\
+                  fn zip_headers() {\n    let h = header::CONTENT_DISPOSITION;\n}\n";
+    let found = file_writing_fns("p.rs", source);
+    assert_eq!(
+        found,
+        BTreeSet::from(["p.rs::zip_headers".to_string()]),
+        "a sync helper that sets a download header is itself a file-writing function"
+    );
+}
+
+#[test]
+fn every_client_file_type_the_server_can_emit_is_recognised() {
+    let cases = [
+        ("pdf", "\"application/pdf\""),
+        ("zip", "\"application/zip\""),
+        (
+            "xlsx",
+            "\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"",
+        ),
+        ("csv", "\"text/csv; charset=utf-8\""),
+        ("json", "\"application/json\""),
+        ("markdown", "\"text/markdown; charset=utf-8\""),
+        ("octet-stream", "\"application/octet-stream\""),
+        ("lowercase header", "\"content-disposition\""),
+        ("mime crate", "mime::APPLICATION_PDF"),
+    ];
+    for (kind, needle) in cases {
+        let source = format!("fn serve() {{\n    let t = {needle};\n}}\n");
+        assert_eq!(
+            file_writing_fns("p.rs", &source),
+            BTreeSet::from(["p.rs::serve".to_string()]),
+            "a {kind} body ({needle}) is a client file"
+        );
+    }
+    let comment = "fn serve() {\n    // \"application/pdf\" is not served here\n}\n";
+    assert!(file_writing_fns("p.rs", comment).is_empty());
+}
+
+// ---- the operator-only deep report (WO9e stop-gap) ----------------------------------------------
+
+#[tokio::test]
+async fn the_deep_report_says_it_is_operator_only_on_its_first_line_and_in_its_filename() {
+    let state = crate::AppState::new(std::sync::Arc::new(crate::InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/portal".to_string()])
+        .expect("project created");
+    let mut report = crate::onboard::ScanReport::gated(&["acme/portal".to_string()]);
+    report.deep = Some(crate::ai_audit::DeepReport {
+        lenses: Vec::new(),
+        advisory: true,
+        disclaimer: "d".to_string(),
+    });
+    let job = state.jobs.create("audit", Some(project.id.clone()));
+    state.jobs.finish(&job, report);
+
+    let resp =
+        crate::export_deep_report(axum::extract::State(state), axum::extract::Path(project.id))
+            .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let disposition = resp
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_default();
+    for (_, filename) in OPERATOR_ONLY_ROUTES {
+        assert!(disposition.contains(filename), "{disposition}");
+    }
+    use http_body_util::BodyExt;
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let markdown = String::from_utf8(bytes.to_vec()).expect("Markdown");
+    let first = markdown.lines().next().unwrap_or_default();
+    assert!(
+        first.contains(OPERATOR_ONLY_LABEL),
+        "the first line says who it is for: {first}"
+    );
+}
+
+#[test]
+fn the_cockpit_panel_and_saved_name_of_the_deep_report_say_it_is_operator_only() {
+    let panel = include_str!("../../../ui/src/cockpit/scan/exports.rs");
+    for (_, filename) in OPERATOR_ONLY_ROUTES {
+        assert!(
+            panel.contains(&format!("\"{filename}\"")),
+            "the saved filename is {filename}"
+        );
+    }
+    assert!(
+        !panel.contains("\"camerata-deep-report.md\""),
+        "no unlabelled saved name"
+    );
+    assert!(
+        panel.contains(OPERATOR_ONLY_LABEL),
+        "the panel carries the label"
+    );
 }

@@ -3248,6 +3248,15 @@ async fn check_github_release(
     }))
 }
 
+/// The first line of the deep report, and what the cockpit panel and the saved filename
+/// ([`DEEP_REPORT_FILENAME`]) say: the report is the operator's working notes. The lens prose is
+/// model-written and goes through no reviewer overlay and no release gate, so it is never a client
+/// deliverable. (A later work order makes it a gated package artifact.)
+const DEEP_REPORT_OPERATOR_LABEL: &str = "Internal working notes, not reviewed, not for the client";
+
+/// The saved name of the deep report; the word INTERNAL travels with the file.
+const DEEP_REPORT_FILENAME: &str = "camerata-deep-report-INTERNAL.md";
+
 /// Advisory disclaimer baked into the deep-report export.
 const DEEP_REPORT_ADVISORY: &str =
     "ADVISORY: This report is AI-inferred from static code analysis. \
@@ -3297,14 +3306,25 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
     let markdown = deep_report_markdown(deep, state.feature_flags.soc2);
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{DEEP_REPORT_FILENAME}\""),
+            ),
+        ],
         markdown,
     )
         .into_response()
 }
 
-/// The deep report as the Markdown a client receives: the lens prose is model-written text read
-/// back from the job store, so it is redacted here, at the export, whatever path stored it.
+/// The deep report as Markdown for the operator: the lens prose is model-written text read back
+/// from the job store, so it is redacted here, at the export, whatever path stored it. It is
+/// labelled as the operator's working notes ([`DEEP_REPORT_OPERATOR_LABEL`]); it is not a client
+/// deliverable.
 fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
     crate::onboard::redact::redact_deep_report(&mut deep);
     render_deep_report_markdown(&deep, soc2_enabled)
@@ -3312,9 +3332,10 @@ fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: boo
 
 /// Render a [`crate::ai_audit::DeepReport`] as Markdown, including only the
 /// lenses that actually ran (flag-aware). The advisory disclaimer is always
-/// baked in as the first section.
+/// baked in as the first section, under the operator-only label.
 fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
     let mut md = String::new();
+    md.push_str(&format!("**{DEEP_REPORT_OPERATOR_LABEL}**\n\n"));
     md.push_str("# Camerata Deep Compliance & Security Report\n\n");
     md.push_str(&format!("> **{}**\n\n", DEEP_REPORT_ADVISORY));
 
