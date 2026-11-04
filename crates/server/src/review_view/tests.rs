@@ -391,11 +391,28 @@ fn a_cursor_names_a_row_and_survives_a_round_trip() {
 #[test]
 fn engine_check_rates_carry_their_margin_and_small_categories_say_indicative() {
     let (rate, margin) = super::lane::rate_and_margin_for_tests(4, 31);
-    assert_eq!((rate, margin), (Some(12.9), Some(11.8)));
+    assert_eq!((rate, margin), (Some(12.9), Some(11.9)));
     assert_eq!(super::lane::rate_and_margin_for_tests(0, 0), (None, None));
+}
+
+/// A14: the margin is the Wilson interval's half-width, not the Wald one. Wald is 0 at a rate of 0
+/// or 100 percent, which reads as certainty from one verdict; Wilson stays honest there.
+#[test]
+fn engine_check_margins_do_not_collapse_to_zero_at_the_ends() {
+    let (rate, margin) = super::lane::rate_and_margin_for_tests(1, 1);
+    assert_eq!(rate, Some(100.0));
+    assert_eq!(margin, Some(39.7), "one verdict is not certainty");
     assert_eq!(
         super::lane::rate_and_margin_for_tests(0, 10),
-        (Some(0.0), Some(0.0))
+        (Some(0.0), Some(13.9))
+    );
+    assert_eq!(
+        super::lane::rate_and_margin_for_tests(10, 10),
+        (Some(100.0), Some(13.9))
+    );
+    assert_eq!(
+        super::lane::rate_and_margin_for_tests(2, 6),
+        (Some(33.3), Some(30.2))
     );
 }
 

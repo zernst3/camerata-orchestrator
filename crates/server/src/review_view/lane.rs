@@ -12,15 +12,18 @@ use camerata_api_types::review_view::{
 use super::ReviewComposer;
 use crate::engine_check::{draw_sample, Sample};
 
-/// A rate as a percent of verdicts, with its 95 percent margin (normal approximation), both to one
-/// decimal place; `None` before the first verdict.
+/// A rate as a percent of verdicts, with the half-width of its 95 percent Wilson score interval
+/// (design A14), both in percentage points to one decimal place; `None` before the first verdict.
+/// The normal approximation reads 0 at a rate of 0 or 100 percent, which is certainty from a
+/// handful of verdicts; the Wilson half-width stays wide there and shrinks as verdicts come in.
 fn rate_and_margin(wrong: usize, verdicts: usize) -> (Option<f64>, Option<f64>) {
     if verdicts == 0 {
         return (None, None);
     }
+    const Z: f64 = 1.96;
     let n = verdicts as f64;
     let p = wrong as f64 / n;
-    let margin = 1.96 * (p * (1.0 - p) / n).sqrt();
+    let margin = Z / (1.0 + Z * Z / n) * (p * (1.0 - p) / n + Z * Z / (4.0 * n * n)).sqrt();
     let round = |x: f64| (x * 1000.0).round() / 10.0;
     (Some(round(p)), Some(round(margin)))
 }

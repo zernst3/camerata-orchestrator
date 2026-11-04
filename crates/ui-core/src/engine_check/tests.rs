@@ -1,7 +1,8 @@
 //! The Engine Check lane's judgments, over the review fixtures.
 
 use camerata_api_types::review_view::{
-    BreadcrumbItem, EngineCheckVerdict, FlaggedByView, OutlierView,
+    BreadcrumbItem, EngineCheckVerdict, FlaggedByView, OutlierView, StratumRate,
+    SMALL_CATEGORY_DRAWN,
 };
 
 use super::*;
@@ -949,4 +950,40 @@ fn should_have_been_escalated_keeps_the_ruling_the_row_already_has() {
         (req.state, req.needed_me),
         (DecisionState::Confirmed, Some(true))
     );
+}
+
+// ── D4: a rate over a handful of verdicts says so ───────────────────────────────────────
+
+fn kept_mut(l: &mut EngineCheckLane) -> &mut StratumRate {
+    l.strata
+        .iter_mut()
+        .find(|s| s.stratum == SampleStratum::Kept)
+        .expect("the kept stratum")
+}
+
+#[test]
+fn a_stratum_rate_over_few_verdicts_says_indicative_only() {
+    let mut l = lane(EngineMode::AllVerdicts);
+    // One verdict, wrong: 100 percent, and not a certainty.
+    let kept = kept_mut(&mut l);
+    kept.drawn = 50;
+    kept.verdicts = 1;
+    kept.wrong = 1;
+    kept.rate_percent = Some(100.0);
+    kept.margin_percent = Some(39.7);
+    let line = rate_lines(&l)
+        .into_iter()
+        .find(|r| r.stratum == SampleStratum::Kept)
+        .expect("the kept rate line");
+    assert_eq!(
+        line.text,
+        "100% \u{b1} 40, indicative only (1 of 1 checked)"
+    );
+    // Just under the small-category line is still indicative; at it, the label goes.
+    let kept = kept_mut(&mut l);
+    kept.verdicts = SMALL_CATEGORY_DRAWN - 1;
+    kept.wrong = 2;
+    assert!(rate_lines(&l)[0].text.contains("indicative only"));
+    kept_mut(&mut l).verdicts = SMALL_CATEGORY_DRAWN;
+    assert!(!rate_lines(&l)[0].text.contains("indicative only"));
 }

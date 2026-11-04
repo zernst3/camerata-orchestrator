@@ -1871,7 +1871,9 @@ fn rate_and_margin(verdicts: usize, wrong: usize) -> (Option<f64>, Option<f64>) 
     }
     let n = verdicts as f64;
     let rate = wrong as f64 / n;
-    let margin = 1.96 * (rate * (1.0 - rate) / n).sqrt();
+    // The Wilson half-width, as the server computes it (design A14).
+    let margin = 1.96 / (1.0 + 1.96 * 1.96 / n)
+        * (rate * (1.0 - rate) / n + 1.96 * 1.96 / (4.0 * n * n)).sqrt();
     (
         Some((rate * 1000.0).round() / 10.0),
         Some((margin * 1000.0).round() / 10.0),

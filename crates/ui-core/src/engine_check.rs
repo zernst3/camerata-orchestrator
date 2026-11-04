@@ -19,7 +19,7 @@ use camerata_api_types::edits::{EditField, NewEditReq};
 use camerata_api_types::review_view::{
     CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckError, EngineCheckLane,
     EngineCheckVerdict, EngineCheckVerdictReq, EscalationStatus, HoldReason, SampleStratum,
-    StratumRate, SAMPLE_CATEGORY_FLOOR,
+    StratumRate, SAMPLE_CATEGORY_FLOOR, SMALL_CATEGORY_DRAWN,
 };
 
 use crate::tree::export::Door;
@@ -437,7 +437,11 @@ fn stratum_rate_text(s: &StratumRate) -> String {
     }
     format!(
         "{} ({} of {} checked)",
-        rate_text(s.rate_percent, s.margin_percent, false),
+        rate_text(
+            s.rate_percent,
+            s.margin_percent,
+            s.verdicts < SMALL_CATEGORY_DRAWN
+        ),
         thousands(s.wrong),
         thousands(s.verdicts)
     )

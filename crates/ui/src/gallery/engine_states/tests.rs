@@ -172,3 +172,20 @@ fn an_export_panel_door_to_an_engine_check_row_focuses_that_card() {
     )));
     assert!(html.contains("held from export until corrected"));
 }
+
+/// D4: one verdict is not a rate to trust. A stratum rate over fewer verdicts than the
+/// small-category line says "indicative only", with a margin that is not zero.
+#[test]
+fn a_stratum_rate_over_one_verdict_says_indicative_only_and_is_not_certain() {
+    for id in ["engine/no-pending-correction", "engine/no-corrected"] {
+        let html = page(id);
+        assert!(
+            html.contains("Error rate among reported findings: 100% \u{b1} 40, indicative only (1 of 1 checked)"),
+            "{id}: {html}"
+        );
+        assert!(
+            !html.contains("100% \u{b1} 0"),
+            "{id}: a zero margin reads as certainty"
+        );
+    }
+}
