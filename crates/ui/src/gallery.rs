@@ -6,7 +6,7 @@
 //!
 //! # Screenshotting every page (agents, U6: 1440 and 1000 wide, no third width)
 //!
-//! 1. `cargo run -p camerata-ui --bin gallery -- <out dir>` writes `<out>/<screen>/<state>.html`
+//! 1. `cargo run -p camerata-ui -- gallery <out dir>` writes `<out>/<screen>/<state>.html`
 //!    and `<out>/index.html`.
 //! 2. Serve it: `python3 -m http.server 8099 --directory <out dir>` (background), then open
 //!    `http://127.0.0.1:8099/index.html` in the in-app browser.
@@ -253,10 +253,27 @@ fn index_html(states: &[GalleryState], placeholders: usize) -> String {
     test_harness::document("Review gallery", &body)
 }
 
-/// The `gallery` binary: `gallery <out dir>`. Returns the process exit code.
+/// Which of the app's two jobs a command line asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// No subcommand: open the cockpit window, exactly as before.
+    App,
+    /// `gallery <out dir>`: write the static pages. Carries the arguments after `gallery`.
+    Gallery(Vec<String>),
+}
+
+/// Route the arguments after the program name. Pure, so it is tested without a window.
+pub fn route(args: &[String]) -> Launch {
+    match args.first().map(String::as_str) {
+        Some("gallery") => Launch::Gallery(args[1..].to_vec()),
+        _ => Launch::App,
+    }
+}
+
+/// The `gallery` subcommand: `gallery <out dir>`. Returns the process exit code.
 pub fn run_cli(args: &[String]) -> i32 {
     let Some(out) = args.first() else {
-        eprintln!("usage: cargo run -p camerata-ui --bin gallery -- <out dir>");
+        eprintln!("usage: cargo run -p camerata-ui -- gallery <out dir>");
         return 2;
     };
     match write_gallery(Path::new(out)) {

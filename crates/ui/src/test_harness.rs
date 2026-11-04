@@ -2,7 +2,7 @@
 //!
 //! `render_props` renders any props-only component to a complete HTML document carrying the app's
 //! real stylesheet (`style::GLOBAL_CSS`) and the web-fonts link, so the same function serves a unit
-//! test (assert on the markup) and the gallery binary (write a page an agent can screenshot).
+//! test (assert on the markup) and the gallery subcommand (write a page an agent can screenshot).
 //! Older per-file `VirtualDom` helpers keep working; new screens use this one.
 
 use dioxus::prelude::*;

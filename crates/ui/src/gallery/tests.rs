@@ -259,3 +259,15 @@ fn fixtures_cover_every_state() {
     }
     assert_eq!(registered.len(), FIXTURE_IDS.len());
 }
+
+#[test]
+fn route_sends_the_gallery_subcommand_to_the_gallery_and_nothing_to_the_app() {
+    let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        route(&args(&["gallery", "/tmp/out"])),
+        Launch::Gallery(args(&["/tmp/out"]))
+    );
+    assert_eq!(route(&args(&["gallery"])), Launch::Gallery(Vec::new()));
+    assert_eq!(route(&[]), Launch::App);
+    assert_eq!(route(&args(&["--something"])), Launch::App);
+}

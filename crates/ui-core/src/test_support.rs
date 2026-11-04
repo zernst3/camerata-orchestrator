@@ -1,5 +1,5 @@
 //! Shared test helpers (the helpers here compile for tests only) and the review fixtures, which
-//! the gallery binary also reads, so [`review_fixtures`] is always compiled.
+//! the gallery subcommand also reads, so [`review_fixtures`] is always compiled.
 
 pub mod review_fixtures;
 

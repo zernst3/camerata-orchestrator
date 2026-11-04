@@ -10,6 +10,9 @@
 //! Run it with:
 //!     cargo run -p camerata-ui
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
+//!
+//! The review gallery (static pages from fixtures, no window) is this binary's `gallery` subcommand:
+//!     cargo run -p camerata-ui -- gallery <out dir>
 
 use camerata_ui::desktop_chrome::{self, CLIPBOARD_SHIM_SCRIPT, GOOGLE_FONTS_LINK};
 
@@ -53,11 +56,11 @@ pub fn bff_base() -> String {
 }
 
 fn main() {
-    // The `gallery` target is this same source (see Cargo.toml): it writes the review gallery's
-    // static pages and never opens the cockpit window.
-    if env!("CARGO_BIN_NAME") == "gallery" {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        std::process::exit(gallery::run_cli(&args));
+    // `cargo run -p camerata-ui -- gallery <out dir>` writes the review gallery's static pages and
+    // never opens the cockpit window; with no arguments the app launches as always.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let gallery::Launch::Gallery(rest) = gallery::route(&args) {
+        std::process::exit(gallery::run_cli(&rest));
     }
     // Auto-load the gitignored .env at the repo root (and any parent), so the
     // GitHub token etc. are inherited by the spawned BFF without exporting them.
