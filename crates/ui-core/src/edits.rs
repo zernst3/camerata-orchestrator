@@ -569,10 +569,11 @@ pub struct MergeCandidate {
 /// How many sites the picker lists at most.
 pub const MERGE_LIST_MAX: usize = 12;
 
-/// The sites `row` can be merged into: the possible-duplicate link first, then the loaded sites
-/// whose `path:line` or rule id contains `query` (every loaded site, nearest first, when the
-/// query is empty). Never the row itself, and never a row that is itself merged away.
-pub fn merge_candidates(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCandidate> {
+/// Every site `row` can be merged into that matches `query`, in the order the picker lists
+/// them: the possible-duplicate link first, then the loaded sites whose `path:line` or rule id
+/// contains `query` (every loaded site, nearest first, when the query is empty). Never the row
+/// itself, and never a row that is itself merged away.
+fn merge_matches(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCandidate> {
     let mut out: Vec<MergeCandidate> = Vec::new();
     if let Some(dup) = row.possible_duplicate_of.as_ref() {
         if dup.key != row.site_key {
@@ -589,9 +590,6 @@ pub fn merge_candidates(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<
     }
     let query = query.trim().to_lowercase();
     for site in &ctx.pool {
-        if out.len() >= MERGE_LIST_MAX {
-            break;
-        }
         if site.key == row.site_key || site.merged || out.iter().any(|c| c.key == site.key) {
             continue;
         }
@@ -609,6 +607,24 @@ pub fn merge_candidates(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<
         }
     }
     out
+}
+
+/// The sites the picker lists: the first [`MERGE_LIST_MAX`] of the matches.
+pub fn merge_candidates(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCandidate> {
+    let mut out = merge_matches(row, ctx, query);
+    out.truncate(MERGE_LIST_MAX);
+    out
+}
+
+/// How many sites match the picker's search in all (the list shows at most
+/// [`MERGE_LIST_MAX`] of them).
+pub fn merge_candidate_total(row: &SiteRow, ctx: &DetailContext, query: &str) -> usize {
+    merge_matches(row, ctx, query).len()
+}
+
+/// The picker's words when its list is cut short, or `None` when it shows every match.
+pub fn merge_shown_line(shown: usize, total: usize) -> Option<String> {
+    (total > shown).then(|| format!("{shown} of {total} shown, narrow the search"))
 }
 
 /// Why a merge was not posted.

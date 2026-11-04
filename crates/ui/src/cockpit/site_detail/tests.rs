@@ -484,6 +484,36 @@ fn the_merge_picker_lists_the_possible_duplicate_first_and_marks_the_pick() {
 }
 
 #[test]
+fn the_merge_picker_says_how_many_sites_match_when_it_lists_fewer() {
+    let row = plain();
+    let total = camerata_ui_core::edits::merge_candidate_total(&row, &ctx(), "");
+    assert!(
+        total > 12,
+        "the fixture pool must overflow the list: {total}"
+    );
+    let draft = MergeDraft {
+        query: String::new(),
+        target: None,
+        reason: String::new(),
+        error: None,
+    };
+    let html = page(row.clone(), mode(DetailMode::Merge(draft)));
+    assert!(
+        html.contains(&format!("12 of {total} shown, narrow the search")),
+        "{html}"
+    );
+    // A search that fits draws no such line.
+    let narrow = MergeDraft {
+        query: "no such place anywhere:9999".into(),
+        target: None,
+        reason: String::new(),
+        error: None,
+    };
+    let html = page(row, mode(DetailMode::Merge(narrow)));
+    assert!(!html.contains("shown, narrow the search"), "{html}");
+}
+
+#[test]
 fn the_split_picker_offers_the_rules_sub_groups_and_a_new_one_with_a_label() {
     let row = plain();
     let existing = mode(DetailMode::Split(SplitDraft {

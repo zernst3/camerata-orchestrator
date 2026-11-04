@@ -1455,3 +1455,32 @@ fn the_split_select_values_map_back_to_the_choice_and_never_carry_a_label() {
         SPLIT_NEW_VALUE
     );
 }
+
+#[test]
+fn the_merge_picker_reports_every_match_and_says_when_it_shows_fewer() {
+    let row = plain();
+    let pool: Vec<PoolSite> = (0..20)
+        .map(|i| PoolSite {
+            key: format!("k{i}"),
+            path: format!("src/m{i}.ts"),
+            line: i + 1,
+            rule_id: "SEC-RLS-1".into(),
+            merged: false,
+        })
+        .collect();
+    let ctx = DetailContext { pool, ..ctx() };
+    let list = merge_candidates(&row, &ctx, "");
+    assert_eq!(list.len(), MERGE_LIST_MAX, "the list is capped");
+    assert_eq!(
+        merge_candidate_total(&row, &ctx, ""),
+        20,
+        "the total is every match, not the page"
+    );
+    // A search that fits shows all of it and says nothing.
+    assert_eq!(merge_candidate_total(&row, &ctx, "m1"), 11);
+    assert_eq!(merge_shown_line(11, 11), None);
+    assert_eq!(
+        merge_shown_line(12, 20).as_deref(),
+        Some("12 of 20 shown, narrow the search")
+    );
+}

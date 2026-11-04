@@ -23,12 +23,12 @@ use camerata_api_types::review_view::SiteRow;
 use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
-    flagged_by_line, head_chips, held_line, merge_candidates, reapply_decision_request,
-    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line,
-    split_choice_from_value, split_option_value, stage1_line, stage2_line, stale_edit_line,
-    stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control, DetailAction,
-    DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction, LineTone, Snippet,
-    SplitChoice, UndoAction, SPLIT_NEW_VALUE,
+    flagged_by_line, head_chips, held_line, merge_candidate_total, merge_candidates,
+    merge_shown_line, reapply_decision_request, reapply_done_message, reduce, review_level_text,
+    severity_note, snippet_at_line, split_choice_from_value, split_option_value, stage1_line,
+    stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
+    Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
+    LineAction, LineTone, Snippet, SplitChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -676,6 +676,10 @@ fn MergeForm(
     on_event: Callback<DetailEvent>,
 ) -> Element {
     let candidates = merge_candidates(&row, &ctx, &draft.query);
+    let cut_short = merge_shown_line(
+        candidates.len(),
+        merge_candidate_total(&row, &ctx, &draft.query),
+    );
     let picked = draft.target.clone();
     rsx! {
         div { class: "queue-reason-prompt site-detail-form site-detail-merge-form", id: "{DETAIL_FORM_ID}",
@@ -719,6 +723,9 @@ fn MergeForm(
                         }
                     }
                 }
+            }
+            if let Some(line) = cut_short {
+                p { class: "site-detail-candidate-more", "{line}" }
             }
             label { class: "rule-modal-label", "Why these are one problem (required)" }
             ReasonInput {

@@ -7224,4 +7224,5 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-detail-candidate.picked { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
 .site-detail-candidate-rule { color: var(--ink-soft); }
 .site-detail-candidate-none { color: var(--ink-faint); cursor: default; }
+.site-detail-candidate-more { margin: 0 0 6px; color: var(--ink-faint); }
 "#;
