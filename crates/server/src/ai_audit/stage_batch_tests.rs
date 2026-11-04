@@ -291,6 +291,8 @@ struct Api {
     probe: Option<Box<PollProbe>>,
     submit_times: Mutex<Vec<Instant>>,
     cancel_calls: Mutex<Vec<String>>,
+    /// Batch ids whose poll and fetch fail, with the HTTP status the provider answers.
+    broken: Mutex<HashMap<String, u16>>,
 }
 
 impl Api {
@@ -309,6 +311,33 @@ impl Api {
             probe: None,
             submit_times: Mutex::new(Vec::new()),
             cancel_calls: Mutex::new(Vec::new()),
+            broken: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A saved batch the provider answers `status` for on every poll and fetch (404: gone).
+    fn breaking(self, batch_id: &str, status: u16) -> Self {
+        self.broken
+            .lock()
+            .unwrap()
+            .insert(batch_id.to_string(), status);
+        self
+    }
+
+    fn broken_answer(&self, batch_id: &str) -> Option<anyhow::Error> {
+        let status = *self.broken.lock().unwrap().get(batch_id)?;
+        if status == 404 {
+            let body = r#"{"type":"error","error":{"type":"not_found_error","message":"batch not found"}}"#;
+            let mut f = LlmCallFailure::new(
+                FailureClass::Content,
+                format!("batch results HTTP 404 Not Found: {body}"),
+            );
+            f.http = Some((404, body.to_string()));
+            Some(anyhow::Error::new(f))
+        } else {
+            Some(anyhow::anyhow!(
+                "Message Batches API HTTP {status}: unavailable"
+            ))
         }
     }
 
@@ -404,6 +433,9 @@ impl BatchApi for Api {
         Ok(id)
     }
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
+        if let Some(e) = self.broken_answer(batch_id) {
+            return Err(e);
+        }
         let n = self.polls.fetch_add(1, Ordering::SeqCst);
         if let Some(probe) = &self.probe {
             probe(n);
@@ -429,6 +461,9 @@ impl BatchApi for Api {
         Ok(())
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        if let Some(e) = self.broken_answer(batch_id) {
+            return Err(e);
+        }
         if self.fetch_fails {
             anyhow::bail!("Message Batches API HTTP 503: results unavailable");
         }
@@ -1614,4 +1649,129 @@ async fn a_long_retry_after_keeps_touching_the_job_and_labels_it_paused() {
         "the hold kept touching the job (idle {idle} ms)"
     );
     assert_eq!(label.as_deref(), Some("paused: rate limited"));
+}
+
+// ── WO7b F1: a batch that is gone for good is settled and its members sent once more ────────────
+
+/// A batch the first process submitted whose results could not be fetched, saved under
+/// `gone_id` so a stub can answer for it by name. Returns the checkpoint's single record.
+async fn save_unsettled_batch(cp: &StageCheckpoint, all: &[&str], gone_id: &str) -> BatchRecord {
+    let first = Api::new().failing_fetch();
+    let mut stage = Scripted::new(all);
+    let mut c = ctx(&first.realtime, Some(&first));
+    c.checkpoint = Some(cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(!out.failed.is_empty(), "the unabsorbed members wait on the batch");
+    let mut records = cp.batches();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].settled);
+    records[0].batch_id = gone_id.to_string();
+    cp.save_batches(&records).unwrap();
+    records.remove(0)
+}
+
+fn cap_meter() -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        review: Default::default(),
+        efficiency: Default::default(),
+        max_cost_usd: Some(1000.0),
+        estimate_hint_usd: None,
+        fix_model: None,
+        clone_judge_model: None,
+        consensus: false,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_saved_batch_the_provider_no_longer_has_is_settled_as_gone_and_its_members_sent_once_more()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3", "a4", "a5", "a6"];
+
+    // Process 1: a1 and a2 are absorbed in real time.
+    let rt = Realtime::new(|id, _| {
+        if id == "a1" || id == "a2" {
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        } else {
+            (Duration::from_secs(1), Err(content_error("boom")))
+        }
+    });
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&rt, None);
+    c.checkpoint = Some(&cp);
+    run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 4 },
+        &c,
+    )
+    .await;
+    // Process 2: the other four go out as a batch nobody can fetch; the id is then saved as one
+    // the provider has since dropped.
+    let record = save_unsettled_batch(&cp, &all, "msgbatch_gone").await;
+    assert_eq!(record.items.len(), 4);
+
+    // Process 3: the provider answers 404 for the saved id. It is settled as gone, its four
+    // unsettled members are submitted ONCE as a new batch, and the run completes.
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(sorted(out.resumed.clone()), ids(&["a1", "a2"]));
+    assert_eq!(sorted(out.absorbed.clone()), ids(&["a3", "a4", "a5", "a6"]));
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1, "submitted once");
+    assert_eq!(
+        sorted(api.submitted_item_ids()[0].clone()),
+        ids(&["a3", "a4", "a5", "a6"]),
+        "exactly the unsettled members"
+    );
+    assert_eq!(api.realtime.call_count(), 0);
+    let records = cp.batches();
+    assert!(
+        records.iter().all(|r| r.settled),
+        "the gone batch is settled, not left live: {records:?}"
+    );
+    assert!(out.failed.iter().all(|f| f.live_batch.is_none()));
+    let notes = meter.cost_cap_record().unwrap().notes.join("\n");
+    assert!(
+        notes.contains("msgbatch_gone") && notes.contains("no longer exists"),
+        "the gone batch is disclosed: {notes}"
+    );
+
+    // Process 4: nothing is left to do, and the gone id is never asked about again.
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.resumed.len(), 6);
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(api.polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_transient_fetch_failure_on_resume_keeps_the_batch_live_and_resubmits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    save_unsettled_batch(&cp, &all, "msgbatch_busy").await;
+
+    let api = Api::new().breaking("msgbatch_busy", 503);
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.failed.len(), 3);
+    assert!(out
+        .failed
+        .iter()
+        .all(|f| f.live_batch.as_deref() == Some("msgbatch_busy")));
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0, "not resubmitted");
+    assert!(!cp.batches()[0].settled, "still live: a later resume polls it");
 }

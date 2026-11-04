@@ -1356,6 +1356,26 @@ fn round_ctx<'a>(stage: Stage, ctx: &'a StageCtx<'a>, api: &'a dyn BatchApi) -> 
     }
 }
 
+/// True when the provider says the batch is gone for good: not found (404) or expired (410, or a
+/// `not_found_error`). Read from the typed failure's HTTP status and error type when the
+/// transport produced one, else from the text of the error (a stub, a wrapped message). A
+/// transient failure (a 5xx, a timeout, a rate limit) is NOT gone: the batch may still be there.
+fn batch_is_gone(e: &anyhow::Error) -> bool {
+    if let Some(f) = failure::call_failure_of(e) {
+        let typed = f.http.as_ref().is_some_and(|(status, body)| {
+            matches!(*status, 404 | 410) || body.contains("not_found_error")
+        }) || f
+            .attempts
+            .iter()
+            .any(|a| matches!(a.http_status, Some(404 | 410)));
+        if typed {
+            return true;
+        }
+    }
+    let text = format!("{e:#}");
+    text.contains("HTTP 404") || text.contains("HTTP 410") || text.contains("not_found_error")
+}
+
 /// Resume, second half: batches an earlier process submitted and did not settle are polled and
 /// fetched by id (never submitted again). Returns the follow-up work their rows produced, to
 /// replace those items' requests in the first round.
@@ -1435,6 +1455,28 @@ where
             Err(failed) if failed.error.is::<JobCancelled>() => {
                 cancel_live_batch(ctx, api, book, &record.batch_id).await;
                 break;
+            }
+            Err(failed) if batch_is_gone(&failed.error) => {
+                // The provider answers not found or expired for this id, now and on every later
+                // try: nothing can ever be fetched from it, so polling it again would fail the
+                // same items on every resume. It is settled as gone, and the members it still
+                // owed are sent again once, in this run's first round. Nothing was absorbed from
+                // it, so none of them is paid for twice here; what the provider may have charged
+                // for the gone batch is not in this ledger, and the note says so.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let note = format!(
+                    "Batch {} no longer exists at the provider ({error}), so its results can                      never be fetched. It was settled as gone and its {} unfinished item(s) were                      submitted again. What the provider charged for the gone batch, if anything,                      is not in this ledger.",
+                    record.batch_id,
+                    members.len()
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                for (_, work) in members {
+                    out.insert(work.id.clone(), work);
+                }
+                records[i].settled = true;
             }
             Err(failed) => {
                 let error = disclosable_error(&format!("{:#}", failed.error));
