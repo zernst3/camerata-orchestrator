@@ -48,9 +48,11 @@
 //! the marker beside it.
 
 use super::stage_batch::{
-    mode_and_api, run_stage, ItemReject, StageCtx, StageItems, StageRoute, StageSettings,
+    mode_and_api, resume_held, run_stage, HeldReply, HeldRows, ItemReject, MemberState, StageCtx,
+    StageItems, StageRoute, StageSettings,
 };
 use super::*;
+use crate::checkpoint::BatchMember;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::stage_telemetry::DetailRejections;
 
@@ -1161,6 +1163,15 @@ struct DetailBatch {
     reasking: Vec<bool>,
     request_key: String,
     req: LlmRequest,
+    /// What a resume reads the reply by: each finding's site key, the id it was asked under and
+    /// the round.
+    members: Vec<BatchMember>,
+    /// Ids a stored reply also answered whose findings are done or gone: their entries are
+    /// ignored. Empty for a call of this round.
+    ignore: Vec<String>,
+    /// How many findings the call asked about in all (the share of a reply that bought nothing
+    /// is counted against this). `batch.len()` for a call of this round.
+    asked: usize,
 }
 
 /// The calls of one detail round in the shape the shared batch runner takes: one item per batch,
@@ -1178,10 +1189,106 @@ struct DetailRound<'a> {
     rejections: &'a mut DetailRejections,
     why: &'a mut std::collections::HashMap<usize, String>,
     wording: &'a mut WordingLedger,
+    /// What a stored reply is read against on resume (see [`HeldRows`]); unused by a round.
+    resume: Option<ResumeState<'a>>,
+}
+
+/// What reading a stored reply for its findings needs beyond a round's own state.
+struct ResumeState<'a> {
+    directives: &'a std::collections::HashMap<String, String>,
+    nonce: &'a crate::prompt_frame::FrameNonce,
+    /// Site key to the finding's index in the run.
+    index: std::collections::HashMap<String, usize>,
+    /// The findings in the run that have no explanation yet.
+    open: std::collections::BTreeSet<usize>,
+}
+
+/// The key a stored reply is read under (never an item of a round).
+const HELD_KEY: &str = "held";
+
+impl HeldRows for DetailRound<'_> {
+    fn member_state(&self, member: &BatchMember) -> MemberState {
+        let Some(state) = &self.resume else {
+            return MemberState::Gone;
+        };
+        match state.index.get(&member.key) {
+            Some(&idx) if self.findings[idx].line == member.line => {
+                if state.open.contains(&idx) {
+                    MemberState::Open
+                } else {
+                    MemberState::Done
+                }
+            }
+            _ => MemberState::Gone,
+        }
+    }
+
+    fn absorb_held(&mut self, held: HeldReply<'_>, resp: LlmResponse) {
+        let Some(state) = &self.resume else {
+            return;
+        };
+        let (directives, nonce) = (state.directives, state.nonce);
+        let batch: Vec<usize> = held
+            .open
+            .iter()
+            .filter_map(|m| state.index.get(&m.key).copied())
+            .collect();
+        let ids: Vec<String> = held.open.iter().map(|m| m.tag.clone()).collect();
+        // A finding that failed a wording check in an earlier reply is on its one re-ask.
+        let reasking: Vec<bool> = batch
+            .iter()
+            .map(|idx| self.wording.replies.contains_key(idx))
+            .collect();
+        let blocks: Vec<Block> = batch
+            .iter()
+            .zip(&ids)
+            .map(|(&idx, id)| {
+                build_block(
+                    id,
+                    &self.findings[idx],
+                    self.files,
+                    directives,
+                    nonce,
+                    self.why.get(&idx).map(String::as_str),
+                )
+            })
+            .collect();
+        self.batches.insert(
+            HELD_KEY.to_string(),
+            DetailBatch {
+                batch: batch.clone(),
+                ids,
+                blocks,
+                reasking,
+                request_key: String::new(),
+                req: LlmRequest::new(String::new()),
+                members: held.open.to_vec(),
+                ignore: held.ignore.iter().map(|m| m.tag.clone()).collect(),
+                asked: held.asked,
+            },
+        );
+        let _ = self.absorb(&HELD_KEY.to_string(), resp);
+        self.batches.remove(HELD_KEY);
+        // The reply settled these findings: what it wrote leaves the open set; what it left
+        // unwritten (and not settled from its wording replies) stays open, to be asked.
+        if let Some(state) = self.resume.as_mut() {
+            for idx in &batch {
+                state.open.remove(idx);
+            }
+            state.open.extend(self.still_pending.drain(..));
+        }
+    }
 }
 
 impl StageItems for DetailRound<'_> {
     type Id = String;
+
+    fn members(&self, key: &String) -> Vec<BatchMember> {
+        self.batches
+            .get(key)
+            .map(|b| b.members.clone())
+            .unwrap_or_default()
+    }
 
     fn items(&self) -> Vec<(String, LlmRequest)> {
         self.order
@@ -1206,6 +1313,7 @@ impl StageItems for DetailRound<'_> {
         let blocks = &bctx.blocks;
         let reasking = &bctx.reasking;
         let request_key = &bctx.request_key;
+        let (ignore, asked) = (&bctx.ignore, bctx.asked);
         let findings = &mut *self.findings;
         let files = self.files;
         let meter = self.meter;
@@ -1227,7 +1335,13 @@ impl StageItems for DetailRound<'_> {
         // the batch's). Each is charged below to one finding the reply did not answer, so a
         // finding's attempt is counted once, under one reason.
         let mut stray = parsed.unusable;
-        let entries = parsed.entries;
+        // An entry for a finding the reply was also written for that is done or gone belongs to
+        // neither this batch's findings nor the stray count.
+        let entries: Vec<Entry> = parsed
+            .entries
+            .into_iter()
+            .filter(|e| !ignore.contains(&e.id))
+            .collect();
         // An id the reply uses twice is ambiguous: neither entry is written.
         let used_twice: Vec<&str> = entries
             .iter()
@@ -1329,7 +1443,7 @@ impl StageItems for DetailRound<'_> {
                     m.record_wasted_share(
                         Stage::DetailRegeneration,
                         &resp,
-                        unwritten as f64 / batch.len() as f64,
+                        unwritten as f64 / asked as f64,
                     );
                 }
             }
@@ -1444,6 +1558,16 @@ async fn run_detail_round(
         let request_key = crate::run_store::journal::request_key(&req);
         let key = crate::checkpoint::batch_key(round, batch.iter().map(|&i| keys[i].as_str()));
         order.push(key.clone());
+        let members = batch
+            .iter()
+            .zip(&ids)
+            .map(|(&i, id)| BatchMember {
+                key: keys[i].clone(),
+                line: findings[i].line,
+                tag: id.clone(),
+                round: round.to_string(),
+            })
+            .collect();
         batches.insert(
             key,
             DetailBatch {
@@ -1453,6 +1577,9 @@ async fn run_detail_round(
                 reasking,
                 request_key,
                 req,
+                members,
+                ignore: Vec::new(),
+                asked: batch.len(),
             },
         );
     }
@@ -1467,6 +1594,7 @@ async fn run_detail_round(
         rejections,
         why,
         wording,
+        resume: None,
     };
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("detail_{repo}"));
     // The round goes out as a Message Batch when the run is a batch run and the seam has a batch
@@ -1534,6 +1662,88 @@ async fn run_detail_round(
     still_pending.sort_unstable();
     still_pending.dedup();
     still_pending
+}
+
+/// Resume, before the first round: every reply an earlier process stored and every batch it left
+/// live is read finding by finding (see [`HeldRows`]), so a reply reaches its findings whatever
+/// batches this run would build. Returns the findings still without an explanation, for the
+/// rounds to ask. A batch that cannot be fetched now holds its findings in `held`: they are not
+/// asked again while it may still be billed.
+#[allow(clippy::too_many_arguments)]
+async fn resume_held_details(
+    llm: &dyn LlmPort,
+    repo: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
+    model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    files: &[(String, String)],
+    directives: &std::collections::HashMap<String, String>,
+    findings: &mut [Finding],
+    pending: Vec<usize>,
+    last_error: &mut Option<String>,
+    rejections: &mut DetailRejections,
+    trail: &mut super::StageTrail,
+    held: &mut std::collections::HashMap<usize, String>,
+    why: &mut std::collections::HashMap<usize, String>,
+    wording: &mut WordingLedger,
+    route: StageRoute<'_>,
+) -> Vec<usize> {
+    let Some(checkpoint) = crate::checkpoint::stage_checkpoint(&format!("detail_{repo}")) else {
+        return pending;
+    };
+    let index: std::collections::HashMap<String, usize> =
+        crate::inspections::site_keys_of(findings)
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| (key, i))
+            .collect();
+    let (_, batch_api) = mode_and_api(llm, route.batch, super::PARALLEL_CONCURRENCY);
+    let ctx = StageCtx {
+        repo,
+        model: &super::stage_model(model),
+        realtime: llm,
+        batch: batch_api,
+        meter,
+        job: route.job,
+        checkpoint: Some(&checkpoint),
+        settings: StageSettings::default(),
+    };
+    let mut stage = DetailRound {
+        llm,
+        meter,
+        files,
+        findings,
+        batches: std::collections::BTreeMap::new(),
+        order: Vec::new(),
+        still_pending: Vec::new(),
+        rejections,
+        why,
+        wording,
+        resume: Some(ResumeState {
+            directives,
+            nonce,
+            index: index.clone(),
+            open: pending.into_iter().collect(),
+        }),
+    };
+    let resumed = resume_held(Stage::DetailRegeneration, &mut stage, &ctx).await;
+    let open: Vec<usize> = stage
+        .resume
+        .take()
+        .map(|r| r.open.into_iter().collect())
+        .unwrap_or_default();
+    drop(stage);
+    for live in resumed.live {
+        for key in &live.keys {
+            if let Some(&idx) = index.get(key) {
+                held.insert(idx, live.batch_id.clone());
+                why.insert(idx, live.reason.clone());
+            }
+        }
+        trail.note_failed_item(live.class, &live.reason, &live.attempts);
+        *last_error = Some(live.reason);
+    }
+    open
 }
 
 /// The sentence a failed part adds for findings held by batches that were accepted but whose
@@ -1651,6 +1861,26 @@ pub(crate) async fn regenerate_full_details_in(
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
     if !blocked {
+        // What an earlier process stored (replies, batches left live) reaches its findings first.
+        pending = resume_held_details(
+            llm,
+            repo,
+            nonce,
+            model,
+            meter,
+            files,
+            &directives,
+            &mut findings,
+            pending,
+            &mut last_error,
+            &mut rejections,
+            &mut trail,
+            &mut held,
+            &mut why,
+            &mut wording,
+            route,
+        )
+        .await;
         for round in 0..DETAIL_ROUNDS {
             // A finding held by a live batch is not asked again: the batch may still be billed.
             let ask: Vec<usize> = pending

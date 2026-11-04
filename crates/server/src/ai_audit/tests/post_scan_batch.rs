@@ -304,7 +304,7 @@ mod resume_by_member {
             "app/auth/signout/route.ts",
             line,
             "rawRedirect(p) is called with an unvalidated path \u{2014} an open redirect.",
-            "rawRedirect(p)",
+            &format!("rawRedirect(p) /* site {line} */"),
         )
     }
 
@@ -364,6 +364,7 @@ mod resume_by_member {
                 text: r#"{"fixes":[{"id":"abcdef","fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts, written elsewhere."}]}"#.to_string(),
                 members: vec![BatchMember {
                     key: keys[1].clone(),
+                    line: 2,
                     tag: "abcdef".to_string(),
                     round: "r1".to_string(),
                 }],
@@ -419,5 +420,57 @@ mod resume_by_member {
             notes.iter().any(|n| n.contains("no longer in this run")),
             "the wasted share is on the ledger: {notes:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_that_still_cannot_be_fetched_keeps_its_findings_held_and_is_not_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(62), at(2), at(22), at(42)], None).await;
+
+        assert!(fix_of(&out[0]).ends_with("for the first site."), "{out:?}");
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding went out; the held ones were not sent again"
+        );
+        assert!(
+            out[1..].iter().all(|f| f.fix_specific.is_none()),
+            "the held findings have no fix yet: {out:?}"
+        );
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_0")),
+            "the failed part names the live batch: {failed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_row_read_on_one_resume_is_not_read_or_paid_for_again_on_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+        let seam = api.seam();
+        let findings = || vec![at(2), at(22), at(42)];
+        let (first, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        let fetched = stub.calls.load(std::sync::atomic::Ordering::Relaxed);
+
+        let meter = UsageMeter::default();
+        let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(api.submit_calls(), 1);
+        assert_eq!(
+            stub.calls.load(std::sync::atomic::Ordering::Relaxed),
+            fetched,
+            "nothing fetched again"
+        );
+        let fixes = |rows: &[Finding]| {
+            rows.iter()
+                .map(|f| f.fix_specific.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fixes(&again), fixes(&first));
+        assert_eq!(meter.snapshot().input_tokens, 100, "the usage is not zero");
     }
 }

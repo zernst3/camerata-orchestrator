@@ -3261,6 +3261,7 @@ mod resume_by_member {
     fn at(line: usize) -> Finding {
         Finding {
             line,
+            snippet: format!("{SNIPPET} // site {line}"),
             ..finding(&format!("{TITLE} {line}{HEADLINE_SEP}{SHORT}"))
         }
     }
@@ -3307,6 +3308,10 @@ mod resume_by_member {
         (api, stub)
     }
 
+    fn details(rows: &[Finding]) -> Vec<String> {
+        rows.iter().map(|f| f.detail.clone()).collect()
+    }
+
     fn wrote(f: &Finding, line: usize) -> bool {
         f.detail.contains(&format!("(finding at line {line})"))
     }
@@ -3338,6 +3343,7 @@ mod resume_by_member {
                 text: elsewhere,
                 members: vec![BatchMember {
                     key: keys[1].clone(),
+                    line: 9,
                     tag: "abcdef".to_string(),
                     round: "r1".to_string(),
                 }],
@@ -3411,6 +3417,124 @@ mod resume_by_member {
         assert!(
             notes.iter().any(|n| n.contains("no longer in this run")),
             "the wasted share is on the ledger: {notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_site_key_that_now_names_a_finding_on_another_line_is_not_written_into() {
+        // Findings of one rule and one snippet in one file are told apart by their order alone,
+        // so a finding added above shifts every key below it. The row for the old second
+        // finding must not land in the finding that now holds that key.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let same = |line: usize| finding(&format!("{TITLE} {line}{HEADLINE_SEP}{SHORT}"));
+        let same_at = |line: usize| Finding { line, ..same(line) };
+        let (_, failed) = run(
+            dir.path(),
+            &seam,
+            vec![same_at(9), same_at(49), same_at(89)],
+            None,
+        )
+        .await;
+        assert!(failed.iter().any(|f| f.reason.contains("msgbatch_0")));
+        api.heal();
+
+        let meter = UsageMeter::default();
+        let (out, failed) = run(
+            dir.path(),
+            &seam,
+            vec![same_at(9), same_at(29), same_at(49), same_at(89)],
+            Some(&meter),
+        )
+        .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([9, 29, 49, 89]) {
+            assert!(
+                wrote(row, line),
+                "line {line} carries another's text: {row:?}"
+            );
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "the findings whose keys moved were asked again, not given another's reply"
+        );
+        assert!(
+            meter
+                .notes()
+                .iter()
+                .any(|n| n.contains("no longer in this run")),
+            "{:?}",
+            meter.notes()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_that_still_cannot_be_fetched_keeps_its_findings_held_and_is_not_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        // Still unreachable: the resumed run lists a new finding too.
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(29), at(9), at(49), at(89)], None).await;
+
+        assert!(wrote(&out[0], 29), "the new finding was asked: {out:?}");
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding went out; the held ones were not sent again"
+        );
+        let prompts = api.submitted_prompts();
+        assert!(
+            !prompts[1].contains(&format!("{HANDLER}:49\n")),
+            "a held finding was sent again"
+        );
+        let part = failed
+            .iter()
+            .find(|f| f.reason.contains("msgbatch_0"))
+            .expect("the failed part names the live batch");
+        assert!(
+            part.reason.contains("not submitted again"),
+            "{}",
+            part.reason
+        );
+        assert!(
+            out[1..]
+                .iter()
+                .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)),
+            "the held findings are marked incomplete, never dropped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_row_read_on_one_resume_is_not_read_or_paid_for_again_on_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (first, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        let fetched = stub.prompts(Role::Regen).len();
+
+        // Another restart: the reply is stored, so nothing is fetched or submitted and the
+        // explanations are on the rows with their usage on the ledger.
+        let meter = UsageMeter::default();
+        let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(api.submit_calls(), 1);
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            fetched,
+            "nothing fetched again"
+        );
+        assert_eq!(details(&again), details(&first));
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            1_000,
+            "the usage is not zero"
         );
     }
 }

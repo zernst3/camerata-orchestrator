@@ -35,6 +35,16 @@
 //! and its reply is handed to [`StageItems::absorb`] unless the stage reports it already holds
 //! the item); a batch that has not settled is polled and fetched by id, never submitted again;
 //! only an item with no result and no live batch is sent.
+//!
+//! A stage whose item is one call about SEVERAL findings (detail regeneration, fix generation)
+//! cannot be resumed by item key: the resumed run need not build the same calls. It writes each
+//! item's findings into the checkpoint ([`StageItems::members`]) and resumes through
+//! [`resume_held`] before its first round: every stored reply, and every row of a batch that was
+//! live when the process stopped, is read finding by finding by site key, so a reply reaches the
+//! findings it was written for whatever calls the new run builds. A finding already done keeps
+//! its result; a row for a finding that is gone is put on the ledger as wasted and written
+//! nowhere. The alternatives pass asks about rule groups, not findings (its item is named by the
+//! rule ids, with no finding to settle a row into), so it keeps the key match.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -55,7 +65,7 @@ use super::batch_mode::{
 use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
 use super::*;
-use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint, SubmitIntent};
+use crate::checkpoint::{AbsorbedLine, BatchMember, BatchRecord, StageCheckpoint, SubmitIntent};
 use crate::jobs::JobStore;
 use crate::llm::{BatchItem, BatchResultRow, CacheTtl, LlmPort, LlmRequest, LlmResponse};
 
@@ -154,6 +164,15 @@ pub trait StageItems {
     /// answer leaves out is one the stage decided not to send (it disclosed that itself, as stage
     /// 1 does for a site whose request does not fit); the runner records it as a failed part.
     fn items_for(&self, _ids: &[Self::Id]) -> Vec<(Self::Id, LlmRequest)> {
+        Vec::new()
+    }
+
+    /// The findings item `id` is one call about, for a stage whose item is a call about several
+    /// findings (detail regeneration, fix generation). They are written into the checkpoint with
+    /// the item, so a resume reads a returned reply finding by finding ([`HeldRows`]) and does
+    /// not depend on the next run building the same call. The default, none, is a stage whose
+    /// item is one thing, matched on resume by its key.
+    fn members(&self, _id: &Self::Id) -> Vec<BatchMember> {
         Vec::new()
     }
 
@@ -689,6 +708,11 @@ async fn cancel_live_batch<Id>(
 ) {
     book.cancelled = true;
     book.batches_cancelled.push(batch_id.to_string());
+    cancel_at_provider(ctx, api, batch_id).await;
+}
+
+/// Ask the provider to cancel `batch_id`; when it cannot be cancelled, say so on the ledger.
+async fn cancel_at_provider(ctx: &StageCtx<'_>, api: &dyn BatchApi, batch_id: &str) {
     if let Err(e) = api.cancel_batch(batch_id).await {
         let note = format!(
             "The job was cancelled but batch {batch_id} could not be cancelled at the provider \
@@ -795,6 +819,10 @@ fn replay_checkpoint<S: StageItems>(
 ) {
     let Some(cp) = ctx.checkpoint else { return };
     for line in cp.absorbed() {
+        // A reply read finding by finding is replayed the same way (see [`resume_held`]).
+        if !line.members.is_empty() {
+            continue;
+        }
         let Some(id) = by_key.get(&line.key) else {
             continue;
         };
@@ -838,7 +866,11 @@ fn settle_reply<S: StageItems>(
 ) -> Settled<S::Id> {
     let id = &work.id;
     let wasted = usage_only(&resp);
-    let line = ctx.checkpoint.map(|_| line_for(&id.to_string(), &resp));
+    let line = ctx.checkpoint.map(|_| {
+        let mut line = line_for(&id.to_string(), &resp);
+        line.members = s.members(id);
+        line
+    });
     match s.absorb(id, resp) {
         Ok(()) => {
             if let (Some(cp), Some(line)) = (ctx.checkpoint, line) {
@@ -1507,7 +1539,8 @@ where
     };
     let mut records = cp.batches();
     for i in 0..records.len() {
-        if records[i].settled {
+        // A batch that records its findings is read finding by finding by [`resume_held`].
+        if records[i].settled || !records[i].members.is_empty() {
             continue;
         }
         if cancel_requested(ctx) {
@@ -1613,6 +1646,331 @@ where
         }
     }
     out
+}
+
+// ── resume, finding by finding ──────────────────────────────────────────────────────────────────
+
+/// Where a finding a stored reply was written for stands in the run being resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberState {
+    /// In the run and still without a result: the reply is read for it.
+    Open,
+    /// In the run and already done (another reply wrote it): it stays as it is.
+    Done,
+    /// No longer in the run: nothing is written for it.
+    Gone,
+}
+
+/// A stored reply, as a [`HeldRows`] stage is handed it.
+pub struct HeldReply<'a> {
+    /// The findings the reply is read for. The stage reads the reply's entries for these.
+    pub open: &'a [BatchMember],
+    /// The findings the reply also answered that are done or gone: their entries are ignored,
+    /// never counted against the open ones and never written into them.
+    pub ignore: &'a [BatchMember],
+    /// How many findings the call asked about in all, for pro rata waste.
+    pub asked: usize,
+}
+
+/// A stage whose items are calls about several findings. On resume the runner hands it every
+/// stored reply (an absorbed one from an earlier process, or a row of a batch that was live when
+/// that process stopped) with the findings it was written for, and the stage settles it finding
+/// by finding. A reply therefore reaches its findings whatever calls the resumed run would
+/// build, and is read once.
+pub trait HeldRows {
+    /// Where the finding `member` names stands now: a finding with that site key at the line it
+    /// was asked at. A key that now names a finding at another line is [`MemberState::Gone`].
+    fn member_state(&self, member: &BatchMember) -> MemberState;
+
+    /// Read `resp` for the open findings of `held`, exactly as a fresh reply for them is read.
+    fn absorb_held(&mut self, held: HeldReply<'_>, resp: LlmResponse);
+}
+
+/// Findings whose batch is accepted but could not be fetched now: they are not sent again.
+#[derive(Debug, Clone)]
+pub struct LiveHeld {
+    pub batch_id: String,
+    /// The site keys of the findings of the batch that are still open.
+    pub keys: Vec<String>,
+    pub class: FailureClass,
+    pub reason: String,
+    pub attempts: Vec<AttemptRecord>,
+}
+
+/// What reading the stored replies left for the stage to do.
+#[derive(Debug, Default)]
+pub struct HeldResume {
+    /// Batches that could not be fetched: their open findings wait for a later resume.
+    pub live: Vec<LiveHeld>,
+    /// The job was cancelled while a batch was being polled.
+    pub cancelled: bool,
+}
+
+/// Hand one stored reply to the stage. `source` names it for the ledger.
+fn read_held_reply<H: HeldRows>(
+    stage: Stage,
+    h: &mut H,
+    ctx: &StageCtx<'_>,
+    source: &str,
+    members: &[BatchMember],
+    resp: LlmResponse,
+) {
+    let mut open = Vec::new();
+    let mut ignore = Vec::new();
+    let mut gone = 0usize;
+    for member in members {
+        match h.member_state(member) {
+            MemberState::Open => open.push(member.clone()),
+            MemberState::Done => ignore.push(member.clone()),
+            MemberState::Gone => {
+                gone += 1;
+                ignore.push(member.clone());
+            }
+        }
+    }
+    if gone > 0 {
+        let note = format!(
+            "{source} answered {gone} of {} finding(s) that are no longer in this run. Nothing \
+             was written for them, and their share of what the reply cost was wasted.",
+            members.len()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+            m.record_wasted_share(stage, &resp, gone as f64 / members.len() as f64);
+        }
+    }
+    if open.is_empty() {
+        return;
+    }
+    h.absorb_held(
+        HeldReply {
+            open: &open,
+            ignore: &ignore,
+            asked: members.len(),
+        },
+        resp,
+    );
+}
+
+/// Resume, for a stage whose items are calls about several findings ([`HeldRows`]), before the
+/// round is built. Every reply an earlier process absorbed is read again for its findings (its
+/// usage goes to the meter), then each batch that process submitted and did not settle is polled
+/// and fetched, never submitted again, and its rows are read for their findings by site key. A
+/// row for a finding that is gone is told on the ledger; one for a finding done by another reply
+/// changes nothing; each row is read once (a reply already stored is not read again from its
+/// batch). A batch that cannot be fetched now is reported in [`HeldResume::live`] and stays
+/// unsettled for a later resume; one the provider no longer has is settled as gone and its open
+/// findings are left for the round to ask once more.
+pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_>) -> HeldResume {
+    let mut out = HeldResume::default();
+    let Some(cp) = ctx.checkpoint else {
+        return out;
+    };
+    let mut replayed: BTreeSet<String> = BTreeSet::new();
+    for line in cp.absorbed_in_order() {
+        if line.members.is_empty() {
+            continue;
+        }
+        let resp = response_from(&line);
+        if let Some(m) = ctx.meter {
+            m.record_stage(stage, &resp);
+        }
+        read_held_reply(
+            stage,
+            h,
+            ctx,
+            "A reply stored by an earlier process",
+            &line.members,
+            resp,
+        );
+        replayed.insert(line.key);
+    }
+    let Some(api) = ctx.batch else {
+        return out;
+    };
+    let mut records = cp.batches();
+    for i in 0..records.len() {
+        if records[i].settled || records[i].members.is_empty() {
+            continue;
+        }
+        if cancel_requested(ctx) {
+            out.cancelled = true;
+            break;
+        }
+        let record = records[i].clone();
+        let open_keys = |h: &H| -> Vec<String> {
+            record
+                .members
+                .values()
+                .flatten()
+                .filter(|m| h.member_state(m) == MemberState::Open)
+                .map(|m| m.key.clone())
+                .collect()
+        };
+        let ttl = ttl_from_name(&record.ttl);
+        let rctx = round_ctx(stage, ctx, api);
+        let progress = PollProgress {
+            stage,
+            done_before: 0,
+            total: None,
+        };
+        eprintln!(
+            "[camerata-server] stage {}: resuming batch {} ({} calls) by polling it, not \
+             submitting it again",
+            stage.label(),
+            record.batch_id,
+            record.members.len()
+        );
+        match poll_and_fetch(
+            &rctx,
+            &record.batch_id,
+            ttl,
+            ctx.settings.poll_interval,
+            Some(progress),
+            false,
+            true,
+        )
+        .await
+        {
+            Ok(rows) => {
+                read_held_rows(stage, h, ctx, &record, rows, ttl, &replayed);
+                records[i].settled = true;
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_at_provider(ctx, api, &record.batch_id).await;
+                out.cancelled = true;
+                break;
+            }
+            Err(failed) if batch_is_gone(&failed.error) => {
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let note = format!(
+                    "Batch {} no longer exists at the provider ({error}), so its results can \
+                     never be fetched. It was settled as gone and its {} unfinished finding(s) \
+                     were asked again. What the provider charged for the gone batch, if \
+                     anything, is not in this ledger.",
+                    record.batch_id,
+                    open_keys(h).len()
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                records[i].settled = true;
+            }
+            Err(failed) => {
+                // Accepted and running, or finished, at the provider. It is NOT submitted
+                // again: that would pay for the same findings twice. The record stays unsettled
+                // so a later resume polls it.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let keys = open_keys(h);
+                if let Some(m) = ctx.meter {
+                    m.record_note(format!(
+                        "batch {} ({} finding(s)) was submitted and its results could not be \
+                         retrieved: {error}. It was NOT submitted again, because it may still be \
+                         running and billed; a resume polls it.",
+                        record.batch_id,
+                        keys.len()
+                    ));
+                }
+                out.live.push(LiveHeld {
+                    batch_id: record.batch_id.clone(),
+                    keys,
+                    class: classify_pass_error(&failed.error),
+                    reason: format!(
+                        "batch {} was submitted but its results could not be retrieved \
+                         ({error}); it may still be running and billed, so it was not \
+                         submitted again",
+                        record.batch_id
+                    ),
+                    attempts: failure::attempts_of(&failed.error),
+                });
+            }
+        }
+        if let Err(e) = cp.save_batches(&records) {
+            checkpoint_trouble(ctx, "batch list", &e);
+        }
+    }
+    out
+}
+
+/// Read the rows of a fetched batch for the findings its record lists, each call once.
+fn read_held_rows<H: HeldRows>(
+    stage: Stage,
+    h: &mut H,
+    ctx: &StageCtx<'_>,
+    record: &BatchRecord,
+    rows: Vec<BatchResultRow>,
+    ttl: CacheTtl,
+    replayed: &BTreeSet<String>,
+) {
+    let mut by_cid: HashMap<String, BatchResultRow> =
+        rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
+    let mut repricer = Repricer::new(ctx.model, ttl);
+    let mut unanswered = 0usize;
+    for (cid, members) in &record.members {
+        let key = record.items.get(cid).cloned().unwrap_or_default();
+        let row = by_cid.remove(cid);
+        // A reply an earlier process stored was read above; reading it again would absorb it
+        // twice.
+        if replayed.contains(&key) {
+            continue;
+        }
+        match row {
+            Some(BatchResultRow {
+                response: Some(mut resp),
+                ..
+            }) => {
+                repricer.apply(&mut resp);
+                if let Some(m) = ctx.meter {
+                    m.record_stage(stage, &resp);
+                }
+                if let Some(cp) = ctx.checkpoint {
+                    let mut line = line_for(&key, &resp);
+                    line.members.clone_from(members);
+                    if let Err(e) = cp.record_absorbed(&line) {
+                        checkpoint_trouble(ctx, "absorbed item", &e);
+                    }
+                }
+                read_held_reply(
+                    stage,
+                    h,
+                    ctx,
+                    &format!("Batch {}", record.batch_id),
+                    members,
+                    resp,
+                );
+            }
+            other => {
+                if let Some(BatchResultRow {
+                    billed: Some(mut billed),
+                    ..
+                }) = other
+                {
+                    repricer.apply(&mut billed);
+                    if let Some(m) = ctx.meter {
+                        m.record_stage(stage, &billed);
+                    }
+                }
+                unanswered += members
+                    .iter()
+                    .filter(|m| h.member_state(m) == MemberState::Open)
+                    .count();
+            }
+        }
+    }
+    repricer.note(ctx.meter);
+    if unanswered > 0 {
+        let note = format!(
+            "Batch {} returned no usable result for {unanswered} finding(s); they are asked \
+             again in this run's rounds.",
+            record.batch_id
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
 }
 
 /// Submit, poll and settle the stage's items as Message Batches, sending once more what a
@@ -1819,7 +2177,14 @@ where
                 .zip(sub)
                 .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                 .collect(),
-            members: BTreeMap::new(),
+            members: sub_cids
+                .iter()
+                .zip(sub)
+                .filter_map(|(cid, w)| {
+                    let members = s.members(&w.id);
+                    (!members.is_empty()).then(|| (cid.clone(), members))
+                })
+                .collect(),
             settled: false,
             nonce: Some(nonce),
         };
