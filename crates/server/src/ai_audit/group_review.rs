@@ -1966,23 +1966,11 @@ fn record_ledger(
         });
 }
 
-/// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
-/// a spend limit, and what the stage spent, was refused or lost to an outage is folded back into
-/// the report's usage, ledger and failed parts. This is what the command line and the app call.
-pub async fn review_groups_metered(
-    report: &mut ScanReport,
-    llm: &dyn LlmPort,
-    cfg: &GroupReviewConfig<'_>,
-    controls: &crate::cost_cap::RunControls,
-) -> GroupReviewOutcome {
-    let prior = report.actual_usage.clone().unwrap_or_default();
-    let meter = UsageMeter::continuing(controls.clone(), &prior);
-    let outcome = review_groups(report, llm, cfg, Some(&meter)).await;
-
-    // Usage: the meter started from the scan's, so its snapshot is the whole run's.
-    if meter.snapshot().calls > 0 {
-        report.actual_usage = Some(meter.snapshot());
-    }
+/// What the stage's meter learned about spend, folded into the scan's report: the spend limit's
+/// record, an outage stop and the batch runner's notes.
+pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter) {
+    // The batch runner's notes are kept whether or not a limit was set, and join the scan's.
+    report.ledger.record_runner_notes(meter.notes());
     // The spend limit: what it stopped here is a failed part and joins the scan's record.
     if let Some(cap) = meter.cost_cap_record() {
         let has_new = !cap.not_run_passes.is_empty() || !cap.not_run_stages.is_empty();
@@ -2004,6 +1992,26 @@ pub async fn review_groups_metered(
             report.ledger.record_outage(outage);
         }
     }
+}
+
+/// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
+/// a spend limit, and what the stage spent, was refused or lost to an outage is folded back into
+/// the report's usage, ledger and failed parts. This is what the command line and the app call.
+pub async fn review_groups_metered(
+    report: &mut ScanReport,
+    llm: &dyn LlmPort,
+    cfg: &GroupReviewConfig<'_>,
+    controls: &crate::cost_cap::RunControls,
+) -> GroupReviewOutcome {
+    let prior = report.actual_usage.clone().unwrap_or_default();
+    let meter = UsageMeter::continuing(controls.clone(), &prior);
+    let outcome = review_groups(report, llm, cfg, Some(&meter)).await;
+
+    // Usage: the meter started from the scan's, so its snapshot is the whole run's.
+    if meter.snapshot().calls > 0 {
+        report.actual_usage = Some(meter.snapshot());
+    }
+    fold_spend_into_report(report, &meter);
     // Per-stage telemetry: this stage's row joins the scan's.
     let fresh = meter.stage_telemetry(report.code_lines);
     if !fresh.stages.is_empty() {

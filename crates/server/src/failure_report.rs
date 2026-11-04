@@ -79,6 +79,12 @@ pub struct FailureReport {
     /// Operator only. `serde(default)` so a report written before R1-1 still loads.
     #[serde(default)]
     pub detail_fallbacks: Vec<DetailFallbackEntry>,
+    /// What the batch runner told the operator about spend the ledger cannot count (a batch the
+    /// provider no longer has, a submission that may have been accepted and orphaned). Not a
+    /// failure and never the reason a report exists: it rides along in a report that does.
+    /// Operator only. `serde(default)` so a report written before it existed still loads.
+    #[serde(default)]
+    pub runner_notes: Vec<String>,
 }
 
 /// The entries for every failed part of `report`. A disclosed scope limit (a tool not run by
@@ -154,6 +160,12 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
         entries,
         standard_fixes,
         detail_fallbacks,
+        runner_notes: report
+            .ledger
+            .runner_notes()
+            .iter()
+            .map(|n| camerata_secrets::redact_str(n).into_owned())
+            .collect(),
     }
 }
 
@@ -238,6 +250,17 @@ impl FailureReport {
                     "\n- {} {}:{} {}: {}",
                     s.repo, s.path, s.line, s.rule_id, s.reasons
                 ));
+            }
+            out.push('\n');
+        }
+        if !self.runner_notes.is_empty() {
+            out.push_str(&format!(
+                "\n## Batch runner notes ({})\n\nSpend this run's ledger cannot count, and what \
+                 was done about it. These are not failures.\n",
+                self.runner_notes.len()
+            ));
+            for note in &self.runner_notes {
+                out.push_str(&format!("\n- {note}"));
             }
             out.push('\n');
         }
@@ -356,6 +379,7 @@ pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> Failu
         entries,
         standard_fixes: current.standard_fixes.clone(),
         detail_fallbacks: current.detail_fallbacks.clone(),
+        runner_notes: current.runner_notes.clone(),
     }
 }
 
@@ -443,6 +467,39 @@ mod tests {
         assert_eq!(e.last_at, "2026-10-28T10:30:00Z");
         assert!(!e.message.contains("AAAAAAAA"), "{}", e.message);
         assert!(e.message.chars().count() <= MAX_RECORD_MESSAGE_CHARS + 3);
+    }
+
+    #[test]
+    fn the_batch_runners_notes_ride_along_in_a_report_that_exists() {
+        let mut scan = report_with(vec![failed()]);
+        scan.ledger.record_runner_notes(vec![
+            "Batch msgbatch_x no longer exists at the provider.".to_string()
+        ]);
+        let fr = build(&scan);
+        assert_eq!(
+            fr.runner_notes,
+            ["Batch msgbatch_x no longer exists at the provider."]
+        );
+        let md = fr.render_md();
+        assert!(md.contains("msgbatch_x"), "{md}");
+        // They survive the merge with an earlier report and the file round trip.
+        let merged = merge_history(&FailureReport::default(), &fr);
+        assert_eq!(merged.runner_notes, fr.runner_notes);
+        let json = serde_json::to_string(&merged).unwrap();
+        let back: FailureReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runner_notes, fr.runner_notes);
+        // A report written before the field existed still loads.
+        let old: FailureReport =
+            serde_json::from_str(r#"{"generated_at":"t","entries":[]}"#).unwrap();
+        assert!(old.runner_notes.is_empty());
+    }
+
+    #[test]
+    fn a_batch_note_alone_is_not_a_failure_and_writes_no_report() {
+        let mut scan = report_with(Vec::new());
+        scan.ledger
+            .record_runner_notes(vec!["Batch msgbatch_x is gone.".to_string()]);
+        assert!(build(&scan).is_empty());
     }
 
     #[test]

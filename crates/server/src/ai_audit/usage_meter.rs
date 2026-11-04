@@ -405,6 +405,12 @@ impl UsageMeter {
         self.budget().notes.push(note);
     }
 
+    /// Every operator-facing note the run kept on this meter, with or without a spend limit
+    /// (the cap record carries them only when a limit was set).
+    pub fn notes(&self) -> Vec<String> {
+        self.budget().notes.clone()
+    }
+
     /// What the cap did so far; `None` when no cap was set.
     pub fn cost_cap_record(&self) -> Option<crate::cost_cap::CostCapRecord> {
         let cap_usd = self.controls.max_cost_usd?;

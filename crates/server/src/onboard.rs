@@ -3706,33 +3706,12 @@ pub async fn audit_repos_with_llm_controlled(
     report.ledger.record_ai_key(ai_key);
     // Which efficiency measures were on, so any two runs can be compared knowing what differed.
     report.ledger.record_efficiency(controls.efficiency);
-    // The spend cap: what it stopped is disclosed through the same failed-pass list every other
-    // incomplete pass uses, and the amounts stay on the operator ledger.
-    if let Some(cap) = meter.cost_cap_record() {
-        all_failed_passes.extend(cap.failed_passes());
-        if cap.stopped_the_run() {
-            notes.push(format!(
-                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
-                 did not run (see the list of passes that did not run)",
-                cap.not_run_passes.len(),
-                cap.not_run_stages.len()
-            ));
-        }
-        report.ledger.record_cost_cap(cap);
-    }
-    // The outage stop: what it left undone is disclosed through the same failed-pass list, and
-    // the trigger and every part that was never sent stay on the operator ledger.
-    if let Some(outage) = meter.outage_record() {
-        all_failed_passes.extend(outage.failed_passes());
-        notes.push(format!(
-            "INCOMPLETE: the run stopped because the model provider could not be reached; {} \
-             scan pass(es) and {} stage(s) were never sent (see the list of passes that did not \
-             run). Run it again when the provider is back.",
-            outage.not_run_passes.len(),
-            outage.not_run_stages.len()
-        ));
-        report.ledger.record_outage(outage);
-    }
+    fold_spend_records(
+        &mut report.ledger,
+        &meter,
+        &mut all_failed_passes,
+        &mut notes,
+    );
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
     // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
@@ -3854,6 +3833,48 @@ pub async fn audit_repos_with_llm_controlled(
     )
 }
 
+/// What the run's meter learned about its spend, folded into the scan's ledger, failed parts and
+/// notes: the spend cap's record (when a limit was set), the outage stop (when the provider could
+/// not be reached) and the batch runner's own notes (always).
+fn fold_spend_records(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    meter: &crate::ai_audit::UsageMeter,
+    all_failed_passes: &mut Vec<crate::ai_audit::FailedPass>,
+    notes: &mut Vec<String>,
+) {
+    // The batch runner's notes (a batch the provider lost, a submission that may have been
+    // orphaned) are spend the ledger cannot count. They are kept whether or not a limit was set:
+    // the cap record's copy of them exists only under one.
+    ledger.record_runner_notes(meter.notes());
+    // The spend cap: what it stopped is disclosed through the same failed-pass list every other
+    // incomplete pass uses, and the amounts stay on the operator ledger.
+    if let Some(cap) = meter.cost_cap_record() {
+        all_failed_passes.extend(cap.failed_passes());
+        if cap.stopped_the_run() {
+            notes.push(format!(
+                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
+                 did not run (see the list of passes that did not run)",
+                cap.not_run_passes.len(),
+                cap.not_run_stages.len()
+            ));
+        }
+        ledger.record_cost_cap(cap);
+    }
+    // The outage stop: what it left undone is disclosed through the same failed-pass list, and
+    // the trigger and every part that was never sent stay on the operator ledger.
+    if let Some(outage) = meter.outage_record() {
+        all_failed_passes.extend(outage.failed_passes());
+        notes.push(format!(
+            "INCOMPLETE: the run stopped because the model provider could not be reached; {} \
+             scan pass(es) and {} stage(s) were never sent (see the list of passes that did not \
+             run). Run it again when the provider is back.",
+            outage.not_run_passes.len(),
+            outage.not_run_stages.len()
+        ));
+        ledger.record_outage(outage);
+    }
+}
+
 /// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
 /// appears in an EARLIER commit — the one cheap context fact that needs real git plumbing,
 /// unlike `onboard::audit::enrich_secret_context`'s `.gitignore`/secret-kind facts, which work
@@ -3966,6 +3987,31 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A batch the provider lost, or a submission it may have accepted and orphaned, is spend the
+    /// ledger cannot count. The notes about it reach the ledger whether or not a limit was set.
+    #[test]
+    fn the_batch_runners_notes_reach_the_ledger_of_a_scan_with_no_spend_limit() {
+        let meter =
+            crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::default());
+        meter.record_note("A batch of 3 item(s) may have been submitted and orphaned.".to_string());
+        assert!(meter.cost_cap_record().is_none(), "no limit was set");
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let mut failed = Vec::new();
+        let mut notes = Vec::new();
+
+        fold_spend_records(&mut ledger, &meter, &mut failed, &mut notes);
+
+        assert_eq!(
+            ledger.runner_notes(),
+            ["A batch of 3 item(s) may have been submitted and orphaned."]
+        );
+        assert!(ledger.cost_cap().is_none());
+        assert!(
+            failed.is_empty() && notes.is_empty(),
+            "a note is not a failure"
+        );
+    }
 
     /// A targeted rescan re-evaluates a few rules on every repo they apply to. Its picks replace
     /// the stored ones for the same (rule, repo) and leave every other service's pick alone, in

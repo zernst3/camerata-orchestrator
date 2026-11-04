@@ -1953,6 +1953,75 @@ async fn the_submit_intent_survives_a_failed_save_of_the_batch_list_and_the_next
     assert!(cp.intents().is_empty());
 }
 
+// ── WO7b D1: the notes are kept whether or not a spend limit was set ────────────────────────────
+
+fn uncapped_meter() -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls::default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gone_batch_is_kept_on_the_meter_when_no_spend_limit_was_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    save_unsettled_batch(&cp, &all, "msgbatch_gone").await;
+
+    let api = Api::new().breaking("msgbatch_gone", 404);
+    let meter = uncapped_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+
+    assert!(
+        meter.cost_cap_record().is_none(),
+        "no limit, so no cap record to carry it"
+    );
+    let notes = meter.notes().join("\n");
+    assert!(
+        notes.contains("msgbatch_gone") && notes.contains("no longer exists"),
+        "the gone batch is on the meter: {notes}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_orphaned_submission_is_kept_on_the_meter_when_no_spend_limit_was_set() {
+    use futures::FutureExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+    let api = Api::new().killed_after_accepting();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let died = std::panic::AssertUnwindSafe(run_stage(STAGE, &mut stage, StageMode::Batch, &c))
+        .catch_unwind()
+        .await;
+    assert!(died.is_err(), "the stub killed the process");
+
+    let api = Api::new();
+    let meter = uncapped_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+
+    assert!(meter.cost_cap_record().is_none());
+    let notes = meter.notes();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+            .count(),
+        1,
+        "the possible orphan is on the meter once: {notes:?}"
+    );
+}
+
 // ── WO7b F11: a window is admitted on the bytes of its real requests ────────────────────────────
 
 #[tokio::test(start_paused = true)]

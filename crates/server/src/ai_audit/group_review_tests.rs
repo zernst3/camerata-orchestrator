@@ -1708,6 +1708,46 @@ async fn the_spend_limit_counts_what_the_scan_already_spent_and_stops_stage_2() 
     assert!(report.ledger.is_cost_capped());
 }
 
+/// A meter with no spend limit that kept `notes`, as a batch run that lost a batch leaves it.
+fn uncapped_meter_with(notes: &[&str]) -> UsageMeter {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls::default());
+    for n in notes {
+        meter.record_note((*n).to_string());
+    }
+    meter
+}
+
+#[test]
+fn the_batch_runners_notes_reach_the_ledger_when_no_spend_limit_was_set() {
+    let mut report = report_of(&[(SQL, 3)]);
+    let meter = uncapped_meter_with(&["Batch msgbatch_x no longer exists at the provider."]);
+    assert!(meter.cost_cap_record().is_none(), "no limit was set");
+
+    fold_spend_into_report(&mut report, &meter);
+
+    assert!(report.ledger.cost_cap().is_none());
+    assert_eq!(
+        report.ledger.runner_notes(),
+        ["Batch msgbatch_x no longer exists at the provider."]
+    );
+}
+
+#[test]
+fn the_group_reviews_notes_join_the_notes_the_scan_already_recorded() {
+    let mut report = report_of(&[(SQL, 3)]);
+    report
+        .ledger
+        .record_runner_notes(vec!["from the scan".to_string()]);
+    let meter = uncapped_meter_with(&["from the group review"]);
+
+    fold_spend_into_report(&mut report, &meter);
+
+    assert_eq!(
+        report.ledger.runner_notes(),
+        ["from the scan", "from the group review"]
+    );
+}
+
 #[tokio::test]
 async fn the_metered_review_folds_its_usage_into_the_reports_usage_and_telemetry() {
     let mut report = report_of(&[(SQL, 3)]);
