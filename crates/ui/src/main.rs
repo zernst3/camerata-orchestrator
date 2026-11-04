@@ -19,6 +19,7 @@ mod chat;
 mod cockpit;
 mod credentials;
 mod design;
+mod gallery;
 pub mod loading;
 pub mod md;
 mod provider_safety;
@@ -28,6 +29,7 @@ mod server_process;
 mod source_ui;
 mod style;
 mod terminal;
+mod test_harness;
 mod toast;
 mod vcs_settings;
 mod walkthrough;
@@ -51,6 +53,12 @@ pub fn bff_base() -> String {
 }
 
 fn main() {
+    // The `gallery` target is this same source (see Cargo.toml): it writes the review gallery's
+    // static pages and never opens the cockpit window.
+    if env!("CARGO_BIN_NAME") == "gallery" {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        std::process::exit(gallery::run_cli(&args));
+    }
     // Auto-load the gitignored .env at the repo root (and any parent), so the
     // GitHub token etc. are inherited by the spawned BFF without exporting them.
     // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.

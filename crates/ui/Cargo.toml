@@ -21,6 +21,15 @@ workspace = true
 name = "camerata-ui"
 path = "src/main.rs"
 
+# The review gallery (docs/plans/2026-11-02_review-ui-spec.md section 12): the same source as the
+# cockpit, because every screen module is private to that binary (`crate::` paths all over). `main`
+# branches on `CARGO_BIN_NAME`, so this target writes static pages and never opens a window.
+# `test = false` stops its copy of the 11,000 unit tests from running a second time.
+[[bin]]
+name = "gallery"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 # `time` drives the calm Build-narrative dwell; `rt-multi-thread` lets the desktop
@@ -63,12 +72,15 @@ dotenvy = "0.15"
 # markdown source in the chat bubble.
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
+# dioxus-ssr renders a component to an HTML string: for headless structure assertions in tests
+# (Tier 1) and, through `test_harness::render_props`, for the review gallery binary (a real
+# dependency since 2026-11-03, no longer dev only).
+dioxus-ssr = "0.7"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread", "test-util"] }
-# UI testing (#112 follow-up). dioxus-ssr renders a component to an HTML string for headless
-# structure assertions (Tier 1); wiremock stands up a fake BFF so the reqwest network helpers can be
+# UI testing (#112 follow-up). wiremock stands up a fake BFF so the reqwest network helpers can be
 # tested against CAMERATA_BFF_URL (Tier 2). No browser / wasm needed.
-dioxus-ssr = "0.7"
 wiremock = "0.6"
 # The wiremock tests point helpers at a mock BFF via the process-global CAMERATA_BFF_URL env var.
 # serial_test's shared key (#[serial(process_env)]) serializes every such test crate-wide so they
