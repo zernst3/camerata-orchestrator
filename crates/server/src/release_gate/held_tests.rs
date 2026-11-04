@@ -403,7 +403,9 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
         DecisionState::Confirmed,
         "real after all",
     );
-    let sealed = report.seal_with_restored(&crate::decisions::restored_keys_of(&[restore.clone()]));
+    let sealed = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        std::slice::from_ref(&restore),
+    ));
     let acked = at(sealed.as_scan_report(), "src/acked.rs");
     let mut accepted = decision(
         "dec-000009",
