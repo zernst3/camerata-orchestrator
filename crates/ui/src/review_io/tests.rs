@@ -484,3 +484,301 @@ async fn a_read_that_fails_part_way_fails_the_plan() {
         .unwrap_err();
     assert_eq!(err.message, "the server is down");
 }
+
+// ── The site detail's writes (spec section 8) ─────────────────────────────────────────────
+
+fn an_edit(id: &str) -> Edit {
+    Edit {
+        id: id.to_string(),
+        key: "k".to_string(),
+        field: EditField::Headline,
+        old: "Old".to_string(),
+        new: "New".to_string(),
+        reason: "r".to_string(),
+        by: "zach".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        run_id: "insp-1".to_string(),
+        fingerprint_at_edit: "f".to_string(),
+        stale: false,
+        discarded_at: None,
+        reapplied_from: None,
+    }
+}
+
+#[tokio::test]
+async fn a_discard_and_a_reapply_post_to_the_edit_s_own_routes() {
+    use camerata_api_types::edits::EditDiscarded;
+    let server = MockServer::start().await;
+    let mut gone = an_edit("edit-000001");
+    gone.discarded_at = Some("2026-11-04T09:00:05Z".to_string());
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/edits/edit-000001/discard"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(EditDiscarded { edit: gone.clone() }),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut again = an_edit("edit-000002");
+    again.reapplied_from = Some("edit-000001".to_string());
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/edits/edit-000001/reapply"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(EditRecorded {
+            edit: again.clone(),
+        }))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let src = http(&server);
+    assert_eq!(src.discard_edit("edit-000001").await.unwrap().edit, gone);
+    assert_eq!(src.reapply_edit("edit-000001").await.unwrap().edit, again);
+}
+
+#[tokio::test]
+async fn an_added_finding_posts_the_form_and_a_refusal_comes_back_in_the_servers_words() {
+    use camerata_api_types::edits::{AddFindingReq, FindingAdded};
+    let server = MockServer::start().await;
+    let req = AddFindingReq {
+        repo: "acme/app".to_string(),
+        path: "web/env.ts".to_string(),
+        line: 3,
+        rule_id: "SEC-KEY-2".to_string(),
+        severity: "high".to_string(),
+        snippet: "const k = import.meta.env.VITE_KEY;".to_string(),
+        headline: "Key in a public variable".to_string(),
+        detail: "It ships to the browser.".to_string(),
+        fix: String::new(),
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
+        category: None,
+        reason: "missed".to_string(),
+        by: String::new(),
+    };
+    let held = FindingAdded {
+        key: "k".to_string(),
+        evidence_verified: false,
+        evidence_note: "The quoted code was not found near line 3.".to_string(),
+    };
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/added-findings"))
+        .and(body_json(&req))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&held))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(http(&server).add_finding(req.clone()).await.unwrap(), held);
+
+    // An incomplete form is a 422 with the store's own words.
+    let refused = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/added-findings"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(
+            camerata_api_types::edits::EditError {
+                ok: false,
+                code: "added_finding_incomplete".to_string(),
+                message: "a finding the reviewer adds needs a rule id".to_string(),
+            },
+        ))
+        .mount(&refused)
+        .await;
+    let err = http(&refused).add_finding(req).await.unwrap_err();
+    assert_eq!(err.message, "a finding the reviewer adds needs a rule id");
+}
+
+#[tokio::test]
+async fn the_client_acknowledgement_posts_who_and_the_note_on_the_decision() {
+    use camerata_api_types::decisions::ClientAck;
+    use camerata_api_types::edits::{ClientAckRecorded, ClientAckReq};
+    let server = MockServer::start().await;
+    let ack = ClientAckReq {
+        by: "cto@acme.test".to_string(),
+        note: "signed off".to_string(),
+    };
+    let dec = FixtureReviewSource::base()
+        .recorded
+        .post_decision(NewDecisionReq {
+            scope: Scope::Site,
+            key: "k".to_string(),
+            state: DecisionState::Ignored,
+            reason: "behind the proxy".to_string(),
+            decided_by: String::new(),
+            needed_me: None,
+            sample_verdict: None,
+            except: Vec::new(),
+            run_id: String::new(),
+            decided_at: String::new(),
+        })
+        .await
+        .unwrap()
+        .decision;
+    let mut acked = dec.clone();
+    acked.confirmed_by_client = Some(ClientAck {
+        by: ack.by.clone(),
+        at: "2026-11-05T10:00:00Z".to_string(),
+        note: ack.note.clone(),
+    });
+    let body = ClientAckRecorded {
+        decision: acked,
+        also_acknowledged: 0,
+    };
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/decisions/dec-000001/client-ack"))
+        .and(body_json(&ack))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let got = http(&server).client_ack("dec-000001", ack).await.unwrap();
+    assert_eq!(got, body);
+}
+
+#[tokio::test]
+async fn the_source_window_is_read_from_finding_context_for_this_project() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/finding-context"))
+        .and(query_param("repo", "acme/app"))
+        .and(query_param("path", "web/env.ts"))
+        .and(query_param("line", "3"))
+        .and(query_param("project", "p1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok", "lines": ["a", "b", "c"], "start_line": 2, "end_line": 4,
+            "violation_line": 3, "kind": "function", "language": "ts", "matches_snippet": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let got = http(&server)
+        .source_window("acme/app", "web/env.ts", 3)
+        .await
+        .unwrap();
+    assert_eq!(got.start_line, 2);
+    assert_eq!(got.lines, ["a", "b", "c"]);
+
+    // The server's one-line reason is what the form shows when the code cannot be read.
+    let gone = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/finding-context"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "file_missing", "reason": "file not found, changed since scan?"
+        })))
+        .mount(&gone)
+        .await;
+    let err = http(&gone)
+        .source_window("acme/app", "web/env.ts", 3)
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "file not found, changed since scan?");
+}
+
+#[tokio::test]
+async fn the_recording_writes_keep_the_detail_s_writes_in_order_and_can_refuse() {
+    use camerata_api_types::edits::{AddFindingReq, ClientAckReq};
+    let writes = RecordingWrites::default();
+    let add = AddFindingReq {
+        repo: "r".to_string(),
+        path: "p".to_string(),
+        line: 1,
+        rule_id: "X".to_string(),
+        severity: "low".to_string(),
+        snippet: "s".to_string(),
+        headline: "h".to_string(),
+        detail: "d".to_string(),
+        fix: String::new(),
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
+        category: None,
+        reason: "why".to_string(),
+        by: String::new(),
+    };
+    let ack = ClientAckReq {
+        by: "c".to_string(),
+        note: String::new(),
+    };
+    writes.discard_edit("edit-000001").await.unwrap();
+    writes.reapply_edit("edit-000002").await.unwrap();
+    let added = writes.add_finding(add.clone()).await.unwrap();
+    assert!(added.evidence_verified);
+    writes.client_ack("dec-000009", ack.clone()).await.unwrap();
+    assert_eq!(
+        *writes.log.borrow(),
+        vec![
+            Written::DiscardEdit("edit-000001".to_string()),
+            Written::ReapplyEdit("edit-000002".to_string()),
+            Written::AddFinding(add.clone()),
+            Written::ClientAck("dec-000009".to_string(), ack.clone()),
+        ]
+    );
+    *writes.refuse.borrow_mut() = Some("read only".to_string());
+    assert_eq!(
+        writes.add_finding(add).await.unwrap_err().message,
+        "read only"
+    );
+    assert_eq!(
+        writes.client_ack("d", ack).await.unwrap_err().message,
+        "read only"
+    );
+    assert_eq!(
+        writes.log.borrow().len(),
+        4,
+        "a refused write is not logged"
+    );
+}
+
+#[tokio::test]
+async fn a_write_side_that_predates_the_detail_refuses_in_words() {
+    struct Old;
+    impl ReviewWrites for Old {
+        fn post_decision(&self, _: NewDecisionReq) -> SourceFuture<'_, DecisionRecorded> {
+            unreachable!()
+        }
+        fn revoke_decision<'a>(&'a self, _: &'a str) -> SourceFuture<'a, RevokeResp> {
+            unreachable!()
+        }
+        fn post_edit(&self, _: NewEditReq) -> SourceFuture<'_, EditRecorded> {
+            unreachable!()
+        }
+        fn preview_budget(
+            &self,
+            _: camerata_api_types::review_view::EscalationBudgetReq,
+        ) -> SourceFuture<'_, camerata_api_types::review_view::EscalationBudgetOutcome> {
+            unreachable!()
+        }
+        fn apply_budget(
+            &self,
+            _: camerata_api_types::review_view::EscalationBudgetReq,
+        ) -> SourceFuture<'_, camerata_api_types::review_view::EscalationBudgetOutcome> {
+            unreachable!()
+        }
+        fn set_sample_size(
+            &self,
+            _: usize,
+        ) -> SourceFuture<'_, camerata_api_types::review_view::SampleSizeResp> {
+            unreachable!()
+        }
+        fn set_stage_model<'a>(&'a self, _: &'a str, _: &'a str) -> SourceFuture<'a, ()> {
+            unreachable!()
+        }
+    }
+    let err = Old.discard_edit("e").await.unwrap_err();
+    assert!(
+        err.message.contains("cannot do discarding an edit"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn the_fixture_source_serves_a_window_and_answers_the_detail_writes() {
+    let fixture = FixtureReviewSource::base();
+    let row = dataset_base().rows[0].clone();
+    let window = fixture
+        .source_window(&row.repo, &row.path, row.line)
+        .await
+        .unwrap();
+    let at = row.line - window.start_line;
+    assert_eq!(
+        window.lines[at].trim(),
+        row.snippet.lines().next().unwrap_or_default().trim(),
+        "the line asked about is the site's own snippet"
+    );
+    fixture.discard_edit("edit-000001").await.unwrap();
+    assert!(fixture.calls().contains(&"discard_edit".to_string()));
+}
