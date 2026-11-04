@@ -38,7 +38,7 @@ const FILE_VERSION: u32 = 1;
 pub const DEFAULT_CHECKER: &str = "reviewer";
 
 /// The fewest rows a category with unread rows gets in the sample (design A2).
-pub const CATEGORY_FLOOR: usize = 3;
+pub const CATEGORY_FLOOR: usize = camerata_api_types::review_view::SAMPLE_CATEGORY_FLOOR;
 
 /// The share of the sample, at least [`THROWN_OUT_MINIMUM`] rows, drawn from the rows the engine
 /// threw out (design A10 item 2).

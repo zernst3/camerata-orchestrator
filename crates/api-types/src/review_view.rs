@@ -43,6 +43,10 @@ pub const SAMPLE_SIZE_SUGGESTED: usize = 50;
 /// A category sampled fewer times than this has a rate that is indicative only (spec section 7).
 pub const SMALL_CATEGORY_DRAWN: usize = 10;
 
+/// The fewest cards the sample draws from each category that has that many unread rows (design
+/// A2). The lane says so when this floor puts the sample above the setting.
+pub const SAMPLE_CATEGORY_FLOOR: usize = 3;
+
 // ── Shared pieces ─────────────────────────────────────────────────────────────────────────
 
 /// A chip on a site row (spec section 2). A row lists every marker it has, in the precedence the
@@ -553,6 +557,10 @@ pub enum EngineCheckError {
     WordingOrFixWrong,
     /// Design A9 item 3.
     GroupSummaryDoesNotDescribe,
+    /// A No on a row the engine THREW OUT (design A10 item 2): it was a real problem. Not in
+    /// [`Self::ALL`], the list the reviewer picks from on a kept row; the thrown-out card has
+    /// this one answer, and it puts the row back (a restore decision) as its correction.
+    ThrownOutRealProblem,
 }
 
 impl EngineCheckError {
