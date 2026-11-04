@@ -47,7 +47,9 @@
 //! the same path every other degraded stage uses. So the export can hold a short detail only with
 //! the marker beside it.
 
-use super::stage_batch::{run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings};
+use super::stage_batch::{
+    mode_and_api, run_stage, ItemReject, StageCtx, StageItems, StageRoute, StageSettings,
+};
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::stage_telemetry::DetailRejections;
@@ -1393,6 +1395,7 @@ async fn run_detail_round(
     why: &mut std::collections::HashMap<usize, String>,
     wording: &mut WordingLedger,
     second_try: bool,
+    route: StageRoute<'_>,
 ) -> Vec<usize> {
     let keys = crate::inspections::site_keys_of(findings);
     let mut batches = std::collections::BTreeMap::new();
@@ -1462,25 +1465,20 @@ async fn run_detail_round(
         wording,
     };
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("detail_{repo}"));
+    // The round goes out as a Message Batch when the run is a batch run and the seam has a batch
+    // API (chosen per round, as stage 1 does); a real-time run stays real time.
+    let (mode, batch_api) = mode_and_api(llm, route.batch, super::PARALLEL_CONCURRENCY);
     let ctx = StageCtx {
         repo,
         model: &super::stage_model(model),
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter,
-        job: None,
+        job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: StageSettings::default(),
     };
-    let outcome = run_stage(
-        Stage::DetailRegeneration,
-        &mut stage,
-        StageMode::Parallel {
-            max_in_flight: super::PARALLEL_CONCURRENCY,
-        },
-        &ctx,
-    )
-    .await;
+    let outcome = run_stage(Stage::DetailRegeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. A refusal by the
     // spend limit or the outage stop is recorded by the meter; any other failure is on the
     // stage's trail, and a transport failure is the only one the second try sends again.
@@ -1558,12 +1556,40 @@ fn detail_rejections(
 pub(crate) async fn regenerate_full_details(
     llm: &dyn LlmPort,
     repo: &str,
+    findings: Vec<Finding>,
+    files: &[(String, String)],
+    directives: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
+    model: Option<&str>,
+    meter: Option<&UsageMeter>,
+) -> (Vec<Finding>, Vec<FailedPass>) {
+    regenerate_full_details_in(
+        llm,
+        repo,
+        findings,
+        files,
+        directives,
+        nonce,
+        model,
+        meter,
+        StageRoute::default(),
+    )
+    .await
+}
+
+/// [`regenerate_full_details`] on a run's route: as Message Batches when the run's scan mode is
+/// Batch and the model seam has a batch API (chosen per round), reporting to the run's job.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn regenerate_full_details_in(
+    llm: &dyn LlmPort,
+    repo: &str,
     mut findings: Vec<Finding>,
     files: &[(String, String)],
     directives: &[(String, String)],
     nonce: &crate::prompt_frame::FrameNonce,
     model: Option<&str>,
     meter: Option<&UsageMeter>,
+    route: StageRoute<'_>,
 ) -> (Vec<Finding>, Vec<FailedPass>) {
     if findings.is_empty() {
         return (findings, Vec::new());
@@ -1613,6 +1639,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut why,
                 &mut wording,
                 false,
+                route,
             )
             .await;
         }
@@ -1666,6 +1693,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut why,
                 &mut wording,
                 true,
+                route,
             )
             .await;
             if !still.is_empty() {

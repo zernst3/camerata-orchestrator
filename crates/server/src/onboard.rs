@@ -3542,7 +3542,7 @@ pub async fn audit_repos_with_llm_controlled(
                     && !meter.stage_blocked(spec, crate::ai_audit::STAGE_FIX)
                 {
                     let (fixed_findings, fix_failed_passes) =
-                        crate::ai_audit::generate_fix_specifics(
+                        crate::ai_audit::generate_fix_specifics_in(
                             llm,
                             spec,
                             repo_findings,
@@ -3550,6 +3550,12 @@ pub async fn audit_repos_with_llm_controlled(
                             fix_model.as_deref(),
                             Some(&meter),
                             corpus,
+                            // A batch run sends the fix rounds as batches too (chosen per
+                            // round); a real-time run stays real time.
+                            crate::ai_audit::stage_batch::StageRoute {
+                                batch: mode == crate::ai_audit::ScanMode::Batch,
+                                job,
+                            },
                         )
                         .await;
                     repo_findings = fixed_findings;

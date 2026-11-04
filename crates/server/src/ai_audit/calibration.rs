@@ -17,7 +17,7 @@
 //! site, an absorb for each reply, one retry for a reply that was cut off.
 
 use super::stage_batch::{
-    run_stage, ItemReject as RunnerReject, StageCtx, StageItems, StageMode, StageSettings,
+    mode_and_api, run_stage, ItemReject as RunnerReject, StageCtx, StageItems, StageSettings,
 };
 use super::*;
 use crate::llm::LlmResponse;
@@ -1230,14 +1230,7 @@ pub async fn verify_findings(
     };
 
     let model = stage_model(calibration_model);
-    let batch_api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
-    let mode = if inputs.batch && batch_api.is_some() {
-        StageMode::Batch
-    } else {
-        StageMode::Parallel {
-            max_in_flight: inputs.concurrency.max(1),
-        }
-    };
+    let (mode, batch_api) = mode_and_api(llm, inputs.batch, inputs.concurrency);
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("calibration_{repo}"));
     let ctx = StageCtx {
         repo,

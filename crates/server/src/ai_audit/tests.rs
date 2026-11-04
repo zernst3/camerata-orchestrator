@@ -10,6 +10,7 @@ mod deep_routing_regressions;
 mod fix_generation;
 mod merge;
 mod poll_stack_batch;
+mod post_scan_batch;
 mod severity_rule_cases;
 mod verify_findings;
 use audit_repo::*;

@@ -785,6 +785,49 @@ fn every_post_scan_stage_runs_through_run_stage() {
     }
 }
 
+/// Source check (WO7c / F5): the run's scan mode reaches the detail rewrites, the alternatives
+/// pass and fix generation, and each hands the run's job to the runner. A call site that goes back
+/// to `batch: false` (or drops the job) sends that stage in real time in a batch run.
+#[test]
+fn a_batch_run_reaches_every_post_scan_stage_with_its_job() {
+    const AUDIT_RUN: &str = include_str!("audit_run.rs");
+    const ONBOARD: &str = include_str!("../onboard.rs");
+
+    for (name, src, call, mode) in [
+        (
+            "detail rewrites",
+            AUDIT_RUN,
+            "regenerate_full_details_in(",
+            "mode == ScanMode::Batch",
+        ),
+        (
+            "alternatives",
+            AUDIT_RUN,
+            "recommend_alternatives_in(",
+            "mode == ScanMode::Batch",
+        ),
+        (
+            "fix generation",
+            ONBOARD,
+            "generate_fix_specifics_in(",
+            "mode == crate::ai_audit::ScanMode::Batch",
+        ),
+    ] {
+        let at = src
+            .find(call)
+            .unwrap_or_else(|| panic!("{name}: no `{call}` call in the source"));
+        let args = &src[at..at + src[at..].find(".await").expect("an await")];
+        assert!(
+            args.contains(&format!("batch: {mode}")),
+            "{name}: the run's scan mode does not reach the stage: {args}"
+        );
+        assert!(
+            args.contains("job"),
+            "{name}: the run's job does not reach the stage: {args}"
+        );
+    }
+}
+
 // ── A refused stage 1 window is disclosed (review wave 6, D1) ──────────────────────────────
 
 fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {

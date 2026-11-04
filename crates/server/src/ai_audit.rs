@@ -301,7 +301,8 @@ pub use deep_tier::*;
 
 pub(crate) mod detail_regen;
 pub(crate) mod reply_schemas;
-use detail_regen::regenerate_full_details;
+use detail_regen::{regenerate_full_details, regenerate_full_details_in};
+use stage_batch::StageRoute;
 
 #[cfg(test)]
 mod detail_regen_tests;
@@ -314,6 +315,8 @@ mod calibration_tests;
 pub mod group_review;
 #[cfg(test)]
 mod group_review_tests;
+#[cfg(test)]
+mod loop_batch;
 #[cfg(test)]
 mod runner_adoption_tests;
 pub mod stage_batch;

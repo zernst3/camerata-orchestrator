@@ -1204,6 +1204,7 @@ pub(super) async fn run_fix_specifics_round(
     ledger: &mut FixLedger,
     trail: &mut StageTrail,
     second_try: bool,
+    route: stage_batch::StageRoute<'_>,
 ) -> Vec<usize> {
     let site_keys = crate::inspections::site_keys_of(findings);
     let mut batches = std::collections::BTreeMap::new();
@@ -1275,25 +1276,20 @@ pub(super) async fn run_fix_specifics_round(
     };
     let checkpoint = crate::checkpoint::stage_checkpoint(&format!("fix_{repo}"));
     let model = stage_model(fix_model);
+    // A Message Batch when the run is a batch run and the seam has a batch API (chosen per round,
+    // as stage 1 does); a real-time run stays real time.
+    let (mode, batch_api) = stage_batch::mode_and_api(llm, route.batch, PARALLEL_CONCURRENCY);
     let ctx = stage_batch::StageCtx {
         repo,
         model: &model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter,
-        job: None,
+        job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: stage_batch::StageSettings::default(),
     };
-    let outcome = stage_batch::run_stage(
-        Stage::FixGeneration,
-        &mut stage,
-        stage_batch::StageMode::Parallel {
-            max_in_flight: PARALLEL_CONCURRENCY,
-        },
-        &ctx,
-    )
-    .await;
+    let outcome = stage_batch::run_stage(Stage::FixGeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. The spend limit
     // and the outage stop record themselves on the meter; any other failure is a transport
     // failure the end-of-run second try may send again.
@@ -1430,11 +1426,37 @@ pub(super) fn apply_authored_remediation_without_model(
 pub async fn generate_fix_specifics(
     llm: &dyn LlmPort,
     repo: &str,
+    findings: Vec<Finding>,
+    files: &[(String, String)],
+    fix_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> (Vec<Finding>, Vec<FailedPass>) {
+    generate_fix_specifics_in(
+        llm,
+        repo,
+        findings,
+        files,
+        fix_model,
+        meter,
+        corpus,
+        stage_batch::StageRoute::default(),
+    )
+    .await
+}
+
+/// [`generate_fix_specifics`] on a run's route: as Message Batches when the run's scan mode is
+/// Batch and the model seam has a batch API (chosen per round), reporting to the run's job.
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_fix_specifics_in(
+    llm: &dyn LlmPort,
+    repo: &str,
     mut findings: Vec<Finding>,
     files: &[(String, String)],
     fix_model: Option<&str>,
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
+    route: stage_batch::StageRoute<'_>,
 ) -> (Vec<Finding>, Vec<FailedPass>) {
     // A finding that already carries its codebase-specific fix keeps it: the only findings that
     // arrive with one are those a delta retest carried forward from the inspection for a file
@@ -1530,6 +1552,7 @@ pub async fn generate_fix_specifics(
             &mut ledger,
             &mut trail,
             false,
+            route,
         )
         .await;
     }
@@ -1557,6 +1580,7 @@ pub async fn generate_fix_specifics(
             &mut ledger,
             &mut trail,
             false,
+            route,
         )
         .await;
     }
@@ -1602,6 +1626,7 @@ pub async fn generate_fix_specifics(
             &mut ledger,
             &mut trail,
             true,
+            route,
         )
         .await;
         if !still.is_empty() {

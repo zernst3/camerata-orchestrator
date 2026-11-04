@@ -49,7 +49,8 @@ use tokio::time::Instant;
 
 use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
-    plan_item_ranges, poll_and_fetch, BatchApi, JobCancelled, PollProgress, RoundContext,
+    plan_item_ranges, poll_and_fetch, BatchApi, BatchSeam, JobCancelled, PollProgress,
+    RoundContext,
 };
 use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
@@ -215,6 +216,37 @@ impl Default for StageSettings {
             per_item_usd: None,
         }
     }
+}
+
+/// How a post-scan stage (detail rewrites, fix generation, alternatives) sends a round, and the
+/// job it reports to. `batch` is the run's choice (its scan mode is Batch); whether the round
+/// really goes out as a batch is decided per round by [`mode_and_api`], exactly as stage 1 does.
+#[derive(Clone, Copy, Default)]
+pub struct StageRoute<'a> {
+    /// The run asked for batches. A real-time run leaves this `false` and nothing is submitted.
+    pub batch: bool,
+    /// The job whose progress line and activity the runner keeps, and whose cancel it honors.
+    pub job: Option<(&'a JobStore, &'a str)>,
+}
+
+/// The mode a stage round runs in, and the batch API it can use: [`StageMode::Batch`] when the
+/// run asked for batches and the model seam carries a [`BatchApi`], else real time with
+/// `max_in_flight` requests at once. The seam is the only source of a batch API (the real client
+/// reaches it through the run journal's seam), so a plain real-time completer stays real time.
+pub fn mode_and_api(
+    llm: &dyn LlmPort,
+    batch_wanted: bool,
+    max_in_flight: usize,
+) -> (StageMode, Option<&dyn BatchApi>) {
+    let api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
+    let mode = if batch_wanted && api.is_some() {
+        StageMode::Batch
+    } else {
+        StageMode::Parallel {
+            max_in_flight: max_in_flight.max(1),
+        }
+    };
+    (mode, api)
 }
 
 /// Everything a run needs besides the stage's items.

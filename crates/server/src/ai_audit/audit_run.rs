@@ -275,7 +275,7 @@ pub async fn audit_repo(
         let alternatives_blocked = !ask_alts.is_empty()
             && meter.is_some_and(|m| m.stage_blocked(repo, STAGE_ALTERNATIVES));
         if !ask_alts.is_empty() && !alternatives_blocked {
-            match recommend_alternatives(
+            match recommend_alternatives_in(
                 llm,
                 repo,
                 files,
@@ -285,6 +285,10 @@ pub async fn audit_repo(
                 audit_model.as_deref(),
                 feedback,
                 meter,
+                StageRoute {
+                    batch: mode == ScanMode::Batch,
+                    job,
+                },
             )
             .await
             {
@@ -692,7 +696,7 @@ pub async fn audit_repo(
     if terse_output_of(meter) {
         // The whole redacted file set, not just the files this run scanned: on an incremental
         // run `files` is only the changed ones, and a statement can name any file of the repo.
-        let (regenerated, regen_failed) = regenerate_full_details(
+        let (regenerated, regen_failed) = regenerate_full_details_in(
             llm,
             repo,
             std::mem::take(&mut all_findings),
@@ -701,6 +705,10 @@ pub async fn audit_repo(
             &nonce,
             audit_model.as_deref(),
             meter,
+            StageRoute {
+                batch: mode == ScanMode::Batch,
+                job,
+            },
         )
         .await;
         all_findings = regenerated;
