@@ -36,9 +36,10 @@ pub(in crate::cockpit) fn DeepReportExportPanel(project_id: String, soc2_enabled
 
     rsx! {
         div { class: "deep-export-panel",
-            p { class: "section-label", "Export deep compliance report" }
+            p { class: "section-label", "Export deep compliance report (internal)" }
             p { class: "section-hint",
-                "Downloads the full deep-tier analysis as a Markdown document. \
+                "Internal working notes, not reviewed, not for the client. \
+                 Downloads the full deep-tier analysis as a Markdown document. \
                  Includes deep security findings and threat model."
                 if soc2_enabled {
                     " SOC-2 gap analysis is also included."
@@ -75,7 +76,7 @@ pub(in crate::cockpit) fn DeepReportExportPanel(project_id: String, soc2_enabled
                     div { class: "deep-export-modal",
                         onclick: move |e| e.stop_propagation(),
                         div { class: "deep-export-modal-head",
-                            p { class: "deep-export-modal-title", "Deep compliance report" }
+                            p { class: "deep-export-modal-title", "Deep compliance report (internal working notes)" }
                             button {
                                 class: "rule-modal-close",
                                 onclick: move |_| report_md.set(None),
@@ -92,7 +93,7 @@ pub(in crate::cockpit) fn DeepReportExportPanel(project_id: String, soc2_enabled
                             onclick: move |_| {
                                 let md_copy = md.clone();
                                 spawn(async move {
-                                    let _ = save_csv("camerata-deep-report.md", md_copy).await;
+                                    let _ = save_csv("camerata-deep-report-INTERNAL.md", md_copy).await;
                                 });
                             },
                             "Save to file"

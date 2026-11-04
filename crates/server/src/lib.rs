@@ -3248,6 +3248,15 @@ async fn check_github_release(
     }))
 }
 
+/// The first line of the deep report, and what the cockpit panel and the saved filename
+/// ([`DEEP_REPORT_FILENAME`]) say: the report is the operator's working notes. The lens prose is
+/// model-written and goes through no reviewer overlay and no release gate, so it is never a client
+/// deliverable. (A later work order makes it a gated package artifact.)
+const DEEP_REPORT_OPERATOR_LABEL: &str = "Internal working notes, not reviewed, not for the client";
+
+/// The saved name of the deep report; the word INTERNAL travels with the file.
+const DEEP_REPORT_FILENAME: &str = "camerata-deep-report-INTERNAL.md";
+
 /// Advisory disclaimer baked into the deep-report export.
 const DEEP_REPORT_ADVISORY: &str =
     "ADVISORY: This report is AI-inferred from static code analysis. \
@@ -3297,14 +3306,25 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
     let markdown = deep_report_markdown(deep, state.feature_flags.soc2);
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{DEEP_REPORT_FILENAME}\""),
+            ),
+        ],
         markdown,
     )
         .into_response()
 }
 
-/// The deep report as the Markdown a client receives: the lens prose is model-written text read
-/// back from the job store, so it is redacted here, at the export, whatever path stored it.
+/// The deep report as Markdown for the operator: the lens prose is model-written text read back
+/// from the job store, so it is redacted here, at the export, whatever path stored it. It is
+/// labelled as the operator's working notes ([`DEEP_REPORT_OPERATOR_LABEL`]); it is not a client
+/// deliverable.
 fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
     crate::onboard::redact::redact_deep_report(&mut deep);
     render_deep_report_markdown(&deep, soc2_enabled)
@@ -3312,9 +3332,10 @@ fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: boo
 
 /// Render a [`crate::ai_audit::DeepReport`] as Markdown, including only the
 /// lenses that actually ran (flag-aware). The advisory disclaimer is always
-/// baked in as the first section.
+/// baked in as the first section, under the operator-only label.
 fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
     let mut md = String::new();
+    md.push_str(&format!("**{DEEP_REPORT_OPERATOR_LABEL}**\n\n"));
     md.push_str("# Camerata Deep Compliance & Security Report\n\n");
     md.push_str(&format!("> **{}**\n\n", DEEP_REPORT_ADVISORY));
 
@@ -3377,6 +3398,9 @@ struct AuditReportReq {
 /// 404s when the project doesn't exist or has no completed scan yet. 500s (with a plain-
 /// text-ish JSON message) when `typst` isn't installed or the compile otherwise fails —
 /// see `report_export::compile_pdf`'s fail-soft contract.
+///
+/// The PDF passes the SAME release gate as the package route ([`gated_release`], over the same
+/// reviewed report): whatever refuses the zip with a 422 refuses the PDF with that 422.
 async fn export_audit_report(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3432,70 +3456,23 @@ async fn export_audit_report(
         None
     };
 
-    // Branding (2026-09-13 review): fold CAMERATA_REPORT_BRAND/CAMERATA_REPORT_PREPARED_BY into
-    // any blank fields the export dialog didn't POST, BEFORE build_report_json — which stays
-    // pure/no-I/O itself (see `ReportOptions::apply_env_defaults`'s doc comment).
-    req.options.apply_env_defaults();
-    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
-    // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
-    req.options.chosen_options = project_chosen_options(&project);
-    // Confidentiality: the client name comes from the project's inspection setup, and a blank
-    // one blocks the export before anything is built.
-    req.options.client_name = project.client_name.clone();
-    if let Err(e) = crate::report_export::require_client_name(&req.options) {
-        return client_name_required_response(&e);
-    }
-    // And no report for fewer repos than the project holds.
-    req.options.expected_repos = project.repos.clone();
-    // A project that is not a client engagement is the operator's own review: its exports may
-    // come from a run that did not complete, marked as such.
-    req.options.internal = !project.client_engagement;
-    if let Err(e) = crate::report_export::require_all_repos(&report, &req.options) {
-        return repositories_missing_response(&e);
-    }
-    if let Err(e) = crate::report_export::require_complete_run(&report, &req.options) {
-        return run_incomplete_response(&e);
-    }
+    // The same options, set the same way, as the package route: the PDF is the one the package
+    // carries, built by the same code (`prepare_export_options`).
+    prepare_export_options(&mut req.options, &project, &report);
 
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
     let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
 
-    let json = crate::report_export::build_report_json(&reviewed, corpus.as_ref(), &req.options);
-
-    let data_json = match crate::report_export::render_data_json(&json) {
-        Ok(data_json) => data_json,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
+    // The release gate, the same one the package route passes: every check over the package this
+    // PDF belongs to, so a held row, an incomplete run, a secret or an unsynced change refuses
+    // the PDF exactly as it refuses the zip. Only the PDF is returned.
+    let gated = match gated_release(&reviewed, corpus.as_ref(), &req.options).await {
+        Ok(gated) => gated,
+        Err(response) => return response,
     };
-    // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
-    // ships a PDF outside any zip, and `data.json` is the only data the template reads.
-    let stem = report_filename_stem_for(reviewed.report(), &req.options.project_title);
-    if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
-        return release_blocked_response(&failure);
-    }
-    if let Err(failure) = crate::release_gate::check_unsynced(
-        &stem,
-        &reviewed.report().findings,
-        &req.options.unsynced_changes,
-    ) {
-        return release_blocked_response(&failure);
-    }
-    let pdf_bytes = match crate::report_export::compile_pdf_from_data(&data_json).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    let stem = gated.released.stem;
+    let pdf_bytes = gated.pdf;
 
     let filename = format!("{stem}.pdf");
 
@@ -3511,6 +3488,114 @@ async fn export_audit_report(
         pdf_bytes,
     )
         .into_response()
+}
+
+/// Set the export options both file routes share, from the project and the sealed report. Server
+/// populated, never client-supplied: the branding defaults, the chosen-option fallback, the
+/// backend and engagement record, the client name, the repos the project holds and whether the
+/// export is the operator's own. One function so the PDF route and the package route cannot
+/// build different PDFs from the same scan.
+fn prepare_export_options(
+    options: &mut crate::report_export::ReportOptions,
+    project: &crate::project::Project,
+    report: &crate::onboard::SealedReport,
+) {
+    // Branding (2026-09-13 review): fold CAMERATA_REPORT_BRAND/CAMERATA_REPORT_PREPARED_BY into
+    // any blank fields the export dialog didn't POST, BEFORE build_report_json — which stays
+    // pure/no-I/O itself (see `ReportOptions::apply_env_defaults`'s doc comment).
+    options.apply_env_defaults();
+    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
+    // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
+    options.chosen_options = project_chosen_options(project);
+    // The backend the scan ran on and whether it was a client engagement, recorded in the
+    // manifest and README. The scan's own ledger record wins (the project's settings may have
+    // changed since); the project is the fallback for a scan recorded before the ledger carried
+    // it.
+    options.model = Some(match report.ledger.engagement() {
+        Some(e) => ModelRecord {
+            backend: e.backend.clone(),
+            provider: e.provider.clone(),
+            models: Vec::new(),
+            client_engagement: e.client_engagement,
+        },
+        None => ModelRecord::anthropic(project.backend)
+            .with_client_engagement(project.client_engagement),
+    });
+    // Confidentiality: the client name comes from the project's inspection setup. The assembly
+    // refuses a blank one (a 422).
+    options.client_name = project.client_name.clone();
+    // The repos the project holds: the assembly refuses a report that covers fewer.
+    options.expected_repos = project.repos.clone();
+    // A project that is not a client engagement is the operator's own review: its exports may
+    // come from a run that did not complete, marked as such.
+    options.internal = !project.client_engagement;
+}
+
+/// A package that cleared the release gate, with the compiled PDF it carries.
+struct GatedExport {
+    released: crate::release_gate::ReleasedZip,
+    pdf: Vec<u8>,
+}
+
+/// THE path every route that writes a client-facing file takes to its bytes: the one assembly
+/// ([`release_gate::build_product_package`]) over the one [`crate::report_export::ReviewedReport`],
+/// then the one gate ([`release_gate::release`], or `release_internal` for the operator's own
+/// review). `Ok` only when every check passed; every refusal is already the 422 the routes
+/// return (`{ ok: false, gate, message, ... }`, problems naming each site), and any other failure
+/// is a 500. A pinned test lists the routes that write client files and asserts each one calls
+/// this.
+async fn gated_release(
+    reviewed: &crate::report_export::ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    options: &crate::report_export::ReportOptions,
+) -> Result<GatedExport, Response> {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let package = match crate::release_gate::build_product_package(reviewed, corpus, options).await
+    {
+        Ok(package) => package,
+        Err(e) => {
+            // The assembly checks the PDF's data before it compiles it; a refusal there is the
+            // same blocked response as one from `release`.
+            if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
+                return Err(release_blocked_response(failure));
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
+                return Err(client_name_required_response(missing));
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>() {
+                return Err(repositories_missing_response(missing));
+            }
+            if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
+                return Err(run_incomplete_response(incomplete));
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response());
+        }
+    };
+    let pdf = package.pdf.clone();
+    let released = match if options.internal {
+        crate::release_gate::release_internal(package)
+    } else {
+        crate::release_gate::release(package)
+    } {
+        Ok(released) => released,
+        Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
+            return Err(release_blocked_response(&failure));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response());
+        }
+    };
+    Ok(GatedExport { released, pdf })
 }
 
 /// The reviewer's overlay over a sealed report, for an export: the decisions and edits of the
@@ -3698,85 +3783,18 @@ async fn export_product(
         None
     };
 
-    // Branding (2026-09-13 review): same env-default fold as `export_audit_report` — the
-    // xlsx/findings.json siblings this handler also builds read `opts.prepared_by` directly
-    // (`xlsx_export.rs`), so resolving it here once covers all three artifacts.
-    req.options.apply_env_defaults();
-    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
-    // populated, never client-supplied. Covers all three artifacts built below.
-    req.options.chosen_options = project_chosen_options(&project);
-    // The backend the scan ran on and whether it was a client engagement, recorded in the
-    // manifest and README. Server-populated, never client-supplied. The scan's own ledger record
-    // wins (the project's settings may have changed since); the project is the fallback for a
-    // scan recorded before the ledger carried it.
-    req.options.model = Some(match report.ledger.engagement() {
-        Some(e) => ModelRecord {
-            backend: e.backend.clone(),
-            provider: e.provider.clone(),
-            models: Vec::new(),
-            client_engagement: e.client_engagement,
-        },
-        None => ModelRecord::anthropic(project.backend)
-            .with_client_engagement(project.client_engagement),
-    });
-    // Confidentiality: the client name comes from the project's inspection setup. The package
-    // assembly refuses a blank one (mapped to a 422 below).
-    req.options.client_name = project.client_name.clone();
-    // The repos the project holds: the package assembly refuses a report that covers fewer.
-    req.options.expected_repos = project.repos.clone();
-    req.options.internal = !project.client_engagement;
+    // The same options, set the same way, as the PDF route (`prepare_export_options`).
+    prepare_export_options(&mut req.options, &project, &report);
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
-    // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
-    // sample generator.
+    // (`release_gate::release`), shared by this handler, the PDF route, `camerata inspect
+    // --export` and the sample generator: see `gated_release`.
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
     let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
-    let package =
-        match crate::release_gate::build_product_package(&reviewed, corpus.as_ref(), &req.options)
-            .await
-        {
-            Ok(package) => package,
-            Err(e) => {
-                // The assembly checks the PDF's data before it compiles it; a refusal there is the
-                // same blocked response as one from `release`.
-                if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
-                    return release_blocked_response(failure);
-                }
-                if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>()
-                {
-                    return client_name_required_response(missing);
-                }
-                if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>()
-                {
-                    return repositories_missing_response(missing);
-                }
-                if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
-                    return run_incomplete_response(incomplete);
-                }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-                )
-                    .into_response();
-            }
-        };
-    let released = match if req.options.internal {
-        crate::release_gate::release_internal(package)
-    } else {
-        crate::release_gate::release(package)
-    } {
-        Ok(released) => released,
-        Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
-            return release_blocked_response(&failure);
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
+    let released = match gated_release(&reviewed, corpus.as_ref(), &req.options).await {
+        Ok(gated) => gated.released,
+        Err(response) => return response,
     };
     // Proof the gate ran, visible to the cockpit without reading the zip.
     let release_checks = released.report.check_names().join(", ");
