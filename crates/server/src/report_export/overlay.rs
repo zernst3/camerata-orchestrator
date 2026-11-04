@@ -292,6 +292,9 @@ pub fn apply_overlay(
         .collect();
     let restored = RestoredKeys::from_keys(restored_keys(&records));
     let edits: Vec<&Edit> = edits.iter().filter(|e| e.is_active()).collect();
+    // A summary edit is about a tree node and not a row; it is applied to the tree below.
+    let (summary_edits, edits): (Vec<&Edit>, Vec<&Edit>) =
+        edits.into_iter().partition(|e| e.field.is_node_scope());
 
     let mut applied: Vec<AppliedEdit> = Vec::new();
     let mut stale: Vec<StaleEditNote> = Vec::new();
@@ -325,6 +328,13 @@ pub fn apply_overlay(
             if let Some(tree) = r.tree.as_mut() {
                 apply_splits(tree, &mut r.findings, &outcome.splits);
             }
+        }
+        // The reviewer's node summaries replace the model's, after the tree is in its final
+        // shape (a rebuild or a split would otherwise carry the model's text over them).
+        if !summary_edits.is_empty() {
+            let (done, old) = apply_summary_edits(r.tree.as_mut(), &summary_edits);
+            applied.extend(done);
+            stale.extend(old);
         }
         // The ledger's escalation block is worked out again from the tree being exported, not
         // copied from what stage 2 recorded: a row thrown out after stage 2 is no longer one of
@@ -580,6 +590,67 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
     out
 }
 
+/// The fingerprint a node summary edit is made against: the hash of the model summary it replaced
+/// (review UI spec U4). A rerun that writes a different summary for the node changes it, so the
+/// edit loads as stale like any other.
+pub fn summary_fingerprint(model_summary: &str) -> String {
+    camerata_api_types::fingerprint::fingerprint("node-summary", model_summary)
+}
+
+/// Apply the reviewer's node summary edits to the tree (spec U4). An edit applies only while the
+/// model summary it replaced still hashes to its `fingerprint_at_edit`; a rerun that wrote a
+/// different summary leaves it stale, shown beside the model's text and not applied. Edits are
+/// applied in the order written and the later one wins; each is judged against the MODEL's
+/// summary, so an earlier edit never makes a later one stale.
+fn apply_summary_edits(
+    tree: Option<&mut ReviewTree>,
+    edits: &[&Edit],
+) -> (Vec<AppliedEdit>, Vec<StaleEditNote>) {
+    let mut applied = Vec::new();
+    let mut stale = Vec::new();
+    let Some(tree) = tree else {
+        // No tree, no node: every summary edit is stale.
+        for e in edits {
+            let mut edit = (*e).clone();
+            edit.stale = true;
+            stale.push(StaleEditNote {
+                edit,
+                current_value: String::new(),
+            });
+        }
+        return (applied, stale);
+    };
+    let model: HashMap<String, String> = tree
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.summary.clone().unwrap_or_default()))
+        .collect();
+    for e in edits {
+        let current = model.get(&e.key);
+        let matches =
+            current.is_some_and(|text| summary_fingerprint(text) == e.fingerprint_at_edit);
+        if !matches {
+            let mut edit = (*e).clone();
+            edit.stale = true;
+            stale.push(StaleEditNote {
+                edit,
+                current_value: current.cloned().unwrap_or_default(),
+            });
+            continue;
+        }
+        if let Some(node) = tree.nodes.iter_mut().find(|n| n.id == e.key) {
+            node.summary = Some(e.new.trim().to_string());
+            node.summary_source = TextSource::Reviewer;
+            applied.push(AppliedEdit {
+                id: e.id.clone(),
+                key: e.key.clone(),
+                field: e.field,
+            });
+        }
+    }
+    (applied, stale)
+}
+
 /// What `field` holds on `f` now, in the text an edit's `old` and `new` use.
 pub fn current_value(f: &Finding, field: EditField) -> String {
     match field {
@@ -602,6 +673,8 @@ pub fn current_value(f: &Finding, field: EditField) -> String {
         EditField::Kind => serde_json::to_string(&f.kind).unwrap_or_default(),
         EditField::Category => f.category.clone().unwrap_or_default(),
         EditField::Subgroup => f.group_path.get(2).cloned().unwrap_or_default(),
+        // A summary belongs to a tree node, not to a row.
+        EditField::Summary => String::new(),
     }
 }
 
@@ -660,7 +733,7 @@ fn apply_field(f: &mut Finding, field: EditField, new: &str) {
             f.category = (!new.is_empty()).then(|| new.to_string());
         }
         // Applied to the tree, not the row.
-        EditField::Subgroup => {}
+        EditField::Subgroup | EditField::Summary => {}
     }
 }
 

@@ -21,6 +21,10 @@ use dioxus::prelude::*;
 
 use crate::test_harness;
 
+mod export_states;
+mod shell_states;
+mod tree_states;
+
 /// How a state draws itself.
 #[derive(Clone, Copy)]
 pub enum StateKind {
@@ -157,27 +161,39 @@ const SPEC: &[(&str, &str, &[&str])] = &[
     ("export", "WO10", &["clear", "blocked"]),
 ];
 
-/// The renderer of a screen's state once its work order has built it, else `None`. One arm per
-/// built screen; the arm calls that screen's `gallery/<screen>_states.rs`.
-fn built_renderer(screen: &str, state: &str) -> Option<fn() -> String> {
-    match screen {
-        "settings" => settings_states::renderer(state),
-        _ => None,
-    }
+/// A state id and the function that renders its page.
+pub(crate) type BuiltRenderer = (&'static str, fn() -> String);
+
+/// The renderer of every state a work order has built, by `screen/state`. A work order that
+/// builds a screen adds its `gallery/<screen>_states.rs` here.
+fn built_renderers() -> Vec<BuiltRenderer> {
+    let mut all = Vec::new();
+    all.extend(shell_states::states());
+    all.extend(tree_states::states());
+    all.extend(export_states::states());
+    all.extend(settings_states::states());
+    all
 }
 
-/// Every named state, in spec order.
+/// Every named state, in spec order. A state with a renderer is `Built`; the rest are
+/// placeholders naming the work order that owns them.
 pub fn registry() -> Vec<GalleryState> {
+    let built = built_renderers();
     SPEC.iter()
-        .flat_map(|(screen, owner, states)| {
-            states.iter().map(move |state| GalleryState {
+        .flat_map(|(screen, owner, states)| states.iter().map(|state| (*screen, *owner, *state)))
+        .map(|(screen, owner, state)| {
+            let id = format!("{screen}/{state}");
+            let kind = built
+                .iter()
+                .find(|(built_id, _)| *built_id == id)
+                .map_or(StateKind::Placeholder { owner }, |(_, render)| {
+                    StateKind::Built(*render)
+                });
+            GalleryState {
                 screen,
                 state,
-                kind: match built_renderer(screen, state) {
-                    Some(render) => StateKind::Built(render),
-                    None => StateKind::Placeholder { owner },
-                },
-            })
+                kind,
+            }
         })
         .collect()
 }

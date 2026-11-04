@@ -403,3 +403,147 @@ fn every_edit_field_requires_a_reason() {
         );
     }
 }
+
+// ── node summary edits (review UI spec U4) ────────────────────────────────────────────────
+
+/// An inspection of two rows under one rule whose rule node carries `summary`.
+fn inspection_with_node_summary(pid: &str, summary: &str) -> InspectionEntry {
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.findings = vec![
+        row("SEC-1", "src/a.rs", 10, "let a = secret_a();"),
+        row("SEC-1", "src/b.rs", 20, "let b = secret_b();"),
+    ];
+    report.provenance.started_at = "2026-11-02T10:00:00Z".to_string();
+    report.provenance.finished_at = "2026-11-02T10:00:00Z".to_string();
+    report.attach_tree();
+    if let Some(tree) = report.tree.as_mut() {
+        if let Some(node) = tree.nodes.iter_mut().find(|n| n.id == "rule:SEC-1") {
+            node.summary = Some(summary.to_string());
+        }
+    }
+    InspectionEntry::from_report(pid, report, InspectionKind::Full)
+}
+
+#[tokio::test]
+async fn a_node_summary_edit_shows_on_the_reviewed_report_and_the_tree_and_goes_stale_on_a_rerun() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let pid = state
+        .projects
+        .create("Acme", vec!["acme/app".to_string()])
+        .unwrap()
+        .id;
+    state
+        .inspections
+        .append(inspection_with_node_summary(&pid, "The model's reading."))
+        .unwrap();
+    let app = router(state.clone());
+    let base = format!("/api/projects/{pid}");
+
+    // The edit is made at the node: its key is the node id.
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("{base}/edits"),
+        Some(serde_json::json!({
+            "key": "rule:SEC-1", "field": "summary",
+            "new": "Both sites read the secret from the environment.",
+            "reason": "the model missed the shared helper", "by": "zach"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["edit"]["field"], "summary", "{body}");
+    assert_eq!(body["edit"]["old"], "The model's reading.", "{body}");
+    assert!(
+        !body["edit"]["fingerprint_at_edit"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "{body}"
+    );
+
+    // The reviewed report carries the reviewer's summary.
+    let (status, body) = call(&app, "GET", &format!("{base}/reviewed-report"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let node = body["tree"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "rule:SEC-1")
+        .unwrap_or_else(|| panic!("no rule node in {body}"));
+    assert_eq!(
+        node["summary"],
+        "Both sites read the secret from the environment."
+    );
+    assert_eq!(node["summary_source"], "reviewer");
+
+    // The tree the screen reads shows the edit beside the node.
+    let (status, body) = call(&app, "GET", &format!("{base}/review/tree"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let node = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "rule:SEC-1")
+        .unwrap();
+    assert_eq!(node["summary_source"], "reviewer", "{node}");
+    assert_eq!(
+        node["summary_edit"]["new"], "Both sites read the secret from the environment.",
+        "{node}"
+    );
+    assert_eq!(node["summary_edit"]["stale"], false, "{node}");
+
+    // A rerun writes a different model summary: the edit is stale, shown and not applied.
+    state
+        .inspections
+        .append(inspection_with_node_summary(
+            &pid,
+            "After the rerun the model says this.",
+        ))
+        .unwrap();
+    let (status, body) = call(&app, "GET", &format!("{base}/review/tree"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let node = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "rule:SEC-1")
+        .unwrap();
+    assert_eq!(
+        node["summary"], "After the rerun the model says this.",
+        "{node}"
+    );
+    assert_eq!(node["summary_source"], "model", "{node}");
+    assert_eq!(node["summary_edit"]["stale"], true, "{node}");
+    assert_eq!(
+        node["summary_edit"]["current_value"], "After the rerun the model says this.",
+        "{node}"
+    );
+}
+
+#[tokio::test]
+async fn a_summary_edit_of_a_node_that_is_not_in_the_tree_is_refused() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let pid = state
+        .projects
+        .create("Acme", vec!["acme/app".to_string()])
+        .unwrap()
+        .id;
+    state
+        .inspections
+        .append(inspection_with_node_summary(&pid, "The model's reading."))
+        .unwrap();
+    let app = router(state);
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/edits"),
+        Some(serde_json::json!({
+            "key": "rule:NOPE-9", "field": "summary", "new": "x", "reason": "r", "by": "zach"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "unknown_node", "{body}");
+}

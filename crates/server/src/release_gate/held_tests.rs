@@ -529,9 +529,9 @@ fn each_editable_field_round_trips_into_the_exports() {
         (EditField::Category, "secret-exposure", "category"),
     ];
     assert_eq!(
-        cases.len() + 1,
+        cases.len() + 2,
         EditField::ALL.len(),
-        "every editable field but the sub-group (a tree edit) has a case here"
+        "every editable field but the sub-group and the node summary (both tree edits) has a case here"
     );
     for (n, (field, new, column)) in cases.iter().enumerate() {
         let edits = vec![edit_of(n + 1, &row, *field, "", new)];
@@ -650,6 +650,37 @@ fn gate_problems(reviewed: &ReviewedReport) -> GateFailure {
         Err(ReleaseError::Blocked(failure)) => failure,
         other => panic!("the package must be refused: {other:?}"),
     }
+}
+
+#[test]
+fn a_held_row_names_the_sub_group_it_sits_in_not_a_rule_built_from_its_id() {
+    use camerata_api_types::review_view::HoldReason;
+
+    // A model-named row and a tool row: neither lives under `rule:{rule_id}`.
+    let mut ai = second_row("src/a.rs", 1);
+    ai.rule_id = "AI-0042".to_string();
+    ai.group_path = vec![
+        "cat:injection".to_string(),
+        "rule:ai/injection".to_string(),
+        "sub:ai/injection/2".to_string(),
+    ];
+    let mut tool = second_row("src/b.rs", 2);
+    tool.rule_id = "no-eval".to_string();
+    tool.group_path = vec![
+        "cat:injection".to_string(),
+        "rule:eslint/no-eval".to_string(),
+        "sub:eslint/no-eval/1".to_string(),
+    ];
+    let unplaced = second_row("src/c.rs", 3);
+
+    let row = |f: &Finding| super::holds::held_row(f, HoldReason::JunkContent, "");
+    assert_eq!(row(&ai).node_id, "sub:ai/injection/2");
+    assert_eq!(row(&tool).node_id, "sub:eslint/no-eval/1");
+    assert_eq!(
+        row(&unplaced).node_id,
+        "",
+        "a row never placed names no node"
+    );
 }
 
 #[test]

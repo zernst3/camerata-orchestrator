@@ -10,10 +10,8 @@
 //! candidates on the server (design A4), so Apply sends exactly one request: the escalation
 //! budget write.
 //!
-//! The lane is mounted by the review shell (WO10). This module only exposes the screen and its
-//! host; it does not wire a lane switcher.
-
-use std::rc::Rc;
+//! The lane is mounted by the review shell (`review_shell`), which hands the host the shared
+//! [`ReviewApi`]: reads through `ReviewSource`, every write through `ReviewWrites`.
 
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, ReviewSettingsView as SettingsData,
@@ -27,6 +25,7 @@ use camerata_ui_core::review_settings::{
 };
 use dioxus::prelude::*;
 
+use camerata_ui::review_io::{ReviewApi, ReviewWrites};
 use camerata_ui::review_source::ReviewSource;
 
 /// The sentence under the stage models: where a model may come from. It says where models do
@@ -256,17 +255,6 @@ pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
 
 // ── The host: signals and I/O, reading and writing through the source ───────────────────
 
-/// What the host needs from the shell that mounts it, by value so the props can be compared.
-/// Two handles are equal when they are the same source.
-#[derive(Clone)]
-pub struct SettingsSource(pub Rc<dyn ReviewSource>);
-
-impl PartialEq for SettingsSource {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-    }
-}
-
 /// Load the settings.
 pub(crate) async fn load(source: &dyn ReviewSource) -> Result<SettingsData, String> {
     source.settings().await.map_err(|e| e.message)
@@ -276,7 +264,8 @@ pub(crate) async fn load(source: &dyn ReviewSource) -> Result<SettingsData, Stri
 /// settings. Nothing else is asked of the source, and no model is involved. Refuses, without a
 /// request, a draft whose Apply is not ready (invalid, unchanged, or a run in flight).
 pub(crate) async fn apply_formula(
-    source: &dyn ReviewSource,
+    reads: &dyn ReviewSource,
+    writes: &dyn ReviewWrites,
     view: &SettingsData,
     draft: &SettingsDraft,
     run_in_flight: bool,
@@ -290,21 +279,15 @@ pub(crate) async fn apply_formula(
         }
     }
     let req = camerata_ui_core::review_settings::escalation_req(draft, &view.limits)?;
-    let outcome = source.apply_budget(req).await.map_err(|e| e.message)?;
-    let reloaded = load(source).await?;
+    let outcome = writes.apply_budget(req).await.map_err(|e| e.message)?;
+    let reloaded = load(reads).await?;
     Ok((outcome, reloaded))
 }
 
 /// Save the Engine Check sample size, then reload.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review shell (WO10) mounts the host; delete this attribute then"
-    )
-)]
 pub(crate) async fn save_sample(
-    source: &dyn ReviewSource,
+    reads: &dyn ReviewSource,
+    writes: &dyn ReviewWrites,
     view: &SettingsData,
     draft: &SettingsDraft,
     run_in_flight: bool,
@@ -318,20 +301,14 @@ pub(crate) async fn save_sample(
         }
     }
     let n = sample_size(draft, &view.limits)?;
-    source.set_sample_size(n).await.map_err(|e| e.message)?;
-    load(source).await
+    writes.set_sample_size(n).await.map_err(|e| e.message)?;
+    load(reads).await
 }
 
 /// Set one stage's model, then reload.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review shell (WO10) mounts the host; delete this attribute then"
-    )
-)]
 pub(crate) async fn change_stage_model(
-    source: &dyn ReviewSource,
+    reads: &dyn ReviewSource,
+    writes: &dyn ReviewWrites,
     stage: Stage,
     model: &str,
     run_in_flight: bool,
@@ -339,16 +316,17 @@ pub(crate) async fn change_stage_model(
     if run_in_flight {
         return Err(RUN_IN_FLIGHT_NOTE.to_string());
     }
-    source
+    writes
         .set_stage_model(stage.step_key(), model)
         .await
         .map_err(|e| e.message)?;
-    load(source).await
+    load(reads).await
 }
 
 #[derive(Clone, PartialEq, Props)]
 pub struct ReviewSettingsHostProps {
-    pub source: SettingsSource,
+    /// Reads and writes of the project's review settings.
+    pub api: ReviewApi,
     /// A run is in flight (the scan panel's flag): the lane's controls lock.
     #[props(default)]
     pub run_in_flight: bool,
@@ -371,11 +349,11 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
     let mut saving = use_signal(|| false);
     let mut save_error = use_signal(|| None::<String>);
 
-    let source = props.source.clone();
+    let api = props.api.clone();
     use_future(move || {
-        let source = source.clone();
+        let api = api.clone();
         async move {
-            match load(source.0.as_ref()).await {
+            match load(api.reads.as_ref()).await {
                 Ok(v) => {
                     draft.set(Some(SettingsDraft::from_view(&v)));
                     view.set(Some(v));
@@ -386,7 +364,7 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
     });
 
     let run_in_flight = props.run_in_flight;
-    let source = props.source.clone();
+    let source = props.api.clone();
     let on_applied = props.on_applied;
     let handler = EventHandler::new(move |event: SettingsEvent| {
         let (Some(current_view), Some(current)) = (view(), draft()) else {
@@ -421,7 +399,8 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
                             saving.set(true);
                             save_error.set(None);
                             match save_sample(
-                                source.0.as_ref(),
+                                source.reads.as_ref(),
+                                source.writes.as_ref(),
                                 &current_view,
                                 &current,
                                 run_in_flight,
@@ -478,7 +457,14 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
                 spawn(async move {
                     saving.set(true);
                     save_error.set(None);
-                    match change_stage_model(source.0.as_ref(), stage, &model, run_in_flight).await
+                    match change_stage_model(
+                        source.reads.as_ref(),
+                        source.writes.as_ref(),
+                        stage,
+                        &model,
+                        run_in_flight,
+                    )
+                    .await
                     {
                         Ok(reloaded) => {
                             // Only the saved side changes; typed fields stay as typed.
@@ -525,15 +511,8 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
 /// request. A slow earlier reply is dropped, never shown over a newer preview or after the draft
 /// turned invalid. A draft that cannot be previewed clears the preview. This writes nothing and
 /// calls no model.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review shell (WO10) mounts the host; delete this attribute then"
-    )
-)]
 fn request_preview(
-    source: &SettingsSource,
+    source: &ReviewApi,
     view: &SettingsData,
     next: &SettingsDraft,
     current_view: Signal<Option<SettingsData>>,
@@ -546,7 +525,7 @@ fn request_preview(
     };
     let source = source.clone();
     spawn(async move {
-        if let Ok(outcome) = source.0.preview_budget(req.clone()).await {
+        if let Ok(outcome) = source.writes.preview_budget(req.clone()).await {
             let still_asked = match (current_view(), current_draft()) {
                 (Some(v), Some(d)) => preview_is_current(&v, &d, &req),
                 _ => false,
@@ -558,16 +537,9 @@ fn request_preview(
     });
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the review shell (WO10) mounts the host; delete this attribute then"
-    )
-)]
 #[allow(clippy::too_many_arguments)]
 fn apply(
-    source: &SettingsSource,
+    source: &ReviewApi,
     current_view: SettingsData,
     current: SettingsDraft,
     run_in_flight: bool,
@@ -582,7 +554,15 @@ fn apply(
     spawn(async move {
         saving.set(true);
         save_error.set(None);
-        match apply_formula(source.0.as_ref(), &current_view, &current, run_in_flight).await {
+        match apply_formula(
+            source.reads.as_ref(),
+            source.writes.as_ref(),
+            &current_view,
+            &current,
+            run_in_flight,
+        )
+        .await
+        {
             Ok((outcome, reloaded)) => {
                 // The typed sample size stays as typed; the formula comes back as saved.
                 let mut next = SettingsDraft::from_view(&reloaded);

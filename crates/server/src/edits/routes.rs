@@ -195,6 +195,31 @@ fn draft_for(
     }
 }
 
+/// The edit of a tree node's summary (spec U4): the old value is the summary the node shows now,
+/// and the fingerprint is the hash of the MODEL's summary in the sealed report, so a rerun that
+/// writes a different one shows the edit as stale. `None` when the tree has no such node.
+fn node_draft_for(
+    sealed: &SealedReport,
+    reviewed: &ReviewedReport,
+    req: &NewEditReq,
+) -> Option<EditDraft> {
+    let key = req.key.trim();
+    let model = sealed.tree.as_ref()?.node(key)?;
+    let shown = reviewed.report().tree.as_ref()?.node(key)?;
+    Some(EditDraft {
+        key: key.to_string(),
+        field: req.field,
+        old: shown.summary.clone().unwrap_or_default(),
+        new: req.new.trim().to_string(),
+        reason: req.reason.clone(),
+        by: req.by.clone(),
+        run_id: req.run_id.clone(),
+        fingerprint: crate::report_export::summary_fingerprint(
+            model.summary.as_deref().unwrap_or_default(),
+        ),
+    })
+}
+
 /// The key `edit`'s site has in the latest run, when the engine found it moved.
 fn moved_key(state: &AppState, id: &str, latest: &InspectionEntry, edit: &Edit) -> String {
     let Some(prev) = state
@@ -258,22 +283,34 @@ pub(crate) async fn post_edit(
         return no_inspection();
     };
     let (sealed, reviewed) = review_of(&state, &id, &latest);
-    let Some((sealed_row, reviewed_row)) = rows_of(&sealed, &reviewed, req.key.trim()) else {
-        return refusal(
-            StatusCode::NOT_FOUND,
-            "unknown_site",
-            "This site is not in the latest inspection.",
-        );
+    let draft = if req.field.is_node_scope() {
+        // A summary is edited at its node: the key is a node id (spec U4).
+        let Some(draft) = node_draft_for(&sealed, &reviewed, &req) else {
+            return refusal(
+                StatusCode::NOT_FOUND,
+                "unknown_node",
+                "This node is not in the latest inspection's tree.",
+            );
+        };
+        draft
+    } else {
+        let Some((sealed_row, reviewed_row)) = rows_of(&sealed, &reviewed, req.key.trim()) else {
+            return refusal(
+                StatusCode::NOT_FOUND,
+                "unknown_site",
+                "This site is not in the latest inspection.",
+            );
+        };
+        draft_for(
+            sealed_row,
+            reviewed_row,
+            req.field,
+            &req.new,
+            &req.reason,
+            &req.by,
+            &req.run_id,
+        )
     };
-    let draft = draft_for(
-        sealed_row,
-        reviewed_row,
-        req.field,
-        &req.new,
-        &req.reason,
-        &req.by,
-        &req.run_id,
-    );
     let when = now();
     match state.edits.record_edit(
         &id,

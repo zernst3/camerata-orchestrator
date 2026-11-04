@@ -125,6 +125,13 @@ pub fn tree_view(reviewed: &ReviewedReport, internal: bool) -> Vec<TreeNodeView>
         .collect()
 }
 
+/// The flags the prose checks give a node's label, cause and summary, one per hit (`summary:
+/// methodology_leak:the scanner`). The review screen shows them beside the node before any client
+/// package is built, so they are worked out here once and read by the screen and the export alike.
+pub(crate) fn prose_flags_of(n: &TreeNode) -> Vec<String> {
+    checked_text(n).0
+}
+
 /// A node's flags from the prose checks, and its label, cause and summary as client output may
 /// carry them. A withheld label falls back to the plain name of the level.
 fn checked_text(n: &TreeNode) -> (Vec<String>, String, String, String) {

@@ -110,11 +110,13 @@ impl EscalationReason {
     }
 
     /// Whether a candidate with this reason and severity may go over the budget under the
-    /// project's `allowed` set: the reason must be in the set, and every reason but
-    /// `evidence_unverified` also needs critical severity.
+    /// project's `allowed` set: the reason must be in the set and the severity critical.
+    /// `evidence_unverified` is always allowed, at any severity, whatever the stored set says: the
+    /// release gate refuses that row without a decision, and a project file written before the
+    /// settings route refused such a set can still hold one.
     pub fn may_exceed_budget(self, severity: &str, allowed: &[EscalationReason]) -> bool {
-        allowed.contains(&self)
-            && (self == Self::EvidenceUnverified || severity.eq_ignore_ascii_case("critical"))
+        self == Self::EvidenceUnverified
+            || (allowed.contains(&self) && severity.eq_ignore_ascii_case("critical"))
     }
 }
 
@@ -578,6 +580,46 @@ mod tests {
         assert!(!EscalationReason::ConflictingVerdicts.may_exceed_budget("critical", &set));
         // A project can narrow the set.
         assert!(!EscalationReason::SecretExposure.may_exceed_budget("critical", &[]));
+    }
+
+    #[test]
+    fn unverified_evidence_may_exceed_the_budget_whatever_the_stored_set_says() {
+        // A project file written before the settings route refused such a set can hold an
+        // over-budget set without it (serde fills a default only for a missing key). The release
+        // gate refuses the row without a decision, so it is escalated all the same.
+        for stored in [vec![], vec![EscalationReason::SecretExposure]] {
+            assert!(EscalationReason::EvidenceUnverified.may_exceed_budget("low", &stored));
+            assert!(
+                !EscalationReason::SecretExposure.may_exceed_budget("high", &stored),
+                "the other reasons still obey the set and critical severity"
+            );
+        }
+        let mut line = EscalationBudget::compute(1.0, 1, 1000);
+        let candidate = |reason| EscalationCandidate {
+            key: String::new(),
+            node_id: String::new(),
+            reason,
+            severity: "low".to_string(),
+            stage2_rank: 1,
+            global_rank: 1,
+            escalated: false,
+            over_budget_reason: None,
+            why: String::new(),
+        };
+        let mut candidates = vec![
+            candidate(EscalationReason::OutlierInGroup),
+            candidate(EscalationReason::EvidenceUnverified),
+        ];
+        re_mark(&mut candidates, &mut line, &[]);
+        assert!(candidates[0].escalated, "inside the budget");
+        assert!(
+            candidates[1].escalated,
+            "over the budget, kept by unverified evidence"
+        );
+        assert_eq!(
+            candidates[1].over_budget_reason,
+            Some(EscalationReason::EvidenceUnverified)
+        );
     }
 
     #[test]

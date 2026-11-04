@@ -2,20 +2,25 @@
 //!
 //! A host owns signals and I/O and reads here; a view takes props and never fetches. The real
 //! HTTP source comes later (`HttpReviewSource`, reqwest against the BFF base URL); the one here is
-//! the fixture source the gallery and the tests use. Reads only so far: the work orders that add
-//! writes (decisions, edits, settings) extend the trait with them.
+//! the fixture source the gallery and the tests use. Reads only: every write is
+//! [`crate::review_io::ReviewWrites`], which the fixture source implements too, so one fixture
+//! serves a host.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use camerata_api_types::decisions::{DecisionRecorded, NewDecisionReq, RevokeResp};
+use camerata_api_types::edits::{EditRecorded, NewEditReq};
 use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
     EngineCheckLane, EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, QueueView,
     ReviewSettingsView, ReviewShellView, SampleSizeResp, SitesPage, TreeView,
 };
 use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base, ReviewDataSet};
+
+use crate::review_io::{RecordingWrites, ReviewWrites};
 
 /// Why a read failed, in words a screen can show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,21 +66,6 @@ pub trait ReviewSource {
     fn export_gate(&self) -> SourceFuture<'_, ExportGateView>;
     /// The review settings (spec section 9).
     fn settings(&self) -> SourceFuture<'_, ReviewSettingsView>;
-
-    // ── The settings lane's writes (spec section 9). None of them calls a model. ──
-
-    /// `POST escalation-budget/preview`: the line a proposed rate and floor would give. Writes
-    /// nothing.
-    fn preview_budget(&self, req: EscalationBudgetReq)
-        -> SourceFuture<'_, EscalationBudgetOutcome>;
-    /// `POST escalation-budget`: save the rate, floor and over-budget reasons. The server marks
-    /// the line again from the stored candidates (design A4).
-    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome>;
-    /// `POST sample-size`.
-    fn set_sample_size(&self, sample_size_per_run: usize) -> SourceFuture<'_, SampleSizeResp>;
-    /// `POST step-models { step, model }` for a stage (`audit`, `calibration`, `group_review`,
-    /// `fix`).
-    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()>;
 }
 
 /// A source over a seeded fixture data set, or one that fails every read.
@@ -87,6 +77,8 @@ pub struct FixtureReviewSource {
     settings: RefCell<ReviewSettingsView>,
     /// Every call made, by name, in order. A test reads it to see what a screen asked for.
     calls: RefCell<Vec<String>>,
+    /// The decision and edit writes, recorded.
+    pub recorded: RecordingWrites,
 }
 
 impl FixtureReviewSource {
@@ -96,6 +88,7 @@ impl FixtureReviewSource {
             data,
             failure: None,
             calls: RefCell::new(Vec::new()),
+            recorded: RecordingWrites::default(),
         }
     }
 
@@ -212,6 +205,25 @@ impl ReviewSource for FixtureReviewSource {
             None => Ok(self.settings.borrow().clone()),
         };
         Box::pin(std::future::ready(result))
+    }
+}
+
+impl ReviewWrites for FixtureReviewSource {
+    // The decision and edit writes answer with made-up records and keep a log (see
+    // `RecordingWrites`); the settings writes change the settings this source reads back.
+    fn post_decision(&self, req: NewDecisionReq) -> SourceFuture<'_, DecisionRecorded> {
+        self.log("post_decision");
+        self.recorded.post_decision(req)
+    }
+
+    fn revoke_decision<'a>(&'a self, decision_id: &'a str) -> SourceFuture<'a, RevokeResp> {
+        self.log("revoke_decision");
+        self.recorded.revoke_decision(decision_id)
+    }
+
+    fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded> {
+        self.log("post_edit");
+        self.recorded.post_edit(req)
     }
 
     fn preview_budget(

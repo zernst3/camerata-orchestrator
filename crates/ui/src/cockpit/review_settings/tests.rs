@@ -1,6 +1,7 @@
 use super::*;
 use crate::gallery::settings_states::{page_props, render};
 use camerata_api_types::review::EscalationReason;
+use camerata_ui::review_io::ReviewWrites;
 use camerata_ui::review_source::FixtureReviewSource;
 use camerata_ui_core::review_settings::budget_for;
 use camerata_ui_core::test_support::review_fixtures::{dataset_base, Body, Loaded};
@@ -232,17 +233,21 @@ fn every_settings_state_builds_from_a_ready_fixture() {
 fn the_host_draws_loading_until_the_source_answers() {
     #[derive(Clone, PartialEq, Props)]
     struct Case {
-        source: SettingsSource,
+        api: ReviewApi,
     }
     fn harness(case: Case) -> Element {
         rsx! {
-            ReviewSettingsHost { source: case.source.clone(), on_applied: move |_| {} }
+            ReviewSettingsHost { api: case.api.clone(), on_applied: move |_| {} }
         }
     }
+    let fixture = std::rc::Rc::new(FixtureReviewSource::base());
     let html = crate::test_harness::render_fragment(
         harness,
         Case {
-            source: SettingsSource(Rc::new(FixtureReviewSource::base())),
+            api: ReviewApi {
+                reads: fixture.clone(),
+                writes: fixture,
+            },
         },
     );
     assert!(html.contains("Loading settings"), "{html}");
@@ -259,7 +264,9 @@ async fn changing_the_rate_after_a_run_re_marks_without_a_model_call() {
     draft.rate = "2.0".to_string();
     let first_call = source.calls().len();
 
-    let (outcome, reloaded) = apply_formula(&source, &v, &draft, false).await.unwrap();
+    let (outcome, reloaded) = apply_formula(&source, &source, &v, &draft, false)
+        .await
+        .unwrap();
 
     let calls: Vec<String> = source.calls().split_off(first_call);
     assert_eq!(
@@ -288,7 +295,7 @@ async fn changing_the_rate_after_a_run_re_marks_without_a_model_call() {
     let mut draft = SettingsDraft::from_view(&reloaded);
     draft.rate = "0.5".to_string();
     let n = source.calls().len();
-    apply_formula(&source, &reloaded, &draft, false)
+    apply_formula(&source, &source, &reloaded, &draft, false)
         .await
         .unwrap();
     assert_eq!(
@@ -306,15 +313,19 @@ async fn apply_sends_nothing_when_the_draft_is_invalid_unchanged_or_a_run_is_in_
 
     let mut bad = SettingsDraft::from_view(&v);
     bad.rate = "11".into();
-    let err = apply_formula(&source, &v, &bad, false).await.unwrap_err();
+    let err = apply_formula(&source, &source, &v, &bad, false)
+        .await
+        .unwrap_err();
     assert!(err.contains("between 0 and 10"), "{err}");
 
     let same = SettingsDraft::from_view(&v);
-    assert!(apply_formula(&source, &v, &same, false).await.is_err());
+    assert!(apply_formula(&source, &source, &v, &same, false)
+        .await
+        .is_err());
 
     let mut changed = SettingsDraft::from_view(&v);
     changed.rate = "3.0".into();
-    let err = apply_formula(&source, &v, &changed, true)
+    let err = apply_formula(&source, &source, &v, &changed, true)
         .await
         .unwrap_err();
     assert_eq!(err, RUN_IN_FLIGHT_NOTE);
@@ -328,7 +339,9 @@ async fn a_refused_write_keeps_the_error_and_leaves_the_saved_settings() {
     let v = dataset_base().settings;
     let mut draft = SettingsDraft::from_view(&v);
     draft.floor = "35".into();
-    let err = apply_formula(&source, &v, &draft, false).await.unwrap_err();
+    let err = apply_formula(&source, &source, &v, &draft, false)
+        .await
+        .unwrap_err();
     assert_eq!(err, "the project file is read only");
     assert_eq!(
         source.calls(),
@@ -344,13 +357,15 @@ async fn the_sample_size_saves_with_one_write_and_a_reload() {
     let mut draft = SettingsDraft::from_view(&v);
     draft.sample = "0".into();
     let n = source.calls().len();
-    let reloaded = save_sample(&source, &v, &draft, false).await.unwrap();
+    let reloaded = save_sample(&source, &source, &v, &draft, false)
+        .await
+        .unwrap();
     assert_eq!(reloaded.engine_check.sample_size_per_run, 0);
     assert_eq!(source.calls().split_off(n), ["set_sample_size", "settings"]);
     // Over the limit: refused before any request.
     draft.sample = "1001".into();
     let n = source.calls().len();
-    assert!(save_sample(&source, &reloaded, &draft, false)
+    assert!(save_sample(&source, &source, &reloaded, &draft, false)
         .await
         .is_err());
     assert_eq!(source.calls().len(), n);
@@ -360,23 +375,29 @@ async fn the_sample_size_saves_with_one_write_and_a_reload() {
 async fn a_stage_model_goes_through_the_step_models_route_under_its_step_key() {
     let source = FixtureReviewSource::base();
     let n = source.calls().len();
-    let reloaded = change_stage_model(&source, Stage::GroupReview, "claude-opus-5-5", false)
-        .await
-        .unwrap();
+    let reloaded = change_stage_model(
+        &source,
+        &source,
+        Stage::GroupReview,
+        "claude-opus-5-5",
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(reloaded.stage_models.group_review, "claude-opus-5-5");
     assert_eq!(
         source.calls().split_off(n),
         ["set_stage_model:group_review", "settings"]
     );
-    let cleared = change_stage_model(&source, Stage::Fix, "", false)
+    let cleared = change_stage_model(&source, &source, Stage::Fix, "", false)
         .await
         .unwrap();
     assert_eq!(cleared.stage_models.fix, "", "the fix model can be unset");
-    assert!(change_stage_model(&source, Stage::Scan, "x", true)
+    assert!(change_stage_model(&source, &source, Stage::Scan, "x", true)
         .await
         .is_err());
     assert!(
-        change_stage_model(&source, Stage::GroupReview, " ", false)
+        change_stage_model(&source, &source, Stage::GroupReview, " ", false)
             .await
             .is_err(),
         "a blank stage 2 model is refused"
@@ -464,4 +485,162 @@ fn a_disabled_apply_has_the_inert_look_not_the_amber_bevel() {
         let tag = tag_with_class(&fragment(id), "review-settings-apply");
         assert!(tag.contains("disabled"), "{id}: {tag}");
     }
+}
+
+// ── The host's stale-preview guard (`still_asked`) ────────────────────────────────────────
+
+use camerata_api_types::review_view::{EscalationBudgetReq, SampleSizeResp};
+use camerata_ui::review_source::{ReviewSourceError, SourceFuture};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// A source whose preview answer is held back until the test lets it go, so a reply can arrive
+/// after the draft moved on. Every other call goes to the fixture.
+struct HeldPreview {
+    inner: FixtureReviewSource,
+    gate: RefCell<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl ReviewWrites for HeldPreview {
+    fn post_decision(
+        &self,
+        req: camerata_api_types::decisions::NewDecisionReq,
+    ) -> SourceFuture<'_, camerata_api_types::decisions::DecisionRecorded> {
+        self.inner.post_decision(req)
+    }
+    fn revoke_decision<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> SourceFuture<'a, camerata_api_types::decisions::RevokeResp> {
+        self.inner.revoke_decision(id)
+    }
+    fn post_edit(
+        &self,
+        req: camerata_api_types::edits::NewEditReq,
+    ) -> SourceFuture<'_, camerata_api_types::edits::EditRecorded> {
+        self.inner.post_edit(req)
+    }
+    fn preview_budget(
+        &self,
+        req: EscalationBudgetReq,
+    ) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        let gate = self.gate.borrow_mut().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.map_err(|_| ReviewSourceError {
+                    message: "the gate was dropped".to_string(),
+                })?;
+            }
+            self.inner.preview_budget(req).await
+        })
+    }
+    fn apply_budget(&self, req: EscalationBudgetReq) -> SourceFuture<'_, EscalationBudgetOutcome> {
+        self.inner.apply_budget(req)
+    }
+    fn set_sample_size(&self, n: usize) -> SourceFuture<'_, SampleSizeResp> {
+        self.inner.set_sample_size(n)
+    }
+    fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {
+        self.inner.set_stage_model(step, model)
+    }
+}
+
+type PreviewSignals = (
+    Signal<Option<SettingsData>>,
+    Signal<Option<SettingsDraft>>,
+    Signal<Option<EscalationBudgetOutcome>>,
+);
+
+thread_local! {
+    static PREVIEW_SIGNALS: RefCell<Option<PreviewSignals>> = const { RefCell::new(None) };
+    static PREVIEW_API: RefCell<Option<ReviewApi>> = const { RefCell::new(None) };
+}
+
+/// A component that asks for the preview of a typed rate the way the host does: it asks, and the
+/// draft signal is set to the same draft.
+fn preview_app() -> Element {
+    let view = use_signal(|| Some(dataset_base().settings));
+    let typed = {
+        let v = dataset_base().settings;
+        let mut d = SettingsDraft::from_view(&v);
+        d.rate = "2.0".to_string();
+        d
+    };
+    let draft = use_signal(|| Some(typed.clone()));
+    let preview = use_signal(|| None::<EscalationBudgetOutcome>);
+    PREVIEW_SIGNALS.with(|s| *s.borrow_mut() = Some((view, draft, preview)));
+    use_hook(|| {
+        let api = PREVIEW_API.with(|a| a.borrow().clone()).expect("an api");
+        request_preview(&api, &dataset_base().settings, &typed, view, draft, preview);
+    });
+    rsx! {}
+}
+
+/// Ask for a preview, hold the reply, run `meanwhile` (which may change the draft), let the reply
+/// arrive, and return what the host kept.
+async fn preview_after(
+    meanwhile: impl FnOnce(&VirtualDom, &PreviewSignals),
+) -> Option<EscalationBudgetOutcome> {
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let held = Rc::new(HeldPreview {
+        inner: FixtureReviewSource::base(),
+        gate: RefCell::new(Some(gate)),
+    });
+    PREVIEW_API.with(|a| {
+        *a.borrow_mut() = Some(ReviewApi {
+            reads: Rc::new(FixtureReviewSource::base()),
+            writes: held,
+        });
+    });
+    let mut vdom = VirtualDom::new(preview_app);
+    vdom.rebuild_in_place();
+    // Let the spawned preview request start and wait on its gate.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), vdom.wait_for_work()).await;
+    let signals = PREVIEW_SIGNALS
+        .with(|s| *s.borrow())
+        .expect("the component ran");
+    meanwhile(&vdom, &signals);
+    release.send(()).expect("the request is waiting");
+    for _ in 0..4 {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(50), vdom.wait_for_work()).await;
+        vdom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+    }
+    vdom.in_runtime(|| signals.2.peek().clone())
+}
+
+#[tokio::test]
+async fn a_preview_reply_is_kept_while_the_draft_still_asks_for_it() {
+    let kept = preview_after(|_, _| {}).await;
+    let outcome = kept.expect("the answer to the question still being asked is shown");
+    assert!(!outcome.applied);
+    assert_eq!(outcome.after.rate_per_kloc, 2.0);
+}
+
+#[tokio::test]
+async fn a_preview_reply_is_dropped_when_the_draft_moved_on_before_it_came() {
+    let kept = preview_after(|vdom, (_, draft, _)| {
+        // The reviewer typed a different rate while the request was out.
+        vdom.in_runtime(|| {
+            let mut next = draft.peek().clone().expect("a draft");
+            next.rate = "3.0".to_string();
+            let mut draft = *draft;
+            draft.set(Some(next));
+        });
+    })
+    .await;
+    assert_eq!(kept, None, "a slow reply never shows over a newer draft");
+}
+
+#[tokio::test]
+async fn a_preview_reply_is_dropped_when_the_draft_is_back_to_what_is_saved() {
+    let kept = preview_after(|vdom, (view, draft, _)| {
+        vdom.in_runtime(|| {
+            let saved = view.peek().clone().expect("a view");
+            let mut draft = *draft;
+            draft.set(Some(SettingsDraft::from_view(&saved)));
+        });
+    })
+    .await;
+    assert_eq!(kept, None, "reverting the field cancels the pending answer");
 }

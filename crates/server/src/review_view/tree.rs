@@ -7,13 +7,15 @@
 use std::collections::HashMap;
 
 use camerata_api_types::decisions::Scope;
+use camerata_api_types::edits::EditField;
 use camerata_api_types::review_view::{
-    NodeCountsView, NodeDecisionSummary, SitesPage, SummarySource, TreeLevel, TreeNodeKind,
-    TreeNodeView, TreeView, SITES_PAGE_SIZE,
+    EditView, NodeCountsView, NodeDecisionSummary, SitesPage, SummarySource, TreeLevel,
+    TreeNodeKind, TreeNodeView, TreeView, SITES_PAGE_SIZE,
 };
 
 use super::ReviewComposer;
 use crate::onboard::Finding;
+use crate::report_export::tree_view::prose_flags_of;
 use crate::review_tree::{is_thrown_out_id, NodeKind, NodeLevel, TextSource, TreeNode};
 
 /// The rank of a severity for ordering: critical first. An unknown severity sorts last.
@@ -212,15 +214,13 @@ impl<'a> ReviewComposer<'a> {
                     TextSource::Model => SummarySource::Model,
                     TextSource::Reviewer => SummarySource::Reviewer,
                 },
-                flags: n.flags.clone(),
+                flags: n.flags.iter().cloned().chain(prose_flags_of(n)).collect(),
                 thrown_out: is_thrown_out_id(&n.id),
                 counts: counts
                     .get(n.id.as_str())
                     .map_or_else(NodeCountsView::default, |t| t.0),
                 decision: self.node_decision(&n.id),
-                // The node summary edit (spec U4) has no overlay yet: `EditField` has no summary
-                // field, so there is never one to show.
-                summary_edit: None,
+                summary_edit: self.summary_edit_of(n),
             })
             .collect();
         TreeView {
@@ -228,6 +228,31 @@ impl<'a> ReviewComposer<'a> {
             group_reviewed: tree.group_reviewed,
             nodes,
         }
+    }
+
+    /// The reviewer's latest summary edit of `node` (spec U4), applied or stale, beside the node.
+    fn summary_edit_of(&self, node: &TreeNode) -> Option<EditView> {
+        let edit = self
+            .edits_by_key
+            .get(node.id.as_str())?
+            .iter()
+            .rfind(|e| e.field == EditField::Summary)?;
+        let stale = self.stale_edits.get(edit.id.as_str());
+        Some(EditView {
+            id: edit.id.clone(),
+            field: edit.field,
+            old: edit.old.clone(),
+            new: edit.new.clone(),
+            reason: edit.reason.clone(),
+            by: edit.by.clone(),
+            at: edit.at.clone(),
+            stale: stale.is_some(),
+            current_value: stale.map_or_else(
+                || node.summary.clone().unwrap_or_default(),
+                |s| s.current_value.clone(),
+            ),
+            reapplied_from: edit.reapplied_from.clone(),
+        })
     }
 
     /// The live group decision standing on `node_id`, the latest if there are several.

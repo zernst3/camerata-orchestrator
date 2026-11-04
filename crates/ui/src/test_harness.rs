@@ -10,6 +10,12 @@ use dioxus::prelude::*;
 use crate::style::GLOBAL_CSS;
 use camerata_ui::desktop_chrome::GOOGLE_FONTS_LINK;
 
+/// What a static page needs that the app window does not: the app clips its window to the viewport
+/// and scrolls inside panes, so a page that rendered a whole screen would show only its first
+/// screenful. These rules let the page grow and scroll as a document, and change nothing else.
+pub const PAGE_OVERRIDES: &str = "html, body { height: auto; overflow: auto; } \
+.app-root { height: auto; min-height: 100vh; overflow: visible; justify-content: flex-start; }";
+
 /// Render `component` with `props` to the markup it draws, with no document around it.
 pub fn render_fragment<P: Clone + 'static>(component: fn(P) -> Element, props: P) -> String {
     let mut vdom = VirtualDom::new_with_props(component, props);
@@ -28,7 +34,8 @@ pub fn document(title: &str, body: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{title}</title>\n{GOOGLE_FONTS_LINK}\n<style>{GLOBAL_CSS}</style>\n</head>\n\
+         <title>{title}</title>\n{GOOGLE_FONTS_LINK}\n<style>{GLOBAL_CSS}</style>\n\
+         <style>{PAGE_OVERRIDES}</style>\n</head>\n\
          <body>\n<div class=\"app-root\">{body}</div>\n</body>\n</html>\n"
     )
 }

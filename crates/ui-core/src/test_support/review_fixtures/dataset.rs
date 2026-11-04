@@ -103,6 +103,15 @@ pub struct Params {
     pub categories: usize,
     pub rules_per_category: usize,
     pub subgroups_per_rule: usize,
+    /// When set, the tree has exactly this many sub-groups: categories and rules are filled in
+    /// order (`rules_per_category` rules of `subgroups_per_rule` sub-groups each) until they
+    /// run out, the last rule and category possibly part full. Every sub-group then holds at
+    /// least one site. `None` fills `categories` x `rules_per_category` x `subgroups_per_rule`.
+    pub total_subgroups: Option<usize>,
+    /// Sites forced into the first sub-group of rules spread across the tree, one entry per big
+    /// sub-group (only with `total_subgroups`). A real run is skewed: a few sub-groups hold
+    /// thousands of sites and most hold a dozen.
+    pub big_subgroups: Vec<usize>,
     /// Sites in all, not counting thrown-out rows.
     pub sites: usize,
     pub counted_lines: usize,
@@ -120,6 +129,9 @@ pub struct Params {
     pub moved: usize,
     pub duplicates: usize,
     pub decided_subgroups: usize,
+    /// Sub-groups of which every member is decided by one group decision (no outlier, no held
+    /// row, no new member), so the tree draws its green check.
+    pub fully_decided_subgroups: usize,
     pub decided_rules: usize,
     /// Covered sites whose inherited record is missing: decided sub-group members with no
     /// per-site record. The only thing that feeds the export gate's `node_decisions_missing_members`.
@@ -167,6 +179,8 @@ impl Params {
             categories: 4,
             rules_per_category: 3,
             subgroups_per_rule: 3,
+            total_subgroups: None,
+            big_subgroups: Vec::new(),
             sites: 600,
             counted_lines: 12_000,
             rate_per_kloc: 1.0,
@@ -182,6 +196,7 @@ impl Params {
             moved: 6,
             duplicates: 7,
             decided_subgroups: 6,
+            fully_decided_subgroups: 2,
             decided_rules: 1,
             decision_gaps: 2,
             new_since_decision: 5,
@@ -195,13 +210,17 @@ impl Params {
         }
     }
 
-    /// The scale set: 30,000 sites in 12 categories and about 1,700 nodes (spec U1).
+    /// The scale set: 30,000 sites in the shape the server's measurement fixture has (design
+    /// A14): 58 categories of up to 8 rules of 5 sub-groups, 2,308 sub-groups and 2,828 nodes
+    /// in all, with a few large sub-groups so a node needs more than one page of sites.
     pub fn scale_30k(seed: u64) -> Self {
         Self {
             seed,
-            categories: 12,
-            rules_per_category: 20,
-            subgroups_per_rule: 6,
+            categories: 58,
+            rules_per_category: 8,
+            subgroups_per_rule: 5,
+            total_subgroups: Some(2_308),
+            big_subgroups: vec![1_340, 820, 560],
             sites: 30_000,
             counted_lines: 480_000,
             rate_per_kloc: 1.0,
@@ -217,6 +236,7 @@ impl Params {
             moved: 60,
             duplicates: 150,
             decided_subgroups: 140,
+            fully_decided_subgroups: 20,
             decided_rules: 6,
             decision_gaps: 3,
             new_since_decision: 90,
@@ -345,9 +365,9 @@ const REPOS: [&str; 2] = ["acme-web", "acme-api"];
 
 fn severity_rank(s: &str) -> usize {
     match s {
-        "Critical" => 0,
-        "High" => 1,
-        "Medium" => 2,
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
         _ => 3,
     }
 }
@@ -387,12 +407,19 @@ struct Layout {
 impl Layout {
     fn new(p: &Params, rng: &mut Rng) -> Self {
         let mut rules = Vec::new();
-        for c in 0..p.categories {
-            let prefix = CATEGORIES[c % CATEGORIES.len()].2;
+        // Sub-groups still to place when the tree has a fixed number of them.
+        let mut left = p.total_subgroups.unwrap_or(usize::MAX);
+        'categories: for c in 0..p.categories {
+            let prefix = category_parts(c).2;
             for r in 0..p.rules_per_category {
+                let in_this_rule = p.subgroups_per_rule.min(left);
+                if in_this_rule == 0 {
+                    break 'categories;
+                }
+                left = left.saturating_sub(in_this_rule);
                 let id = format!("{prefix}-{}", r + 1);
                 let weight = 1 + rng.below(9);
-                let subs = (0..p.subgroups_per_rule)
+                let subs = (0..in_this_rule)
                     .map(|s| SubDef {
                         node: format!("sub:{id}/{}", s + 1),
                         label: format!(
@@ -421,6 +448,44 @@ impl Layout {
         }
     }
 
+    /// How many sub-groups the layout has.
+    fn sub_count(&self) -> usize {
+        self.rules.iter().map(|r| r.subs.len()).sum()
+    }
+
+    /// The `n`th sub-group in tree order, as (rule, sub).
+    fn nth_sub(&self, n: usize) -> Option<(usize, usize)> {
+        let mut left = n;
+        for (ri, r) in self.rules.iter().enumerate() {
+            if left < r.subs.len() {
+                return Some((ri, left));
+            }
+            left -= r.subs.len();
+        }
+        None
+    }
+
+    /// Where site `i` goes. With a fixed number of sub-groups the first sites cover each
+    /// sub-group once (so none is empty) and the next ones fill the big sub-groups; the rest,
+    /// and every site of a set without a fixed shape, are picked by weight.
+    fn place(&self, i: usize, rng: &mut Rng, p: &Params) -> (usize, usize) {
+        if p.total_subgroups.is_some() {
+            let covered = self.sub_count();
+            if let Some(at) = self.nth_sub(i).filter(|_| i < covered) {
+                return at;
+            }
+            let mut j = i.saturating_sub(covered);
+            for (k, &size) in p.big_subgroups.iter().enumerate() {
+                if j < size {
+                    let rule = (k * 40) % self.rules.len().max(1);
+                    return (rule, 0);
+                }
+                j -= size;
+            }
+        }
+        self.pick(rng)
+    }
+
     /// Pick a rule then a sub-group, weighted.
     fn pick(&self, rng: &mut Rng) -> (usize, usize) {
         let mut roll = rng.below(self.total_weight);
@@ -445,8 +510,25 @@ impl Layout {
     }
 }
 
+/// The slug, label and rule-id prefix of category `c`. Past the twelve names the pool has, a
+/// name repeats with a number (`secrets-2`, `Secrets and credentials 2`, `SEC2`), so every
+/// category and rule id is unique at any size.
+fn category_parts(c: usize) -> (String, String, String) {
+    let (slug, label, prefix) = CATEGORIES[c % CATEGORIES.len()];
+    let round = c / CATEGORIES.len();
+    if round == 0 {
+        (slug.to_string(), label.to_string(), prefix.to_string())
+    } else {
+        (
+            format!("{slug}-{}", round + 1),
+            format!("{label} {}", round + 1),
+            format!("{prefix}{}", round + 1),
+        )
+    }
+}
+
 fn cat_node(c: usize) -> String {
-    format!("cat:{}", CATEGORIES[c % CATEGORIES.len()].0)
+    format!("cat:{}", category_parts(c).0)
 }
 
 const THROWN_CAT: &str = "cat:thrown-out";
@@ -463,16 +545,15 @@ fn level(wire: &str) -> Option<ReviewLevel> {
 // ── Rows ──────────────────────────────────────────────────────────────────────────────────
 
 fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
-    let (ri, si) = layout.pick(rng);
+    let (ri, si) = layout.place(i, rng, p);
     let rule = &layout.rules[ri];
     let sub = &rule.subs[si];
-    let (cat_slug, cat_label, _) = CATEGORIES[rule.category % CATEGORIES.len()];
-    let _ = cat_slug;
+    let cat_label = category_parts(rule.category).1;
     let severity = match rng.below(100) {
-        0..=2 => "Critical",
-        3..=19 => "High",
-        20..=64 => "Medium",
-        _ => "Low",
+        0..=2 => "critical",
+        3..=19 => "high",
+        20..=64 => "medium",
+        _ => "low",
     };
     let repo = REPOS[rng.below(REPOS.len())];
     let path = format!(
@@ -492,7 +573,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
     let stage1 = Stage1View {
         severity: severity.to_string(),
         real: real.clone(),
-        effort: (!unread).then(|| ["S", "M", "L"][rng.below(3)].to_string()),
+        effort: (!unread).then(|| ["low", "medium", "high"][rng.below(3)].to_string()),
         confidence: (!unread).then(|| ["high", "medium", "low"][rng.below(3)].to_string()),
         reason: if unread {
             String::new()
@@ -521,7 +602,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         rule_id: rule.id.clone(),
         severity: severity.to_string(),
         kind: Some(FindingKind::Defect),
-        category: Some(cat_label.to_string()),
+        category: Some(cat_label),
         headline: format!("{} at line {line}", rule.label),
         detail: DETAILS[rng.below(DETAILS.len())].to_string(),
         fix: FIXES[rng.below(FIXES.len())].to_string(),
@@ -563,7 +644,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         path,
         line,
         rule_id: "THROWN-1".to_string(),
-        severity: "Low".to_string(),
+        severity: "low".to_string(),
         kind: Some(FindingKind::Defect),
         category: Some("Thrown out by the engine".to_string()),
         headline: "Placeholder text where a finding should be".to_string(),
@@ -578,7 +659,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         ],
         group_primary: false,
         stage1: Stage1View {
-            severity: "Low".to_string(),
+            severity: "low".to_string(),
             ..Stage1View::default()
         },
         stage2: None,
@@ -864,7 +945,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                 s.disagreements.push(Stage2Disagreement {
                     field: DisagreementField::Severity,
                     stage1: sev,
-                    mine: "High".to_string(),
+                    mine: "high".to_string(),
                     why: "The path is public.".to_string(),
                 });
             }
@@ -1062,12 +1143,28 @@ pub fn build(p: &Params) -> ReviewDataSet {
         .map(|(k, _)| k)
         .collect();
     let stride = (big_subs.len() / p.decided_subgroups.max(1)).max(1);
-    let picked_subs: Vec<String> = big_subs
+    let mut picked_subs: Vec<String> = big_subs
         .iter()
         .step_by(stride)
         .take(p.decided_subgroups)
         .map(|s| (*s).clone())
         .collect();
+    // Sub-groups no outlier, held row, edit or marker touches, decided whole: they come last, so
+    // the new-since and missing-record rows the earlier groups carry are already placed.
+    let whole: Vec<String> = sub_members
+        .iter()
+        .filter(|(k, m)| {
+            !picked_subs.contains(k) && m.len() >= 2 && m.iter().all(|&i| is_free(&special, i))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let whole_stride = (whole.len() / p.fully_decided_subgroups.max(1)).max(1);
+    picked_subs.extend(
+        whole
+            .into_iter()
+            .step_by(whole_stride)
+            .take(p.fully_decided_subgroups),
+    );
     let big_rules: Vec<&String> = rule_members
         .keys()
         .filter(|k| {
@@ -1283,7 +1380,7 @@ fn edit_text(row: &SiteRow, field: EditField) -> (String, String) {
             row.detail.clone(),
             format!("{} Confirmed by reading the caller.", row.detail),
         ),
-        _ => (row.severity.clone(), "High".to_string()),
+        _ => (row.severity.clone(), "high".to_string()),
     }
 }
 
@@ -1318,8 +1415,8 @@ fn assemble(
     let mut node_labels: BTreeMap<String, String> = BTreeMap::new();
     let mut cat_seen = std::collections::BTreeSet::new();
     for r in &layout.rules {
-        let (_, label, _) = CATEGORIES[r.category % CATEGORIES.len()];
-        node_labels.insert(cat_node(r.category), label.to_string());
+        let label = category_parts(r.category).1;
+        node_labels.insert(cat_node(r.category), label);
         cat_seen.insert(r.category);
         node_labels.insert(r.node.clone(), format!("{}: {}", r.id, r.label));
         for s in &r.subs {
@@ -1401,7 +1498,10 @@ fn assemble(
                 id: id.to_string(),
                 level,
                 parent: parent.map(str::to_string),
-                summary: Some(format!("{} sites under {label}.", counts.sites)),
+                // The group review writes the summaries; without it there are none.
+                summary: p
+                    .group_reviewed
+                    .then(|| format!("{} sites under {label}.", counts.sites)),
                 label,
                 kind,
                 cause,
@@ -1484,6 +1584,7 @@ fn assemble(
             .map(HoldReason::phrase)
             .unwrap_or_default()
             .to_string(),
+        node_id: r.group_path.get(2).cloned().unwrap_or_default(),
     };
     // A gap is a covered site with no per-site record. New-since rows are not covered, so they
     // never reach the gate.

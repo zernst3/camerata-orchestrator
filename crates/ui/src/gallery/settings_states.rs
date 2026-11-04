@@ -107,15 +107,21 @@ pub(crate) fn render(id: &str) -> String {
     test_harness::render_props(SettingsStatePage, props)
 }
 
-/// The renderer of `state` of the settings screen, for the registry.
-pub(super) fn renderer(state: &str) -> Option<fn() -> String> {
-    Some(match state {
-        "defaults" => || render("settings/defaults"),
-        "rate-changed" => || render("settings/rate-changed"),
-        "invalid" => || render("settings/invalid"),
-        "saving" => || render("settings/saving"),
-        "error" => || render("settings/error"),
-        "run-in-flight" => || render("settings/run-in-flight"),
-        _ => return None,
-    })
+macro_rules! states {
+    ($($name:ident => $id:literal),* $(,)?) => {
+        $(fn $name() -> String { render($id) })*
+        /// Every state this file renders, with its renderer.
+        pub(super) fn states() -> Vec<super::BuiltRenderer> {
+            vec![$(($id, $name as fn() -> String)),*]
+        }
+    };
+}
+
+states! {
+    defaults => "settings/defaults",
+    rate_changed => "settings/rate-changed",
+    invalid => "settings/invalid",
+    saving => "settings/saving",
+    error => "settings/error",
+    run_in_flight => "settings/run-in-flight",
 }

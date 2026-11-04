@@ -397,7 +397,7 @@ fn the_projects_over_budget_reason_set_decides_what_goes_past_the_line() {
 }
 
 #[test]
-fn an_empty_over_budget_set_lets_nothing_past_the_budget_not_even_unverified_evidence() {
+fn an_empty_over_budget_set_lets_only_unverified_evidence_past_the_budget() {
     let (mut tree, mut rows) = tree_of(2, |_, _| "critical");
     rows[4].captures.insert(
         EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
@@ -425,15 +425,30 @@ fn an_empty_over_budget_set_lets_nothing_past_the_budget_not_even_unverified_evi
         3,
         "the unverified row is a candidate"
     );
+    // The severe-reach reasons obey the stored set: none of them gets past the budget.
     assert!(
-        ranked.candidates.iter().all(|c| !c.escalated),
+        ranked
+            .candidates
+            .iter()
+            .filter(|c| c.reason != EscalationReason::EvidenceUnverified)
+            .all(|c| !c.escalated && c.over_budget_reason.is_none()),
         "{:?}",
         ranked.candidates
     );
-    assert!(ranked
+    // Unverified evidence always does, whatever a stored set says (the gate refuses the row
+    // without a decision, and a project file from before the settings route refused an empty set
+    // can still hold one).
+    let unverified: Vec<_> = ranked
         .candidates
         .iter()
-        .all(|c| c.over_budget_reason.is_none()));
-    assert_eq!(ranked.budget.escalated, 0);
-    assert_eq!(ranked.budget.over_budget, 0);
+        .filter(|c| c.reason == EscalationReason::EvidenceUnverified)
+        .collect();
+    assert_eq!(unverified.len(), 1);
+    assert!(unverified[0].escalated);
+    assert_eq!(
+        unverified[0].over_budget_reason,
+        Some(EscalationReason::EvidenceUnverified)
+    );
+    assert_eq!(ranked.budget.escalated, 1);
+    assert_eq!(ranked.budget.over_budget, 1);
 }

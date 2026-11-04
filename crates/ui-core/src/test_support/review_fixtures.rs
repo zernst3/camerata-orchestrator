@@ -52,6 +52,17 @@ impl<T> Loaded<T> {
     }
 }
 
+impl<T: Clone> From<&Loaded<T>> for crate::tree::ViewStatus<T> {
+    /// A fixture's view as the status a screen draws.
+    fn from(l: &Loaded<T>) -> Self {
+        match l {
+            Loaded::Loading => Self::Loading,
+            Loaded::Failed(m) => Self::Failed(m.clone()),
+            Loaded::Ready(v) => Self::Ready(v.clone()),
+        }
+    }
+}
+
 /// Everything a gallery page needs for one named state: the shell above, then the body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateFixture {

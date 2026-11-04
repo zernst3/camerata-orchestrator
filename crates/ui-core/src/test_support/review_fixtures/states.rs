@@ -96,6 +96,7 @@ fn empty_params() -> Params {
         p.moved = 0;
         p.duplicates = 0;
         p.decided_subgroups = 0;
+        p.fully_decided_subgroups = 0;
         p.decided_rules = 0;
         p.decision_gaps = 0;
         p.new_since_decision = 0;
@@ -172,38 +173,106 @@ fn subgroup_ids(ds: &ReviewDataSet) -> Vec<String> {
         .collect()
 }
 
-/// Sub-groups that together show every marker on their first page (greedy cover).
-fn subs_covering_every_marker(ds: &ReviewDataSet) -> Vec<String> {
-    let mut remaining: Vec<Marker> = Marker::PRECEDENCE.to_vec();
-    let mut chosen = Vec::new();
-    let mut candidates = subgroup_ids(ds);
-    while !remaining.is_empty() && chosen.len() < 8 {
-        let score = |sub: &String| -> usize {
-            let page = ds.sites_page(sub, None, SITES_PAGE_SIZE);
-            let Some(page) = page else { return 0 };
-            remaining
+/// Where each marker first shows on the first page of `sub`: (marker, row index).
+fn marker_rows(ds: &ReviewDataSet, sub: &str) -> Vec<(Marker, usize)> {
+    let Some(page) = ds.sites_page(sub, None, SITES_PAGE_SIZE) else {
+        return Vec::new();
+    };
+    Marker::PRECEDENCE
+        .into_iter()
+        .filter_map(|m| {
+            page.rows
                 .iter()
-                .filter(|m| page.rows.iter().any(|r| r.markers.contains(m)))
-                .count()
-        };
-        let Some(best) = candidates
+                .position(|r| r.markers.contains(&m))
+                .map(|at| (m, at))
+        })
+        .collect()
+}
+
+/// The sub-groups the markers page opens, each with the rows of its first page it shows. The
+/// first is the richest sub-group (most distinct markers, then fewest rows): the page focuses it,
+/// and it shows every marker it has. Every marker that sub-group lacks is then taken from where
+/// it shows soonest, rarest marker first, preferring a sub-group already open; a sub-group shows
+/// only as many rows as its markers need (a real first page with a "show next" row under it). So
+/// the focused node, drawn in tree order, is not pushed below the fold by rows that carry no chip.
+fn markers_cover(ds: &ReviewDataSet) -> Vec<(String, usize)> {
+    /// What opening one more sub-group costs, in rows (its head and its table header).
+    const OPEN_COST: usize = 3;
+    let info: BTreeMap<String, Vec<(Marker, usize)>> = subgroup_ids(ds)
+        .into_iter()
+        .map(|s| {
+            let rows = marker_rows(ds, &s);
+            (s, rows)
+        })
+        .collect();
+    let page_len = |sub: &String| {
+        ds.sites_page(sub, None, SITES_PAGE_SIZE)
+            .map_or(usize::MAX, |p| p.rows.len())
+    };
+    let Some(richest) = info
+        .iter()
+        .max_by_key(|(sub, ms)| {
+            (
+                ms.len(),
+                std::cmp::Reverse(page_len(sub)),
+                std::cmp::Reverse((*sub).clone()),
+            )
+        })
+        .map(|(sub, _)| sub.clone())
+    else {
+        return Vec::new();
+    };
+    let mut plan: Vec<(String, usize)> = vec![(
+        richest.clone(),
+        info[&richest]
             .iter()
-            .max_by_key(|s| (score(s), std::cmp::Reverse((*s).clone())))
-            .cloned()
-        else {
-            break;
+            .map(|(_, at)| at + 1)
+            .max()
+            .unwrap_or(1),
+    )];
+    let mut remaining: Vec<Marker> = Marker::PRECEDENCE
+        .into_iter()
+        .filter(|m| !info[&richest].iter().any(|(have, _)| have == m))
+        .collect();
+    // Rarest first: a marker only one sub-group has is decided before one many have.
+    remaining.sort_by_key(|m| {
+        info.values()
+            .filter(|v| v.iter().any(|(h, _)| h == m))
+            .count()
+    });
+    for m in remaining {
+        let cost = |sub: &String, at: usize| match plan.iter().find(|(s, _)| s == sub) {
+            Some((_, shown)) => (at + 1).saturating_sub(*shown),
+            None => at + 1 + OPEN_COST,
         };
-        if score(&best) == 0 {
-            break;
+        let best = info
+            .iter()
+            .filter_map(|(sub, ms)| ms.iter().find(|(h, _)| *h == m).map(|(_, at)| (sub, *at)))
+            .min_by_key(|(sub, at)| (cost(sub, *at), (*sub).clone()));
+        let Some((sub, at)) = best else { continue };
+        match plan.iter_mut().find(|(s, _)| s == sub) {
+            Some((_, shown)) => *shown = (*shown).max(at + 1),
+            None => plan.push((sub.clone(), at + 1)),
         }
-        let page = ds.sites_page(&best, None, SITES_PAGE_SIZE);
-        if let Some(page) = page {
-            remaining.retain(|m| !page.rows.iter().any(|r| r.markers.contains(m)));
-        }
-        candidates.retain(|c| *c != best);
-        chosen.push(best);
     }
-    chosen
+    plan
+}
+
+fn subs_covering_every_marker(ds: &ReviewDataSet) -> Vec<String> {
+    markers_cover(ds).into_iter().map(|(sub, _)| sub).collect()
+}
+
+/// The markers page body: the cover's sub-groups open, each trimmed to the rows its chips need.
+fn tree_body_of_cover(ds: &ReviewDataSet) -> TreeBody {
+    let plan = markers_cover(ds);
+    let subs: Vec<String> = plan.iter().map(|(sub, _)| sub.clone()).collect();
+    let mut body = tree_body(ds, &subs);
+    for (sub, rows) in plan {
+        if let Some(short) = ds.sites_page(&sub, None, rows) {
+            body.pages.insert(sub, short);
+        }
+    }
+    body
 }
 
 fn tree_body(ds: &ReviewDataSet, subs: &[String]) -> TreeBody {
@@ -370,10 +439,9 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         }
         "tree/markers" => {
             let ds = base();
-            let subs = subs_covering_every_marker(&ds);
             StateFixture {
                 shell: shell_of(&ds),
-                body: Body::Tree(tree_body(&ds, &subs)),
+                body: Body::Tree(tree_body_of_cover(&ds)),
             }
         }
         "tree/node-prompt" => {
@@ -421,9 +489,23 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                         .find(|n| n.id == *s)
                         .map_or(0, |n| n.counts.new_since_decision)
                 })?;
+            // A sub-group every site of which is decided, so its green check is on the page.
+            let whole = ds
+                .tree
+                .nodes
+                .iter()
+                .find(|n| {
+                    n.level == TreeLevel::Subgroup
+                        && n.id != sub
+                        && n.decision.is_some()
+                        && n.counts.sites > 0
+                        && n.counts.decided == n.counts.sites
+                })
+                .map(|n| n.id.clone());
+            let subs: Vec<String> = std::iter::once(sub).chain(whole).collect();
             StateFixture {
                 shell: shell_of(&ds),
-                body: Body::Tree(tree_body(&ds, std::slice::from_ref(&sub))),
+                body: Body::Tree(tree_body(&ds, &subs)),
             }
         }
         "tree/not-group-reviewed" => {
@@ -438,7 +520,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         "tree/narrow" => {
             let ds = base();
             let subs = subs_covering_every_marker(&ds);
-            let mut body = tree_body(&ds, &subs);
+            let mut body = tree_body_of_cover(&ds);
             body.narrow = true;
             body.selected_site = subs
                 .first()

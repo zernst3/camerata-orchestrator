@@ -32,6 +32,7 @@ pub fn held_row(f: &Finding, reason: HoldReason, detail: impl Into<String>) -> H
         rule_id: f.rule_id.clone(),
         reason,
         detail: detail.into(),
+        node_id: f.group_path.get(2).cloned().unwrap_or_default(),
     }
 }
 

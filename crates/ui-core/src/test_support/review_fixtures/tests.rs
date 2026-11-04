@@ -33,6 +33,84 @@ fn fixture_30k_is_deterministic() {
     );
 }
 
+/// The scale set has the shape of the server's measurement fixture (WO9c: 30,000 rows over 58
+/// categories of 8 rules of 5 sub-groups, 2,828 nodes), generated and not stored.
+#[test]
+fn fixture_30k_has_the_servers_shape() {
+    let ds = dataset_30k();
+    let count = |level: TreeLevel| {
+        ds.tree
+            .nodes
+            .iter()
+            .filter(|n| n.level == level && !n.thrown_out)
+            .count()
+    };
+    assert_eq!(count(TreeLevel::Category), 58, "about 60 categories");
+    assert_eq!(count(TreeLevel::Rule), 462);
+    assert_eq!(count(TreeLevel::Subgroup), 2_308);
+    let kept = ds.tree.nodes.iter().filter(|n| !n.thrown_out).count();
+    assert_eq!(kept, 2_828, "the server's node count");
+    // No node is empty: the tree has exactly the nodes that hold sites.
+    assert!(ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| !n.thrown_out)
+        .all(|n| n.counts.sites > 0));
+    // Ids are unique, so a category past the twelve names the pool has is still its own node.
+    let ids: BTreeSet<&String> = ds.tree.nodes.iter().map(|n| &n.id).collect();
+    assert_eq!(ids.len(), ds.tree.nodes.len());
+    // A few sub-groups need more than one page of sites.
+    let big = ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| n.level == TreeLevel::Subgroup && n.counts.sites > SITES_PAGE_SIZE)
+        .count();
+    assert!(
+        big >= 3,
+        "{big} sub-groups of more than {SITES_PAGE_SIZE} sites"
+    );
+}
+
+/// Severities and effort are the values the server writes (wire values), never display forms.
+#[test]
+fn severities_and_effort_use_the_servers_wire_values() {
+    for ds in [dataset_base(), dataset_30k()] {
+        for r in &ds.rows {
+            assert!(
+                ["critical", "high", "medium", "low"].contains(&r.severity.as_str()),
+                "severity {:?}",
+                r.severity
+            );
+            assert!(
+                ["critical", "high", "medium", "low"].contains(&r.stage1.severity.as_str()),
+                "stage 1 severity {:?}",
+                r.stage1.severity
+            );
+            if let Some(effort) = &r.stage1.effort {
+                assert!(
+                    ["low", "medium", "high"].contains(&effort.as_str()),
+                    "effort {effort:?}"
+                );
+            }
+            for e in &r.edits {
+                if e.field == camerata_api_types::edits::EditField::Severity {
+                    assert!(
+                        ["critical", "high", "medium", "low"].contains(&e.new.as_str()),
+                        "{e:?}"
+                    );
+                }
+            }
+            if let Some(s) = &r.stage2 {
+                for d in &s.disagreements {
+                    assert!(d.mine.chars().all(|c| !c.is_uppercase()), "{d:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_different_seed_gives_different_data() {
     let a = build(&Params::base(SEED));
@@ -108,9 +186,9 @@ fn rows_are_in_the_fixed_order_with_unique_keys() {
     let keys: BTreeSet<&String> = ds.rows.iter().map(|r| &r.site_key).collect();
     assert_eq!(keys.len(), ds.rows.len());
     let rank = |s: &str| match s {
-        "Critical" => 0,
-        "High" => 1,
-        "Medium" => 2,
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
         _ => 3,
     };
     for w in ds.rows.windows(2) {
@@ -251,6 +329,20 @@ fn the_shell_agrees_with_the_rows_and_the_gate() {
 }
 
 #[test]
+fn every_held_row_names_the_sub_group_it_sits_in() {
+    let ds = dataset_base();
+    for h in ds.gate.held.iter().chain(&ds.gate.merged_without_decision) {
+        let row = ds.row(&h.key).unwrap_or_else(|| panic!("{}", h.key));
+        assert_eq!(
+            Some(&h.node_id),
+            row.group_path.get(2),
+            "{} names its sub-group, as the server's held row does",
+            h.key
+        );
+    }
+}
+
+#[test]
 fn new_since_rows_alone_never_feed_the_export_gate() {
     let mut p = Params::base(SEED);
     p.decision_gaps = 0;
@@ -368,6 +460,18 @@ fn the_not_group_reviewed_set_has_no_stage_two_columns() {
     assert!(!ds.tree.group_reviewed && !ds.shell.group_reviewed);
     assert!(ds.rows.iter().all(|r| r.stage2.is_none()));
     assert!(ds.candidates.is_empty());
+    assert!(
+        ds.tree.nodes.iter().all(|n| n.summary.is_none()),
+        "no node carries a model summary when the group review did not run"
+    );
+    assert!(
+        dataset_base()
+            .tree
+            .nodes
+            .iter()
+            .all(|n| n.summary.is_some()),
+        "the reviewed set keeps its summaries"
+    );
 }
 
 #[test]
@@ -780,4 +884,27 @@ fn every_fixture_key_has_the_real_shape_with_three_nuls() {
             check("candidate", &c.key);
         }
     }
+}
+
+/// A node whose every site is decided is there to be drawn with its check (spec section 2).
+#[test]
+fn the_base_set_has_a_fully_decided_sub_group_and_the_node_decided_state_opens_it() {
+    let ds = dataset_base();
+    let whole: Vec<&str> = ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| n.level == TreeLevel::Subgroup && n.counts.sites > 0)
+        .filter(|n| n.counts.decided == n.counts.sites && n.decision.is_some())
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(!whole.is_empty(), "no sub-group is decided whole");
+    let fx = fixture("tree/node-decided").unwrap();
+    let Body::Tree(t) = fx.body else {
+        panic!("not a tree body");
+    };
+    assert!(
+        whole.iter().any(|w| t.open_nodes.iter().any(|o| o == w)),
+        "the state opens a fully decided sub-group"
+    );
 }

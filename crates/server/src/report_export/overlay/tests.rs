@@ -610,3 +610,131 @@ fn a_bound_note_is_not_printed_beside_a_severity_the_reviewer_set() {
         "no bound note beside the reviewer's severity"
     );
 }
+
+// ── node summary edits (review UI spec U4) ────────────────────────────────────────────────
+
+/// `three()` with a model summary on every node, so a node's edit has something to replace.
+fn three_with_summaries(model: &str) -> SealedReport {
+    three().overlaid(|r| {
+        if let Some(tree) = r.tree.as_mut() {
+            for n in &mut tree.nodes {
+                n.summary = Some(format!("{model} ({})", n.id));
+            }
+        }
+    })
+}
+
+/// A summary edit of `node_id`, made against the model summary the node has in `sealed`.
+fn summary_edit_of(n: usize, sealed: &SealedReport, node_id: &str, new: &str) -> Edit {
+    let node = sealed
+        .tree
+        .as_ref()
+        .and_then(|t| t.node(node_id))
+        .unwrap_or_else(|| panic!("no node {node_id}"));
+    let model = node.summary.clone().unwrap_or_default();
+    Edit {
+        id: format!("edit-{n:06}"),
+        key: node_id.to_string(),
+        field: EditField::Summary,
+        old: model.clone(),
+        new: new.to_string(),
+        reason: "SECRET-REASON the model missed the shared helper".to_string(),
+        by: "SECRET-REVIEWER".to_string(),
+        at: NOW.to_string(),
+        run_id: "insp-1".to_string(),
+        fingerprint_at_edit: super::summary_fingerprint(&model),
+        stale: false,
+        discarded_at: None,
+        reapplied_from: None,
+    }
+}
+
+#[test]
+fn a_summary_edit_replaces_the_model_summary_and_marks_it_the_reviewers() {
+    let sealed = three_with_summaries("The model says");
+    let before = serde_json::to_string(&sealed).unwrap();
+    let edit = summary_edit_of(
+        1,
+        &sealed,
+        "rule:SEC-1",
+        "Both sites read the secret from the environment; fixed by one helper.",
+    );
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+
+    let tree = reviewed.report().tree.as_ref().unwrap();
+    let node = tree.node("rule:SEC-1").unwrap();
+    assert_eq!(node.summary.as_deref(), Some(edit.new.as_str()));
+    assert_eq!(node.summary_source, TextSource::Reviewer);
+    assert!(
+        reviewed
+            .applied_edits()
+            .iter()
+            .any(|a| a.key == "rule:SEC-1" && a.field == EditField::Summary),
+        "{:?}",
+        reviewed.applied_edits()
+    );
+    assert!(reviewed.stale_edits().is_empty());
+    // Another node keeps the model's summary, and the sealed report is untouched.
+    let other = tree.node("rule:SEC-2").unwrap();
+    assert_eq!(other.summary_source, TextSource::Model);
+    assert_eq!(serde_json::to_string(&sealed).unwrap(), before);
+}
+
+#[test]
+fn a_summary_edit_goes_stale_when_the_model_summary_changes() {
+    let first_run = three_with_summaries("The model says");
+    let edit = summary_edit_of(1, &first_run, "rule:SEC-1", "The reviewer's reading.");
+    // A rerun: the model wrote something else for the same node.
+    let rerun = three_with_summaries("After a rerun the model says");
+    let reviewed = apply_overlay(&rerun, &[], std::slice::from_ref(&edit), &[]);
+
+    let node = reviewed
+        .report()
+        .tree
+        .as_ref()
+        .unwrap()
+        .node("rule:SEC-1")
+        .unwrap();
+    assert_eq!(
+        node.summary.as_deref(),
+        Some("After a rerun the model says (rule:SEC-1)"),
+        "a stale edit applies nothing"
+    );
+    assert_eq!(node.summary_source, TextSource::Model);
+    let stale = reviewed.stale_edits();
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    assert_eq!(stale[0].edit.key, "rule:SEC-1");
+    assert!(stale[0].edit.stale);
+    assert_eq!(
+        stale[0].current_value,
+        "After a rerun the model says (rule:SEC-1)"
+    );
+    assert!(reviewed.applied_edits().is_empty());
+}
+
+#[test]
+fn a_summary_edit_reaches_the_client_tree_summary_and_the_internal_source() {
+    let sealed = three_with_summaries("The model says");
+    let edit = summary_edit_of(
+        1,
+        &sealed,
+        "rule:SEC-1",
+        "Both sites read the secret from the environment.",
+    );
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+
+    let client = crate::report_export::tree_view::tree_view(&reviewed, false);
+    let node = client.iter().find(|n| n.id == "rule:SEC-1").unwrap();
+    assert_eq!(node.summary, edit.new);
+    let internal = crate::report_export::tree_view::tree_view(&reviewed, true);
+    let node = internal.iter().find(|n| n.id == "rule:SEC-1").unwrap();
+    assert_eq!(
+        node.internal.as_ref().unwrap().summary_source,
+        "reviewer",
+        "who wrote it stays internal"
+    );
+    // The reviewer's reason and name reach no client output.
+    let client_json = serde_json::to_string(&client).unwrap();
+    assert!(!client_json.contains("SECRET-REASON"));
+    assert!(!client_json.contains("SECRET-REVIEWER"));
+}
