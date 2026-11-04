@@ -136,7 +136,9 @@ impl<'a> ReviewComposer<'a> {
             by: e.by.clone(),
             at: e.at.clone(),
             stale: stale.is_some(),
+            // A stale edit shown on the row its site moved to compares against that row.
             current_value: stale
+                .filter(|_| e.key == f.site_key)
                 .map_or_else(|| current_value(f, e.field), |s| s.current_value.clone()),
             reapplied_from: e.reapplied_from.clone(),
         }

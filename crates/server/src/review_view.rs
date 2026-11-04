@@ -47,7 +47,7 @@ use crate::decisions::{apply_to, AppliedDecisions};
 use crate::onboard::{Finding, ScanReport};
 use crate::report_export::overlay::StaleEditNote;
 use crate::report_export::ReviewedReport;
-use crate::review_tree::{KeyLink, ReviewTree};
+use crate::review_tree::{KeyLink, LinkHow, ReviewTree};
 
 mod lane;
 mod queue;
@@ -171,16 +171,35 @@ impl<'a> ReviewComposer<'a> {
             .map(|(i, c)| (c.key.clone(), i))
             .collect();
 
-        let mut edits_by_key: HashMap<&str, Vec<&Edit>> = HashMap::new();
-        for e in inputs.edits {
-            edits_by_key.entry(e.key.as_str()).or_default().push(e);
-        }
-        let stale_edits = inputs
+        let stale_edits: HashMap<&str, &StaleEditNote> = inputs
             .reviewed
             .stale_edits()
             .iter()
             .map(|s| (s.edit.id.as_str(), s))
             .collect();
+        // An edit belongs to the row of its own key. A stale edit whose site is no longer a row
+        // belongs to the row the engine found that site moved to (the same old-to-new links the
+        // decisions' stale standing reads), so the moved row shows it.
+        let moved_to: HashMap<&str, &str> = inputs
+            .links
+            .iter()
+            .filter(|l| l.how == LinkHow::Moved)
+            .map(|l| (l.old_key.as_str(), l.new_key.as_str()))
+            .collect();
+        let mut edits_by_key: HashMap<&str, Vec<&Edit>> = HashMap::new();
+        for e in inputs.edits {
+            let own = e.key.as_str();
+            let key = if stale_edits.contains_key(e.id.as_str()) && !rows.contains_key(own) {
+                moved_to
+                    .get(own)
+                    .copied()
+                    .filter(|new| rows.contains_key(new))
+                    .unwrap_or(own)
+            } else {
+                own
+            };
+            edits_by_key.entry(key).or_default().push(e);
+        }
 
         // What the release gate refuses, from its own refusal functions (the Engine Check's
         // pending No among them: the reviewed report carries the store's evidence).
