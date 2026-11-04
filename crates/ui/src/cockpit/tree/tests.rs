@@ -66,18 +66,19 @@ async fn node_batch_excludes_outliers_unless_ticked() {
         .await
         .unwrap();
     assert!(!id.is_empty());
-    let log = writes.log.borrow();
-    assert_eq!(log.len(), 1, "one decision for the whole node");
-    let Written::Decision(req) = &log[0] else {
-        panic!("not a decision: {:?}", log[0]);
-    };
-    assert_eq!(req.scope, Scope::Node(node.clone()));
-    assert_eq!(req.state, DecisionState::Confirmed);
-    assert_eq!(req.reason, "same pattern across the group");
-    for k in outliers.iter().chain(&held) {
-        assert!(req.except.contains(k), "{k} is left out");
+    {
+        let log = writes.log.borrow();
+        assert_eq!(log.len(), 1, "one decision for the whole node");
+        let Written::Decision(req) = &log[0] else {
+            panic!("not a decision: {:?}", log[0]);
+        };
+        assert_eq!(req.scope, Scope::Node(node.clone()));
+        assert_eq!(req.state, DecisionState::Confirmed);
+        assert_eq!(req.reason, "same pattern across the group");
+        for k in outliers.iter().chain(&held) {
+            assert!(req.except.contains(k), "{k} is left out");
+        }
     }
-    drop(log);
 
     // One outlier ticked: it is in, the rest are still out.
     let ticked: BTreeSet<String> = outliers.iter().take(1).cloned().collect();
@@ -176,14 +177,15 @@ async fn editing_a_summary_posts_to_the_edits_route_keyed_by_the_node() {
     )
     .await
     .unwrap();
-    let log = writes.log.borrow();
-    let Written::Edit(req) = &log[0] else {
-        panic!("not an edit");
-    };
-    assert_eq!(req.key, node.id);
-    assert_eq!(req.field, EditField::Summary);
-    assert_eq!(req.new, "The reviewer's reading.");
-    drop(log);
+    {
+        let log = writes.log.borrow();
+        let Written::Edit(req) = &log[0] else {
+            panic!("not an edit");
+        };
+        assert_eq!(req.key, node.id);
+        assert_eq!(req.field, EditField::Summary);
+        assert_eq!(req.new, "The reviewer's reading.");
+    }
     let err = commit_summary(&writes, &node, "Another.", "", "insp-1")
         .await
         .unwrap_err();
@@ -212,7 +214,7 @@ async fn a_held_row_is_found_under_its_rule_and_the_door_lands_on_its_sub_group(
         None
     );
     assert_eq!(
-        locate_site(&reads, &index, &held.rule_id, "no\0such\0key\01").await,
+        locate_site(&reads, &index, &held.rule_id, "no\0such\0key\x01").await,
         None
     );
 }

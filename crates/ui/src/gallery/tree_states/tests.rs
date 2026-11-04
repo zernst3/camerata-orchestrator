@@ -110,7 +110,7 @@ fn tree_30k_pages_a_big_sub_group_with_show_next_500_and_holds_one_page() {
         &html[..html.len().min(400)]
     );
     let rows = html.matches("class=\"site-row").count();
-    assert!(rows <= 500 && rows >= 400, "one page of sites, got {rows}");
+    assert!((400..=500).contains(&rows), "one page of sites, got {rows}");
     // 58 categories and the thrown-out one, all closed except the path to the big sub-group.
     assert_eq!(
         html.matches("margin-left: 0px").count(),

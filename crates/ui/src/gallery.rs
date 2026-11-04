@@ -161,9 +161,12 @@ const SPEC: &[(&str, &str, &[&str])] = &[
     ("export", "WO10", &["clear", "blocked"]),
 ];
 
+/// A state id and the function that renders its page.
+pub(crate) type BuiltRenderer = (&'static str, fn() -> String);
+
 /// The renderer of every state a work order has built, by `screen/state`. A work order that
 /// builds a screen adds its `gallery/<screen>_states.rs` here.
-fn built_renderers() -> Vec<(&'static str, fn() -> String)> {
+fn built_renderers() -> Vec<BuiltRenderer> {
     let mut all = Vec::new();
     all.extend(shell_states::states());
     all.extend(tree_states::states());

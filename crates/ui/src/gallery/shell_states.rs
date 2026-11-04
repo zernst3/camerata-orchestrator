@@ -33,7 +33,7 @@ macro_rules! states {
     ($($name:ident => $id:literal),* $(,)?) => {
         $(fn $name() -> String { render($id) })*
         /// Every state this file renders, with its renderer.
-        pub(super) fn states() -> Vec<(&'static str, fn() -> String)> {
+        pub(super) fn states() -> Vec<super::BuiltRenderer> {
             vec![$(($id, $name as fn() -> String)),*]
         }
     };

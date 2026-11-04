@@ -794,7 +794,7 @@ mod tests {
         let idx = index();
         let sub = first_subgroup();
         let mut st = TreeState::default();
-        st.open_path(&idx, &idx.parent_of(&sub).unwrap().to_string());
+        st.open_path(&idx, idx.parent_of(&sub).unwrap());
         st.focus_node(&sub);
         let reqs = st.press_enter(&idx);
         assert_eq!(reqs.len(), 1);

@@ -245,7 +245,7 @@ pub(crate) fn TreeScreen(
                                     Block::Node { node, open, focused } => rsx! {
                                         NodeRow {
                                             key: "n-{node.id}",
-                                            node,
+                                            node: *node,
                                             open,
                                             focused,
                                             on_toggle,
@@ -333,7 +333,7 @@ fn site_position(state: &TreeState, node: &str, row: &SiteRow) -> String {
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Block {
     Node {
-        node: TreeNodeView,
+        node: Box<TreeNodeView>,
         open: bool,
         focused: bool,
     },
@@ -356,7 +356,7 @@ pub(crate) fn tree_blocks(index: &TreeIndex, state: &TreeState) -> Vec<Block> {
         };
         let open = state.is_open(&id);
         out.push(Block::Node {
-            node: node.clone(),
+            node: Box::new(node.clone()),
             open,
             focused: state.cursor == Some(TreeRef::Node(id.clone())),
         });
@@ -1613,13 +1613,15 @@ pub(crate) fn TreeHost() -> Element {
                     open_summary(&idx, &id, prompt);
                 }
             },
-            on_prompt_reason: move |text: String| match prompt.write().as_mut() {
-                Some(
+            on_prompt_reason: move |text: String| {
+                if let Some(
                     TreePrompt::Batch { reason, .. }
                     | TreePrompt::Summary { reason, .. }
                     | TreePrompt::Site { reason, .. },
-                ) => *reason = text,
-                _ => {}
+                ) = prompt.write().as_mut()
+                {
+                    *reason = text;
+                }
             },
             on_prompt_text: move |text: String| {
                 if let Some(TreePrompt::Summary { text: t, .. }) = prompt.write().as_mut() {
