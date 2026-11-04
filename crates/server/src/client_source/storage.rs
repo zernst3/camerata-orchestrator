@@ -91,6 +91,9 @@ pub const DATA_DIR_ENTRIES: &[(&str, Treatment)] = &[
     // The reviewer's edits and the findings they added: headline, detail and fix text they wrote,
     // and an added finding's quoted snippet (an excerpt), like the inspection it overlays.
     ("edits", Treatment::Kept),
+    // The Engine Check's verdicts: site keys (repo, path, fingerprint), Yes or No and what was
+    // wrong from a closed list, no excerpts. Review state, like the decisions.
+    ("engine-check", Treatment::Kept),
     // A copy of client excerpts the engine used to skip unchanged files. PURGED per repo.
     ("scan-cache.json", Treatment::Purged),
     // Identity, paths, ids, descriptions and rule ids only.

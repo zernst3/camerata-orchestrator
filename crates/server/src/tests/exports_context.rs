@@ -239,6 +239,79 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
     );
 }
 
+/// The export route attaches the Engine Check store to the report it gates: a site the Engine
+/// Check said No to, with no correction, is refused with the site named; without the verdict the
+/// same project exports.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn product_export_is_refused_while_an_engine_check_no_is_uncorrected() {
+    if !typst_on_path() {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    }
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["owner/repo".to_string()])
+        .expect("project created");
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.client_name = "Example Client Ltd".to_string()
+        })
+        .expect("project exists");
+    let entry = state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &project.id,
+            make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .expect("inspection stored");
+    let key = entry.report.findings[0].site_key.clone();
+    let export = |state: AppState, id: String| async move {
+        export_product(
+            axum::extract::State(state),
+            axum::extract::Path(id),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await
+    };
+
+    let resp = export(state.clone(), project.id.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK, "no verdict: the export goes");
+
+    state
+        .engine_check
+        .record(
+            &project.id,
+            &key,
+            &camerata_api_types::review_view::EngineCheckVerdictReq {
+                right: false,
+                wrong: Some(camerata_api_types::review_view::EngineCheckError::WrongSeverity),
+                correction: None,
+                by: String::new(),
+            },
+            &entry.id,
+            "2026-11-04T08:00:00Z",
+        )
+        .expect("verdict recorded");
+    let resp = export(state, project.id.clone()).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(body["gate"], "release");
+    let problems = body["problems"].to_string();
+    assert!(
+        problems.contains("reviewer correction on flagged findings")
+            && problems.contains("src/main.rs"),
+        "the refusal names the check and the site: {problems}"
+    );
+}
+
 /// Pure unit test for `product_export_readme` — doesn't need `typst` on PATH (unlike the
 /// full-zip e2e test above), so it always runs. P6 (2026-09-29): product name + no "audit".
 #[test]

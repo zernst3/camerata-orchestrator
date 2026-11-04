@@ -280,6 +280,17 @@ pub struct ReviewSettings {
     /// Set only here or by the `--group-review-model` flag, never by the environment.
     #[serde(default)]
     pub group_review_model: String,
+    /// How many rows the Engine Check draws per run (design A2b). 0 turns the lane off. A project
+    /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
+    #[serde(default = "default_sample_size_per_run")]
+    pub sample_size_per_run: usize,
+}
+
+/// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
+pub const DEFAULT_SAMPLE_SIZE_PER_RUN: usize = 50;
+
+fn default_sample_size_per_run() -> usize {
+    DEFAULT_SAMPLE_SIZE_PER_RUN
 }
 
 // `Project` is `Eq`, so its settings have to be. The rate is a number a person types; a NaN would
@@ -307,6 +318,7 @@ impl Default for ReviewSettings {
             escalation_floor: default_escalation_floor(),
             over_budget_reasons: default_over_budget_reasons(),
             group_review_model: String::new(),
+            sample_size_per_run: default_sample_size_per_run(),
         }
     }
 }
@@ -326,6 +338,7 @@ mod review_settings_tests {
             EscalationReason::default_over_budget_set()
         );
         assert!(s.group_review_model.is_empty());
+        assert_eq!(s.sample_size_per_run, 50);
     }
 
     #[test]

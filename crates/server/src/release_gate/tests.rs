@@ -393,7 +393,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_thirteen_checks() {
+fn release_passes_a_clean_package_and_reports_fourteen_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -408,6 +408,7 @@ fn release_passes_a_clean_package_and_reports_thirteen_checks() {
             "reviewer decision on unverified evidence",
             "decision records behind merged rows",
             "reviewer decision on restored findings",
+            "reviewer correction on flagged findings",
             "confidentiality marking",
             "manifest",
             "provenance",
@@ -427,7 +428,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
-             confidentiality marking, manifest, provenance, unsynced reviewer changes (all passed)"
+             reviewer correction on flagged findings, confidentiality marking, manifest, \
+             provenance, unsynced reviewer changes (all passed)"
         ),
         "{readme}"
     );
@@ -1148,8 +1150,9 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         Some(
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, decision records behind \
-             merged rows, reviewer decision on restored findings, confidentiality marking, \
-             manifest, provenance, unsynced reviewer changes"
+             merged rows, reviewer decision on restored findings, reviewer correction on \
+             flagged findings, confidentiality marking, manifest, provenance, unsynced \
+             reviewer changes"
         )
     );
 }

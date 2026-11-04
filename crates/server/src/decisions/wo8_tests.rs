@@ -201,7 +201,7 @@ fn a_restored_row_is_held_until_decided() {
         .unwrap();
 
     // Held from every batch decision, and decided by nobody yet.
-    let held = held_keys(std::slice::from_ref(&kept), &store.active("p"));
+    let held = held_keys(std::slice::from_ref(&kept), &store.active("p"), &none());
     assert!(held.contains(&key), "{held:?}");
     assert!(
         !StoreDecisions::for_project(&store, "p").has_decision(&kept),
@@ -212,7 +212,7 @@ fn a_restored_row_is_held_until_decided() {
     store
         .record_site("p", &req(&key, DecisionState::Confirmed, ""), ctx("insp-1"))
         .unwrap();
-    let held = held_keys(std::slice::from_ref(&kept), &store.active("p"));
+    let held = held_keys(std::slice::from_ref(&kept), &store.active("p"), &none());
     assert!(!held.contains(&key), "{held:?}");
     assert!(StoreDecisions::for_project(&store, "p").has_decision(&kept));
 }
@@ -303,7 +303,11 @@ async fn a_no_on_a_thrown_out_finding_restores_and_holds_it() {
         .expect("the restored row is among the reviewed rows");
     assert!(!engine_discard::is_discarded(row));
     assert!(reviewed.report().discarded.is_empty());
-    let held = held_keys(&reviewed.report().findings, &state.decisions.active(&pid));
+    let held = held_keys(
+        &reviewed.report().findings,
+        &state.decisions.active(&pid),
+        &none(),
+    );
     assert!(held.contains(&thrown_key));
 
     // The release gate refuses it until it is decided.
@@ -408,7 +412,11 @@ async fn held_keys_is_the_only_hold_list() {
         .unwrap();
 
     // Each reason is in the hold list, from one function.
-    let held = held_keys(&entry.report.findings, &state.decisions.active(&pid));
+    let held = held_keys(
+        &entry.report.findings,
+        &state.decisions.active(&pid),
+        &none(),
+    );
     for (reason, key) in [
         ("evidence unverified", &unverified_k),
         ("junk", &junk_k),
@@ -694,4 +702,9 @@ async fn confirmed_by_client_is_false_until_the_client_ack_route_is_called() {
         "{after}"
     );
     assert!(!after.contains("Needs client confirmation"), "{after}");
+}
+
+/// No Engine Check evidence: the hold list of these tests is the decisions' and the rows' alone.
+fn none() -> crate::engine_check::EngineCheckEvidence {
+    crate::engine_check::EngineCheckEvidence::NotRecorded
 }

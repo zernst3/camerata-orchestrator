@@ -594,10 +594,11 @@ struct StoredFileRef<'a> {
 /// This is THE hold list: every hold reason lives in this function, a batch decision on a node
 /// and the decision route both leave out exactly these keys, and a new kind of hold is added here
 /// and nowhere else. The Engine Check's pending No (a wrong finding held until a correction or a
-/// decision is recorded, design A2b) is the next one: see [`engine_check_holds`].
+/// decision is recorded, design A2b) is [`engine_check_holds`].
 pub fn held_keys(
     rows: &[crate::onboard::Finding],
     active: &[Decision],
+    engine_check: &crate::engine_check::EngineCheckEvidence,
 ) -> std::collections::HashSet<String> {
     let mut held: std::collections::HashSet<String> = rows
         .iter()
@@ -621,16 +622,21 @@ pub fn held_keys(
             .into_iter()
             .map(str::to_string),
     );
-    held.extend(engine_check_holds(active));
+    held.extend(engine_check_holds(active, engine_check));
     held
 }
 
-/// The rows the Engine Check's pending No holds from the client export. THE PLACE for that hold:
-/// the Engine Check (WO11) records a No on a row with no correction yet, and this function
-/// returns that row's key until a correction or a decision is recorded. Until the Engine Check
-/// exists nothing writes such a record, so this holds nothing.
-fn engine_check_holds(_active: &[Decision]) -> Vec<String> {
-    Vec::new()
+/// The rows the Engine Check's pending No holds from the client export: the sites with a No
+/// verdict and no correction ([`crate::engine_check::uncorrected_keys`]), read from the evidence
+/// the caller took from the Engine Check store ([`crate::engine_check::EngineCheckStore::evidence_for`]).
+/// Evidence that was not recorded holds nothing, and an unreadable store lists no site: the
+/// release gate refuses that on its own, naming the file
+/// ([`crate::release_gate::engine_check::problems`]).
+fn engine_check_holds(
+    active: &[Decision],
+    engine_check: &crate::engine_check::EngineCheckEvidence,
+) -> Vec<String> {
+    engine_check.uncorrected(active)
 }
 
 /// The keys of the findings the reviewer put back after the engine threw them out, for the

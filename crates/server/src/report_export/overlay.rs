@@ -136,12 +136,29 @@ pub struct ReviewedReport {
     /// Dispositions that came from an export request rather than the store (an older client
     /// while the store is empty). They answer the gate's question too.
     legacy: bool,
+    /// What the Engine Check store holds about this run, attached by the caller that has the
+    /// store ([`Self::with_engine_check`]). Nothing recorded holds nothing.
+    engine_check: crate::engine_check::EngineCheckEvidence,
 }
 
 impl ReviewedReport {
     /// The rows an export reads: the sealed set with the overlay applied.
     pub fn report(&self) -> &SealedReport {
         &self.report
+    }
+
+    /// What the Engine Check store holds about this run: the release gate holds every site the
+    /// Engine Check said No to until it is corrected.
+    pub fn engine_check(&self) -> &crate::engine_check::EngineCheckEvidence {
+        &self.engine_check
+    }
+
+    /// This report with the Engine Check's evidence attached. Every caller that holds the store
+    /// attaches it before the gate or the read model looks at the report.
+    #[must_use]
+    pub fn with_engine_check(mut self, evidence: crate::engine_check::EngineCheckEvidence) -> Self {
+        self.engine_check = evidence;
+        self
     }
 
     /// The reviewer's decisions as the exporters read them, by site key.
@@ -226,6 +243,39 @@ impl ReviewerDecisions for ReviewedReport {
     }
 }
 
+/// The sealed report with the escalation line marked again from the project's CURRENT settings,
+/// over the stored candidates: no model call, no candidate added or dropped. The budget, the
+/// candidates' marks and the rows' escalation columns are rewritten on the copy
+/// ([`crate::review_tree::ReviewTree::re_mark`]); the stored inspection is untouched.
+///
+/// This is THE place the line moves. The review screens and every export load the report through
+/// it (`review_of` and `reviewed_for_export`, before [`apply_overlay`]), so the queue the reviewer
+/// works from and the escalations, review levels and PDF a client receives are marked by the same
+/// line. A report with no tree is returned as it is.
+pub fn re_mark_line(
+    sealed: &SealedReport,
+    settings: &camerata_api_types::project::ReviewSettings,
+) -> SealedReport {
+    sealed.overlaid(|report| {
+        let code_lines = report.code_lines;
+        let Some(tree) = report.tree.as_mut() else {
+            return;
+        };
+        let counted_lines = Some(tree.budget.counted_lines)
+            .filter(|n| *n > 0)
+            .unwrap_or(code_lines);
+        tree.re_mark(
+            &crate::review_tree::RankSettings {
+                rate_per_kloc: settings.escalation_rate_per_kloc,
+                floor: settings.escalation_floor,
+                counted_lines,
+                over_budget_reasons: settings.over_budget_reasons.clone(),
+            },
+            &mut report.findings,
+        );
+    })
+}
+
 /// Apply the reviewer's overlay to a sealed report (design 5.1). `decisions` may include revoked
 /// records; they are ignored. `edits` may include discarded ones; they are ignored. The sealed
 /// report is not changed.
@@ -298,6 +348,7 @@ pub fn apply_overlay(
         merges,
         levels,
         legacy: false,
+        engine_check: crate::engine_check::EngineCheckEvidence::default(),
     }
 }
 

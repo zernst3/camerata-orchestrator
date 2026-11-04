@@ -218,7 +218,13 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             // Held rows are never covered by a batch: the gate needs a ruling on them by name,
             // and an inherited record would hide that nobody looked.
             let mut with_held = req.clone();
-            let held = super::held_keys(&latest.report.findings, &state.decisions.active(id));
+            let held = super::held_keys(
+                &latest.report.findings,
+                &state.decisions.active(id),
+                &state
+                    .engine_check
+                    .evidence_for(id, &latest.id, state.edits.active(id)),
+            );
             with_held.except.extend(
                 members
                     .iter()

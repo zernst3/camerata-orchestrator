@@ -623,3 +623,428 @@ fn the_merge_check_refuses_a_package_whose_findings_or_decisions_file_is_unreada
         }
     }
 }
+
+// ── the review screen's export panel lists exactly what the gate refuses (WO9c) ───────────
+
+/// The (path, line) a gate problem's location names ("src/users.rs line 21").
+fn located(p: &Problem) -> (String, usize) {
+    let (path, line) = p
+        .location
+        .rsplit_once(" line ")
+        .unwrap_or_else(|| panic!("not a row location: {}", p.location));
+    (path.to_string(), line.parse().expect("a line number"))
+}
+
+fn sorted(mut v: Vec<(String, usize)>) -> Vec<(String, usize)> {
+    v.sort();
+    v
+}
+
+/// The rows of the view for one reason, as (path, line).
+fn view_rows(rows: &[camerata_api_types::review_view::HeldRow]) -> Vec<(String, usize)> {
+    sorted(rows.iter().map(|h| (h.path.clone(), h.line)).collect())
+}
+
+fn gate_problems(reviewed: &ReviewedReport) -> GateFailure {
+    match release(package_of(reviewed)) {
+        Err(ReleaseError::Blocked(failure)) => failure,
+        other => panic!("the package must be refused: {other:?}"),
+    }
+}
+
+#[test]
+fn export_gate_view_equals_release_gate_refusals() {
+    use camerata_api_types::review_view::{ExportGateView, HoldReason};
+
+    // Six rows, each held for a different reason the gate refuses: evidence not verified, junk
+    // text, a merge with no decision behind it, a restored row nobody has ruled on, a site the
+    // Engine Check said No to that nothing has corrected, and a site a group decision covers
+    // without writing its record.
+    let mut report = report_of_three();
+    report.findings.push(second_row("src/cart.rs", 7));
+    report.findings.push(second_row("src/wishlist.rs", 9));
+    report.findings.push(second_row("src/profile.rs", 3));
+    let row = |report: &mut ScanReport, path: &str| -> usize {
+        report
+            .findings
+            .iter()
+            .position(|f| f.path == path)
+            .unwrap_or_else(|| panic!("no row in {path}"))
+    };
+    let (db, users, orders, cart) = (
+        row(&mut report, "src/db.rs"),
+        row(&mut report, "src/users.rs"),
+        row(&mut report, "src/orders.rs"),
+        row(&mut report, "src/cart.rs"),
+    );
+    report.findings[db].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    report.findings[users].detail = "A title \u{2014} I cannot assist.".to_string();
+    report.findings[orders].captures.insert(
+        MERGED_INTO_CAPTURE.to_string(),
+        "some-target-key".to_string(),
+    );
+    report.findings[orders].captures.insert(
+        MERGED_LABEL_CAPTURE.to_string(),
+        "Merged into src/db.rs:12".to_string(),
+    );
+    report.findings[cart].captures.insert(
+        crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string(),
+        "its headline is a placeholder".to_string(),
+    );
+    let sealed = report.seal();
+    let key_of = |path: &str| at(&sealed, path).site_key;
+    let wishlist = key_of("src/wishlist.rs");
+    let node = Decision {
+        scope: Scope::Node("rule:SEC-NO-RAW-SQL-CONCAT-1".to_string()),
+        applies_to: vec![wishlist.clone()],
+        ..decision(
+            "dec-000001",
+            "rule:SEC-NO-RAW-SQL-CONCAT-1",
+            DecisionState::Confirmed,
+            "pattern",
+        )
+    };
+    let profile = key_of("src/profile.rs");
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&node), &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&profile)], Vec::new()));
+
+    let view = crate::release_gate::holds::gate_holds(&reviewed);
+    let failure = gate_problems(&reviewed);
+
+    // Row by row, kind by kind: the view lists the rows each check refuses and no others.
+    let located_in = |check: CheckId, file: &str| {
+        sorted(
+            check_problems(&failure, check)
+                .into_iter()
+                .filter(|p| p.file == file)
+                .map(located)
+                .collect(),
+        )
+    };
+    let kind = |reason: HoldReason| {
+        view_rows(
+            &view
+                .held
+                .iter()
+                .filter(|h| h.reason == reason)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        kind(HoldReason::EvidenceUnverified),
+        located_in(CheckId::EvidenceUnverified, "findings.json")
+    );
+    assert_eq!(
+        kind(HoldReason::JunkContent),
+        located_in(CheckId::Content, "findings.json")
+    );
+    assert_eq!(
+        kind(HoldReason::RestoredWithoutDecision),
+        located_in(CheckId::RestoredWithoutDecision, "findings.json")
+    );
+    assert_eq!(
+        kind(HoldReason::EngineCheckNoWithoutCorrection),
+        located_in(CheckId::EngineCheckNoWithoutCorrection, "findings.json")
+    );
+    assert_eq!(
+        view_rows(&view.merged_without_decision),
+        located_in(CheckId::MergedWithoutDecision, "findings.json")
+    );
+    assert!(view
+        .merged_without_decision
+        .iter()
+        .all(|h| h.reason == HoldReason::MergedWithoutDecision));
+    // Each kind found its one row (the fixture holds one of each), so the equalities above are
+    // not empty ones.
+    for (what, rows) in [
+        ("evidence", kind(HoldReason::EvidenceUnverified)),
+        ("junk", kind(HoldReason::JunkContent)),
+        ("restored", kind(HoldReason::RestoredWithoutDecision)),
+        (
+            "engine check",
+            kind(HoldReason::EngineCheckNoWithoutCorrection),
+        ),
+        ("merged", view_rows(&view.merged_without_decision)),
+    ] {
+        assert_eq!(rows.len(), 1, "{what}: {rows:?}");
+    }
+
+    // The group decision's gap: one problem per site, one gap entry naming the same site.
+    let gap_problems = check_problems(&failure, CheckId::MergedWithoutDecision)
+        .into_iter()
+        .filter(|p| p.file == crate::report_export::decisions_file::DECISIONS_FILE)
+        .count();
+    let gap_sites: usize = view
+        .node_decisions_missing_members
+        .iter()
+        .map(|g| g.missing.len())
+        .sum();
+    assert_eq!((gap_problems, gap_sites), (1, 1));
+    assert_eq!(
+        view.node_decisions_missing_members[0].missing,
+        vec![wishlist.clone()]
+    );
+
+    // And nothing else: every problem the five checks raise is a row or a gap in the view.
+    let refused: usize = [
+        CheckId::EvidenceUnverified,
+        CheckId::Content,
+        CheckId::RestoredWithoutDecision,
+        CheckId::EngineCheckNoWithoutCorrection,
+        CheckId::MergedWithoutDecision,
+    ]
+    .iter()
+    .map(|c| check_problems(&failure, *c).len())
+    .sum();
+    assert_eq!(
+        refused,
+        view.held.len() + view.merged_without_decision.len() + gap_sites
+    );
+
+    // Rule on every one of them: the view empties and the gate lets the package through.
+    let mut records = vec![node];
+    records.push(Decision {
+        inherited_from: Some("dec-000001".to_string()),
+        ..decision(
+            "dec-000001.00000",
+            &wishlist,
+            DecisionState::Confirmed,
+            "pattern",
+        )
+    });
+    let sealed = {
+        let mut report = report_of_three();
+        report.findings.push(second_row("src/cart.rs", 7));
+        report.findings.push(second_row("src/wishlist.rs", 9));
+        report.findings.push(second_row("src/profile.rs", 3));
+        let db = row(&mut report, "src/db.rs");
+        let users = row(&mut report, "src/users.rs");
+        let cart = row(&mut report, "src/cart.rs");
+        report.findings[db].captures.insert(
+            crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+            "not found near the cited line".to_string(),
+        );
+        report.findings[users].detail = "A title \u{2014} I cannot assist.".to_string();
+        report.findings[cart].captures.insert(
+            crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string(),
+            "its headline is a placeholder".to_string(),
+        );
+        report.seal()
+    };
+    let key = |path: &str| at(&sealed, path).site_key;
+    let (db, users, orders, cart, profile) = (
+        key("src/db.rs"),
+        key("src/users.rs"),
+        key("src/orders.rs"),
+        key("src/cart.rs"),
+        key("src/profile.rs"),
+    );
+    for (i, k) in [&db, &users, &cart, &profile].into_iter().enumerate() {
+        records.push(decision(
+            &format!("dec-1{i:05}"),
+            k,
+            DecisionState::Confirmed,
+            "",
+        ));
+    }
+    records.push(decision(
+        "dec-200000",
+        &orders,
+        DecisionState::MergedInto(db.clone()),
+        "same query helper",
+    ));
+    // The decision on the profile row is later than the Engine Check's No: it is the correction.
+    let reviewed = apply_overlay(&sealed, &records, &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&profile)], Vec::new()));
+    assert_eq!(
+        crate::release_gate::holds::gate_holds(&reviewed),
+        ExportGateView::default()
+    );
+    assert!(release(package_of(&reviewed)).is_ok());
+}
+
+// ── the Engine Check's No holds the row until it is corrected (design A2b) ────────────────
+
+/// A time before every decision and edit the tests make (`NOW`).
+const VERDICT_AT: &str = "2026-11-04T08:00:00Z";
+const CHECK_RUN: &str = "insp-1";
+
+fn no_verdict(key: &str) -> camerata_api_types::review_view::EngineCheckVerdict {
+    camerata_api_types::review_view::EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: CHECK_RUN.to_string(),
+        right: false,
+        wrong: Some(camerata_api_types::review_view::EngineCheckError::WrongSeverity),
+        correction: None,
+        by: "reviewer".to_string(),
+        at: VERDICT_AT.to_string(),
+    }
+}
+
+fn recorded(
+    verdicts: Vec<camerata_api_types::review_view::EngineCheckVerdict>,
+    edits: Vec<Edit>,
+) -> crate::engine_check::EngineCheckEvidence {
+    crate::engine_check::EngineCheckEvidence::Recorded {
+        run_id: CHECK_RUN.to_string(),
+        verdicts,
+        edits,
+    }
+}
+
+fn engine_check_problems(reviewed: &ReviewedReport) -> Vec<Problem> {
+    match release(package_of(reviewed)) {
+        Ok(_) => Vec::new(),
+        Err(ReleaseError::Blocked(failure)) => {
+            check_problems(&failure, CheckId::EngineCheckNoWithoutCorrection)
+                .into_iter()
+                .cloned()
+                .collect()
+        }
+        Err(other) => panic!("the package must assemble: {other}"),
+    }
+}
+
+#[test]
+fn the_gate_refuses_an_engine_check_no_without_a_correction_and_names_the_site() {
+    let sealed = report_of_three().seal();
+    let site = at(&sealed, "src/users.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&site.site_key)], Vec::new()));
+    let problems = engine_check_problems(&reviewed);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].location, "src/users.rs line 21");
+    assert_eq!(problems[0].evidence.as_deref(), Some(site.rule_id.as_str()));
+    // A Yes on the same site holds nothing.
+    let yes = camerata_api_types::review_view::EngineCheckVerdict {
+        right: true,
+        wrong: None,
+        ..no_verdict(&site.site_key)
+    };
+    let reviewed =
+        apply_overlay(&sealed, &[], &[], &[]).with_engine_check(recorded(vec![yes], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+    // And a store nobody consulted holds nothing (the headless export has no store).
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    assert!(engine_check_problems(&reviewed).is_empty());
+}
+
+#[test]
+fn a_correction_clears_an_engine_check_no_at_the_gate() {
+    let sealed = report_of_three().seal();
+    let site = at(&sealed, "src/users.rs");
+    let key = site.site_key.clone();
+
+    // A decision made after the verdict.
+    let reviewed = apply_overlay(
+        &sealed,
+        &[decision(
+            "dec-000001",
+            &key,
+            DecisionState::FalsePositive,
+            "",
+        )],
+        &[],
+        &[],
+    )
+    .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+
+    // An edit made after the verdict.
+    let edit = edit_of(1, &site, EditField::Fix, "", "Bind the parameters.");
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], vec![edit]));
+    assert!(engine_check_problems(&reviewed).is_empty());
+
+    // A correction the verdict names.
+    let named = camerata_api_types::review_view::EngineCheckVerdict {
+        correction: Some(camerata_api_types::review_view::CorrectionRef::Decision(
+            "dec-000001".to_string(),
+        )),
+        ..no_verdict(&key)
+    };
+    let reviewed = apply_overlay(
+        &sealed,
+        &[decision(
+            "dec-000001",
+            &key,
+            DecisionState::FalsePositive,
+            "",
+        )],
+        &[],
+        &[],
+    )
+    .with_engine_check(recorded(vec![named], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+
+    // A decision made BEFORE the verdict is not a correction of it.
+    let earlier = Decision {
+        decided_at: "2026-11-04T07:00:00Z".to_string(),
+        ..decision("dec-000001", &key, DecisionState::FalsePositive, "")
+    };
+    let reviewed = apply_overlay(&sealed, &[earlier], &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert_eq!(engine_check_problems(&reviewed).len(), 1);
+}
+
+#[test]
+fn the_gate_refuses_when_the_engine_check_file_cannot_be_read() {
+    use crate::engine_check::EngineCheckStore;
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdictReq};
+
+    let sealed = report_of_three().seal();
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = EngineCheckStore::at(dir.path().to_path_buf());
+    // A Yes only: the file exists and holds no No, so a readable store refuses nothing.
+    let key = at(&sealed, "src/users.rs").site_key;
+    let yes = EngineCheckVerdictReq {
+        right: true,
+        wrong: None,
+        correction: None,
+        by: String::new(),
+    };
+    store
+        .record("p", &key, &yes, CHECK_RUN, VERDICT_AT)
+        .unwrap();
+    let readable =
+        reviewed
+            .clone()
+            .with_engine_check(store.evidence_for("p", CHECK_RUN, Vec::new()));
+    assert!(engine_check_problems(&readable).is_empty());
+
+    // The file is damaged after the store opened: the gate reads it as it is now.
+    let path = store.file_for("p").expect("a file-backed store");
+    std::fs::write(&path, b"{ not json").unwrap();
+    let damaged =
+        reviewed
+            .clone()
+            .with_engine_check(store.evidence_for("p", CHECK_RUN, Vec::new()));
+    let problems = engine_check_problems(&damaged);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].file.ends_with("p.json"),
+        "the problem names the file: {:?}",
+        problems[0]
+    );
+
+    // And the file the store moved aside at open (a restart over a damaged file) refuses too.
+    let reopened = EngineCheckStore::at(dir.path().to_path_buf());
+    assert!(reopened.is_corrupt("p"));
+    let moved_aside =
+        reviewed
+            .clone()
+            .with_engine_check(reopened.evidence_for("p", CHECK_RUN, Vec::new()));
+    let problems = engine_check_problems(&moved_aside);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].file.ends_with("p.json"), "{:?}", problems[0]);
+
+    // The row view lists no row for it (the refusal is the file's, not a site's).
+    let view = crate::release_gate::holds::gate_holds(&moved_aside);
+    assert!(view.held.is_empty());
+    let _ = EngineCheckError::NotARealIssue;
+}

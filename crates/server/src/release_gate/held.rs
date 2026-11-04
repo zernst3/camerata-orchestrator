@@ -94,15 +94,7 @@ pub fn merged_without_decision_in_archive(
             continue;
         }
         let id = row["site_id"].as_str().unwrap_or_default();
-        let backed = records.iter().any(|d| {
-            !d.revoked
-                && d.scope == "site"
-                && d.site_id == id
-                && d.state == "merged_into"
-                && d.merged_into == target
-                && d.has_reason
-        });
-        if !backed {
+        if !merge_is_backed(&records, id, target) {
             problems.push(Problem::new(
                 "findings.json",
                 format!(
@@ -126,25 +118,74 @@ pub fn merged_without_decision_in_archive(
     // Every live group decision has one per-site record for each site it covers. A per-site
     // record the reviewer revoked on its own (an undo of one site of a batch) is still a record:
     // the site was accounted for, and it is simply undecided again.
+    for gap in group_decision_gaps(&records) {
+        problems.push(Problem::new(
+            DECISIONS_FILE,
+            format!("group decision {} on {}", gap.decision_id, gap.node_id),
+            format!(
+                "the group decision covers a site with no record of its own for it ({}). \
+                 Decide the group again so every site it covers holds the decision",
+                gap.site_id
+            ),
+            None,
+        ));
+    }
+    problems
+}
+
+/// Whether a merged row (the row `site_id`, merged into `target`) has the decision behind it:
+/// a live site-scope record naming that row, the state `merged_into`, that target, and a reason.
+/// The archive check and the review screen's export panel both ask this question here.
+pub(crate) fn merge_is_backed(records: &[DecisionRowJson], site_id: &str, target: &str) -> bool {
+    records.iter().any(|d| {
+        !d.revoked
+            && d.scope == "site"
+            && d.site_id == site_id
+            && d.state == "merged_into"
+            && d.merged_into == target
+            && d.has_reason
+    })
+}
+
+/// One site a live group decision covers that has no per-site record of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupDecisionGap {
+    pub decision_id: String,
+    pub node_id: String,
+    /// The site's id ([`crate::report_export::site_id`]).
+    pub site_id: String,
+}
+
+/// Every site a live group decision covers that holds no per-site record, in record order.
+pub(crate) fn group_decision_gaps(records: &[DecisionRowJson]) -> Vec<GroupDecisionGap> {
+    let mut gaps = Vec::new();
     for node in records.iter().filter(|d| d.scope == "node" && !d.revoked) {
         for covered in &node.applies_to {
             let has_record = records
                 .iter()
                 .any(|d| d.scope == "site" && d.inherited_from == node.id && d.site_id == *covered);
             if !has_record {
-                problems.push(Problem::new(
-                    DECISIONS_FILE,
-                    format!("group decision {} on {}", node.id, node.node_id),
-                    format!(
-                        "the group decision covers a site with no record of its own for it ({covered}). \
-                         Decide the group again so every site it covers holds the decision"
-                    ),
-                    None,
-                ));
+                gaps.push(GroupDecisionGap {
+                    decision_id: node.id.clone(),
+                    node_id: node.node_id.clone(),
+                    site_id: covered.clone(),
+                });
             }
         }
     }
-    problems
+    gaps
+}
+
+/// The rows the reviewer restored after the engine threw them out that `decisions` has not
+/// decided since: what [`restored_without_decision`] refuses, as rows.
+pub fn undecided_restored<'a>(
+    findings: &'a [Finding],
+    decisions: &'a dyn ReviewerDecisions,
+) -> impl Iterator<Item = &'a Finding> {
+    findings
+        .iter()
+        .filter(|f| f.captures.contains_key(ENGINE_RESTORED_CAPTURE))
+        .filter(|f| !decisions.has_decision(f))
 }
 
 /// One problem per row the reviewer restored after the engine threw it out that `decisions` has
@@ -153,10 +194,7 @@ pub fn restored_without_decision(
     findings: &[Finding],
     decisions: &dyn ReviewerDecisions,
 ) -> Vec<Problem> {
-    findings
-        .iter()
-        .filter(|f| f.captures.contains_key(ENGINE_RESTORED_CAPTURE))
-        .filter(|f| !decisions.has_decision(f))
+    undecided_restored(findings, decisions)
         .map(|f| {
             Problem::new(
                 "findings.json",

@@ -30,7 +30,7 @@ use crate::decisions::{restored_keys_of, DecisionCtx, DecisionStoreError};
 use crate::inspections::InspectionEntry;
 use crate::onboard::{Finding, SealedReport};
 use crate::report_export::overlay::current_value;
-use crate::report_export::{apply_overlay, ReviewedReport};
+use crate::report_export::{apply_overlay, re_mark_line, ReviewedReport};
 use crate::AppState;
 
 fn now() -> String {
@@ -123,7 +123,7 @@ fn guard(state: &AppState, id: &str) -> Result<(), Response> {
 }
 
 /// The latest inspection sealed with the project's restores, and the overlay over it.
-fn review_of(
+pub(crate) fn review_of(
     state: &AppState,
     id: &str,
     latest: &InspectionEntry,
@@ -131,11 +131,21 @@ fn review_of(
     let decisions = state.decisions.list(id);
     let restored = restored_keys_of(&state.decisions.active(id));
     let sealed = latest.report.clone().seal_with_restored(&restored);
+    // The line the project's settings give now, the same one the exports ship.
+    let sealed = state
+        .projects
+        .get(id)
+        .map_or_else(|| sealed.clone(), |p| re_mark_line(&sealed, &p.review));
     let reviewed = apply_overlay(
         &sealed,
         &decisions,
         &state.edits.list(id),
         &state.edits.added(id),
+    )
+    .with_engine_check(
+        state
+            .engine_check
+            .evidence_for(id, &latest.id, state.edits.active(id)),
     );
     (sealed, reviewed)
 }
@@ -644,9 +654,13 @@ pub(crate) async fn get_reviewed_report(
     };
     let (_, reviewed) = review_of(&state, &id, &latest);
     let report = reviewed.report();
-    let mut held: Vec<String> = crate::decisions::held_keys(&report.findings, reviewed.records())
-        .into_iter()
-        .collect();
+    let mut held: Vec<String> = crate::decisions::held_keys(
+        &report.findings,
+        reviewed.records(),
+        reviewed.engine_check(),
+    )
+    .into_iter()
+    .collect();
     held.sort();
     Json(ReviewedReportResp {
         run_id: latest.id.clone(),
