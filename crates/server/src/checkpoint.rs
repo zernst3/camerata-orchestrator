@@ -186,13 +186,31 @@ pub struct BatchRecord {
     /// not settled is polled again on resume, never submitted again.
     #[serde(default)]
     pub settled: bool,
+    /// The submit nonce of the [`SubmitIntent`] written before this batch was submitted, so a
+    /// resume can tell an intent whose batch was saved from one whose batch was not. `None` on
+    /// a record written before intents existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
 }
 
-/// The two checkpoint files of one stage.
+/// What the runner is about to submit, written BEFORE `submit` is called. A kill between the
+/// provider accepting the batch and the batch's id being saved leaves an intent no
+/// [`BatchRecord`] carries the nonce of: the resume reads that as a batch that may have been
+/// submitted and orphaned (it cannot be polled or cancelled, because its id was never saved).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitIntent {
+    /// A random token for this one submission, copied onto the [`BatchRecord`] saved after it.
+    pub nonce: String,
+    /// The `custom_id` of each item in the submission, mapped to the item's key.
+    pub items: BTreeMap<String, String>,
+}
+
+/// The checkpoint files of one stage.
 #[derive(Debug, Clone)]
 pub struct StageCheckpoint {
     absorbed: PathBuf,
     batches: PathBuf,
+    intents: PathBuf,
 }
 
 impl StageCheckpoint {
@@ -212,6 +230,7 @@ impl StageCheckpoint {
         Self {
             absorbed: run_dir.join(format!("{stem}.jsonl")),
             batches: run_dir.join(format!("{stem}.batches.json")),
+            intents: run_dir.join(format!("{stem}.intents.json")),
         }
     }
 
@@ -265,6 +284,40 @@ impl StageCheckpoint {
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &self.batches)
     }
+
+    /// Every submission intent still on file: the ones written before a `submit` and not yet
+    /// cleared. Empty when there are none.
+    pub fn intents(&self) -> Vec<SubmitIntent> {
+        std::fs::read_to_string(&self.intents)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replace the intent list (an empty list clears it). Written the way the batch list is.
+    pub fn save_intents(&self, intents: &[SubmitIntent]) -> std::io::Result<()> {
+        if let Some(dir) = self.intents.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(intents).map_err(std::io::Error::other)?;
+        let tmp = self.intents.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.intents)
+    }
+}
+
+/// A fresh random token for one submission (see [`SubmitIntent::nonce`]).
+pub fn new_submit_nonce() -> String {
+    let mut bytes = [0u8; 12];
+    // The OS random source cannot be unavailable on a supported platform; if it were, a token
+    // from the clock still tells two submissions of one process apart.
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..12]);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── The run's checkpoint folder, carried with the audit future ──────────────────────────────────
@@ -425,6 +478,7 @@ mod tests {
             ttl: "1h".to_string(),
             items: BTreeMap::from([("s1".to_string(), "site-1".to_string())]),
             settled: false,
+            nonce: Some("n1".to_string()),
         };
         a.save_batches(std::slice::from_ref(&record)).unwrap();
         assert_eq!(a.batches(), vec![record.clone()]);
@@ -438,5 +492,32 @@ mod tests {
             !dir.path().join("calibration.batches.json.tmp").exists(),
             "the temp file was renamed away"
         );
+    }
+
+    #[test]
+    fn submit_intents_round_trip_and_clear_and_nonces_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        assert!(cp.intents().is_empty());
+        let intent = SubmitIntent {
+            nonce: new_submit_nonce(),
+            items: BTreeMap::from([("s1".to_string(), "site-1".to_string())]),
+        };
+        cp.save_intents(std::slice::from_ref(&intent)).unwrap();
+        assert_eq!(cp.intents(), vec![intent]);
+        cp.save_intents(&[]).unwrap();
+        assert!(cp.intents().is_empty());
+        assert_ne!(new_submit_nonce(), new_submit_nonce());
+    }
+
+    #[test]
+    fn a_batch_record_written_before_nonces_existed_still_reads() {
+        let old = r#"[{"batch_id":"msgbatch_1","ttl":"1h","items":{"s1":"site-1"},"settled":false}]"#;
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        std::fs::write(dir.path().join("calibration.batches.json"), old).unwrap();
+        let records = cp.batches();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].nonce, None);
     }
 }

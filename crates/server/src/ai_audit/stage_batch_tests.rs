@@ -293,6 +293,9 @@ struct Api {
     cancel_calls: Mutex<Vec<String>>,
     /// Batch ids whose poll and fetch fail, with the HTTP status the provider answers.
     broken: Mutex<HashMap<String, u16>>,
+    /// The simulated kill: `submit` accepts the batch (the provider holds it) and then the
+    /// process dies before the id can be saved, so the call never returns.
+    kill_after_accepting: bool,
 }
 
 impl Api {
@@ -312,6 +315,7 @@ impl Api {
             submit_times: Mutex::new(Vec::new()),
             cancel_calls: Mutex::new(Vec::new()),
             broken: Mutex::new(HashMap::new()),
+            kill_after_accepting: false,
         }
     }
 
@@ -321,6 +325,12 @@ impl Api {
             .lock()
             .unwrap()
             .insert(batch_id.to_string(), status);
+        self
+    }
+
+    /// The process is killed after the provider accepts a submission and before its id is saved.
+    fn killed_after_accepting(mut self) -> Self {
+        self.kill_after_accepting = true;
         self
     }
 
@@ -430,6 +440,10 @@ impl BatchApi for Api {
                 .map(|i| (i.custom_id.clone(), id_of(&item_prompt(i))))
                 .collect(),
         );
+        drop(batches);
+        if self.kill_after_accepting {
+            panic!("simulated kill: the process died after the provider accepted batch {id}");
+        }
         Ok(id)
     }
     async fn poll(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
@@ -1774,4 +1788,68 @@ async fn a_transient_fetch_failure_on_resume_keeps_the_batch_live_and_resubmits_
         .all(|f| f.live_batch.as_deref() == Some("msgbatch_busy")));
     assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0, "not resubmitted");
     assert!(!cp.batches()[0].settled, "still live: a later resume polls it");
+}
+
+// ── WO7b F2: a kill between the provider accepting a batch and its id being saved ───────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_kill_after_the_provider_accepts_a_batch_and_before_its_id_is_saved_is_disclosed_and_resubmitted(
+) {
+    use futures::FutureExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+
+    // Process 1 is killed with the provider holding a batch whose id was never saved.
+    let api = Api::new().killed_after_accepting();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let died = std::panic::AssertUnwindSafe(run_stage(STAGE, &mut stage, StageMode::Batch, &c))
+        .catch_unwind()
+        .await;
+    assert!(died.is_err(), "the stub killed the process");
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+    assert!(cp.batches().is_empty(), "the batch id never reached the checkpoint");
+
+    // Process 2 finds the intent with no saved batch: it says a batch may have been submitted and
+    // orphaned, then sends the items once.
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(sorted(out.absorbed.clone()), ids(&all));
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1, "one resubmission");
+    assert_eq!(sorted(api.submitted_item_ids()[0].clone()), ids(&all));
+    let notes = meter.cost_cap_record().unwrap().notes;
+    let orphan_lines = notes
+        .iter()
+        .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+        .count();
+    assert_eq!(orphan_lines, 1, "the possible orphan is on the ledger once: {notes:?}");
+    assert!(
+        notes.iter().any(|n| n.contains("3 item")),
+        "the line says how many items it covered: {notes:?}"
+    );
+
+    // Process 3: the batch was saved and settled this time; the old intent is not reported again.
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert_eq!(out.resumed.len(), 3);
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
+    assert!(meter.cost_cap_record().unwrap().notes.is_empty());
 }

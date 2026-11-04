@@ -53,7 +53,7 @@ use super::batch_mode::{
 };
 use super::request_budget::ensure_request_fits;
 use super::*;
-use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint};
+use crate::checkpoint::{AbsorbedLine, BatchRecord, StageCheckpoint, SubmitIntent};
 use crate::jobs::JobStore;
 use crate::llm::{BatchItem, BatchResultRow, CacheTtl, LlmPort, LlmRequest, LlmResponse};
 
@@ -479,6 +479,7 @@ where
     if cancel_requested(ctx) {
         book.cancelled = true;
     }
+    disclose_orphaned_submissions(stage, ctx);
     let mut follow: BTreeMap<S::Id, Work<S::Id>> = BTreeMap::new();
     if !book.cancelled && ctx.batch.is_some() {
         follow = resume_batches(stage, s, ctx, &mut book, &by_key, &reqs).await;
@@ -1356,6 +1357,46 @@ fn round_ctx<'a>(stage: Stage, ctx: &'a StageCtx<'a>, api: &'a dyn BatchApi) -> 
     }
 }
 
+/// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
+/// and nothing was accepted).
+fn clear_submit_intent(ctx: &StageCtx<'_>) {
+    if let Some(cp) = ctx.checkpoint {
+        if let Err(e) = cp.save_intents(&[]) {
+            checkpoint_trouble(ctx, "submit intent", &e);
+        }
+    }
+}
+
+/// Resume, between the halves: a submission intent no saved batch carries the nonce of is a
+/// batch that may have been accepted by the provider while its id was never saved (the process
+/// was killed between `submit` returning and the batch list being written). It cannot be polled
+/// or cancelled from here, so the possible spend is put on the ledger, not hidden; its items that
+/// have no result are sent again by the rounds that follow. The intents are cleared once told.
+fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
+    let Some(cp) = ctx.checkpoint else {
+        return;
+    };
+    let intents = cp.intents();
+    if intents.is_empty() {
+        return;
+    }
+    let saved: BTreeSet<String> = cp.batches().into_iter().filter_map(|r| r.nonce).collect();
+    for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
+        let note = format!(
+            "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the              earlier process stopped after asking the provider to accept it and before saving its              id, so it cannot be polled or cancelled from here, and what it was charged, if              anything, is not in this ledger. Check the Anthropic console. The items of it that              have no result were submitted again.",
+            intent.items.len(),
+            stage.label()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+    if let Err(e) = cp.save_intents(&[]) {
+        checkpoint_trouble(ctx, "submit intent", &e);
+    }
+}
+
 /// True when the provider says the batch is gone for good: not found (404) or expired (410, or a
 /// `not_found_error`). Read from the typed failure's HTTP status and error type when the
 /// transport produced one, else from the text of the error (a stub, a wrapped message). A
@@ -1602,6 +1643,22 @@ where
         }
 
         let ttl = batch_cache_ttl(eff, sub.len());
+        // The intent goes to the checkpoint BEFORE the submit: a kill after the provider accepts
+        // the batch and before its id is saved leaves this behind, and the resume says so.
+        let nonce = crate::checkpoint::new_submit_nonce();
+        if let Some(cp) = ctx.checkpoint {
+            let intent = SubmitIntent {
+                nonce: nonce.clone(),
+                items: sub_cids
+                    .iter()
+                    .zip(sub)
+                    .map(|(cid, w)| (cid.clone(), w.id.to_string()))
+                    .collect(),
+            };
+            if let Err(e) = cp.save_intents(&[intent]) {
+                checkpoint_trouble(ctx, "submit intent", &e);
+            }
+        }
         let submitted: Result<String, anyhow::Error> = loop {
             let items: Vec<BatchItem> = sub
                 .iter()
@@ -1650,11 +1707,13 @@ where
         let batch_id = match submitted {
             Ok(id) => id,
             Err(e) if e.is::<JobCancelled>() => {
+                clear_submit_intent(ctx);
                 book.cancelled = true;
                 break;
             }
             Err(e) => {
                 // Nothing was accepted, so nothing can be running: safe to send again.
+                clear_submit_intent(ctx);
                 let class = classify_pass_error(&e);
                 let attempts = failure::attempts_of(&e);
                 let reason = format!(
@@ -1690,6 +1749,7 @@ where
                 .map(|(cid, w)| (cid.clone(), w.id.to_string()))
                 .collect(),
             settled: false,
+            nonce: Some(nonce),
         };
         let mut records = ctx
             .checkpoint
@@ -1697,8 +1757,10 @@ where
             .unwrap_or_default();
         records.push(record.clone());
         if let Some(cp) = ctx.checkpoint {
-            if let Err(e) = cp.save_batches(&records) {
-                checkpoint_trouble(ctx, "batch list", &e);
+            match cp.save_batches(&records) {
+                // The id is on file: the intent has done its job.
+                Ok(()) => clear_submit_intent(ctx),
+                Err(e) => checkpoint_trouble(ctx, "batch list", &e),
             }
         }
 
