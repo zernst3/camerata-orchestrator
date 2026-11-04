@@ -3616,11 +3616,7 @@ mod resume_by_member {
             .collect();
         assert!(!lines.is_empty(), "the batch's reply was recorded");
         for line in &lines {
-            assert_eq!(
-                line.batch_id,
-                Some(records[0].batch_id.clone()),
-                "{line:?}"
-            );
+            assert_eq!(line.batch_id, Some(records[0].batch_id.clone()), "{line:?}");
         }
     }
 

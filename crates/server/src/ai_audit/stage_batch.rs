@@ -864,12 +864,14 @@ fn settle_reply<S: StageItems>(
     book: &mut Book<S::Id>,
     work: &Work<S::Id>,
     resp: LlmResponse,
+    batch_id: Option<&str>,
 ) -> Settled<S::Id> {
     let id = &work.id;
     let wasted = usage_only(&resp);
     let line = ctx.checkpoint.map(|_| {
         let mut line = line_for(&id.to_string(), &resp);
         line.members = s.members(id);
+        line.batch_id = batch_id.map(str::to_string);
         line
     });
     match s.absorb(id, resp) {
@@ -1239,7 +1241,8 @@ async fn run_parallel<S>(
             }
             Called::Done(Ok(resp)) => {
                 aimd.on_success();
-                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp) {
+                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp, None)
+                {
                     queue.push_front(again);
                 }
             }
@@ -1325,6 +1328,13 @@ impl<'a> Repricer<'a> {
     }
 }
 
+/// Which batch a set of fetched rows came from, and how its usage is priced.
+#[derive(Clone, Copy)]
+struct BatchOrigin<'a> {
+    batch_id: &'a str,
+    ttl: CacheTtl,
+}
+
 /// Deal with every row of one fetched batch. `members` lists the batch's items as
 /// `(custom id, work)`. Returns the work to send in a follow-up submission: items the batch left
 /// out or errored (sent once more) and items whose reply the stage turned down and re-asked.
@@ -1335,8 +1345,9 @@ fn settle_rows<S: StageItems>(
     book: &mut Book<S::Id>,
     rows: Vec<BatchResultRow>,
     members: Vec<(String, Work<S::Id>)>,
-    ttl: CacheTtl,
+    origin: &BatchOrigin<'_>,
 ) -> Vec<Work<S::Id>> {
+    let BatchOrigin { batch_id, ttl } = *origin;
     let mut by_id: HashMap<String, BatchResultRow> =
         rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
     let mut repricer = Repricer::new(ctx.model, ttl);
@@ -1354,7 +1365,9 @@ fn settle_rows<S: StageItems>(
                 if let Some(m) = ctx.meter {
                     m.record_stage(stage, &resp);
                 }
-                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp) {
+                if let Settled::Retry(again) =
+                    settle_reply(stage, s, ctx, book, &work, resp, Some(batch_id))
+                {
                     follow.push(again);
                 }
             }
@@ -1592,7 +1605,11 @@ where
         .await
         {
             Ok(rows) => {
-                for work in settle_rows(stage, s, ctx, book, rows, members, ttl) {
+                let origin = BatchOrigin {
+                    batch_id: &record.batch_id,
+                    ttl,
+                };
+                for work in settle_rows(stage, s, ctx, book, rows, members, &origin) {
                     out.insert(work.id.clone(), work);
                 }
                 records[i].settled = true;
@@ -2227,7 +2244,11 @@ where
             Ok(rows) => {
                 let members: Vec<(String, Work<S::Id>)> =
                     sub_cids.iter().cloned().zip(sub.iter().cloned()).collect();
-                follow.extend(settle_rows(stage, s, ctx, book, rows, members, ttl));
+                let origin = BatchOrigin {
+                    batch_id: &batch_id,
+                    ttl,
+                };
+                follow.extend(settle_rows(stage, s, ctx, book, rows, members, &origin));
                 record.settled = true;
                 if let Some(last) = records.last_mut() {
                     last.settled = true;
