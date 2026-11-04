@@ -33,6 +33,84 @@ fn fixture_30k_is_deterministic() {
     );
 }
 
+/// The scale set has the shape of the server's measurement fixture (WO9c: 30,000 rows over 58
+/// categories of 8 rules of 5 sub-groups, 2,828 nodes), generated and not stored.
+#[test]
+fn fixture_30k_has_the_servers_shape() {
+    let ds = dataset_30k();
+    let count = |level: TreeLevel| {
+        ds.tree
+            .nodes
+            .iter()
+            .filter(|n| n.level == level && !n.thrown_out)
+            .count()
+    };
+    assert_eq!(count(TreeLevel::Category), 58, "about 60 categories");
+    assert_eq!(count(TreeLevel::Rule), 462);
+    assert_eq!(count(TreeLevel::Subgroup), 2_308);
+    let kept = ds.tree.nodes.iter().filter(|n| !n.thrown_out).count();
+    assert_eq!(kept, 2_828, "the server's node count");
+    // No node is empty: the tree has exactly the nodes that hold sites.
+    assert!(ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| !n.thrown_out)
+        .all(|n| n.counts.sites > 0));
+    // Ids are unique, so a category past the twelve names the pool has is still its own node.
+    let ids: BTreeSet<&String> = ds.tree.nodes.iter().map(|n| &n.id).collect();
+    assert_eq!(ids.len(), ds.tree.nodes.len());
+    // A few sub-groups need more than one page of sites.
+    let big = ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| n.level == TreeLevel::Subgroup && n.counts.sites > SITES_PAGE_SIZE)
+        .count();
+    assert!(
+        big >= 3,
+        "{big} sub-groups of more than {SITES_PAGE_SIZE} sites"
+    );
+}
+
+/// Severities and effort are the values the server writes (wire values), never display forms.
+#[test]
+fn severities_and_effort_use_the_servers_wire_values() {
+    for ds in [dataset_base(), dataset_30k()] {
+        for r in &ds.rows {
+            assert!(
+                ["critical", "high", "medium", "low"].contains(&r.severity.as_str()),
+                "severity {:?}",
+                r.severity
+            );
+            assert!(
+                ["critical", "high", "medium", "low"].contains(&r.stage1.severity.as_str()),
+                "stage 1 severity {:?}",
+                r.stage1.severity
+            );
+            if let Some(effort) = &r.stage1.effort {
+                assert!(
+                    ["low", "medium", "high"].contains(&effort.as_str()),
+                    "effort {effort:?}"
+                );
+            }
+            for e in &r.edits {
+                if e.field == camerata_api_types::edits::EditField::Severity {
+                    assert!(
+                        ["critical", "high", "medium", "low"].contains(&e.new.as_str()),
+                        "{e:?}"
+                    );
+                }
+            }
+            if let Some(s) = &r.stage2 {
+                for d in &s.disagreements {
+                    assert!(d.mine.chars().all(|c| !c.is_uppercase()), "{d:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_different_seed_gives_different_data() {
     let a = build(&Params::base(SEED));
@@ -108,9 +186,9 @@ fn rows_are_in_the_fixed_order_with_unique_keys() {
     let keys: BTreeSet<&String> = ds.rows.iter().map(|r| &r.site_key).collect();
     assert_eq!(keys.len(), ds.rows.len());
     let rank = |s: &str| match s {
-        "Critical" => 0,
-        "High" => 1,
-        "Medium" => 2,
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
         _ => 3,
     };
     for w in ds.rows.windows(2) {
