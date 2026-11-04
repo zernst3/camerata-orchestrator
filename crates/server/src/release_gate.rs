@@ -127,13 +127,12 @@ pub async fn build_product_package_with_stem(
     crate::report_export::require_complete_run(report, options)?;
     let report_json = crate::report_export::build_report_json(reviewed, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
-    // The secrets check over the PDF's data runs BEFORE the compile: Typst gets a temp dir, and
-    // a value that would be refused must never be written to disk, let alone compiled.
-    check_pdf_data(stem, &data_json).map_err(ReleaseError::Blocked)?;
-    // Everything but the PDF, then the held checks, then the compile. The held problems need only
-    // the rows, the overlay and the package's own datasets, so a held run is refused here, with
-    // the same 422 `release` gives, without Typst. The package carries no PDF yet; it is never
-    // returned without one.
+    // Everything but the PDF, then every check that needs no Typst (the secrets in every file,
+    // the held rows, the counts, the marking, the row parity), then the compile. The refusal is
+    // the whole list at once, the same 422 `release` gives, so a package that is held and also
+    // leaks a secret names both. A refusal comes before Typst is given anything: a value that
+    // would be refused is never written to disk, let alone compiled. The package carries no PDF
+    // yet; it is never returned without one.
     let mut package = assemble_package(
         reviewed,
         corpus,
@@ -141,66 +140,29 @@ pub async fn build_product_package_with_stem(
         stem,
         (report_json, data_json, Vec::new()),
     )?;
-    if let Some(failure) = held_refusal(&package) {
+    if let Some(failure) = held_refusal(&package)? {
         return Err(ReleaseError::Blocked(failure).into());
     }
     package.pdf = crate::report_export::compile_pdf_from_data(&package.data_json).await?;
     Ok(package)
 }
 
-/// The refusals [`release`] would give for rows held for a reviewer, worked out before the PDF is
-/// compiled: undecided junk content, unverified evidence, restored findings and Engine Check Nos
-/// (an internal package, which [`release_internal`] releases, skips these four), the unsynced
-/// reviewer changes, and a merge or group decision with no record behind it (read from the
-/// package's own `findings.json` and `decisions.json`). Only checks that `release` runs over the
-/// same lists, so a package this clears is still held to every other check by `release`.
-fn held_refusal(package: &ProductPackage) -> Option<GateFailure> {
-    let mut report = GateReport::default();
-    let held = |problems: &[Problem]| {
-        if package.internal {
-            Vec::new()
-        } else {
-            problems.to_vec()
-        }
-    };
-    report.record(CheckId::Content, held(&package.undecided_junk_content));
-    report.record(
-        CheckId::EvidenceUnverified,
-        held(&package.undecided_unverified_evidence),
-    );
-    report.record(
-        CheckId::RestoredWithoutDecision,
-        held(&package.restored_without_decision),
-    );
-    report.record(
-        CheckId::EngineCheckNoWithoutCorrection,
-        held(&package.engine_check_no_without_correction),
-    );
-    report.record(
-        CheckId::UnsyncedReviewerChanges,
-        package.unsynced_reviewer_changes.clone(),
-    );
-    let mut entries = std::collections::BTreeMap::new();
-    entries.insert("findings.json".to_string(), package.findings_json.clone());
-    if let Some((_, bytes)) = package
-        .datasets
-        .iter()
-        .find(|(name, _)| name == crate::report_export::decisions_file::DECISIONS_FILE)
-    {
-        entries.insert(
-            crate::report_export::decisions_file::DECISIONS_FILE.to_string(),
-            bytes.clone(),
-        );
-    }
-    report.record(
-        CheckId::MergedWithoutDecision,
-        held::merged_without_decision_in_archive(&entries),
-    );
-    let report = report.sorted();
-    (!report.is_clean()).then(|| GateFailure {
+/// A stand-in for the PDF while the real one is not compiled yet: it starts the way a PDF does,
+/// so the archive checks that read the member's name and first bytes pass over it.
+const PRE_COMPILE_PDF: &[u8] = b"%PDF-1.7\n% not compiled yet\n";
+
+/// Every refusal [`release`] would give, worked out before the PDF is compiled: the package is
+/// zipped with a stand-in PDF and held to [`gate_report`], the one list `release` uses. Only the
+/// PDF's own bytes are not read (an archive pass over them needs the compiled file), so a package
+/// this clears is still held to those by `release`. The list is whole: a package that is held and
+/// also leaks a secret is refused naming both.
+fn held_refusal(package: &ProductPackage) -> Result<Option<GateFailure>, ReleaseError> {
+    let bytes = zip_package(package, PRE_COMPILE_PDF)?;
+    let report = gate_report(package, &bytes, package.internal);
+    Ok((!report.is_clean()).then(|| GateFailure {
         stem: package.stem.clone(),
         report,
-    })
+    }))
 }
 
 /// The rest of the assembly, around an already-compiled PDF. Split out so the gate's own tests
@@ -587,23 +549,48 @@ pub fn release_internal(package: ProductPackage) -> Result<ReleasedZip, ReleaseE
     release_checked(package, true)
 }
 
-fn release_checked(
-    package: ProductPackage,
-    internal_ok: bool,
-) -> Result<ReleasedZip, ReleaseError> {
-    let allow_incomplete = internal_ok && package.internal;
-    let bytes = crate::build_product_zip(
+fn zip_package(package: &ProductPackage, pdf: &[u8]) -> Result<Vec<u8>, ReleaseError> {
+    crate::build_product_zip(
         &package.stem,
-        &package.pdf,
+        pdf,
         &package.xlsx,
         &package.findings_json,
         &package.readme,
         &package.datasets,
         &package.provenance,
     )
-    .map_err(|e| ReleaseError::Assembly(e.to_string()))?;
+    .map_err(|e| ReleaseError::Assembly(e.to_string()))
+}
 
-    let mut report = audit_zip_with(&bytes, None, allow_incomplete, false);
+fn release_checked(
+    package: ProductPackage,
+    internal_ok: bool,
+) -> Result<ReleasedZip, ReleaseError> {
+    let allow_incomplete = internal_ok && package.internal;
+    let bytes = zip_package(&package, &package.pdf)?;
+    let report = gate_report(&package, &bytes, allow_incomplete);
+
+    if report.is_clean() {
+        Ok(ReleasedZip {
+            stem: package.stem,
+            bytes,
+            report,
+        })
+    } else {
+        Err(ReleaseError::Blocked(GateFailure {
+            stem: package.stem,
+            report,
+        }))
+    }
+}
+
+/// Every check over the zip `bytes` of `package`, and over the package's own rows: the archive
+/// pass ([`audit_zip_with`]), the secrets check over the PDF's data, the counts, the marking and
+/// the row parity, and the rows held for a reviewer. [`release`] holds the real archive to it, and
+/// the assembly holds a stand-in-PDF archive to the same function before it compiles
+/// ([`held_refusal`]), so the two can never disagree about a check.
+fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -> GateReport {
+    let mut report = audit_zip_with(bytes, None, allow_incomplete, false);
     // An internal package (the operator's own review, never a client's) may carry rows held for a
     // reviewer's decision: each is marked held in its workbook. A client package is refused until
     // every held row has a decision.
@@ -614,7 +601,7 @@ fn release_checked(
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
     // confidentiality line to them.
-    if let Ok(entries) = read_zip_entries(&bytes) {
+    if let Ok(entries) = read_zip_entries(bytes) {
         report.record(
             CheckId::Counts,
             pdf_count_reconciliation_problems(&entries, &package.report_json),
@@ -656,20 +643,7 @@ fn release_checked(
         CheckId::UnsyncedReviewerChanges,
         package.unsynced_reviewer_changes.clone(),
     );
-    let report = report.sorted();
-
-    if report.is_clean() {
-        Ok(ReleasedZip {
-            stem: package.stem,
-            bytes,
-            report,
-        })
-    } else {
-        Err(ReleaseError::Blocked(GateFailure {
-            stem: package.stem,
-            report,
-        }))
-    }
+    report.sorted()
 }
 
 /// The PDF-only route's gate: the secrets check over `data.json` alone (that route ships no zip,

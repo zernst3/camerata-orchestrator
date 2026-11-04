@@ -349,6 +349,67 @@ async fn seed_moved_variant_produces_stale_records() {
     assert_eq!(row["line"], 47);
 }
 
+/// Every row of the run, read page by page from the category nodes.
+async fn all_rows(
+    app: &axum::Router,
+    seeded: &Seeded,
+) -> Vec<camerata_api_types::review_view::SiteRow> {
+    let tree: TreeView = get(app, seeded, "the tree", "review/tree").await;
+    let mut rows = Vec::new();
+    for node in tree.nodes.iter().filter(|n| n.level == TreeLevel::Category) {
+        let page: SitesPage = get(
+            app,
+            seeded,
+            "a node's sites",
+            &format!("review/sites?node={}", node.id),
+        )
+        .await;
+        rows.extend(page.rows);
+    }
+    rows
+}
+
+#[tokio::test]
+async fn a_stale_edit_on_a_moved_site_shows_on_the_moved_row() {
+    let (_dir, seeded) = seed(Variant::Moved).await;
+    let (_state, app) = reopen(&seeded);
+    let edits: camerata_api_types::edits::EditsResp =
+        get(&app, &seeded, "the edits", "edits").await;
+    assert_eq!(edits.stale.len(), 1, "the seed leaves one stale edit");
+    let moved_key = edits.stale[0].current_key.clone();
+    assert!(!moved_key.is_empty(), "the engine found where it went");
+
+    let rows = all_rows(&app, &seeded).await;
+    let row = rows
+        .iter()
+        .find(|r| r.site_key == moved_key)
+        .expect("the moved row is on a page");
+    assert!(
+        row.markers.contains(&Marker::Stale),
+        "the moved row carries the Stale marker: {:?}",
+        row.markers
+    );
+    assert!(
+        row.edits
+            .iter()
+            .any(|e| e.id == edits.stale[0].edit.id && e.stale),
+        "the moved row lists the stale edit with stale set: {:?}",
+        row.edits
+    );
+    // The tree counts it on the row's node, not only in the shell.
+    let tree: TreeView = get(&app, &seeded, "the tree", "review/tree").await;
+    let stale_in_tree: usize = tree
+        .nodes
+        .iter()
+        .filter(|n| n.level == TreeLevel::Category)
+        .map(|n| n.counts.stale)
+        .sum();
+    assert!(
+        stale_in_tree >= 2,
+        "the stale decision and the stale edit: {stale_in_tree}"
+    );
+}
+
 // ── refusing a data directory with something in it ───────────────────────────────────────
 
 #[tokio::test]
@@ -471,6 +532,30 @@ async fn seeded_project_export_is_blocked_by_exactly_the_seeded_held_rows() {
         let refused = gate_refusals(&reviewed).expect("the gate must refuse the seeded project");
         assert_eq!(refused, expected, "{variant:?}: the gate");
     }
+}
+
+#[tokio::test]
+async fn an_uncorrected_engine_check_no_is_still_refused_after_a_rerun() {
+    // The No was given on the first run; the rerun (the moved variant) has the same site under
+    // the same key and no verdict of its own.
+    let (_dir, seeded) = seed(Variant::Moved).await;
+    let (state, app) = reopen(&seeded);
+    let (path, line) = place_of("sql-11", Variant::Moved);
+    let want: Held = (HoldReason::EngineCheckNoWithoutCorrection, path, line);
+
+    let gate: ExportGateView = get(&app, &seeded, "the export gate", "review/export-gate").await;
+    assert!(
+        view_rows(&gate).contains(&want),
+        "the panel still lists the row: {:?}",
+        view_rows(&gate)
+    );
+    let latest = state.inspections().latest(&seeded.project_id).unwrap();
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &seeded.project_id, &latest);
+    let refused = gate_refusals(&reviewed).expect("the gate must refuse the seeded project");
+    assert!(
+        refused.contains(&want),
+        "the export is refused naming the site: {refused:?}"
+    );
 }
 
 // ── a loader that forgets the Engine Check's evidence lets the gate pass silently ─────────

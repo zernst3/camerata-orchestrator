@@ -1025,8 +1025,9 @@ fn the_order_check_catches_a_swapped_assembly() {
 
 #[test]
 fn the_assembly_checks_and_holds_before_it_compiles() {
-    // The secrets check over `data.json` runs before Typst is given the file, and the held
-    // checks run before Typst is run at all: a refusal needs no Typst and no value reaches disk.
+    // Every check that needs no Typst (the secrets in every file and in the PDF's data, the held
+    // rows, the counts, the marking, the row parity) runs as ONE list before Typst is run at all:
+    // a refusal needs no Typst, names every problem at once, and no value reaches disk.
     // `gated_release(` pins the routes; this pins the order inside the one assembly.
     let source = production_part(include_str!("../release_gate.rs"));
     let start = source
@@ -1034,11 +1035,32 @@ fn the_assembly_checks_and_holds_before_it_compiles() {
         .expect("the assembly");
     let body = &source[start..];
     let body = &body[..body.find("\n}\n").expect("the end of the assembly")];
-    in_order(
-        body,
-        &["check_pdf_data(", "held_refusal(", "compile_pdf_from_data("],
-    )
-    .unwrap_or_else(|e| panic!("the assembly must check, then hold, then compile: {e}"));
+    in_order(body, &["held_refusal(", "compile_pdf_from_data("])
+        .unwrap_or_else(|e| panic!("the assembly must check and hold, then compile: {e}"));
+    assert!(
+        !body.contains("check_pdf_data("),
+        "the secrets check is part of the one list, not an early return before it"
+    );
+
+    // The one list is the one `release` runs: both call `gate_report`, and it holds the secrets
+    // over the PDF's data beside the archive pass.
+    let function = |name: &str| {
+        let at = source.find(name).unwrap_or_else(|| panic!("{name}"));
+        let rest = &source[at..];
+        &rest[..rest.find("\n}\n").expect("the end of the function")]
+    };
+    assert!(function("fn held_refusal(").contains("gate_report("));
+    assert!(function("fn release_checked(").contains("gate_report("));
+    let report = function("fn gate_report(");
+    for needle in [
+        "audit_zip_with(",
+        "pdf_data_problems(",
+        "pdf_count_reconciliation_problems(",
+        "pdf_marking_problems(",
+        "row_parity(",
+    ] {
+        assert!(report.contains(needle), "gate_report must run {needle}");
+    }
 }
 
 #[test]
