@@ -150,12 +150,13 @@ pub enum EngineMode {
     AllVerdicts,
 }
 
-/// The reasons that may exceed the budget (design A4).
-pub const OVER_BUDGET_REASONS: [EscalationReason; 4] = [
+/// The reasons that may exceed the budget (design A4 and D5): the server's default set.
+pub const OVER_BUDGET_REASONS: [EscalationReason; 5] = [
     EscalationReason::UnauthenticatedReach,
     EscalationReason::SecretExposure,
     EscalationReason::DataLoss,
     EscalationReason::CrossTenant,
+    EscalationReason::EvidenceUnverified,
 ];
 
 impl Params {

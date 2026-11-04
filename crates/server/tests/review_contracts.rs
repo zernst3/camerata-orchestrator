@@ -775,7 +775,8 @@ async fn escalation_budget_preview_writes_nothing() {
     let project_before = f.state.projects().get(&f.project_id).unwrap().review;
     let entry_before = f.state.inspections().latest(&f.project_id).unwrap();
 
-    let req = json!({ "rate_per_kloc": 9.0, "floor": 0, "over_budget_reasons": ["evidence_unverified"] });
+    let req =
+        json!({ "rate_per_kloc": 9.0, "floor": 0, "over_budget_reasons": ["evidence_unverified"] });
     let outcome: EscalationBudgetOutcome =
         post_ok(&f, "the preview", "/escalation-budget/preview", req).await;
     assert!(!outcome.applied);

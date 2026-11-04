@@ -396,3 +396,72 @@ async fn previewing_the_line_writes_nothing() {
     let after = load(&source).await.unwrap();
     assert_eq!(after, v, "the saved settings are unchanged by a preview");
 }
+
+/// The opening tag of the checkbox for `label` (the `<input` just before its words).
+fn checkbox_for(html: &str, label: &str) -> String {
+    let at = html
+        .find(&format!("<span>{label}</span>"))
+        .unwrap_or_else(|| panic!("no checkbox labelled {label}: {html}"));
+    let start = html[..at].rfind("<input").unwrap();
+    let end = html[start..].find('>').unwrap() + start;
+    html[start..=end].to_string()
+}
+
+#[test]
+fn evidence_unverified_is_drawn_ticked_and_disabled_in_every_state() {
+    for id in STATES {
+        let html = fragment(id);
+        let tag = checkbox_for(&html, "evidence unverified");
+        assert!(tag.contains("checked"), "{id}: ticked: {tag}");
+        assert!(tag.contains("disabled"), "{id}: locked: {tag}");
+        // The others stay ordinary checkboxes (not locked) in a state with nothing in flight.
+        if id == "settings/defaults" {
+            let tag = checkbox_for(&html, "secret exposure");
+            assert!(!tag.contains("disabled"), "{tag}");
+        }
+    }
+}
+
+#[test]
+fn an_invalid_rate_says_the_budget_was_not_computed() {
+    let html = fragment("settings/invalid");
+    assert!(
+        html.contains("Counted lines 12,000, budget not computed"),
+        "the line says what is missing rather than going silent: {html}"
+    );
+}
+
+/// The body of the first CSS rule whose selector is exactly `selector`.
+fn css_rule(selector: &str) -> String {
+    let css = crate::style::GLOBAL_CSS;
+    let at = css
+        .find(&format!("{selector} {{"))
+        .unwrap_or_else(|| panic!("no CSS rule for {selector}"));
+    let open = css[at..].find('{').unwrap() + at;
+    let close = css[open..].find('}').unwrap() + open;
+    css[open + 1..close].to_string()
+}
+
+#[test]
+fn a_disabled_apply_has_the_inert_look_not_the_amber_bevel() {
+    // The global theme gives .btn-run a 2px amber bevel, a drop shadow and a text shadow that
+    // outlive its :disabled colours; the lane's own rule (higher specificity) takes them off.
+    let rule = css_rule(".review-settings-apply.review-settings-apply:disabled");
+    for want in [
+        "border-color: var(--line)",
+        "box-shadow: none",
+        "text-shadow: none",
+    ] {
+        assert!(rule.contains(want), "{want} in {rule}");
+    }
+    // Every state with a disabled Apply carries the class that rule is on.
+    for id in [
+        "settings/defaults",
+        "settings/invalid",
+        "settings/saving",
+        "settings/run-in-flight",
+    ] {
+        let tag = tag_with_class(&fragment(id), "review-settings-apply");
+        assert!(tag.contains("disabled"), "{id}: {tag}");
+    }
+}

@@ -21,9 +21,9 @@ use camerata_api_types::review_view::{
 use camerata_ui_core::models::ModelsResp;
 use camerata_ui_core::review_settings::{
     budget_line, effect_sentence, field_action, field_hint, formula_apply_state, model_groups,
-    preview_request, reason_choices, reason_label, reasons_note, revert_field, sample_apply_state,
-    sample_hint, sample_size, toggle_reason, ApplyState, Field, FieldAction, SettingsDraft,
-    SettingsEvent, Stage,
+    preview_is_current, preview_request, reason_choices, reason_label, reason_locked, reasons_note,
+    revert_field, sample_apply_state, sample_hint, sample_size, toggle_reason, ApplyState, Field,
+    FieldAction, SettingsDraft, SettingsEvent, Stage,
 };
 use dioxus::prelude::*;
 
@@ -196,8 +196,8 @@ pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
                         label { class: "audit-thorough-toggle", key: "{reason.as_str()}",
                             input {
                                 r#type: "checkbox",
-                                checked: props.draft.reasons.contains(&reason),
-                                disabled: locked || busy,
+                                checked: reason_locked(reason) || props.draft.reasons.contains(&reason),
+                                disabled: locked || busy || reason_locked(reason),
                                 onchange: move |_| on_event.call(SettingsEvent::ToggleReason(reason)),
                             }
                             span { "{reason_label(reason)}" }
@@ -400,12 +400,12 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
                     Field::Floor => next.floor = text,
                     Field::Sample => next.sample = text,
                 }
-                request_preview(&source, &current_view, &next, preview);
+                request_preview(&source, &current_view, &next, view, draft, preview);
                 draft.set(Some(next));
             }
             SettingsEvent::ToggleReason(reason) => {
                 let next = toggle_reason(&current, reason);
-                request_preview(&source, &current_view, &next, preview);
+                request_preview(&source, &current_view, &next, view, draft, preview);
                 draft.set(Some(next));
             }
             SettingsEvent::Key(field, key) => {
@@ -453,7 +453,7 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
                     }
                     FieldAction::Revert => {
                         let next = revert_field(&current, &current_view, field);
-                        request_preview(&source, &current_view, &next, preview);
+                        request_preview(&source, &current_view, &next, view, draft, preview);
                         draft.set(Some(next));
                     }
                     FieldAction::Nothing => {}
@@ -521,8 +521,10 @@ pub fn ReviewSettingsHost(props: ReviewSettingsHostProps) -> Element {
 }
 
 /// Ask the server what `next` would do to the line, when it is a valid unsaved formula, and keep
-/// the answer only if the draft still describes the same request when it arrives. A draft that
-/// cannot be previewed clears the preview. This writes nothing and calls no model.
+/// the answer only if the draft (read again when the answer arrives) still describes the same
+/// request. A slow earlier reply is dropped, never shown over a newer preview or after the draft
+/// turned invalid. A draft that cannot be previewed clears the preview. This writes nothing and
+/// calls no model.
 #[cfg_attr(
     not(test),
     expect(
@@ -534,6 +536,8 @@ fn request_preview(
     source: &SettingsSource,
     view: &SettingsData,
     next: &SettingsDraft,
+    current_view: Signal<Option<SettingsData>>,
+    current_draft: Signal<Option<SettingsDraft>>,
     mut preview: Signal<Option<EscalationBudgetOutcome>>,
 ) {
     let Some(req) = preview_request(view, next) else {
@@ -542,8 +546,14 @@ fn request_preview(
     };
     let source = source.clone();
     spawn(async move {
-        if let Ok(outcome) = source.0.preview_budget(req).await {
-            preview.set(Some(outcome));
+        if let Ok(outcome) = source.0.preview_budget(req.clone()).await {
+            let still_asked = match (current_view(), current_draft()) {
+                (Some(v), Some(d)) => preview_is_current(&v, &d, &req),
+                _ => false,
+            };
+            if still_asked {
+                preview.set(Some(outcome));
+            }
         }
     });
 }

@@ -93,6 +93,16 @@ pub fn group_thousands(n: usize) -> String {
     out
 }
 
+/// The reason that is always escalated (design D5) and so always ticked.
+const LOCKED_REASON: EscalationReason = EscalationReason::EvidenceUnverified;
+
+/// `reasons` once each, with the locked reason added, in the closed list's priority order.
+fn with_locked(reasons: &[EscalationReason]) -> Vec<EscalationReason> {
+    let mut all = reasons.to_vec();
+    all.push(LOCKED_REASON);
+    in_priority_order(&all)
+}
+
 /// `reasons` once each, in the closed list's priority order.
 fn in_priority_order(reasons: &[EscalationReason]) -> Vec<EscalationReason> {
     EscalationReason::ALL
@@ -108,7 +118,7 @@ impl SettingsDraft {
             rate: format_rate(view.escalation.rate_per_kloc),
             floor: view.escalation.floor.to_string(),
             sample: view.engine_check.sample_size_per_run.to_string(),
-            reasons: in_priority_order(&view.escalation.over_budget_reasons),
+            reasons: with_locked(&view.escalation.over_budget_reasons),
         }
     }
 
@@ -182,7 +192,8 @@ pub fn escalation_req(
     Ok(EscalationBudgetReq {
         rate_per_kloc,
         floor,
-        over_budget_reasons: in_priority_order(&draft.reasons),
+        // Evidence unverified is always escalated, so the request always carries it.
+        over_budget_reasons: with_locked(&draft.reasons),
     })
 }
 
@@ -265,8 +276,31 @@ pub fn revert_field(
     out
 }
 
-/// `draft` with `reason` ticked or unticked.
+/// Whether `reason` is ticked and cannot be changed: evidence unverified is always escalated
+/// (design D5), so the lane shows it checked and disabled.
+pub fn reason_locked(reason: EscalationReason) -> bool {
+    reason == LOCKED_REASON
+}
+
+/// Whether the answer to the preview `answered` still describes the draft: the draft must still
+/// be a valid unsaved formula, and the same one. A slow earlier reply must not overwrite the
+/// preview of a newer draft, nor reappear after the draft turned invalid or was reverted.
+pub fn preview_is_current(
+    view: &ReviewSettingsView,
+    draft: &SettingsDraft,
+    answered: &EscalationBudgetReq,
+) -> bool {
+    preview_request(view, draft).as_ref() == Some(answered)
+}
+
+/// `draft` with `reason` ticked or unticked. The locked reason stays ticked.
 pub fn toggle_reason(draft: &SettingsDraft, reason: EscalationReason) -> SettingsDraft {
+    if reason_locked(reason) {
+        return SettingsDraft {
+            reasons: with_locked(&draft.reasons),
+            ..draft.clone()
+        };
+    }
     let mut reasons = draft.reasons.clone();
     if let Some(at) = reasons.iter().position(|r| *r == reason) {
         reasons.remove(at);
@@ -274,7 +308,7 @@ pub fn toggle_reason(draft: &SettingsDraft, reason: EscalationReason) -> Setting
         reasons.push(reason);
     }
     SettingsDraft {
-        reasons: in_priority_order(&reasons),
+        reasons: with_locked(&reasons),
         ..draft.clone()
     }
 }
@@ -311,7 +345,7 @@ pub fn preview_request(
 }
 
 /// The budget line under the formula: counted lines and what the draft gives. A draft that
-/// cannot be applied claims no budget.
+/// cannot be applied claims no budget and says so.
 pub fn budget_line(counted_lines: usize, draft: &SettingsDraft, limits: &SettingsLimits) -> String {
     let lines = group_thousands(counted_lines);
     match escalation_req(draft, limits) {
@@ -319,7 +353,7 @@ pub fn budget_line(counted_lines: usize, draft: &SettingsDraft, limits: &Setting
             "Counted lines {lines} \u{2192} budget {}",
             budget_for(counted_lines, req.rate_per_kloc, req.floor)
         ),
-        Err(_) => format!("Counted lines {lines}"),
+        Err(_) => format!("Counted lines {lines}, budget not computed"),
     }
 }
 

@@ -190,7 +190,11 @@ fn the_formula_request_carries_the_typed_rate_floor_and_ticked_reasons() {
     assert_eq!(req.floor, 35);
     assert_eq!(
         req.over_budget_reasons,
-        vec![EscalationReason::SecretExposure]
+        vec![
+            EscalationReason::SecretExposure,
+            EscalationReason::EvidenceUnverified
+        ],
+        "evidence unverified rides along: it is always escalated (D5)"
     );
     let bad = SettingsDraft {
         floor: "x".into(),
@@ -459,8 +463,8 @@ fn the_budget_line_recomputes_from_the_typed_rate_and_floor() {
     };
     assert_eq!(
         budget_line(300_000, &bad, &v.limits),
-        "Counted lines 300,000",
-        "no budget is claimed for a value that cannot be applied"
+        "Counted lines 300,000, budget not computed",
+        "no budget is claimed for a value that cannot be applied, and the line says so"
     );
 }
 
@@ -637,4 +641,69 @@ fn reasons_are_labelled_as_the_spec_words_them() {
     );
     assert_eq!(reason_label(EscalationReason::RuleMisfit), "a rule misfit");
     assert!(reasons_note().contains("critical"));
+}
+
+#[test]
+fn evidence_unverified_stays_ticked_and_locked() {
+    let v = view();
+    let all = draft(&v);
+    assert!(all.reasons.contains(&EscalationReason::EvidenceUnverified));
+    assert!(reason_locked(EscalationReason::EvidenceUnverified));
+    assert!(!reason_locked(EscalationReason::SecretExposure));
+    // A click on it changes nothing.
+    assert_eq!(
+        toggle_reason(&all, EscalationReason::EvidenceUnverified),
+        all,
+        "it cannot be unticked"
+    );
+    // Whatever the draft holds, the request carries it (the server refuses a set without it).
+    let none = SettingsDraft {
+        reasons: Vec::new(),
+        ..draft(&v)
+    };
+    let req = escalation_req(&none, &v.limits).unwrap();
+    assert_eq!(
+        req.over_budget_reasons,
+        vec![EscalationReason::EvidenceUnverified]
+    );
+}
+
+#[test]
+fn a_preview_answer_is_kept_only_for_the_request_the_draft_still_describes() {
+    let v = view();
+    let at_two = SettingsDraft {
+        rate: "2.0".into(),
+        ..draft(&v)
+    };
+    let at_three = SettingsDraft {
+        rate: "3.0".into(),
+        ..draft(&v)
+    };
+    let invalid = SettingsDraft {
+        rate: "x".into(),
+        ..draft(&v)
+    };
+    let asked = preview_request(&v, &at_two).unwrap();
+    assert!(preview_is_current(&v, &at_two, &asked), "same draft");
+    assert!(
+        !preview_is_current(&v, &at_three, &asked),
+        "a slow reply for 2.0 must not overwrite the preview of 3.0"
+    );
+    assert!(
+        !preview_is_current(&v, &invalid, &asked),
+        "a reply must not come back after the draft turned invalid"
+    );
+    assert!(
+        !preview_is_current(&v, &draft(&v), &asked),
+        "nor after the draft went back to the saved formula"
+    );
+}
+
+#[test]
+fn the_fixture_settings_hold_the_five_default_over_budget_reasons() {
+    assert_eq!(
+        view().escalation.over_budget_reasons,
+        EscalationReason::default_over_budget_set(),
+        "the fixture mirrors the server's default set, evidence unverified included"
+    );
 }
