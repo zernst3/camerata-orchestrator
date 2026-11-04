@@ -13,6 +13,7 @@ pub mod decision_memory;
 pub mod decision_sync;
 pub mod decisions;
 pub mod designs;
+pub mod edits;
 pub mod git;
 pub mod govdev;
 pub mod lenient;

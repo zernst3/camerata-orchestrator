@@ -5,6 +5,7 @@
 //! a text field does, and never with Ctrl, Alt or Cmd held. Anything else returns `None` for
 //! every key there is, so a letter typed into a reason box can never be read as a decision.
 
+use crate::edits::DetailKey;
 use crate::triage::{FocusMove, KeyMods, PaneCommand, PaneFocus, TriageState};
 
 /// What the cursor is on, which decides what `C`, `I`, `F` and `T` mean.
@@ -46,6 +47,8 @@ pub enum TreeCommand {
     OpenCode,
     /// `B` on a node or site: the stacked view of its sub-group.
     OpenStack,
+    /// `E`, `M`, `A` or `U` on a site: the detail pane's forms (spec section 11, "Detail").
+    Detail(DetailKey),
 }
 
 /// The key map as a pure function. `key` is the DOM key (`ArrowDown`, `c`, `" "`).
@@ -98,6 +101,9 @@ pub fn tree_command(
     }
     match (key.to_ascii_lowercase().as_str(), at) {
         ("e", CursorKind::Node) => Some(TreeCommand::EditSummary),
+        ("e" | "m" | "a" | "u", CursorKind::Site | CursorKind::OutlierSite) => {
+            crate::edits::detail_key(key).map(TreeCommand::Detail)
+        }
         ("o", CursorKind::Site | CursorKind::OutlierSite) => Some(TreeCommand::OpenCode),
         ("b", CursorKind::Node | CursorKind::Site | CursorKind::OutlierSite) => {
             Some(TreeCommand::OpenStack)
@@ -113,11 +119,11 @@ pub fn tree_keys_armed(focus: PaneFocus) -> bool {
     tree_command(focus, "ArrowDown", KeyMods::none(), CursorKind::Node).is_some()
 }
 
-/// The indicator's text. It names only keys that act: O (code) and B (stack) are mapped but not
-/// wired in the host yet, so they are left out until WO11.
+/// The indicator's text. It names only keys that act: O (code) and B (stack) open the viewer and
+/// the stacked view, and E, M, A and U open the site detail's forms.
 pub fn keys_hint(armed: bool, prompt_open: bool) -> &'static str {
     if armed {
-        "Keys: \u{2191}\u{2193} move \u{b7} \u{2192} open \u{b7} \u{2190} close \u{b7} Enter into the sites \u{b7} C I F T decide \u{b7} Space tick an outlier \u{b7} E edit the summary"
+        "Keys: \u{2191}\u{2193} move \u{b7} \u{2192} open \u{b7} \u{2190} close \u{b7} Enter into the sites \u{b7} C I F T decide \u{b7} Space tick an outlier \u{b7} E edit (a node's summary, or a site's field then H D X T S R K G) \u{b7} M merge \u{b7} A add \u{b7} U split \u{b7} O code \u{b7} B stack"
     } else if prompt_open {
         "Keys are off while you type. Enter commits, Esc cancels."
     } else {
@@ -136,7 +142,7 @@ mod tests {
         CursorKind::Site,
         CursorKind::OutlierSite,
     ];
-    const KEYS: [&str; 22] = [
+    const KEYS: [&str; 26] = [
         "ArrowDown",
         "ArrowUp",
         "ArrowRight",
@@ -155,6 +161,10 @@ mod tests {
         "F",
         "T",
         "E",
+        "m",
+        "a",
+        "u",
+        "A",
         "g",
         "x",
         "Tab",
@@ -273,10 +283,34 @@ mod tests {
             );
             assert_eq!(on("o"), Some(TreeCommand::OpenCode));
             assert_eq!(on("b"), Some(TreeCommand::OpenStack));
+            // The detail pane's keys (spec section 11): E then a field letter, M, A and U.
+            assert_eq!(on("e"), Some(TreeCommand::Detail(DetailKey::Edit)));
+            assert_eq!(on("E"), Some(TreeCommand::Detail(DetailKey::Edit)));
+            assert_eq!(on("m"), Some(TreeCommand::Detail(DetailKey::Merge)));
+            assert_eq!(on("a"), Some(TreeCommand::Detail(DetailKey::Add)));
+            assert_eq!(on("u"), Some(TreeCommand::Detail(DetailKey::Split)));
+        }
+    }
+
+    #[test]
+    fn the_detail_keys_belong_to_a_site_and_a_node_keeps_its_summary_edit() {
+        let on = |key, at| press(PaneFocus::Cursor, key, at);
+        // On a node `E` is still the summary; merge, add and split are a site's.
+        assert_eq!(on("e", CursorKind::Node), Some(TreeCommand::EditSummary));
+        for key in ["m", "a", "u"] {
+            assert_eq!(on(key, CursorKind::Node), None, "{key}");
+            assert_eq!(on(key, CursorKind::None), None, "{key}");
+        }
+        // Not armed, nothing fires; a held modifier claims the press (Cmd-A is select all).
+        for key in ["e", "m", "a", "u"] {
+            assert_eq!(press(PaneFocus::ReasonPrompt, key, CursorKind::Site), None);
+            let meta = KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            };
             assert_eq!(
-                on("e"),
-                None,
-                "editing a site's fields is the detail pane's"
+                tree_command(PaneFocus::Cursor, key, meta, CursorKind::Site),
+                None
             );
         }
     }
@@ -292,13 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn the_armed_hint_names_no_key_that_does_nothing() {
-        // O (code) and B (stack) are mapped but the host does not act on them yet; the hint
-        // must not advertise them until WO11 wires the viewer and the stack.
+    fn the_armed_hint_advertises_the_code_viewer_the_stack_and_the_detail_keys() {
+        // WO10 left O and B out of the hint while they did nothing; the host wires them now.
         let hint = keys_hint(true, false);
-        assert!(!hint.contains("O code"), "{hint}");
-        assert!(!hint.contains("B stack"), "{hint}");
-        // The map entries stay: the keys still resolve to their commands.
+        for want in ["O code", "B stack", "E edit", "M merge", "A add", "U split"] {
+            assert!(hint.contains(want), "{want}: {hint}");
+        }
+        // Every key it names resolves to a command somewhere.
         assert_eq!(
             press(PaneFocus::Cursor, "o", CursorKind::Site),
             Some(TreeCommand::OpenCode)
@@ -307,6 +341,9 @@ mod tests {
             press(PaneFocus::Cursor, "b", CursorKind::Node),
             Some(TreeCommand::OpenStack)
         );
+        // Closed, the hint does not offer them.
+        assert!(!keys_hint(false, false).contains("O code"));
+        assert!(!keys_hint(false, true).contains("O code"));
     }
 
     #[test]
