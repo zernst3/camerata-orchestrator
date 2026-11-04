@@ -18,8 +18,8 @@ use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
 use camerata_api_types::edits::{EditField, NewEditReq};
 use camerata_api_types::review_view::{
     CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckError, EngineCheckLane,
-    EngineCheckVerdictReq, EscalationStatus, HoldReason, SampleStratum, StratumRate,
-    SAMPLE_CATEGORY_FLOOR,
+    EngineCheckVerdict, EngineCheckVerdictReq, EscalationStatus, HoldReason, SampleStratum,
+    StratumRate, SAMPLE_CATEGORY_FLOOR,
 };
 
 use crate::tree::export::Door;
@@ -67,7 +67,8 @@ pub fn error_for_digit(key: &str) -> Option<EngineCheckError> {
 
 // ── What a card stands in ─────────────────────────────────────────────────────────────────
 
-/// Where a card stands: the four states the lane draws (spec section 7, "States").
+/// Where a card stands: the states the lane draws (spec section 7, "States"), with the two a
+/// thrown-out row can be in apart from a kept row's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardState {
     /// A fresh card, no verdict.
@@ -80,23 +81,56 @@ pub enum CardState {
         error: Option<EngineCheckError>,
         carried_from: Option<String>,
     },
-    /// A No, and the row has been corrected.
+    /// A No on a thrown-out row that nothing has acted on: the row is still thrown out.
+    ThrownOut,
+    /// A thrown-out row the reviewer put back: it is back in review and held until it is decided.
+    Restored,
+    /// A No, and a correction or a later decision or edit stands behind it.
     Corrected { error: Option<EngineCheckError> },
 }
 
-/// The state of a card, read from the verdict and from whether the gate still holds the row.
+/// Whether `later` is strictly after `earlier` (RFC 3339), the rule the release gate uses: a time
+/// that cannot be read, or the same instant, is not later, so a doubt never reads as corrected.
+fn strictly_later(later: &str, earlier: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(later),
+        chrono::DateTime::parse_from_rfc3339(earlier),
+    ) {
+        (Ok(later), Ok(earlier)) => later > earlier,
+        _ => false,
+    }
+}
+
+/// Whether something corrected the No: the verdict names a correction, or a decision or an edit
+/// was made on the row after the verdict (the gate's own test, see `uncorrected_keys`).
+fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
+    v.correction.is_some()
+        || card
+            .site
+            .decision
+            .as_ref()
+            .is_some_and(|d| strictly_later(&d.decided_at, &v.at))
+        || card.site.edits.iter().any(|e| strictly_later(&e.at, &v.at))
+}
+
+/// The state of a card, read from the verdict, from whether the gate holds the row and from
+/// whether anything corrected it. A No is "corrected" only when something did; the absence of a
+/// hold proves nothing (a thrown-out row is never held for an uncorrected No).
 pub fn card_state(card: &EngineCheckCard) -> CardState {
     match &card.verdict {
         None => CardState::Pending,
         Some(v) if v.right => CardState::Yes,
         Some(v) => {
-            if card.site.held == Some(HoldReason::EngineCheckNoWithoutCorrection) {
-                CardState::Held {
-                    error: v.wrong,
-                    carried_from: v.carried_from.clone(),
-                }
-            } else {
-                CardState::Corrected { error: v.wrong }
+            let held = |error| CardState::Held {
+                error,
+                carried_from: v.carried_from.clone(),
+            };
+            match card.site.held {
+                Some(HoldReason::EngineCheckNoWithoutCorrection) => held(v.wrong),
+                Some(HoldReason::RestoredWithoutDecision) => CardState::Restored,
+                _ if corrected_since(card, v) => CardState::Corrected { error: v.wrong },
+                _ if card.stratum == SampleStratum::ThrownOut => CardState::ThrownOut,
+                _ => held(v.wrong),
             }
         }
     }
@@ -118,6 +152,8 @@ pub fn card_state_text(state: &CardState) -> String {
             carried_from: None,
             error,
         } => with_error("No: held from export until corrected", *error),
+        CardState::ThrownOut => "No: still thrown out, put it back to correct".to_string(),
+        CardState::Restored => "No: put back into review, held until you decide it".to_string(),
         CardState::Corrected { error } => {
             with_error("No, corrected: the corrected version is what ships", *error)
         }
@@ -659,35 +695,11 @@ pub fn correction_request(
                 reason,
             ))
         }
-        CorrectionKind::Escalate => Ok(decision(DecisionState::Confirmed, Some(true), reason)),
+        CorrectionKind::Escalate => {
+            keep_ruling(card, reason).map(|(state, reason)| decision(state, Some(true), &reason))
+        }
         CorrectionKind::Deescalate => {
-            // Keep the ruling the row already has; a row with none is confirmed.
-            let (state, kept_reason) = match &card.site.decision {
-                Some(d)
-                    if matches!(
-                        d.state,
-                        DecisionState::Confirmed
-                            | DecisionState::Ignored
-                            | DecisionState::FalsePositive
-                            | DecisionState::TechDebtNow
-                            | DecisionState::TechDebtLater
-                    ) =>
-                {
-                    (d.state.clone(), d.reason.clone())
-                }
-                _ => (DecisionState::Confirmed, String::new()),
-            };
-            let reason = if reason.is_empty() {
-                kept_reason.as_str()
-            } else {
-                reason
-            };
-            if matches!(state, DecisionState::Ignored | DecisionState::FalsePositive)
-                && reason.trim().is_empty()
-            {
-                return Err("A reason is required to keep this ruling.".to_string());
-            }
-            Ok(decision(state, Some(false), reason))
+            keep_ruling(card, reason).map(|(state, reason)| decision(state, Some(false), &reason))
         }
         CorrectionKind::Subgroup => {
             if value.is_empty() {
@@ -729,6 +741,39 @@ pub fn correction_request(
             Ok(edit(EditField::Summary, value, &node.id))
         }
     }
+}
+
+/// The ruling an escalate or de-escalate correction posts: the one the row already has, with its
+/// reason when the correction gives none, or Confirmed when the row has none. Escalating or
+/// de-escalating says whether the reviewer needed the row; it never replaces a ruling (Ignored,
+/// False positive, tech debt) the reviewer did not choose to change.
+fn keep_ruling(card: &EngineCheckCard, reason: &str) -> Result<(DecisionState, String), String> {
+    let (state, kept_reason) = match &card.site.decision {
+        Some(d)
+            if matches!(
+                d.state,
+                DecisionState::Confirmed
+                    | DecisionState::Ignored
+                    | DecisionState::FalsePositive
+                    | DecisionState::TechDebtNow
+                    | DecisionState::TechDebtLater
+            ) =>
+        {
+            (d.state.clone(), d.reason.clone())
+        }
+        _ => (DecisionState::Confirmed, String::new()),
+    };
+    let reason = if reason.is_empty() {
+        kept_reason.as_str()
+    } else {
+        reason
+    };
+    if matches!(state, DecisionState::Ignored | DecisionState::FalsePositive)
+        && reason.trim().is_empty()
+    {
+        return Err("A reason is required to keep this ruling.".to_string());
+    }
+    Ok((state, reason.to_string()))
 }
 
 /// The correction a recorded id stands for.

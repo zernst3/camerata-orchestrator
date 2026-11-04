@@ -245,7 +245,8 @@ fn EngineCardView(
     let card_status = card_state(&card);
     let status_text = card_state_text(&card_status);
     let token = dom_token(&card.site.site_key);
-    let held = matches!(card_status, CardState::Held { .. });
+    // "Correct it" is offered while a No still has nothing behind it.
+    let correctable = matches!(card_status, CardState::Held { .. } | CardState::ThrownOut);
     let corrected = matches!(card_status, CardState::Corrected { .. });
     let (state_class, state_chip) = match &card_status {
         CardState::Pending => ("engine-state pending", None),
@@ -253,6 +254,11 @@ fn EngineCardView(
         CardState::Held { .. } => (
             "engine-state held",
             Some(("mark-held", "\u{1f512} held from export until corrected")),
+        ),
+        CardState::ThrownOut => ("engine-state held", Some(("mark-held", "still thrown out"))),
+        CardState::Restored => (
+            "engine-state held",
+            Some(("mark-held", "\u{1f512} put back, held until you decide it")),
         ),
         CardState::Corrected { .. } => (
             "engine-state corrected",
@@ -310,7 +316,7 @@ fn EngineCardView(
                     span { class: "{chip}", "{label}" }
                 }
                 span { class: "engine-state-text", "{status_text}" }
-                if held && state.phase == Phase::Viewing {
+                if correctable && state.phase == Phase::Viewing {
                     button { class: "btn-edit-sm", onclick: move |_| on_correct.call(()), "Correct it" }
                 }
             }

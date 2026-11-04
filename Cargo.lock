@@ -1155,6 +1155,7 @@ name = "camerata-ui-core"
 version = "0.0.0"
 dependencies = [
  "camerata-api-types",
+ "chrono",
  "serde",
  "serde_json",
 ]

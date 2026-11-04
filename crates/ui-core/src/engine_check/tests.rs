@@ -442,9 +442,13 @@ fn every_choice_opens_a_correction_that_builds_a_request_or_says_what_is_missing
     assert_eq!(d.state, DecisionState::MergedInto("target-key".to_string()));
 
     // Should have been escalated: a site decision that says the reviewer needed it; no reason.
-    let c = Correction::start(EngineCheckError::ShouldHaveBeenEscalated, &card);
+    // A row with no ruling is confirmed; one with a ruling keeps it (see
+    // `should_have_been_escalated_keeps_the_ruling_the_row_already_has`).
+    let mut unruled = card.clone();
+    unruled.site.decision = None;
+    let c = Correction::start(EngineCheckError::ShouldHaveBeenEscalated, &unruled);
     assert!(!c.needs_reason());
-    let CorrectionRequest::Decision(d) = correction_request(&c, &card, run).unwrap() else {
+    let CorrectionRequest::Decision(d) = correction_request(&c, &unruled, run).unwrap() else {
         panic!("a decision");
     };
     assert_eq!(
@@ -796,4 +800,153 @@ fn no_engine_check_text_has_an_em_dash_or_a_raw_nul() {
     for t in texts {
         assert!(!t.contains('\u{2014}') && !t.contains('\0'), "{t:?}");
     }
+}
+
+// ── D1: a No is "corrected" only when something corrected it ────────────────────────────
+
+fn no_card(correction: Option<CorrectionRef>) -> EngineCheckCard {
+    let mut card = card0();
+    let mut v = verdict(false, None);
+    v.correction = correction;
+    card.verdict = Some(v);
+    card.site.held = None;
+    card.site.decision = None;
+    card.site.edits.clear();
+    card
+}
+
+fn a_decision_at(at: &str) -> camerata_api_types::review_view::DecisionView {
+    let mut d = dataset_base()
+        .rows
+        .iter()
+        .find_map(|r| r.decision.clone())
+        .expect("a decided row in the fixture");
+    d.decided_at = at.to_string();
+    d
+}
+
+#[test]
+fn a_thrown_out_no_with_no_correction_is_not_corrected() {
+    // Esc after N on a thrown-out card stores a No with no correction; the gate does not hold
+    // the row (it is not in the report's findings), so `held` is empty. The card must not read
+    // "corrected: the corrected version is what ships".
+    let mut card = no_card(None);
+    card.stratum = SampleStratum::ThrownOut;
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let state = card_state(&card);
+    assert!(
+        !matches!(state, CardState::Corrected { .. }),
+        "nothing was corrected: {state:?}"
+    );
+    let text = card_state_text(&state);
+    assert!(
+        text.starts_with("No: still thrown out, put it back to correct"),
+        "{text}"
+    );
+    assert!(!text.contains("what ships"), "{text}");
+    assert!(answered(&card), "the No was given on this run");
+    assert_eq!(
+        held_count(&EngineCheckLane {
+            cards: vec![card],
+            ..lane(EngineMode::Pending)
+        }),
+        0,
+        "the gate does not hold a thrown-out row, so the lane does not count it as held"
+    );
+}
+
+#[test]
+fn a_restored_row_is_held_until_the_reviewer_decides_it() {
+    // A committed restore names the restore decision, and the gate holds the row until a ruling.
+    let mut card = no_card(Some(CorrectionRef::Decision("dec-1".to_string())));
+    card.stratum = SampleStratum::ThrownOut;
+    card.site.held = Some(HoldReason::RestoredWithoutDecision);
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let state = card_state(&card);
+    assert!(
+        !matches!(state, CardState::Corrected { .. }),
+        "a restored row is not yet what ships: {state:?}"
+    );
+    let text = card_state_text(&state);
+    assert!(
+        text.contains("put back into review, held until you decide it"),
+        "{text}"
+    );
+    assert!(!text.contains("what ships"), "{text}");
+}
+
+#[test]
+fn a_no_is_corrected_only_by_a_named_correction_or_a_later_decision_or_edit() {
+    // A named correction.
+    let named = no_card(Some(CorrectionRef::Decision("dec-1".to_string())));
+    assert!(matches!(card_state(&named), CardState::Corrected { .. }));
+    // Nothing named, nothing since: an uncorrected No, whatever the hold says.
+    let bare = no_card(None);
+    assert!(
+        !matches!(card_state(&bare), CardState::Corrected { .. }),
+        "{:?}",
+        card_state(&bare)
+    );
+    assert!(matches!(card_state(&bare), CardState::Held { .. }));
+    // A decision made after the verdict (09:00:00) corrects it; one made before does not.
+    let mut later = no_card(None);
+    later.site.decision = Some(a_decision_at("2026-11-04T09:30:00Z"));
+    assert!(matches!(card_state(&later), CardState::Corrected { .. }));
+    let mut earlier = no_card(None);
+    earlier.site.decision = Some(a_decision_at("2026-11-04T08:00:00Z"));
+    assert!(!matches!(card_state(&earlier), CardState::Corrected { .. }));
+    // An edit made after the verdict corrects it too.
+    let mut edited = no_card(None);
+    let mut e = camerata_api_types::review_view::EditView {
+        id: "edit-1".to_string(),
+        field: EditField::Headline,
+        old: "a".to_string(),
+        new: "b".to_string(),
+        reason: "r".to_string(),
+        by: "architect".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        stale: false,
+        current_value: "b".to_string(),
+        reapplied_from: None,
+    };
+    edited.site.edits = vec![e.clone()];
+    assert!(matches!(card_state(&edited), CardState::Corrected { .. }));
+    e.at = "2026-11-04T08:59:59Z".to_string();
+    edited.site.edits = vec![e];
+    assert!(!matches!(card_state(&edited), CardState::Corrected { .. }));
+}
+
+// ── D2: escalating keeps the row's ruling ───────────────────────────────────────────────
+
+#[test]
+fn should_have_been_escalated_keeps_the_ruling_the_row_already_has() {
+    let run = "insp-1";
+    for state in [DecisionState::Ignored, DecisionState::FalsePositive] {
+        let mut card = card0();
+        let mut d = a_decision_at("2026-11-04T08:00:00Z");
+        d.state = state.clone();
+        d.reason = "not reachable from the internet".to_string();
+        card.site.decision = Some(d);
+        let c = Correction::start(EngineCheckError::ShouldHaveBeenEscalated, &card);
+        let CorrectionRequest::Decision(req) = correction_request(&c, &card, run).unwrap() else {
+            panic!("a decision");
+        };
+        assert_eq!(
+            req.state, state,
+            "never a ruling the reviewer did not choose"
+        );
+        assert_eq!(req.needed_me, Some(true));
+        assert_eq!(req.reason, "not reachable from the internet");
+    }
+    // A row with no ruling is confirmed, as before.
+    let mut card = card0();
+    card.site.decision = None;
+    let c = Correction::start(EngineCheckError::ShouldHaveBeenEscalated, &card);
+    let CorrectionRequest::Decision(req) = correction_request(&c, &card, run).unwrap() else {
+        panic!("a decision");
+    };
+    assert_eq!(
+        (req.state, req.needed_me),
+        (DecisionState::Confirmed, Some(true))
+    );
 }
