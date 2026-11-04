@@ -767,7 +767,8 @@ pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStepModelReq {
     /// The step key: `audit` | `calibration` | `fix` | `research_chat` | `story_authoring` |
-    /// `decomposition` | `escalation` | `clarification`.
+    /// `decomposition` | `escalation` | `clarification` | `group_review` (kept in the project's
+    /// review settings, not its step models).
     pub(crate) step: String,
     /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix` only, where it
     /// clears the setting back to the default (see [`fix_step_model`]).
@@ -805,6 +806,11 @@ pub(crate) async fn set_step_model(
     Path(id): Path<String>,
     Json(req): Json<SetStepModelReq>,
 ) -> Json<serde_json::Value> {
+    // The group reviewer (stage 2) is not a per-step model: it lives with the project's review
+    // settings, beside the escalation formula (review spec section 9).
+    if req.step.trim().eq_ignore_ascii_case("group_review") {
+        return set_group_review_model(&state, &id, req.model.trim());
+    }
     let Some(step) = parse_step_kind(&req.step) else {
         return Json(serde_json::json!({ "ok": false, "message": "unknown step" }));
     };
@@ -814,6 +820,27 @@ pub(crate) async fn set_step_model(
     }
     match state.projects.set_step_model(&id, step, model) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Set the project's group review model (`step: "group_review"` on the step-models route). The
+/// other review settings are kept as they are. A blank model is refused: the stage 2 default
+/// applies only when the setting was never written.
+fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde_json::Value> {
+    if model.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
+    }
+    let Some(project) = state.projects.get(id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let settings = camerata_api_types::project::ReviewSettings {
+        group_review_model: model.to_string(),
+        ..project.review
+    };
+    match state.projects.set_review_settings(id, settings) {
+        Some(Ok(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Some(Err(message)) => Json(serde_json::json!({ "ok": false, "message": message })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
 }
