@@ -173,34 +173,66 @@ fn subgroup_ids(ds: &ReviewDataSet) -> Vec<String> {
         .collect()
 }
 
-/// Sub-groups that together show every marker on their first page (greedy cover).
+/// The markers on the first page of `sub`.
+fn markers_on_first_page(ds: &ReviewDataSet, sub: &str) -> (Vec<Marker>, usize) {
+    let Some(page) = ds.sites_page(sub, None, SITES_PAGE_SIZE) else {
+        return (Vec::new(), 0);
+    };
+    let found = Marker::PRECEDENCE
+        .into_iter()
+        .filter(|m| page.rows.iter().any(|r| r.markers.contains(m)))
+        .collect();
+    (found, page.rows.len())
+}
+
+/// Sub-groups that together show every marker on their first page. The first is the richest
+/// sub-group (most distinct markers, then fewest rows), which the page focuses; the rest are
+/// picked by markers gained per row, so the page stays short and the focused node, drawn in tree
+/// order, is not pushed below the fold by long sub-groups opened only for one chip.
 fn subs_covering_every_marker(ds: &ReviewDataSet) -> Vec<String> {
     let mut remaining: Vec<Marker> = Marker::PRECEDENCE.to_vec();
-    let mut chosen = Vec::new();
     let mut candidates = subgroup_ids(ds);
+    let info: BTreeMap<String, (Vec<Marker>, usize)> = candidates
+        .iter()
+        .map(|s| (s.clone(), markers_on_first_page(ds, s)))
+        .collect();
+    let mut chosen: Vec<String> = Vec::new();
     while !remaining.is_empty() && chosen.len() < 8 {
-        let score = |sub: &String| -> usize {
-            let page = ds.sites_page(sub, None, SITES_PAGE_SIZE);
-            let Some(page) = page else { return 0 };
-            remaining
+        let gain = |sub: &String| -> usize {
+            info[sub].0.iter().filter(|m| remaining.contains(m)).count()
+        };
+        let best = if chosen.is_empty() {
+            candidates.iter().max_by_key(|s| {
+                (
+                    info[*s].0.len(),
+                    std::cmp::Reverse(info[*s].1),
+                    std::cmp::Reverse((*s).clone()),
+                )
+            })
+        } else {
+            // The rarest marker still missing decides which sub-groups are in the running (a
+            // marker only one sub-group has must come from it); among those, the most markers
+            // gained per row, compared as a fraction without dividing.
+            let rarest = remaining
                 .iter()
-                .filter(|m| page.rows.iter().any(|r| r.markers.contains(m)))
-                .count()
+                .min_by_key(|m| info.values().filter(|(ms, _)| ms.contains(m)).count())
+                .copied();
+            candidates
+                .iter()
+                .filter(|s| rarest.is_some_and(|m| info[*s].0.contains(&m)))
+                .max_by(|a, b| {
+                    let (ga, ra) = (gain(a), info[*a].1.max(1));
+                    let (gb, rb) = (gain(b), info[*b].1.max(1));
+                    (ga * rb).cmp(&(gb * ra)).then_with(|| b.cmp(a))
+                })
         };
-        let Some(best) = candidates
-            .iter()
-            .max_by_key(|s| (score(s), std::cmp::Reverse((*s).clone())))
-            .cloned()
-        else {
+        let Some(best) = best.cloned() else {
             break;
         };
-        if score(&best) == 0 {
+        if gain(&best) == 0 {
             break;
         }
-        let page = ds.sites_page(&best, None, SITES_PAGE_SIZE);
-        if let Some(page) = page {
-            remaining.retain(|m| !page.rows.iter().any(|r| r.markers.contains(m)));
-        }
+        remaining.retain(|m| !info[&best].0.contains(m));
         candidates.retain(|c| *c != best);
         chosen.push(best);
     }

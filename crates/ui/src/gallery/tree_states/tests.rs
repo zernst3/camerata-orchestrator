@@ -1,4 +1,5 @@
 use super::*;
+use crate::cockpit::tree::{FOCUSED_ROW_SELECTOR, TREE_REGION_ID};
 use crate::style::GLOBAL_CSS;
 use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base};
 use camerata_ui_core::tree::shell::{NOT_GROUP_REVIEWED, NO_INSPECTION};
@@ -222,6 +223,56 @@ fn the_decision_cell_is_not_cut_by_the_stylesheet_and_has_the_room_for_its_word(
     assert!(widths[0] <= 12, "two chips do not need more: {widths:?}");
     assert!(widths[4] >= 20, "Headline takes the remainder: {widths:?}");
     assert_eq!(widths.iter().sum::<u32>(), 100, "{widths:?}");
+}
+
+#[test]
+fn tree_markers_opens_the_node_carrying_the_markers_and_puts_it_near_the_top() {
+    // The narrow page focuses a site, not a node: its row is the one the cursor is on.
+    let narrow = page("tree/narrow");
+    assert!(
+        attr_values(&narrow, "class")
+            .iter()
+            .any(|c| c.starts_with("site-row") && c.split(' ').any(|w| w == "focused")),
+        "the narrow page has a focused site row"
+    );
+    for id in ["tree/markers"] {
+        let html = page(id);
+        let head = html
+            .find("class=\"tree-node focused\"")
+            .unwrap_or_else(|| panic!("{id}: no focused node"));
+        // Its sites are open: the focused node is followed by its table before the next node.
+        let rest = &html[head + 10..];
+        let next_node = rest.find("class=\"tree-node").unwrap_or(rest.len());
+        let mine = &rest[..next_node];
+        assert!(
+            mine.contains("site-table"),
+            "{id}: the focused node is open"
+        );
+        for chip in [
+            "mark-held",
+            "mark-stale",
+            "mark-moved",
+            "mark-outlier",
+            "mark-esc",
+        ] {
+            assert!(mine.contains(chip), "{id}: the focused node shows {chip}");
+        }
+        // Near the top: no more than one screen of site rows above it (a row is about 30px, a
+        // screen at the spec's smaller width is 1000px of the 1400 the screenshots are taken at).
+        let rows_above = html[..head].matches("class=\"site-row").count();
+        assert!(
+            rows_above <= 22,
+            "{id}: {rows_above} site rows sit above the focused node"
+        );
+    }
+    // The live app scrolls the focused row into view; the selector names rows the tree draws.
+    let html = page("tree/markers");
+    for class in ["tree-node focused", "site-row"] {
+        assert!(html.contains(class));
+    }
+    assert!(FOCUSED_ROW_SELECTOR.contains(".tree-node.focused"));
+    assert!(FOCUSED_ROW_SELECTOR.contains(".site-row.focused"));
+    assert!(FOCUSED_ROW_SELECTOR.contains(TREE_REGION_ID));
 }
 
 #[test]

@@ -56,6 +56,10 @@ use camerata_ui::review_io::{fetch_page, read_all_sites, ReviewApi};
 /// The DOM id of the tree's focusable region. Tabbing into it arms the keys.
 pub(crate) const TREE_REGION_ID: &str = "camerata-tree-region";
 
+/// The row the cursor is on, node or site, for the follow-scroll.
+pub(crate) const FOCUSED_ROW_SELECTOR: &str =
+    "#camerata-tree-region .tree-node.focused, #camerata-tree-region .site-row.focused";
+
 // ── What the screen shows ─────────────────────────────────────────────────────────────────
 
 /// How the left column stands (spec section 5, "States").
@@ -181,6 +185,11 @@ pub(crate) fn TreeScreen(
         }
         _ => None,
     };
+    // Keep the cursor's row on screen: a key, a door from the export panel or a click can land
+    // on a row far down the page (the minimum scroll, so a row already in view does not jump).
+    use_effect(use_reactive(&state.cursor, move |_| {
+        super::viewer::follow_selected(FOCUSED_ROW_SELECTOR);
+    }));
     let narrow_class = if narrow {
         "tree-lane narrow"
     } else {
