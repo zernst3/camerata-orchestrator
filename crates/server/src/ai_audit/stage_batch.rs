@@ -123,6 +123,45 @@ pub trait StageItems {
     fn already_absorbed(&self, _id: &Self::Id) -> bool {
         false
     }
+
+    /// Whether the runner sends an item once more after a failure sending again can fix (a
+    /// transport failure, a row a batch left out). The default is yes. A stage that runs its own
+    /// rounds and its own end-of-run second try (detail regeneration, fix generation) says no, so
+    /// its tries are counted by the stage and not twice.
+    fn resends(&self) -> bool {
+        true
+    }
+
+    /// How many requests the runner may hold built at once. `0`, the default, is an EAGER stage:
+    /// it lists every request in [`Self::items`] and the runner keeps them all. A stage with
+    /// thousands of items (stage 1 at 30,000 sites) overrides this together with [`Self::ids`]
+    /// and [`Self::items_for`]: the runner then asks for the requests of at most this many items
+    /// at a time and lets go of a request as soon as its item has ended, so memory is bounded by
+    /// a range, and by [`Self::batch_window`] on the batch path, whatever the item count.
+    fn build_range(&self) -> usize {
+        0
+    }
+
+    /// A lazy stage: the id of every item, in the order they are sent, without building any
+    /// request. Ids must be unique, as for [`Self::items`].
+    fn ids(&self) -> Vec<Self::Id> {
+        Vec::new()
+    }
+
+    /// A lazy stage: the requests for `ids`, at most [`Self::build_range`] of them. An id the
+    /// answer leaves out is one the stage decided not to send (it disclosed that itself, as stage
+    /// 1 does for a site whose request does not fit); the runner records it as a failed part.
+    fn items_for(&self, _ids: &[Self::Id]) -> Vec<(Self::Id, LlmRequest)> {
+        Vec::new()
+    }
+
+    /// A lazy stage on the batch path: the most items submitted before the next ones are built,
+    /// so no more than a window of requests is ever held. Each window is submitted, polled and
+    /// settled on its own (and split further by the body-size limit). The default, no limit, is
+    /// one window.
+    fn batch_window(&self) -> usize {
+        usize::MAX
+    }
 }
 
 /// How the runner sends a stage's requests.
@@ -261,7 +300,9 @@ impl<Id> StageOutcome<Id> {
 /// One item waiting to be sent.
 struct Work<Id> {
     id: Id,
-    req: Arc<LlmRequest>,
+    /// The request; `None` for an item of a lazy stage whose request is not built yet (see
+    /// [`materialize`]).
+    req: Option<Arc<LlmRequest>>,
 }
 
 impl<Id: Clone> Clone for Work<Id> {
@@ -293,6 +334,8 @@ struct Book<Id> {
     batches_cancelled: Vec<String>,
     /// Items neither absorbed nor failed when the stage ended cancelled.
     not_sent: Vec<Id>,
+    /// Whether a failure sending again can fix is sent once more by the runner.
+    resends: bool,
 }
 
 /// The most attempt records one failed part keeps (a long rate limit would otherwise grow it for
@@ -314,6 +357,7 @@ impl<Id: Clone + Ord> Book<Id> {
             cancelled: false,
             batches_cancelled: Vec::new(),
             not_sent: Vec::new(),
+            resends: true,
         }
     }
 
@@ -375,27 +419,51 @@ where
     S: StageItems + Send,
 {
     let mut book: Book<S::Id> = Book::new();
-    let items = s.items();
-    book.total = items.len();
+    book.resends = s.resends();
+    let lazy = s.build_range() > 0;
     let mut by_key: BTreeMap<String, S::Id> = BTreeMap::new();
     let mut reqs: BTreeMap<S::Id, Arc<LlmRequest>> = BTreeMap::new();
-    for (id, req) in items {
-        if reqs.contains_key(&id) {
-            book.fail(
-                &id,
-                FailureClass::Content,
-                "the stage listed this item id twice, so the second request was not sent",
-                None,
-            );
-            continue;
+    // The ids in the order they are sent: the stage's own order for a lazy stage, the id order
+    // for an eager one.
+    let mut order: Vec<S::Id> = Vec::new();
+    if lazy {
+        let listed = s.ids();
+        book.total = listed.len();
+        for id in listed {
+            if by_key.insert(id.to_string(), id.clone()).is_some() {
+                book.fail(
+                    &id,
+                    FailureClass::Content,
+                    "the stage listed this item id twice, so the second request was not sent",
+                    None,
+                );
+                continue;
+            }
+            order.push(id);
         }
-        by_key.insert(id.to_string(), id.clone());
-        reqs.insert(id, Arc::new(req));
+    } else {
+        let items = s.items();
+        book.total = items.len();
+        for (id, req) in items {
+            if reqs.contains_key(&id) {
+                book.fail(
+                    &id,
+                    FailureClass::Content,
+                    "the stage listed this item id twice, so the second request was not sent",
+                    None,
+                );
+                continue;
+            }
+            by_key.insert(id.to_string(), id.clone());
+            reqs.insert(id, Arc::new(req));
+        }
+        order = reqs.keys().cloned().collect();
     }
 
     replay_checkpoint(stage, s, ctx, &mut book, &by_key);
 
-    // A7: no request is submitted or sent without passing the size check.
+    // A7: no request is submitted or sent without passing the size check. An eager stage's
+    // requests are checked here; a lazy stage's are checked as they are built ([`materialize`]).
     for (id, req) in &reqs {
         if book.done.contains(id) {
             continue;
@@ -415,13 +483,13 @@ where
     if !book.cancelled && ctx.batch.is_some() {
         follow = resume_batches(stage, s, ctx, &mut book, &by_key, &reqs).await;
     }
-    let pending: Vec<Work<S::Id>> = reqs
+    let pending: Vec<Work<S::Id>> = order
         .iter()
-        .filter(|(id, _)| !book.done.contains(*id))
-        .map(|(id, req)| {
+        .filter(|id| !book.done.contains(*id))
+        .map(|id| {
             follow.remove(id).unwrap_or_else(|| Work {
                 id: id.clone(),
-                req: req.clone(),
+                req: reqs.get(id).cloned(),
             })
         })
         .collect();
@@ -451,8 +519,8 @@ where
         }
     }
     if book.cancelled {
-        book.not_sent = reqs
-            .keys()
+        book.not_sent = order
+            .iter()
             .filter(|id| !book.done.contains(*id))
             .cloned()
             .collect();
@@ -461,6 +529,81 @@ where
         jobs.clear_stage_progress(id);
     }
     book.into_outcome()
+}
+
+/// The name the spend limit and the ledger know a stage by when it is refused (the name the stage's
+/// own loop admitted under before it ran on the runner).
+fn admission_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Calibration => super::STAGE_CALIBRATION,
+        Stage::Alternatives => super::STAGE_ALTERNATIVES,
+        Stage::DetailRegeneration => super::STAGE_DETAIL,
+        Stage::FixGeneration => super::STAGE_FIX,
+        other => other.label(),
+    }
+}
+
+// ── lazy requests ───────────────────────────────────────────────────────────────────────────────
+
+/// Build the requests of the items in `works` that have none yet (a lazy stage's), at most
+/// [`StageItems::build_range`] at a time, and return the works that now have one, in order. Each
+/// request passes the size check (A7) as it is built. An item the stage built no request for, or
+/// whose request does not fit, ends as a failed part with the reason and is not returned.
+fn materialize<S: StageItems>(
+    stage: Stage,
+    s: &S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    works: Vec<Work<S::Id>>,
+) -> Vec<Work<S::Id>> {
+    let range = s.build_range().max(1);
+    let missing: Vec<S::Id> = works
+        .iter()
+        .filter(|w| w.req.is_none() && !book.done.contains(&w.id))
+        .map(|w| w.id.clone())
+        .collect();
+    if missing.is_empty() {
+        return works;
+    }
+    let mut built: BTreeMap<S::Id, Arc<LlmRequest>> = BTreeMap::new();
+    for chunk in missing.chunks(range) {
+        for (id, req) in s.items_for(chunk) {
+            if !chunk.contains(&id) {
+                continue;
+            }
+            match ensure_request_fits(&req) {
+                Ok(()) => {
+                    built.insert(id, Arc::new(req));
+                }
+                Err(too_large) => {
+                    book.fail(&id, FailureClass::Content, &too_large.to_string(), None);
+                }
+            }
+        }
+        for id in chunk {
+            if !built.contains_key(id) && !book.done.contains(id) {
+                book.fail(
+                    id,
+                    FailureClass::Content,
+                    "the stage built no request for this item, so nothing was sent for it",
+                    None,
+                );
+            }
+        }
+    }
+    report_progress(ctx, stage, book);
+    works
+        .into_iter()
+        .filter_map(|mut w| {
+            if book.done.contains(&w.id) {
+                return None;
+            }
+            if w.req.is_none() {
+                w.req = built.remove(&w.id);
+            }
+            w.req.is_some().then_some(w)
+        })
+        .collect()
 }
 
 // ── job liveness ────────────────────────────────────────────────────────────────────────────────
@@ -706,7 +849,7 @@ fn settle_reply<S: StageItems>(
             }
             Settled::Retry(Work {
                 id: id.clone(),
-                req: Arc::new(req),
+                req: Some(Arc::new(req)),
             })
         }
     }
@@ -723,9 +866,22 @@ fn resend_or_fail<Id: Clone + Ord>(
     reason: &str,
     attempts: Vec<AttemptRecord>,
 ) -> Option<Work<Id>> {
+    // Every try is on the record: a failure that carried no attempt record of its own gets one
+    // describing it, and the second send is marked as the second try.
+    let mut attempts = attempts;
+    if attempts.is_empty() {
+        attempts.push(super::StageTrail::describe(class, reason));
+    }
+    let second = book.resent.contains(&work.id);
+    for r in &mut attempts {
+        r.second_try = second;
+        if r.model.is_empty() {
+            r.model = super::resolve_audit_model(None);
+        }
+    }
     book.note_attempts(&work.id, attempts);
     let outage = ctx.meter.is_some_and(UsageMeter::outage_stopped);
-    if class.is_retried_at_end() && !book.resent.contains(&work.id) && !outage {
+    if book.resends && class.is_retried_at_end() && !book.resent.contains(&work.id) && !outage {
         book.resent.insert(work.id.clone());
         return Some(work.clone());
     }
@@ -889,7 +1045,7 @@ async fn run_parallel<S>(
     let mut second_try: Vec<Work<S::Id>> = Vec::new();
     let mut in_flight: FuturesUnordered<BoxFuture<'_, (Work<S::Id>, Called)>> =
         FuturesUnordered::new();
-    let label = stage.label();
+    let label = admission_name(stage);
 
     loop {
         // A cancelled job dispatches nothing more; requests already in flight finish and are
@@ -902,6 +1058,14 @@ async fn run_parallel<S>(
             let now = Instant::now();
             if book.cancelled || in_flight.len() >= aimd.limit() || aimd.held_until(now).is_some() {
                 break;
+            }
+            if queue.front().is_some_and(|w| w.req.is_none()) {
+                // A lazy stage: build the next range of requests now, not all of them up front.
+                let range = s.build_range().max(1).min(queue.len());
+                let chunk: Vec<Work<S::Id>> = queue.drain(..range).collect();
+                for w in materialize(stage, &*s, ctx, book, chunk).into_iter().rev() {
+                    queue.push_front(w);
+                }
             }
             let Some(work) = queue.pop_front() else { break };
             if aimd.deadline_passed(now) {
@@ -918,12 +1082,24 @@ async fn run_parallel<S>(
             if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
                 let (class, why) = refusal_class(ctx);
                 book.fail(&work.id, class, why, None);
+                if let Some(m) = ctx.meter {
+                    m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+                }
                 report_progress(ctx, stage, book);
                 continue;
             }
             let realtime = ctx.realtime;
             let meter = ctx.meter;
             let repo = ctx.repo;
+            let Some(req) = work.req.clone() else {
+                book.fail(
+                    &work.id,
+                    FailureClass::Content,
+                    "the item had no request to send",
+                    None,
+                );
+                continue;
+            };
             in_flight.push(
                 async move {
                     let permit = match meter {
@@ -934,9 +1110,14 @@ async fn run_parallel<S>(
                         None => None,
                     };
                     if let Some(m) = meter {
-                        m.note_request(&work.req);
+                        m.note_request(&req);
                     }
-                    let result = realtime.complete(work.req.as_ref().clone()).await;
+                    // The streaming transport, as every aggregate stage always used it: the CLI
+                    // leg's heartbeat and partial-output salvage apply, a flat deadline does not.
+                    let mut on_delta = |_: &str| {};
+                    let result = realtime
+                        .complete_streaming(req.as_ref().clone(), &mut on_delta)
+                        .await;
                     if let Some(m) = meter {
                         match &result {
                             Ok(resp) => m.record_stage(stage, resp),
@@ -1215,7 +1396,7 @@ where
                     cid.clone(),
                     Work {
                         id: id.clone(),
-                        req: reqs.get(id)?.clone(),
+                        req: reqs.get(id).cloned(),
                     },
                 ))
             })
@@ -1292,8 +1473,20 @@ async fn run_batch<S>(
 {
     let mut clock = RateClock::new(ctx.settings.rate_limit_deadline);
     let mut work = pending;
+    // A lazy stage builds and submits a window of items at a time; an eager one is one window.
+    let window = s.batch_window().max(1);
     while !work.is_empty() && !book.cancelled {
-        work = batch_round(stage, s, ctx, api, book, work, &mut clock).await;
+        let mut follow: Vec<Work<S::Id>> = Vec::new();
+        let mut rest = std::mem::take(&mut work).into_iter().peekable();
+        while rest.peek().is_some() && !book.cancelled {
+            let chunk: Vec<Work<S::Id>> = rest.by_ref().take(window).collect();
+            let ready = materialize(stage, &*s, ctx, book, chunk);
+            if ready.is_empty() {
+                continue;
+            }
+            follow.extend(batch_round(stage, s, ctx, api, book, ready, &mut clock).await);
+        }
+        work = follow;
     }
 }
 
@@ -1318,7 +1511,7 @@ where
     let ranges = plan_item_ranges(
         cids.iter()
             .map(String::as_str)
-            .zip(work.iter().map(|w| w.req.as_ref())),
+            .zip(work.iter().filter_map(|w| w.req.as_deref())),
         ctx.model,
         ctx.settings.max_body_bytes,
     );
@@ -1347,6 +1540,9 @@ where
             for w in sub {
                 book.fail(&w.id, class, why, None);
             }
+            if let Some(m) = ctx.meter {
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+            }
             continue;
         }
         if let Some(m) = ctx.meter {
@@ -1355,6 +1551,7 @@ where
             {
                 eprintln!("[camerata-server] {why}");
                 m.record_note(why.clone());
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
                 for w in sub {
                     book.fail(&w.id, FailureClass::SpendLimit, &why, None);
                 }
@@ -1367,7 +1564,15 @@ where
             let items: Vec<BatchItem> = sub
                 .iter()
                 .zip(sub_cids)
-                .map(|(w, cid)| crate::llm::build_batch_item(cid.clone(), &w.req, ctx.model, ttl))
+                .filter_map(|(w, cid)| {
+                    let req = w.req.as_deref()?;
+                    Some(crate::llm::build_batch_item(
+                        cid.clone(),
+                        req,
+                        ctx.model,
+                        ttl,
+                    ))
+                })
                 .collect();
             let attempt = api.submit(items).await;
             note_batch_call(ctx.meter, &attempt);

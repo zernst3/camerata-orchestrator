@@ -6711,6 +6711,7 @@ async fn onboard_audit(
                 &review_controls,
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
+                None,
             )
             .await;
         }
@@ -8517,28 +8518,31 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
-            let (mut report, mut manifest) = crate::prompt_frame::with_seed(
-                token_seed,
-                crate::onboard::audit_repos_with_llm_controlled(
-                    model_seam,
-                    &sources,
-                    &selected,
-                    notes,
-                    model.as_deref(),
-                    calibration_model.as_deref(),
-                    mode,
-                    thorough,
-                    Some((&transcripts, SCAN_AUDIT_KEY)),
-                    Some((&body_jobs, &body_jid)),
-                    prior.as_ref(),
-                    deep,
-                    soc2_enabled,
-                    run_ai_review,
-                    run_deterministic,
-                    backend_resolution,
-                    corpus.as_ref(),
-                    &chosen_options,
-                    run_controls,
+            let (mut report, mut manifest) = crate::checkpoint::with_run_checkpoints(
+                run_store.as_ref().map(|s| s.checkpoint_dir()),
+                crate::prompt_frame::with_seed(
+                    token_seed,
+                    crate::onboard::audit_repos_with_llm_controlled(
+                        model_seam,
+                        &sources,
+                        &selected,
+                        notes,
+                        model.as_deref(),
+                        calibration_model.as_deref(),
+                        mode,
+                        thorough,
+                        Some((&transcripts, SCAN_AUDIT_KEY)),
+                        Some((&body_jobs, &body_jid)),
+                        prior.as_ref(),
+                        deep,
+                        soc2_enabled,
+                        run_ai_review,
+                        run_deterministic,
+                        backend_resolution,
+                        corpus.as_ref(),
+                        &chosen_options,
+                        run_controls,
+                    ),
                 ),
             )
             .await;
@@ -8685,14 +8689,18 @@ pub(crate) async fn start_audit_job(
                     .collect();
                 // With the run's own delimiter seed in scope, like the audit above, so a resumed
                 // run asks the group reviewer the same questions and its stored replies match.
-                crate::prompt_frame::with_seed(
-                    token_seed,
-                    crate::ai_audit::group_review::review_scan_report(
-                        &mut report,
-                        model_seam,
-                        &review_controls,
-                        &rules,
-                        llm_backend == crate::llm::Backend::Cli,
+                crate::checkpoint::with_run_checkpoints(
+                    run_store.as_ref().map(|s| s.checkpoint_dir()),
+                    crate::prompt_frame::with_seed(
+                        token_seed,
+                        crate::ai_audit::group_review::review_scan_report(
+                            &mut report,
+                            model_seam,
+                            &review_controls,
+                            &rules,
+                            llm_backend == crate::llm::Backend::Cli,
+                            Some((&body_jobs, &body_jid)),
+                        ),
                     ),
                 )
                 .await;

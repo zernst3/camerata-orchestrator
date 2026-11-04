@@ -1187,28 +1187,31 @@ pub async fn run_inspect_pipeline_with(
         None => base,
     };
     let (mut report, manifest) = {
-        let (mut report, manifest) = camerata_server::prompt_frame::with_seed(
-            token_seed,
-            camerata_server::onboard::audit_repos_with_llm_controlled(
-                model_seam,
-                &sources,
-                &selected,
-                Vec::new(),
-                model,
-                calibration_model,
-                mode,
-                false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
-                None,  // feedback: no live transcript sink headlessly
-                None,  // job: no job store headlessly (this call blocks until done)
-                incremental_prior.as_ref(),
-                false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
-                true,  // soc2_enabled: irrelevant with `deep` off
-                true,  // run_ai_review
-                true,  // run_deterministic
-                backend_resolution,
-                corpus.as_ref(),
-                &HashMap::new(),
-                controls.clone(),
+        let (mut report, manifest) = camerata_server::checkpoint::with_run_checkpoints(
+            store.as_ref().map(|s| s.checkpoint_dir()),
+            camerata_server::prompt_frame::with_seed(
+                token_seed,
+                camerata_server::onboard::audit_repos_with_llm_controlled(
+                    model_seam,
+                    &sources,
+                    &selected,
+                    Vec::new(),
+                    model,
+                    calibration_model,
+                    mode,
+                    false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                    None,  // feedback: no live transcript sink headlessly
+                    None,  // job: no job store headlessly (this call blocks until done)
+                    incremental_prior.as_ref(),
+                    false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                    true,  // soc2_enabled: irrelevant with `deep` off
+                    true,  // run_ai_review
+                    true,  // run_deterministic
+                    backend_resolution,
+                    corpus.as_ref(),
+                    &HashMap::new(),
+                    controls.clone(),
+                ),
             ),
         )
         .await;
@@ -1296,14 +1299,18 @@ pub async fn run_inspect_pipeline_with(
             .iter()
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
-        camerata_server::prompt_frame::with_seed(
-            token_seed,
-            camerata_server::ai_audit::group_review::review_scan_report(
-                &mut report,
-                model_seam,
-                &controls,
-                &rules,
-                llm_backend == camerata_server::llm::Backend::Cli,
+        camerata_server::checkpoint::with_run_checkpoints(
+            store.as_ref().map(|s| s.checkpoint_dir()),
+            camerata_server::prompt_frame::with_seed(
+                token_seed,
+                camerata_server::ai_audit::group_review::review_scan_report(
+                    &mut report,
+                    model_seam,
+                    &controls,
+                    &rules,
+                    llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
+                ),
             ),
         )
         .await;

@@ -16,9 +16,11 @@
 //! rows. [`Stage1Items`] is the same work in the shape a batch runner takes: one request per
 //! site, an absorb for each reply, one retry for a reply that was cut off.
 
+use super::stage_batch::{
+    run_stage, ItemReject as RunnerReject, StageCtx, StageItems, StageMode, StageSettings,
+};
 use super::*;
 use crate::llm::LlmResponse;
-use futures::StreamExt;
 
 /// Lines of code shown on each side of a site.
 pub const CODE_WINDOW_RADIUS: usize = 30;
@@ -64,7 +66,7 @@ pub fn code_window(content: &str, line: usize, radius: usize) -> CodeWindow {
 }
 
 /// What stage 1 needs beyond the findings.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Stage1Inputs<'a> {
     /// The model-facing (redacted) files, for the code window of each site. A site whose file is
     /// not among them is rated from its quoted code alone.
@@ -77,6 +79,12 @@ pub struct Stage1Inputs<'a> {
     pub repo_shape: &'a str,
     /// How many sites are asked at once.
     pub concurrency: usize,
+    /// Ask the sites as Message Batches (half price, answers in minutes to hours) when the model
+    /// seam carries a batch API; without one, or with this off, they are asked in real time.
+    pub batch: bool,
+    /// The job the stage reports to: its activity is touched and its progress set as sites end,
+    /// and a poll tick of a batch does the same.
+    pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
 }
 
 impl<'a> Stage1Inputs<'a> {
@@ -87,6 +95,8 @@ impl<'a> Stage1Inputs<'a> {
             rules: &[],
             repo_shape,
             concurrency: 1,
+            batch: false,
+            job: None,
         }
     }
 
@@ -104,6 +114,25 @@ impl<'a> Stage1Inputs<'a> {
         self.concurrency = concurrency.max(1);
         self
     }
+
+    /// Ask the sites as batches when the seam has a batch API (see [`Self::batch`]).
+    pub fn with_batch(mut self, batch: bool) -> Self {
+        self.batch = batch;
+        self
+    }
+
+    /// Report to `job`.
+    pub fn with_job(mut self, job: Option<(&'a crate::jobs::JobStore, &'a str)>) -> Self {
+        self.job = job;
+        self
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The size of every range of requests stage 1 built, in order (a test thread's own record).
+    pub(super) static BUILT_RANGES: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The notice the removed `--thorough` flag prints for one release. `None` when the flag is off.
@@ -595,6 +624,21 @@ pub(super) const VERIFY_TOKENS_PER_FINDING: u32 = 150;
 /// not a batch (every site is its own call).
 pub(super) const CALIBRATION_BATCH_SIZE: usize = 40;
 
+/// About how much input one site's request carries, in bytes: the shared prompt, the site and the
+/// window of code around it. The batch spend gate projects a window as this many bytes a site, so
+/// a capped run with no pre-flight estimate does not refuse its first window as unenforceable.
+const SITE_INPUT_BYTES: u64 = 10_000;
+
+/// The projected input dollars of one site's request on `model`, at the batch price and three
+/// characters a token. `None` for a model the price table does not know.
+fn site_input_usd(model: &str) -> Option<f64> {
+    crate::llm::input_cost_usd(
+        model,
+        SITE_INPUT_BYTES.div_ceil(3),
+        crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+    )
+}
+
 /// `max_tokens` for the reply to `n_findings` sites: the per-verdict text budget plus the
 /// calibration stage's thinking allowance. A site's call asks for one.
 pub(crate) fn calibration_max_tokens(n_findings: usize) -> u32 {
@@ -860,11 +904,6 @@ impl<'a> Stage1Items<'a> {
         &self.refused
     }
 
-    fn mark_refused(&mut self, i: usize, e: request_budget::RequestTooLarge) {
-        self.refused.retain(|(j, _)| *j != i);
-        self.refused.push((i, e));
-    }
-
     /// Read a reply as a verdict: a JSON object that answers `real`.
     fn parse_reply(&self, resp: &LlmResponse) -> Result<Stage1Verdict, ItemReject> {
         extract_json_object(&resp.text)
@@ -923,120 +962,229 @@ impl<'a> Stage1Items<'a> {
     }
 }
 
-/// What asking about one site came to.
-enum SiteOutcome {
-    Verdict {
-        verdict: Stage1Verdict,
-        text: String,
-    },
-    /// The model answered, but not with a verdict (after the one retry a cut-off reply gets).
-    Unusable { reason: String, text: String },
-    /// The request did not fit the model's window and was never sent.
-    Refused(request_budget::RequestTooLarge),
-    /// The call failed in transport.
-    Failed(anyhow::Error),
-    /// The spend limit stopped the stage before this site; the meter records it.
-    CapReached,
+/// The sites asked per batch submission on the batch path. A window of requests is built, sent,
+/// waited for and absorbed before the next is built, so memory is bounded by a window however many
+/// sites the run has (about 50 MB at 10 KB a request).
+pub(super) const STAGE1_BATCH_WINDOW: usize = 5_000;
+
+/// Stage 1's sites in the shape the shared batch runner takes ([`StageItems`]): one item per
+/// site, named by its site key, its request built only when the runner is about to send it, in
+/// ranges of [`CALIBRATION_BATCH_SIZE`]. Wraps [`Stage1Items`] (the requests, the reading of a
+/// reply, the verdicts) and adds what only a run needs: the keys, the sites refused for size, the
+/// transcript of each group of sites.
+struct Stage1Run<'a, 't> {
+    items: Stage1Items<'a>,
+    /// The site key of each site, by position.
+    keys: Vec<String>,
+    index_of: std::collections::HashMap<String, usize>,
+    /// Sites whose request did not fit the window; recorded while the runner builds requests.
+    refused: std::sync::Mutex<Vec<(usize, request_budget::RequestTooLarge)>>,
+    /// Sites whose last turned-down reply was cut off at the output limit (the retry needs it).
+    truncated: std::collections::BTreeSet<usize>,
+    feedback: Option<(&'t crate::transcript::TranscriptStore, &'t str)>,
+    repo: String,
+    model_label: String,
+    n_groups: usize,
+    /// Groups with a transcript entry so far, with the sites answered in each.
+    registered: std::collections::BTreeMap<usize, usize>,
 }
 
-/// Ask the model about site `idx`: one structured call, plus one re-ask of a reply that was cut
-/// off at the output limit. The call goes through the spend limit like every other.
-async fn ask_site(
-    items: &Stage1Items<'_>,
-    llm: &dyn LlmPort,
-    meter: Option<&UsageMeter>,
-    idx: usize,
-) -> SiteOutcome {
-    // Never send what the model's window cannot take (M1/A7): refused here, disclosed by the caller.
-    let req = match items.fitted_request(idx) {
-        Ok(req) => req,
-        Err(e) => return SiteOutcome::Refused(e),
-    };
-    // SPEND CAP: once the cap is reached the remaining sites do not run. They pass through exactly
-    // as the scan produced them (none dropped) and the stage is recorded as stopped part way.
-    let _permit = match admit_stage(meter, &items.repo, STAGE_CALIBRATION).await {
-        Err(CapReached) => return SiteOutcome::CapReached,
-        Ok(permit) => permit,
-    };
-    note_request(meter, &req);
-    // Routed through the STREAMING transport (not the flat `complete`): the CLI leg's heartbeat
-    // resets on any progress and SALVAGES partial output on a late kill.
-    let mut on_delta = |_: &str| {};
-    let resp = match llm.complete_streaming(req, &mut on_delta).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            meter_failed(meter, Stage::Calibration, &e);
-            return SiteOutcome::Failed(e);
-        }
-    };
-    if let Some(m) = meter {
-        m.record_stage(Stage::Calibration, &resp);
+impl Stage1Run<'_, '_> {
+    fn group_of(site: usize) -> usize {
+        site / CALIBRATION_BATCH_SIZE
     }
-    let reject = match items.parse_reply(&resp) {
-        Ok(verdict) => {
-            return SiteOutcome::Verdict {
-                verdict,
-                text: resp.text,
-            }
-        }
-        Err(reject) => reject,
-    };
-    if resp.truncated {
-        if let Some(m) = meter {
-            m.record_wasted(Stage::Calibration, &resp);
+
+    /// The session id of group `gi`: single-group runs keep the id this stage always used.
+    fn session(&self, gi: usize) -> String {
+        if self.n_groups > 1 {
+            format!("audit-{}-calibrate-b{gi}", self.repo)
+        } else {
+            format!("audit-{}-calibrate", self.repo)
         }
     }
-    let retry = items
-        .retry(idx, &reject)
-        .filter(|_| !meter.is_some_and(UsageMeter::retry_blocked));
-    let Some(retry) = retry else {
-        return SiteOutcome::Unusable {
-            reason: reject.reason,
-            text: resp.text,
+
+    fn group_len(&self, gi: usize) -> usize {
+        CALIBRATION_BATCH_SIZE.min(self.items.len() - gi * CALIBRATION_BATCH_SIZE)
+    }
+
+    /// Open group `gi`'s transcript entry the first time one of its sites is heard from.
+    fn open_group(&mut self, gi: usize) {
+        let Some((store, key)) = self.feedback else {
+            return;
         };
-    };
-    note_request(meter, &retry);
-    match llm.complete_streaming(retry, &mut on_delta).await {
-        Ok(second) => {
-            if let Some(m) = meter {
-                m.record_stage(Stage::Calibration, &second);
-            }
-            match items.parse_reply(&second) {
-                Ok(verdict) => SiteOutcome::Verdict {
-                    verdict,
-                    text: second.text,
-                },
-                Err(reject) => {
-                    if second.truncated {
-                        if let Some(m) = meter {
-                            m.record_wasted(Stage::Calibration, &second);
-                        }
-                    }
-                    SiteOutcome::Unusable {
-                        reason: reject.reason,
-                        text: second.text,
-                    }
-                }
-            }
+        if self.registered.contains_key(&gi) {
+            return;
         }
-        Err(e) => {
-            meter_failed(meter, Stage::Calibration, &e);
-            SiteOutcome::Failed(e)
+        let group_len = self.group_len(gi);
+        let first_prompt = self
+            .items
+            .fitted_request(gi * CALIBRATION_BATCH_SIZE)
+            .map(|r| r.prompt)
+            .unwrap_or_default();
+        let prompt = if group_len > 1 {
+            format!(
+                "{first_prompt}\n(this is the first of {group_len} sites in this group; each \
+                 site is its own call with the same instructions)"
+            )
+        } else {
+            first_prompt
+        };
+        let repo = &self.repo;
+        store.register(
+            key,
+            crate::transcript::AgentTranscript {
+                session_id: self.session(gi),
+                role: format!(
+                    "calibrating {group_len} findings on {} \u{2014} {repo}{}",
+                    self.model_label,
+                    if self.n_groups > 1 {
+                        format!(" (batch {}/{})", gi + 1, self.n_groups)
+                    } else {
+                        String::new()
+                    }
+                ),
+                prompt,
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+        self.registered.insert(gi, 0);
+    }
+
+    fn note_output(&mut self, site: usize, text: &str, answered: bool) {
+        let gi = Self::group_of(site);
+        self.open_group(gi);
+        let Some((store, key)) = self.feedback else {
+            return;
+        };
+        let session = self.session(gi);
+        if self.group_len(gi) == 1 && answered {
+            store.append_output(key, &session, text);
+        } else {
+            store.append_output(
+                key,
+                &session,
+                &format!("\u{2500}\u{2500} site {site} \u{2500}\u{2500}\n{text}"),
+            );
+        }
+        if answered {
+            *self.registered.entry(gi).or_insert(0) += 1;
+        }
+    }
+
+    /// Close every transcript entry: blocked where nothing in the group was answered but some
+    /// site failed, done otherwise.
+    fn close_groups(&self, failed_in: &std::collections::BTreeMap<usize, usize>) {
+        let Some((store, key)) = self.feedback else {
+            return;
+        };
+        for (&gi, &answered) in &self.registered {
+            let session = self.session(gi);
+            let failed = failed_in.get(&gi).copied().unwrap_or(0);
+            if answered == 0 && failed > 0 {
+                store.append_output(
+                    key,
+                    &session,
+                    "every calibration call for this group failed or timed out \u{2014} findings \
+                     pass through unchanged.",
+                );
+                store.set_status(key, &session, "blocked");
+            } else {
+                store.set_status(key, &session, "done");
+            }
         }
     }
 }
 
-/// Run the stage 1 first reviewer over a repo's findings, one structured call per site.
-/// Graceful: a site that cannot be asked passes through unchanged and is disclosed as a failed
-/// part; none is ever dropped.
+impl StageItems for Stage1Run<'_, '_> {
+    type Id = String;
+
+    fn items(&self) -> Vec<(String, LlmRequest)> {
+        Vec::new()
+    }
+
+    fn build_range(&self) -> usize {
+        CALIBRATION_BATCH_SIZE
+    }
+
+    fn batch_window(&self) -> usize {
+        STAGE1_BATCH_WINDOW
+    }
+
+    fn ids(&self) -> Vec<String> {
+        self.keys.clone()
+    }
+
+    fn items_for(&self, ids: &[String]) -> Vec<(String, LlmRequest)> {
+        #[cfg(test)]
+        BUILT_RANGES.with(|r| r.borrow_mut().push(ids.len()));
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(&i) = self.index_of.get(id) else {
+                continue;
+            };
+            match self.items.fitted_request(i) {
+                Ok(req) => out.push((id.clone(), req)),
+                Err(e) => self
+                    .refused
+                    .lock()
+                    .expect("the refused list is not poisoned")
+                    .push((i, e)),
+            }
+        }
+        out
+    }
+
+    fn absorb(&mut self, id: &String, resp: LlmResponse) -> Result<(), RunnerReject> {
+        let Some(&i) = self.index_of.get(id) else {
+            return Err(RunnerReject::new(
+                "the reply names a site this run does not have",
+            ));
+        };
+        match self.items.absorb(i, &resp) {
+            Ok(()) => {
+                self.truncated.remove(&i);
+                self.note_output(i, &resp.text, true);
+                Ok(())
+            }
+            Err(reject) => {
+                if reject.truncated {
+                    self.truncated.insert(i);
+                }
+                self.note_output(i, &resp.text, false);
+                Err(RunnerReject::new(reject.reason))
+            }
+        }
+    }
+
+    fn retry(&self, id: &String, reject: &RunnerReject) -> Option<LlmRequest> {
+        let &i = self.index_of.get(id)?;
+        self.items.retry(
+            i,
+            &ItemReject {
+                reason: reject.reason.clone(),
+                truncated: self.truncated.contains(&i),
+            },
+        )
+    }
+}
+
+/// Run the stage 1 first reviewer over a repo's findings, one structured call per site, on the
+/// shared batch runner ([`stage_batch::run_stage`]): as Message Batches when the run asked for
+/// them and the model seam has a batch API, in real time otherwise. Graceful: a site that cannot
+/// be asked passes through unchanged and is disclosed as a failed part; none is ever dropped.
 ///
-/// The sites are asked in groups of [`CALIBRATION_BATCH_SIZE`], [`Stage1Inputs::concurrency`] at a
-/// time. A group is one transcript entry (the prompt of its first site, then each site's reply), and
-/// the unit a failed part names.
+/// The sites are grouped in [`CALIBRATION_BATCH_SIZE`] for the transcript and for the failed-part
+/// rows, and their requests are built in ranges of that size, never all at once. With a run's
+/// checkpoint folder in scope ([`crate::checkpoint::with_run_checkpoints`]) every absorbed site
+/// is written down as it ends, so a restarted run asks only the sites with no result, polls a
+/// batch still running instead of submitting it again, and reports the usage of the sites it
+/// skipped.
 ///
-/// `feedback`, when present, records each group into the transcript the way the scan passes do:
-/// register the agent with its REAL generated prompt up front, append each reply as it lands, then
-/// set a terminal status. A transcript-recording failure can never affect calibration.
+/// `feedback`, when present, records each group into the transcript: the group's entry opens with
+/// its REAL generated prompt when its first site is heard from, each reply is appended as it
+/// lands, and a terminal status is set at the end. A transcript-recording failure can never
+/// affect calibration.
 ///
 /// C3-1b: this pass is also the ONLY source of the `effort` (hour-estimation) field, so it
 /// returns a second `Vec<FailedPass>` alongside the (never-dropped) findings. A single
@@ -1057,183 +1205,123 @@ pub async fn verify_findings(
     if findings.is_empty() {
         return (findings, Vec::new());
     }
-    let mut items = Stage1Items::from_findings(repo, findings, calibration_model, inputs);
+    let keys = crate::inspections::site_keys_of(&findings);
+    let items = Stage1Items::from_findings(repo, findings, calibration_model, inputs);
     let n = items.len();
-    let concurrency = inputs.concurrency.max(1);
-    let groups: Vec<std::ops::Range<usize>> = (0..n)
-        .step_by(CALIBRATION_BATCH_SIZE)
-        .map(|start| start..(start + CALIBRATION_BATCH_SIZE).min(n))
+    let n_groups = n.div_ceil(CALIBRATION_BATCH_SIZE);
+    let index_of: std::collections::HashMap<String, usize> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.clone(), i))
         .collect();
-    let n_groups = groups.len();
-    let group_of = |site: usize| site / CALIBRATION_BATCH_SIZE;
+    let mut run = Stage1Run {
+        items,
+        keys,
+        index_of,
+        refused: std::sync::Mutex::new(Vec::new()),
+        truncated: std::collections::BTreeSet::new(),
+        feedback,
+        repo: repo.to_string(),
+        model_label: calibration_model.unwrap_or("default").to_string(),
+        n_groups,
+        registered: std::collections::BTreeMap::new(),
+    };
 
+    let model = stage_model(calibration_model);
+    let batch_api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
+    let mode = if inputs.batch && batch_api.is_some() {
+        StageMode::Batch
+    } else {
+        StageMode::Parallel {
+            max_in_flight: inputs.concurrency.max(1),
+        }
+    };
+    let checkpoint = crate::checkpoint::stage_checkpoint(&format!("calibration_{repo}"));
+    let ctx = StageCtx {
+        repo,
+        model: &model,
+        realtime: llm,
+        batch: batch_api,
+        meter,
+        job: inputs.job,
+        checkpoint: checkpoint.as_ref(),
+        settings: StageSettings {
+            per_item_usd: site_input_usd(&model),
+            ..StageSettings::default()
+        },
+    };
+    let outcome = run_stage(Stage::Calibration, &mut run, mode, &ctx).await;
+
+    // What the runner could not get a result for, by site. A refusal for size is its own part
+    // (below); the spend limit and the outage stop record themselves on the meter.
+    let refused_sites: std::collections::BTreeSet<usize> = run
+        .refused
+        .lock()
+        .expect("the refused list is not poisoned")
+        .iter()
+        .map(|(i, _)| *i)
+        .collect();
     let mut trail = StageTrail::default();
-    // Per group: its own failed calls and unusable replies.
     let mut group_trails: Vec<StageTrail> = vec![StageTrail::default(); n_groups];
-    // Sites whose every call failed in a way worth another try, tried once more at the end.
-    let mut deferred: Vec<usize> = Vec::new();
-    // Sites still without a verdict after both tries, with transport failure or an unusable reply.
     let mut unchecked: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-
-    for (gi, range) in groups.iter().enumerate() {
-        let group_len = range.len();
-        // Single-group runs keep the session id this function always used (`audit-{repo}-calibrate`);
-        // a `-bN` suffix and batch label appear once there is more than one group.
-        let session = if n_groups > 1 {
-            format!("audit-{repo}-calibrate-b{gi}")
-        } else {
-            format!("audit-{repo}-calibrate")
+    let mut failed_in: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for f in &outcome.failed {
+        let Some(&i) = run.index_of.get(&f.id) else {
+            continue;
         };
-        if let Some((store, key)) = feedback {
-            let first_prompt = items
-                .fitted_request(range.start)
-                .map(|r| r.prompt)
-                .unwrap_or_default();
-            let prompt = if group_len > 1 {
-                format!(
-                    "{first_prompt}\n(this is the first of {group_len} sites in this group; each \
-                     site is its own call with the same instructions)"
-                )
-            } else {
-                first_prompt
-            };
-            store.register(
-                key,
-                crate::transcript::AgentTranscript {
-                    session_id: session.clone(),
-                    role: format!(
-                        "calibrating {group_len} findings on {} — {repo}{}",
-                        calibration_model.unwrap_or("default"),
-                        if n_groups > 1 {
-                            format!(" (batch {}/{n_groups})", gi + 1)
-                        } else {
-                            String::new()
-                        }
-                    ),
-                    prompt,
-                    output: String::new(),
-                    status: "running".to_string(),
-                },
-            );
+        if refused_sites.contains(&i) {
+            continue;
         }
-        // Ask the group's sites, `concurrency` at a time. `buffered` yields the answers in site
-        // order, so what lands on a row never depends on which call finished first.
-        let outcomes: Vec<SiteOutcome> = futures::stream::iter(range.clone())
-            .map(|idx| ask_site(&items, llm, meter, idx))
-            .buffered(concurrency)
-            .collect()
-            .await;
-        let mut answered = 0usize;
-        let mut failed_here = 0usize;
-        for (idx, outcome) in range.clone().zip(outcomes) {
-            match outcome {
-                SiteOutcome::Verdict { verdict, text } => {
-                    answered += 1;
-                    if let Some((store, key)) = feedback {
-                        if group_len == 1 {
-                            store.append_output(key, &session, &text);
-                        } else {
-                            store.append_output(
-                                key,
-                                &session,
-                                &format!("── site {idx} ──\n{text}"),
-                            );
-                        }
-                    }
-                    items.verdicts[idx] = Some(verdict);
-                }
-                SiteOutcome::Unusable { reason, text } => {
-                    failed_here += 1;
-                    if let Some((store, key)) = feedback {
-                        store.append_output(key, &session, &format!("── site {idx} ──\n{text}"));
-                    }
-                    trail.note_unusable(&reason, false, vec![reason.clone()]);
-                    group_trails[gi].note_unusable(&reason, false, vec![reason.clone()]);
-                    unchecked.insert(idx);
-                }
-                SiteOutcome::Refused(e) => {
-                    failed_here += 1;
-                    items.mark_refused(idx, e);
-                }
-                SiteOutcome::Failed(e) => {
-                    failed_here += 1;
-                    trail.note_error(&e, false);
-                    group_trails[gi].note_error(&e, false);
-                    unchecked.insert(idx);
-                    if second_try_allowed(&e, meter) {
-                        deferred.push(idx);
-                    }
-                }
-                SiteOutcome::CapReached => {}
-            }
+        let gi = Stage1Run::group_of(i);
+        *failed_in.entry(gi).or_insert(0) += 1;
+        if matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop) {
+            continue;
         }
-        if let Some((store, key)) = feedback {
-            if answered == 0 && failed_here > 0 {
-                store.append_output(
-                    key,
-                    &session,
-                    "every calibration call for this group failed or timed out — findings pass \
-                     through unchanged.",
-                );
-                store.set_status(key, &session, "blocked");
-            } else {
-                store.set_status(key, &session, "done");
+        if f.class == FailureClass::Content {
+            trail.note_unusable(&f.reason, false, vec![f.reason.clone()]);
+            group_trails[gi].note_unusable(&f.reason, false, vec![f.reason.clone()]);
+        } else {
+            trail.note_failed_item(f.class, &f.reason, &f.attempts);
+            group_trails[gi].note_failed_item(f.class, &f.reason, &f.attempts);
+        }
+        unchecked.insert(i);
+    }
+    if let Some(cancelled) = &outcome.cancelled {
+        for id in &cancelled.not_sent {
+            if let Some(&i) = run.index_of.get(id) {
+                if !refused_sites.contains(&i) {
+                    unchecked.insert(i);
+                }
             }
         }
     }
-
-    // END-OF-RUN SECOND TRY for the sites set aside above, through the same admission and spend
-    // checks; a stopped run sends nothing.
-    for idx in deferred {
-        if meter.is_some_and(UsageMeter::outage_stopped) {
-            break;
-        }
-        let gi = group_of(idx);
-        match ask_site(&items, llm, meter, idx).await {
-            SiteOutcome::Verdict { verdict, .. } => {
-                items.verdicts[idx] = Some(verdict);
-                unchecked.remove(&idx);
-            }
-            SiteOutcome::Unusable { reason, .. } => {
-                trail.note_unusable(&reason, true, vec![reason.clone()]);
-                group_trails[gi].note_unusable(&reason, true, vec![reason.clone()]);
-            }
-            SiteOutcome::Refused(e) => {
-                unchecked.remove(&idx);
-                items.mark_refused(idx, e);
-            }
-            SiteOutcome::Failed(e) => {
-                trail.note_error(&e, true);
-                group_trails[gi].note_error(&e, true);
-            }
-            // The spend limit stopped the run; it records that, so the site is not also a failed
-            // part.
-            SiteOutcome::CapReached => {
-                unchecked.remove(&idx);
-            }
-        }
-    }
+    run.close_groups(&failed_in);
 
     // Sites still unchecked, grouped, and the sites that were never sent; each is named below.
     let failed_groups: Vec<(usize, Vec<Finding>)> = (0..n_groups)
         .filter_map(|gi| {
             let sites: Vec<Finding> = unchecked
                 .iter()
-                .filter(|&&i| group_of(i) == gi)
-                .map(|&i| items.findings[i].clone())
+                .filter(|&&i| Stage1Run::group_of(i) == gi)
+                .map(|&i| run.items.findings[i].clone())
                 .collect();
             (!sites.is_empty()).then_some((gi, sites))
         })
         .collect();
-    let mut refused: Vec<(Finding, request_budget::RequestTooLarge)> =
-        std::mem::take(&mut items.refused)
-            .into_iter()
-            .map(|(i, e)| (items.findings[i].clone(), e))
-            .collect();
+    let refused_list = std::mem::take(
+        &mut *run
+            .refused
+            .lock()
+            .expect("the refused list is not poisoned"),
+    );
+    let mut refused: Vec<(Finding, request_budget::RequestTooLarge)> = refused_list
+        .into_iter()
+        .map(|(i, e)| (run.items.findings[i].clone(), e))
+        .collect();
     refused.sort_by(|a, b| (a.0.path.as_str(), a.0.line).cmp(&(b.0.path.as_str(), b.0.line)));
-    let calibrated = items.into_findings();
+    let calibrated = run.items.into_findings();
 
-    // C3-1b: a run-wide (not per-site) disclosure — every finding calibration was handed came back
+    // C3-1b: a run-wide (not per-site) disclosure: every finding calibration was handed came back
     // with NO usable effort estimate at all. Neither D5 (severity floor) nor D6 (severity ceiling)
     // below ever sets `effort`, so checking it here, before those text-derived passes run, is
     // equivalent to checking the final output and reads clearer.
@@ -1275,10 +1363,10 @@ pub async fn verify_findings(
         estimation_failed_passes.push(failed_unsent_sites(repo, &refused));
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration pass
-    // succeeded — it re-derives its verdict from the finding's own text, not the model's, so it is
+    // succeeded: it re-derives its verdict from the finding's own text, not the model's, so it is
     // exactly as available when every call failed as when one succeeded.
     // D6: the severity ceiling (R1/R2) runs immediately after, over the SAME set, for the same
-    // reason — both are text-derived and safe regardless of whether calibration ran.
+    // reason: both are text-derived and safe regardless of whether calibration ran.
     let calibrated = apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated));
     (calibrated, estimation_failed_passes)
 }

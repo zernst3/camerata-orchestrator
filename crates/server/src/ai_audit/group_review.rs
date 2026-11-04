@@ -1531,7 +1531,7 @@ fn summary_flags(
 // ── The run ────────────────────────────────────────────────────────────────────────────────
 
 /// What the group review needs besides the report.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GroupReviewConfig<'a> {
     /// The resolved model ([`resolve_group_review_model`]).
     pub model: &'a str,
@@ -1544,6 +1544,8 @@ pub struct GroupReviewConfig<'a> {
     pub rank: RankSettings,
     /// The most calls in flight at once.
     pub max_in_flight: usize,
+    /// The job the stage reports to: its activity is touched and its progress set as calls end.
+    pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
 }
 
 /// What a group review run came to.
@@ -1694,14 +1696,19 @@ pub async fn review_groups(
         items.order.push(id.clone());
         items.requests.insert(id, req);
     }
+    // With the run's checkpoint folder in scope, every call that is read is written down as it
+    // ends, so a restarted run re-asks only the chunks with no result and reports the usage of
+    // the ones it skips (design 6.2). The rule-level summary calls have a checkpoint of their own.
+    let chunk_checkpoint = crate::checkpoint::stage_checkpoint("group-review");
+    let summary_checkpoint = crate::checkpoint::stage_checkpoint("group-review-summary");
     let stage_ctx = StageCtx {
         repo: &repo_label,
         model: cfg.model,
         realtime: llm,
         batch: None,
         meter,
-        job: None,
-        checkpoint: None,
+        job: cfg.job,
+        checkpoint: chunk_checkpoint.as_ref(),
         settings: StageSettings::default(),
     };
     let mode = StageMode::Parallel {
@@ -1784,7 +1791,12 @@ pub async fn review_groups(
     let summary_ran = if summaries.requests.is_empty() {
         None
     } else {
-        Some(run_stage(Stage::GroupReview, &mut summaries, mode, &stage_ctx).await)
+        let summary_ctx = StageCtx {
+            checkpoint: summary_checkpoint.as_ref(),
+            settings: stage_ctx.settings.clone(),
+            ..stage_ctx
+        };
+        Some(run_stage(Stage::GroupReview, &mut summaries, mode, &summary_ctx).await)
     };
 
     // Apply every rule group's replies to the rows and to the tree the final build starts from.
@@ -2029,6 +2041,7 @@ pub async fn review_scan_report(
     controls: &crate::cost_cap::RunControls,
     rules: &[(String, String)],
     cli_backend: bool,
+    job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
         return None;
@@ -2056,6 +2069,7 @@ pub async fn review_scan_report(
         } else {
             stage_batch::DEFAULT_MAX_IN_FLIGHT
         },
+        job,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);
