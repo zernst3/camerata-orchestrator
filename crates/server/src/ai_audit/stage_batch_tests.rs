@@ -1870,6 +1870,14 @@ async fn a_kill_after_the_provider_accepts_a_batch_and_before_its_id_is_saved_is
         notes.iter().all(|n| !n.contains("  ")),
         "a note is a sentence, not a wrapped source line: {notes:?}"
     );
+    assert!(
+        cp.intents().is_empty(),
+        "the intent is cleared once the batch id is saved"
+    );
+    assert!(
+        cp.batches()[0].nonce.is_some(),
+        "the saved batch carries the nonce of its intent"
+    );
 
     // Process 3: the batch was saved and settled this time; the old intent is not reported again.
     let api = Api::new();
@@ -1883,6 +1891,66 @@ async fn a_kill_after_the_provider_accepts_a_batch_and_before_its_id_is_saved_is
     assert_eq!(out.resumed.len(), 3);
     assert_eq!(api.submit_calls.load(Ordering::SeqCst), 0);
     assert!(meter.cost_cap_record().unwrap().notes.is_empty());
+}
+
+/// The intent is cleared only once the batch list that carries its nonce is on disk. If the list
+/// cannot be written, the intent must survive: a kill after that would otherwise leave a provider
+/// batch nobody can find, with nothing on file to say so.
+#[tokio::test(start_paused = true)]
+async fn the_submit_intent_survives_a_failed_save_of_the_batch_list_and_the_next_resume_discloses_it_once(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let cp = StageCheckpoint::new(dir.path(), "calibration");
+    let all = ["a1", "a2", "a3"];
+
+    // A directory where the batch list belongs: the save's rename onto it fails.
+    let list = dir.path().join("calibration.batches.json");
+    std::fs::create_dir(&list).unwrap();
+
+    // Process 1: the provider accepts the batch, the list cannot be written, and the results
+    // cannot be fetched either, so nothing is absorbed.
+    let api = Api::new().failing_fetch();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(!out.is_complete());
+    assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+    let intents = cp.intents();
+    assert_eq!(intents.len(), 1, "the intent was not cleared: {intents:?}");
+    assert_eq!(
+        sorted(intents[0].items.values().cloned().collect()),
+        ids(&all),
+        "it lists the three items"
+    );
+    assert!(cp.batches().is_empty(), "no batch list was written");
+
+    // The disk is fixed; the next resume tells the operator once and sends the items again.
+    std::fs::remove_dir(&list).unwrap();
+    let api = Api::new();
+    let meter = cap_meter();
+    let mut stage = Scripted::new(&all);
+    let mut c = ctx(&api.realtime, Some(&api));
+    c.checkpoint = Some(&cp);
+    c.meter = Some(&meter);
+    c.settings.per_item_usd = Some(0.001);
+    let out = run_stage(STAGE, &mut stage, StageMode::Batch, &c).await;
+    assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
+    assert_eq!(
+        api.submit_calls.load(Ordering::SeqCst),
+        1,
+        "one resubmission"
+    );
+    let notes = meter.cost_cap_record().unwrap().notes;
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.contains("may have been submitted") && n.contains("orphaned"))
+            .count(),
+        1,
+        "the orphan is disclosed once: {notes:?}"
+    );
+    assert!(cp.intents().is_empty());
 }
 
 // ── WO7b F11: a window is admitted on the bytes of its real requests ────────────────────────────
