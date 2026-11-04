@@ -586,7 +586,7 @@ const OPERATOR_ONLY_LABEL: &str = "Internal working notes, not reviewed, not for
 
 /// Functions the scan finds that are not routes serving the audit deliverable, each with why it
 /// is not gated. `(site, reason)`.
-const NOT_CLIENT_FILES: [(&str, &str); 4] = [
+const NOT_CLIENT_FILES: [(&str, &str); 5] = [
     (
         "server/src/api_agent_driver.rs::call_anthropic_with_tools",
         "an outbound request header to the model API, never a served file",
@@ -603,6 +603,11 @@ const NOT_CLIENT_FILES: [(&str, &str); 4] = [
     (
         "server/src/routes/uow_routes.rs::default_attachment_mime_handler",
         "a serde default for an attachment's MIME field, never a served file",
+    ),
+    (
+        "server/src/seed.rs::send",
+        "the seed command's in-process request to the server's own routes (a JSON request \
+         header), never a served file",
     ),
 ];
 
