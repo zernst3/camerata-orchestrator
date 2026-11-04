@@ -180,7 +180,7 @@ async fn decorate_decisions(f: &ReviewFixture) {
         f,
         "move the line",
         "/escalation-budget",
-        json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": [] }),
+        json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": ["evidence_unverified"] }),
     )
     .await;
     // An Ignored row the client has acknowledged (after a package was delivered), and a confirmed
@@ -543,7 +543,7 @@ async fn wire_shapes() -> Value {
             &f.app,
             "POST",
             &format!("{}/escalation-budget/preview", base(&f)),
-            Some(json!({ "rate_per_kloc": 2.0, "floor": 5, "over_budget_reasons": ["secret_exposure"] })),
+            Some(json!({ "rate_per_kloc": 2.0, "floor": 5, "over_budget_reasons": ["secret_exposure", "evidence_unverified"] })),
         )
         .await;
         assert_eq!(status, 200, "{body}");
@@ -775,7 +775,7 @@ async fn escalation_budget_preview_writes_nothing() {
     let project_before = f.state.projects().get(&f.project_id).unwrap().review;
     let entry_before = f.state.inspections().latest(&f.project_id).unwrap();
 
-    let req = json!({ "rate_per_kloc": 9.0, "floor": 0, "over_budget_reasons": [] });
+    let req = json!({ "rate_per_kloc": 9.0, "floor": 0, "over_budget_reasons": ["evidence_unverified"] });
     let outcome: EscalationBudgetOutcome =
         post_ok(&f, "the preview", "/escalation-budget/preview", req).await;
     assert!(!outcome.applied);
@@ -814,9 +814,16 @@ async fn escalation_budget_preview_matches_re_mark() {
     };
 
     for (rate, floor, reasons) in [
-        (0.0, 1, Vec::new()),
+        (0.0, 1, vec![EscalationReason::EvidenceUnverified]),
         (0.0, 0, EscalationReason::default_over_budget_set()),
-        (3.0, 40, vec![EscalationReason::SecretExposure]),
+        (
+            3.0,
+            40,
+            vec![
+                EscalationReason::SecretExposure,
+                EscalationReason::EvidenceUnverified,
+            ],
+        ),
     ] {
         let (want_budget, want_candidates) = propose(rate, floor, reasons.clone());
         let outcome: EscalationBudgetOutcome = post_ok(
@@ -835,12 +842,12 @@ async fn escalation_budget_preview_matches_re_mark() {
     }
 
     // Applying it is the same answer, and the next read shows that line.
-    let (want_budget, _) = propose(0.0, 1, Vec::new());
+    let (want_budget, _) = propose(0.0, 1, vec![EscalationReason::EvidenceUnverified]);
     let applied: EscalationBudgetOutcome = post_ok(
         &f,
         "the write",
         "/escalation-budget",
-        json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": [] }),
+        json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": ["evidence_unverified"] }),
     )
     .await;
     assert!(applied.applied);
@@ -892,6 +899,44 @@ async fn the_budget_and_sample_routes_refuse_values_outside_the_bounds() {
             ..Default::default()
         }
     );
+}
+
+#[tokio::test]
+async fn the_budget_routes_refuse_a_set_that_leaves_out_evidence_unverified() {
+    // Design D5: evidence unverified is always escalated, whatever the request says. A set
+    // without it is refused with a reason naming it, and nothing is written.
+    let f = review_fixture(6);
+    let before = f.state.projects().get(&f.project_id).unwrap().review;
+    for reasons in [json!([]), json!(["secret_exposure", "data_loss"])] {
+        let body = json!({ "rate_per_kloc": 2.0, "floor": 5, "over_budget_reasons": reasons });
+        for uri in ["/escalation-budget", "/escalation-budget/preview"] {
+            let (status, err) = refused(&f, "POST", uri, Some(body.clone())).await;
+            assert_eq!(
+                (status, err.code.as_str()),
+                (422, "invalid_setting"),
+                "{uri} {body}"
+            );
+            assert!(
+                err.message.contains("evidence unverified"),
+                "{uri}: the reason names the missing reason: {}",
+                err.message
+            );
+        }
+    }
+    assert_eq!(
+        f.state.projects().get(&f.project_id).unwrap().review,
+        before,
+        "a refused request wrote a setting"
+    );
+    // With it in the set the same formula is accepted.
+    let ok: EscalationBudgetOutcome = post_ok(
+        &f,
+        "the write",
+        "/escalation-budget",
+        json!({ "rate_per_kloc": 2.0, "floor": 5, "over_budget_reasons": ["evidence_unverified"] }),
+    )
+    .await;
+    assert!(ok.applied);
 }
 
 // ── the Engine Check ──────────────────────────────────────────────────────────────────────
