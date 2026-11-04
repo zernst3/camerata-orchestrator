@@ -86,7 +86,7 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
         description.push(format!("Worked example: {}", g.worked_example));
     }
     description.push(format!(
-        "{} {}, listed below and on the Sites sheet (filter Group = {}).",
+        "{} {}, listed as rows below and on the Sites sheet (filter Group = {}).",
         g.open_site_total,
         if g.open_site_total == 1 {
             "site"
@@ -115,7 +115,7 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
     let mut sites = shown.join("\n");
     if g.open.len() > INLINE_SITES {
         sites.push_str(&format!(
-            "\nand {} more sites, see Sites sheet, filter Group = {}",
+            "\nand {} more rows, see Sites sheet, filter Group = {}",
             g.open.len() - INLINE_SITES,
             g.id
         ));
@@ -144,21 +144,6 @@ pub fn tickets_csv(
     writer.write_record(TICKET_HEADERS)?;
     for g in &groups {
         writer.write_record(ticket_row(g))?;
-    }
-    // A report with no tree has no sub-groups to ticket; one row says so rather than leaving a
-    // header-only file that reads as "nothing to fix".
-    let note = super::subgroups::no_tree_note(reviewed);
-    if groups.is_empty() && !note.is_empty() {
-        writer.write_record([
-            "No tickets: this report has no review tree",
-            note,
-            "",
-            "",
-            "",
-            "",
-            "0",
-            "",
-        ])?;
     }
     Ok(writer.into_inner()?)
 }

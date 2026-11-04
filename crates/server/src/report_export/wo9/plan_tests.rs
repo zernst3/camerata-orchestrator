@@ -224,7 +224,7 @@ fn a_ticket_lists_fifty_sites_and_points_at_the_sites_sheet_for_the_rest() {
     assert_eq!(sites.matches("src/handlers/").count(), 50, "{sites}");
     assert!(
         sites.ends_with(&format!(
-            "and 10 more sites, see Sites sheet, filter Group = {group}"
+            "and 10 more rows, see Sites sheet, filter Group = {group}"
         )),
         "{sites}"
     );
@@ -290,7 +290,7 @@ fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
     assert_eq!(plan_sites, pdf_sites, "the plan counts sites, not rows");
     assert_eq!(ticket_sites, pdf_sites, "the ticket counts sites, not rows");
     assert!(
-        ticket[1].contains("5 sites, listed below"),
+        ticket[1].contains("5 sites, listed as rows below"),
         "the ticket description counts sites: {:?}",
         &ticket[1]
     );
@@ -314,14 +314,24 @@ fn a_report_with_no_tree_says_so_in_the_plan_the_tickets_and_the_pdf_patterns() 
         grid[1]
     );
 
-    // The ticket file: its header, then one row that says why there are no tickets.
+    // The ticket file: its header and no ticket row (a note row would import as a ticket); the
+    // package README says why.
     let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
+    assert_eq!(
+        reader.headers().unwrap().len(),
+        crate::xlsx_export::tickets::TICKET_HEADERS.len(),
+        "the tickets file keeps its header"
+    );
     let tickets: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();
-    assert_eq!(tickets.len(), 1, "{tickets:?}");
+    assert!(tickets.is_empty(), "no ticket rows: {tickets:?}");
+    let readme = String::from_utf8(entries["README.txt"].clone()).unwrap();
+    let tickets_paragraph = readme
+        .split("csv/tickets.csv")
+        .nth(1)
+        .expect("the README describes the tickets file");
     assert!(
-        tickets[0][0].contains("no review tree") || tickets[0][1].contains("no review tree"),
-        "the tickets say so: {:?}",
-        tickets[0]
+        tickets_paragraph.contains("no review tree"),
+        "the README says why the tickets file is empty: {tickets_paragraph}"
     );
 
     // The PDF's patterns: no pattern, and a sentence in the data the Patterns section prints.

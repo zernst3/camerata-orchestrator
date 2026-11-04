@@ -189,7 +189,17 @@ pub(crate) fn assemble_package(
         .map(|m| m.with_models_from(&report.provenance));
     let client = crate::report_export::clean_client_name(&options.client_name);
     provenance.client_name = (!client.is_empty()).then_some(client);
-    let readme = crate::product_export_readme(stem, &provenance);
+    let mut readme = crate::product_export_readme(stem, &provenance);
+    // The tickets file of a report with no review tree is its header alone; the README says why.
+    if !crate::xlsx_export::no_tree_note(reviewed).is_empty() {
+        const TICKETS_PARAGRAPH_END: &str = " Sites sheet on.\n";
+        const NO_TREE_SENTENCE: &str =
+            "  This report has no review tree, so the file has its header and no tickets;\n  \
+             every site is on the Sites sheet.\n";
+        if let Some(at) = readme.find(TICKETS_PARAGRAPH_END) {
+            readme.insert_str(at + TICKETS_PARAGRAPH_END.len(), NO_TREE_SENTENCE);
+        }
+    }
 
     Ok(ProductPackage {
         stem: stem.to_string(),
