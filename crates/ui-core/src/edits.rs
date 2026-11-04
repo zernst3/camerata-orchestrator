@@ -1158,10 +1158,23 @@ pub fn head_chips(row: &SiteRow) -> Vec<Chip> {
 
 /// How closely the row was reviewed, in words; `None` for a row held for a ruling.
 pub fn review_level_text(level: Option<&ReviewLevel>) -> Option<String> {
-    level.map(|l| match l {
-        ReviewLevel::PersonallyReviewed => "review level: personally reviewed".to_string(),
-        ReviewLevel::ReviewedAsPattern(_) => "review level: reviewed as a pattern".to_string(),
-        ReviewLevel::EngineVerified => "review level: engine verified".to_string(),
+    // Read by its wire form: the level is worked out in one place on the server and only read
+    // here, so this names no variant.
+    use camerata_api_types::review::{
+        ENGINE_VERIFIED, PERSONALLY_REVIEWED, REVIEWED_AS_PATTERN_PREFIX,
+    };
+    level.map(|l| {
+        let wire = l.as_wire();
+        let words = if wire == PERSONALLY_REVIEWED {
+            "personally reviewed"
+        } else if wire.starts_with(REVIEWED_AS_PATTERN_PREFIX) {
+            "reviewed as a pattern"
+        } else if wire == ENGINE_VERIFIED {
+            "engine verified"
+        } else {
+            "reviewed"
+        };
+        format!("review level: {words}")
     })
 }
 
