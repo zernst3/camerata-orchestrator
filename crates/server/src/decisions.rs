@@ -625,10 +625,11 @@ pub fn held_keys(
     held
 }
 
-/// The rows the Engine Check's pending No holds from the client export. THE PLACE for that hold:
-/// the Engine Check (WO11) records a No on a row with no correction yet, and this function
-/// returns that row's key until a correction or a decision is recorded. Until the Engine Check
-/// exists nothing writes such a record, so this holds nothing.
+/// The rows the Engine Check's pending No holds from the client export. The rule is
+/// [`crate::engine_check::uncorrected_keys`]; it needs the verdicts and the edits, which this
+/// module's callers do not all hold, so the decision route adds those rows to this list itself
+/// (`decisions::routes::decide`) and the review read model lists them in the export gate view.
+/// This function keeps the seam: a caller that has no verdicts holds nothing here.
 fn engine_check_holds(_active: &[Decision]) -> Vec<String> {
     Vec::new()
 }

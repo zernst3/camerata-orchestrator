@@ -1,0 +1,775 @@
+{
+  "budget_outcome": {
+    "after": {
+      "budget": "number",
+      "candidates": "number",
+      "counted_lines": "number",
+      "escalated": "number",
+      "floor": "number",
+      "over_budget": "number",
+      "rate_per_kloc": "number"
+    },
+    "applied": "bool",
+    "before": {
+      "budget": "number",
+      "candidates": "number",
+      "counted_lines": "number",
+      "escalated": "number",
+      "floor": "number",
+      "over_budget": "number",
+      "rate_per_kloc": "number"
+    },
+    "moved_above": "number",
+    "moved_below": "number"
+  },
+  "closed_lists": {
+    "engine_check_errors": [
+      "not_a_real_issue",
+      "wrong_severity",
+      "duplicate_of_another_row",
+      "should_have_been_escalated",
+      "should_not_have_been_escalated",
+      "wrong_grouping",
+      "wording_or_fix_wrong",
+      "group_summary_does_not_describe"
+    ],
+    "escalation_reasons": [
+      "unauthenticated_reach",
+      "secret_exposure",
+      "data_loss",
+      "cross_tenant",
+      "conflicting_verdicts",
+      "likely_false_alarm_at_high_severity",
+      "outlier_in_group",
+      "rule_misfit",
+      "evidence_unverified",
+      "needs_more_code"
+    ],
+    "hold_reasons": [
+      "junk_content",
+      "evidence_unverified",
+      "restored_without_decision",
+      "merged_without_decision",
+      "engine_check_no_without_correction"
+    ],
+    "markers": [
+      "held",
+      "escalated",
+      "candidate",
+      "over_budget",
+      "outlier",
+      "new_since_decision",
+      "stale",
+      "moved",
+      "possible_duplicate",
+      "edited"
+    ],
+    "outlier_reasons": [
+      "severity_raise_held",
+      "different_object",
+      "different_construct",
+      "only_site_in_file",
+      "stage2_outlier",
+      "precondition_added",
+      "unverified_name",
+      "fix_ungrounded",
+      "contradiction",
+      "evidence_unverified",
+      "in_test_code",
+      "could_be_intentional",
+      "methodology_leak"
+    ]
+  },
+  "engine_check": {
+    "allocation": [
+      {
+        "category": "string",
+        "drawn": "number",
+        "indicative_only": "bool",
+        "margin_percent": "number",
+        "rate_percent": "number",
+        "unread": "number",
+        "verdicts": "number",
+        "wrong": "number"
+      }
+    ],
+    "cards": [
+      {
+        "duplicate_link": {
+          "hint": "string",
+          "key": "string",
+          "line": "number",
+          "path": "string",
+          "rule_id": "string"
+        },
+        "escalation": "string",
+        "flagged_by": [
+          {
+            "$one_of": [
+              "empty",
+              {
+                "line": "number",
+                "path": "string",
+                "rule_id": "string",
+                "site_key": "string",
+                "tool": "string"
+              }
+            ]
+          }
+        ],
+        "outliers": [
+          {
+            "$one_of": [
+              "empty",
+              {
+                "reason": "string",
+                "why": "string"
+              }
+            ]
+          }
+        ],
+        "placement": {
+          "cause": "string",
+          "node_path": [
+            {
+              "id": "string",
+              "label": "string"
+            }
+          ],
+          "subgroup_label": "string",
+          "summary": "string"
+        },
+        "review_flags": [
+          "empty"
+        ],
+        "site": {
+          "added_by_reviewer": "bool",
+          "category": "string",
+          "decision": {
+            "confirmed_by_client": "null",
+            "decided_at": "string",
+            "decided_by": "string",
+            "id": "string",
+            "inherited_from": "string",
+            "needed_me": "null",
+            "reason": "string",
+            "scope": "string",
+            "state": "string"
+          },
+          "detail": "string",
+          "edits": [
+            "empty"
+          ],
+          "fix": "string",
+          "fix_type": "string",
+          "flagged_by": [
+            {
+              "$one_of": [
+                "empty",
+                {
+                  "line": "number",
+                  "path": "string",
+                  "rule_id": "string",
+                  "site_key": "string",
+                  "tool": "string"
+                }
+              ]
+            }
+          ],
+          "group_path": [
+            "string"
+          ],
+          "group_primary": "bool",
+          "headline": "string",
+          "held": "string",
+          "kind": {
+            "kind": "string"
+          },
+          "line": "number",
+          "markers": [
+            {
+              "$one_of": [
+                "empty",
+                "string"
+              ]
+            }
+          ],
+          "merged_into": {
+            "key": "string",
+            "label": "string"
+          },
+          "moved_from": "null",
+          "new_since_decision": "null",
+          "path": "string",
+          "possible_duplicate_of": {
+            "hint": "string",
+            "key": "string",
+            "line": "number",
+            "path": "string",
+            "rule_id": "string"
+          },
+          "repo": "string",
+          "review_flags": [
+            "empty"
+          ],
+          "review_level": "string",
+          "rule_id": "string",
+          "severity": "string",
+          "site_key": "string",
+          "snippet": "string",
+          "stage1": {
+            "confidence": "string",
+            "effort": "string",
+            "real": "string",
+            "reason": "string",
+            "severity": "string"
+          },
+          "stage2": "null",
+          "stale_decision": "null",
+          "thrown_out_reason": "string"
+        },
+        "stage1": {
+          "confidence": "string",
+          "effort": "string",
+          "real": "string",
+          "reason": "string",
+          "severity": "string"
+        },
+        "stratum": "string",
+        "verdict": {
+          "at": "string",
+          "by": "string",
+          "correction": "null",
+          "key": "string",
+          "right": "bool",
+          "run_id": "string",
+          "wrong": "string"
+        }
+      }
+    ],
+    "drawn": "number",
+    "off": "bool",
+    "run_id": "string",
+    "setting": "number",
+    "strata": [
+      {
+        "drawn": "number",
+        "margin_percent": "number",
+        "rate_percent": "number",
+        "stratum": "string",
+        "verdicts": "number",
+        "wrong": "number"
+      }
+    ],
+    "thrown_out_total": "number",
+    "unread_total": "number"
+  },
+  "error": {
+    "code": "string",
+    "message": "string",
+    "ok": "bool"
+  },
+  "export_gate": {
+    "held": [
+      {
+        "detail": "string",
+        "key": "string",
+        "line": "number",
+        "path": "string",
+        "reason": "string",
+        "rule_id": "string"
+      }
+    ],
+    "merged_without_decision": [
+      {
+        "detail": "string",
+        "key": "string",
+        "line": "number",
+        "path": "string",
+        "reason": "string",
+        "rule_id": "string"
+      }
+    ],
+    "node_decisions_missing_members": [
+      "empty"
+    ]
+  },
+  "queue": {
+    "below": [
+      {
+        "candidate": {
+          "escalated": "bool",
+          "global_rank": "number",
+          "key": "string",
+          "node_id": "string",
+          "over_budget_reason": "null",
+          "reason": "string",
+          "severity": "string",
+          "stage2_rank": "number",
+          "why": "string"
+        },
+        "node_path": [
+          {
+            "id": "string",
+            "label": "string"
+          }
+        ],
+        "site": {
+          "added_by_reviewer": "bool",
+          "category": "null",
+          "decision": "null",
+          "detail": "string",
+          "edits": [
+            {
+              "at": "string",
+              "by": "string",
+              "current_value": "string",
+              "field": "string",
+              "id": "string",
+              "new": "string",
+              "old": "string",
+              "reapplied_from": "null",
+              "reason": "string",
+              "stale": "bool"
+            }
+          ],
+          "fix": "string",
+          "fix_type": "string",
+          "flagged_by": [
+            "empty"
+          ],
+          "group_path": [
+            "string"
+          ],
+          "group_primary": "bool",
+          "headline": "string",
+          "held": "null",
+          "kind": {
+            "kind": "string"
+          },
+          "line": "number",
+          "markers": [
+            "string"
+          ],
+          "merged_into": "null",
+          "moved_from": "null",
+          "new_since_decision": "null",
+          "path": "string",
+          "possible_duplicate_of": "null",
+          "repo": "string",
+          "review_flags": [
+            "empty"
+          ],
+          "review_level": "string",
+          "rule_id": "string",
+          "severity": "string",
+          "site_key": "string",
+          "snippet": "string",
+          "stage1": {
+            "confidence": "null",
+            "effort": "null",
+            "real": "string",
+            "reason": "string",
+            "severity": "string"
+          },
+          "stage2": {
+            "disagreements": [
+              "empty"
+            ],
+            "global_rank": "number",
+            "outlier_reason": "null",
+            "outlier_why": "string",
+            "over_budget_reason": "null",
+            "reason": "string",
+            "stage2_rank": "number",
+            "state": "string",
+            "subgroup_cause": "string",
+            "subgroup_label": "string",
+            "why": "string"
+          },
+          "stale_decision": "null",
+          "thrown_out_reason": "null"
+        }
+      }
+    ],
+    "below_offset": "number",
+    "below_total": "number",
+    "budget": {
+      "budget": "number",
+      "candidates": "number",
+      "counted_lines": "number",
+      "escalated": "number",
+      "floor": "number",
+      "over_budget": "number",
+      "rate_per_kloc": "number"
+    },
+    "escalated": [
+      {
+        "candidate": {
+          "escalated": "bool",
+          "global_rank": "number",
+          "key": "string",
+          "node_id": "string",
+          "over_budget_reason": "null",
+          "reason": "string",
+          "severity": "string",
+          "stage2_rank": "number",
+          "why": "string"
+        },
+        "node_path": [
+          {
+            "id": "string",
+            "label": "string"
+          }
+        ],
+        "site": {
+          "added_by_reviewer": "bool",
+          "category": "null",
+          "decision": {
+            "confirmed_by_client": "null",
+            "decided_at": "string",
+            "decided_by": "string",
+            "id": "string",
+            "inherited_from": "string",
+            "needed_me": "null",
+            "reason": "string",
+            "scope": "string",
+            "state": "string"
+          },
+          "detail": "string",
+          "edits": [
+            "empty"
+          ],
+          "fix": "string",
+          "fix_type": "string",
+          "flagged_by": [
+            "empty"
+          ],
+          "group_path": [
+            "string"
+          ],
+          "group_primary": "bool",
+          "headline": "string",
+          "held": "null",
+          "kind": {
+            "kind": "string"
+          },
+          "line": "number",
+          "markers": [
+            "string"
+          ],
+          "merged_into": "null",
+          "moved_from": "null",
+          "new_since_decision": "null",
+          "path": "string",
+          "possible_duplicate_of": "null",
+          "repo": "string",
+          "review_flags": [
+            "empty"
+          ],
+          "review_level": "string",
+          "rule_id": "string",
+          "severity": "string",
+          "site_key": "string",
+          "snippet": "string",
+          "stage1": {
+            "confidence": "null",
+            "effort": "null",
+            "real": "string",
+            "reason": "string",
+            "severity": "string"
+          },
+          "stage2": {
+            "disagreements": [
+              "empty"
+            ],
+            "global_rank": "number",
+            "outlier_reason": "null",
+            "outlier_why": "string",
+            "over_budget_reason": "null",
+            "reason": "string",
+            "stage2_rank": "number",
+            "state": "string",
+            "subgroup_cause": "string",
+            "subgroup_label": "string",
+            "why": "string"
+          },
+          "stale_decision": "null",
+          "thrown_out_reason": "null"
+        }
+      }
+    ],
+    "group_reviewed": "bool",
+    "needed_me": {
+      "decided": "number",
+      "needed_me": "number",
+      "percent": "number"
+    },
+    "over_budget_reasons": [
+      "empty"
+    ],
+    "run_id": "string",
+    "show_below": "bool"
+  },
+  "settings": {
+    "engine_check": {
+      "sample_size_per_run": "number",
+      "suggested": "number"
+    },
+    "escalation": {
+      "budget": {
+        "budget": "number",
+        "candidates": "number",
+        "counted_lines": "number",
+        "escalated": "number",
+        "floor": "number",
+        "over_budget": "number",
+        "rate_per_kloc": "number"
+      },
+      "counted_lines": "number",
+      "floor": "number",
+      "over_budget_reasons": [
+        "empty"
+      ],
+      "rate_per_kloc": "number"
+    },
+    "limits": {
+      "floor_max": "number",
+      "rate_max": "number",
+      "sample_max": "number"
+    },
+    "stage_models": {
+      "calibration": "string",
+      "fix": "string",
+      "group_review": "string",
+      "scan": "string"
+    }
+  },
+  "shell": {
+    "budget": {
+      "budget": "number",
+      "candidates": "number",
+      "counted_lines": "number",
+      "escalated": "number",
+      "floor": "number",
+      "over_budget": "number",
+      "rate_per_kloc": "number"
+    },
+    "counts": {
+      "confirmed": "number",
+      "false_positive": "number",
+      "held": "number",
+      "ignored": "number",
+      "merged": "number",
+      "tech_debt": "number",
+      "total": "number",
+      "unresolved": "number"
+    },
+    "engine_version": "string",
+    "export_gate": {
+      "held": [
+        {
+          "detail": "string",
+          "key": "string",
+          "line": "number",
+          "path": "string",
+          "reason": "string",
+          "rule_id": "string"
+        }
+      ],
+      "merged_without_decision": [
+        {
+          "detail": "string",
+          "key": "string",
+          "line": "number",
+          "path": "string",
+          "reason": "string",
+          "rule_id": "string"
+        }
+      ],
+      "node_decisions_missing_members": [
+        "empty"
+      ]
+    },
+    "group_reviewed": "bool",
+    "lanes": {
+      "engine_check": "number",
+      "engine_check_off": "bool",
+      "escalations": "number",
+      "flat_rows": "number",
+      "tree_undecided": "number"
+    },
+    "run_id": "string",
+    "stale": {
+      "moved": "number",
+      "new_since_decision": "number",
+      "stale_decisions": "number",
+      "stale_edits": "number"
+    }
+  },
+  "sites": {
+    "next_cursor": "null",
+    "node": "string",
+    "offset": "number",
+    "rows": [
+      {
+        "added_by_reviewer": "bool",
+        "category": "string",
+        "decision": {
+          "confirmed_by_client": "null",
+          "decided_at": "string",
+          "decided_by": "string",
+          "id": "string",
+          "inherited_from": "null",
+          "needed_me": "null",
+          "reason": "string",
+          "scope": "string",
+          "state": "string"
+        },
+        "detail": "string",
+        "edits": [
+          {
+            "$one_of": [
+              "empty",
+              {
+                "at": "string",
+                "by": "string",
+                "current_value": "string",
+                "field": "string",
+                "id": "string",
+                "new": "string",
+                "old": "string",
+                "reapplied_from": "null",
+                "reason": "string",
+                "stale": "bool"
+              }
+            ]
+          }
+        ],
+        "fix": "string",
+        "fix_type": "string",
+        "flagged_by": [
+          {
+            "$one_of": [
+              "empty",
+              {
+                "line": "number",
+                "path": "string",
+                "rule_id": "string",
+                "site_key": "string",
+                "tool": "string"
+              }
+            ]
+          }
+        ],
+        "group_path": [
+          "string"
+        ],
+        "group_primary": "bool",
+        "headline": "string",
+        "held": "string",
+        "kind": {
+          "kind": "string"
+        },
+        "line": "number",
+        "markers": [
+          {
+            "$one_of": [
+              "empty",
+              "string"
+            ]
+          }
+        ],
+        "merged_into": {
+          "key": "string",
+          "label": "string"
+        },
+        "moved_from": "null",
+        "new_since_decision": "null",
+        "path": "string",
+        "possible_duplicate_of": {
+          "hint": "string",
+          "key": "string",
+          "line": "number",
+          "path": "string",
+          "rule_id": "string"
+        },
+        "repo": "string",
+        "review_flags": [
+          "empty"
+        ],
+        "review_level": "string",
+        "rule_id": "string",
+        "severity": "string",
+        "site_key": "string",
+        "snippet": "string",
+        "stage1": {
+          "confidence": "string",
+          "effort": "string",
+          "real": "string",
+          "reason": "string",
+          "severity": "string"
+        },
+        "stage2": {
+          "disagreements": [
+            "empty"
+          ],
+          "global_rank": "number",
+          "outlier_reason": "null",
+          "outlier_why": "string",
+          "over_budget_reason": "null",
+          "reason": "string",
+          "stage2_rank": "number",
+          "state": "string",
+          "subgroup_cause": "string",
+          "subgroup_label": "string",
+          "why": "string"
+        },
+        "stale_decision": "null",
+        "thrown_out_reason": "null"
+      }
+    ],
+    "run_id": "string",
+    "total": "number"
+  },
+  "tree": {
+    "group_reviewed": "bool",
+    "nodes": [
+      {
+        "cause": "string",
+        "counts": {
+          "below_the_line": "number",
+          "decided": "number",
+          "escalated": "number",
+          "held": "number",
+          "new_since_decision": "number",
+          "outliers": "number",
+          "sites": "number",
+          "stale": "number",
+          "unplaced": "number"
+        },
+        "decision": {
+          "covered": "number",
+          "decided_at": "string",
+          "id": "string",
+          "left_out": "number",
+          "reason": "string",
+          "state": "string"
+        },
+        "flags": [
+          "empty"
+        ],
+        "id": "string",
+        "kind": "string",
+        "label": "string",
+        "level": "string",
+        "parent": "string",
+        "summary": "string",
+        "summary_edit": "null",
+        "summary_source": "string",
+        "thrown_out": "bool"
+      }
+    ],
+    "run_id": "string"
+  }
+}

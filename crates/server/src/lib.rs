@@ -56,6 +56,7 @@ pub mod dep_audit;
 pub mod draft;
 pub mod edits;
 pub mod enforcement_ledger;
+pub mod engine_check;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
@@ -108,6 +109,7 @@ pub mod review_agent;
 /// The review tree's cross-run site matching (`match_runs`); the stable site key it matches on is
 /// `camerata_api_types::site_key`.
 pub mod review_tree;
+pub mod review_view;
 pub mod routine;
 pub mod run;
 pub mod run_health;
@@ -253,6 +255,9 @@ pub struct AppState {
     /// The reviewer's edits, added findings, merges and splits, one file per project beside the
     /// decisions. An overlay on the sealed report; see [`crate::edits`].
     edits: crate::edits::EditStore,
+    /// The Engine Check's verdicts, one file per project beside the edits. Internal quality
+    /// control: never part of a client output; see [`crate::engine_check`].
+    engine_check: crate::engine_check::EngineCheckStore,
     /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
     /// Not part of the project export. See [`crate::client_source`].
     source_records: crate::client_source::records::SourceRecordStore,
@@ -381,6 +386,7 @@ impl AppState {
             inspections: crate::inspections::InspectionStore::new(),
             decisions: crate::decisions::DecisionStore::new(),
             edits: crate::edits::EditStore::new(),
+            engine_check: crate::engine_check::EngineCheckStore::new(),
             source_records: crate::client_source::records::SourceRecordStore::new(),
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
@@ -649,6 +655,11 @@ impl AppState {
     /// The reviewer's edit store. Out-of-crate test seam (mirrors [`Self::decisions`]).
     pub fn edits(&self) -> &crate::edits::EditStore {
         &self.edits
+    }
+
+    /// The Engine Check's verdict store. Out-of-crate test seam (mirrors [`Self::edits`]).
+    pub fn engine_check(&self) -> &crate::engine_check::EngineCheckStore {
+        &self.engine_check
     }
 
     /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
@@ -1164,6 +1175,8 @@ impl AppState {
         self.decisions = crate::decisions::DecisionStore::at(dir.join("decisions"));
         // The reviewer's edits, beside the decisions. Not disposable either.
         self.edits = crate::edits::EditStore::at(dir.join("edits"));
+        // The Engine Check's verdicts, beside the edits. Not disposable either.
+        self.engine_check = crate::engine_check::EngineCheckStore::at(dir.join("engine-check"));
         // The proof of what source deletion removed, and when source was fetched back.
         self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
             dir.join("source-records.json"),
@@ -1867,6 +1880,8 @@ pub fn router(state: AppState) -> Router {
         )
         // A request about an unknown native-shaped (`uow-...`) unit is a 404, never a write
         // that creates a phantom unit.
+        // The review read model (WO9c): the routes live in `routes/review_routes.rs`.
+        .merge(crate::routes::review_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::native_units::unknown_native_unit_gate,

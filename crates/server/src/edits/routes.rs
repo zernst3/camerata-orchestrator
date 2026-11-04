@@ -123,7 +123,7 @@ fn guard(state: &AppState, id: &str) -> Result<(), Response> {
 }
 
 /// The latest inspection sealed with the project's restores, and the overlay over it.
-fn review_of(
+pub(crate) fn review_of(
     state: &AppState,
     id: &str,
     latest: &InspectionEntry,
