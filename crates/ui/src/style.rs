@@ -7076,6 +7076,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-row .col-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .site-row .col-headline { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-row .col-s1, .site-row .col-s2 { white-space: nowrap; color: var(--ink-soft); }
+/* Stage 1 reads whole ("Y medium" wraps rather than clipping to "Y medi..."). */
+.site-row .col-s1 { white-space: normal; }
 .site-row .col-s2 { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 /* Markers wrap onto a second line rather than clip: a cut chip ("new si...") reads as a different marker. */
 .site-table td.col-markers { white-space: normal; overflow: visible; }
