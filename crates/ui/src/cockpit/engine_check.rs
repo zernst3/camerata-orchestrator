@@ -21,16 +21,18 @@ use camerata_api_types::review_view::{
 use camerata_ui::review_io::ReviewApi;
 use camerata_ui_core::engine_check::{
     all_verdicts_in, allocation_note, card_position, card_state, card_state_text, collapsed_text,
-    correction_ref, correction_request, duplicate_text, engine_command, engine_keys_armed,
-    error_digit, error_label, escalation_text, field_label, flags_text, keys_hint, merge_targets,
-    no_request, outlier_text, placed_text, question, rate_lines, sample_line, stage1_text,
-    stratum_label, verdicts_line, yes_request, CardState, Correction, CorrectionKind,
-    EngineCommand, KeyPhase, LaneState, Phase, NO_CARDS, OFF_TEXT, SEVERITIES, SUBTITLE,
-    TEXT_FIELDS,
+    correction_lines, correction_ref, correction_request, duplicate_text, engine_command,
+    engine_keys_armed, error_digit, error_label, escalation_text, field_label, flags_text,
+    keys_hint, merge_targets, no_request, outlier_text, placed_text, question, rate_lines,
+    sample_line, stage1_text, stratum_label, verdicts_line, yes_request, CardState, Correction,
+    CorrectionKind, EngineCommand, KeyPhase, LaneState, Phase, NO_CARDS, OFF_TEXT, SEVERITIES,
+    SUBTITLE, TEXT_FIELDS,
 };
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::shell::{lane_for_key, Lane};
-use camerata_ui_core::tree::{dom_token, file_line, kind_tag_of, severity_badge, severity_label};
+use camerata_ui_core::tree::{
+    dom_token, file_line, kind_tag_of, marker_chips, severity_badge, severity_label,
+};
 use camerata_ui_core::triage::{FocusMove, KeyMods, PaneFocus};
 use dioxus::prelude::*;
 
@@ -265,6 +267,11 @@ fn EngineCardView(
             Some(("mark-edited", "\u{2713} corrected")),
         ),
     };
+    let summary_lines = correction_lines(&card);
+    let edited_chips: Vec<_> = marker_chips(&card.site)
+        .into_iter()
+        .filter(|c| c.class == "mark-edited")
+        .collect();
     let thrown_out = card.stratum == SampleStratum::ThrownOut;
     let q = question(&card);
     let site = &card.site;
@@ -318,6 +325,16 @@ fn EngineCardView(
                 span { class: "engine-state-text", "{status_text}" }
                 if correctable && state.phase == Phase::Viewing {
                     button { class: "btn-edit-sm", onclick: move |_| on_correct.call(()), "Correct it" }
+                }
+            }
+            if corrected {
+                div { class: "engine-fix-summary",
+                    for line in summary_lines {
+                        span { key: "{line}", class: "engine-fix-line", "{line}" }
+                    }
+                    for chip in edited_chips {
+                        span { key: "{chip.class}", class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
+                    }
                 }
             }
             if let Some(error) = state.error.clone() {

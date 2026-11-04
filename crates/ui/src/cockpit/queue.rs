@@ -304,10 +304,10 @@ fn QueueTable(
                 col { style: "width: 40px" }
                 col { style: "width: 18%" }
                 col { style: "width: 9%" }
-                col { style: "width: 17%" }
-                col { style: "width: 17%" }
-                col { style: "width: 8%" }
-                col { style: "width: 14%" }
+                col { style: "width: 15%" }
+                col { style: "width: 16%" }
+                col { style: "width: 11%" }
+                col { style: "width: 12%" }
                 col { style: "width: 11%" }
                 col { style: "width: 64px" }
             }

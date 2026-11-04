@@ -1974,6 +1974,9 @@ fn apply_engine_mode(p: &Params, rows: &mut [SiteRow]) -> BTreeMap<String, Engin
                 });
                 rows[i].review_level = level(PERSONALLY_REVIEWED);
                 verdict.correction = Some(CorrectionRef::Decision(id));
+                // The correction made is a false-positive ruling, which is what "not a real
+                // issue" corrects, so the verdict names that and the card reads consistently.
+                verdict.wrong = Some(EngineCheckError::NotARealIssue);
             }
         }
         verdicts.insert(key, verdict);

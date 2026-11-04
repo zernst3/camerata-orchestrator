@@ -189,3 +189,24 @@ fn a_stratum_rate_over_one_verdict_says_indicative_only_and_is_not_certain() {
         );
     }
 }
+
+/// D5 (spec 7): a corrected card shows the correction summary, so the reviewer sees what was
+/// done: the ruling and its reason, and the edit chip the row carries.
+#[test]
+fn a_corrected_card_shows_what_was_done() {
+    let html = page("engine/no-corrected");
+    assert!(html.contains("class=\"engine-fix-summary\""), "{html}");
+    assert!(
+        html.contains("False positive: Engine Check said No; the row is not a real issue."),
+        "the ruling and its reason: {html}"
+    );
+    // The verdict's own reason matches the correction made (a false positive is "not a real issue").
+    assert!(
+        html.contains("(not a real issue)"),
+        "the state line names the same error the correction fixed: {html}"
+    );
+    // A card with nothing corrected shows no summary.
+    for id in ["engine/card-pending", "engine/no-pending-correction"] {
+        assert!(!page(id).contains("engine-fix-summary"), "{id}");
+    }
+}

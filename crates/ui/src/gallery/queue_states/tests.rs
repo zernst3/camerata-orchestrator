@@ -219,3 +219,28 @@ fn no_queue_page_claims_a_severity_the_rows_over_budget_do_not_have() {
     }
     assert!(with_band >= 3, "a vacuous pass proves nothing");
 }
+
+/// D6: Stage 1 wraps instead of clipping at 1440 ("Y medi..."). The cell carries the class and the
+/// stylesheet lets it wrap, while the Stage 2 why gives up the room (ellipsized at a width).
+#[test]
+fn the_stage_1_cell_wraps_and_the_why_gives_up_the_room() {
+    let html = render("queue/at-budget");
+    assert!(html.contains("class=\"col-s1\""), "the cell is there");
+    let css: String = GLOBAL_CSS.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        css.contains(".queue-table td.col-s1 { white-space: normal; }"),
+        "Stage 1 wraps"
+    );
+    assert!(
+        css.contains(".queue-table td.col-why { color: var(--ink-soft); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }"),
+        "the why is cut at a width, not Stage 1"
+    );
+    // The table is fixed-layout, so the room is the column's: Stage 1 (11%) gets more than the why
+    // used to leave it (8%), which clipped "Y medium" at 1440.
+    assert!(
+        html.contains(
+            "<col style=\"width: 11%\"/><col style=\"width: 12%\"/><col style=\"width: 11%\"/>"
+        ),
+        "Stage 1, the why and the decision keep their widths"
+    );
+}

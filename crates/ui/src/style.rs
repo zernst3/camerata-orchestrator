@@ -1510,7 +1510,7 @@ html, body {
   display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
 }
 .uow-field-label {
-  font-size: 11.5px; font-weight: 600; color: var(--ink-soft); min-width: 76px;
+  font-size: 11.5px; font-weight: 600; color: var(--ink-soft);;
 }
 /* Segmented control for the 3-state dev-status selector. A genuinely distinct pattern
    (one control, mutually-exclusive options), but aligned to the shared button system:
@@ -7136,7 +7136,12 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .queue-table td.col-reason { white-space: normal; overflow-wrap: anywhere; }
 .queue-table td.col-node { white-space: nowrap; }
 .queue-table th.col-need { letter-spacing: 0; }
-.queue-table td.col-why { color: var(--ink-soft); white-space: nowrap; }
+/* Stage 1 wraps rather than clips ("Y medi..." reads as a different value); the Stage 2 why gives
+   up the room instead, ellipsized at a width, its full text in the cell's title. */
+.queue-table .site-row .col-s1, .queue-table td.col-s1 { white-space: normal; }
+.queue-table td.col-why {
+  color: var(--ink-soft); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+}
 .queue-table .col-need { text-align: center; }
 .queue-table th.col-need { text-align: center; }
 .queue-node-link { color: var(--ink); text-decoration: underline dotted; }
@@ -7187,6 +7192,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .engine-state.held { border-color: var(--danger-color); background: rgba(220, 38, 38, 0.08); color: var(--ink); }
 .engine-state.yes, .engine-state.corrected { border-color: var(--good); }
 .engine-state-text { flex: 1 1 auto; min-width: 0; }
+.engine-fix-summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 5px 10px;
+  border-left: 3px solid var(--good); font-size: 12.5px; color: var(--ink);
+}
+.engine-fix-line { min-width: 0; overflow-wrap: anywhere; }
 .engine-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1100px) { .engine-panels { grid-template-columns: 1fr; } }
 .engine-panel {

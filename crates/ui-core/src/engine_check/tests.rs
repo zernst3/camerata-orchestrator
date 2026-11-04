@@ -987,3 +987,69 @@ fn a_stratum_rate_over_few_verdicts_says_indicative_only() {
     kept_mut(&mut l).verdicts = SMALL_CATEGORY_DRAWN;
     assert!(!rate_lines(&l)[0].text.contains("indicative only"));
 }
+
+// ── D5: the correction summary ──────────────────────────────────────────────────────────
+
+#[test]
+fn a_corrected_card_summarises_the_ruling_and_the_edits_that_corrected_it() {
+    // Nothing corrected, nothing to summarise.
+    assert!(correction_lines(&card0()).is_empty());
+    assert!(correction_lines(&no_card(None)).is_empty());
+    // A named decision: its state and its reason.
+    let mut ruled = no_card(Some(CorrectionRef::Decision("dec-9".to_string())));
+    let mut d = a_decision_at("2026-11-04T09:30:00Z");
+    d.id = "dec-9".to_string();
+    d.state = DecisionState::FalsePositive;
+    d.reason = "the policy is on a view".to_string();
+    ruled.site.decision = Some(d);
+    assert_eq!(
+        correction_lines(&ruled),
+        vec!["False positive: the policy is on a view".to_string()]
+    );
+    // A decision that is neither named nor later is not the correction.
+    let mut other = ruled.clone();
+    other.verdict.as_mut().unwrap().correction = None;
+    other.site.decision.as_mut().unwrap().decided_at = "2026-11-04T08:00:00Z".to_string();
+    assert!(correction_lines(&other).is_empty());
+    // A named edit: the field, old to new, and why.
+    let mut edited = no_card(Some(CorrectionRef::Edit("edit-3".to_string())));
+    edited.site.edits = vec![camerata_api_types::review_view::EditView {
+        id: "edit-3".to_string(),
+        field: EditField::Severity,
+        old: "high".to_string(),
+        new: "medium".to_string(),
+        reason: "behind sign-in".to_string(),
+        by: "architect".to_string(),
+        at: "2026-11-04T09:10:00Z".to_string(),
+        stale: false,
+        current_value: "medium".to_string(),
+        reapplied_from: None,
+    }];
+    assert_eq!(
+        correction_lines(&edited),
+        vec!["Severity: high to medium (behind sign-in)".to_string()]
+    );
+    // A Yes is not a correction.
+    let mut yes = ruled;
+    yes.verdict = Some(verdict(true, None));
+    assert!(correction_lines(&yes).is_empty());
+}
+
+#[test]
+fn the_corrected_fixture_names_the_error_its_correction_fixed() {
+    let l = lane(EngineMode::NoCorrected);
+    let card = l
+        .cards
+        .iter()
+        .find(|c| matches!(card_state(c), CardState::Corrected { .. }))
+        .expect("a corrected card");
+    let wrong = card.verdict.as_ref().and_then(|v| v.wrong);
+    let lines = correction_lines(card);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("False positive"), "{lines:?}");
+    assert_eq!(
+        wrong,
+        Some(EngineCheckError::NotARealIssue),
+        "a false-positive ruling corrects 'not a real issue', not 'wrong severity'"
+    );
+}

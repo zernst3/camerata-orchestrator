@@ -167,6 +167,55 @@ fn with_error(text: &str, error: Option<EngineCheckError>) -> String {
     }
 }
 
+/// What was done to correct a No, in words, for the card's correction summary (spec section 7:
+/// "the card shows the correction summary"): the ruling the row now has with its reason, and each
+/// edit made, when the verdict names them or they were made after it. Empty when nothing was.
+pub fn correction_lines(card: &EngineCheckCard) -> Vec<String> {
+    let Some(v) = &card.verdict else {
+        return Vec::new();
+    };
+    if v.right {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let named_decision = match &v.correction {
+        Some(CorrectionRef::Decision(id)) => Some(id.as_str()),
+        _ => None,
+    };
+    if let Some(d) =
+        card.site.decision.as_ref().filter(|d| {
+            named_decision == Some(d.id.as_str()) || strictly_later(&d.decided_at, &v.at)
+        })
+    {
+        let label = crate::tree::decision_label(&d.state);
+        let reason = d.reason.trim();
+        lines.push(if reason.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label}: {reason}")
+        });
+    }
+    let named_edit = match &v.correction {
+        Some(CorrectionRef::Edit(id)) => Some(id.as_str()),
+        _ => None,
+    };
+    for e in card
+        .site
+        .edits
+        .iter()
+        .filter(|e| named_edit == Some(e.id.as_str()) || strictly_later(&e.at, &v.at))
+    {
+        let change = format!("{}: {} to {}", field_label(e.field), e.old, e.new);
+        let reason = e.reason.trim();
+        lines.push(if reason.is_empty() {
+            change
+        } else {
+            format!("{change} ({reason})")
+        });
+    }
+    lines
+}
+
 /// Whether this card has been answered on THIS run. A No carried from an earlier run is not an
 /// answer given here: the card still wants one.
 pub fn answered(card: &EngineCheckCard) -> bool {
