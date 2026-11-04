@@ -86,7 +86,7 @@ fn hex_encode(key: &str) -> String {
 }
 
 fn hex_decode(cursor: &str) -> Option<String> {
-    if cursor.len() % 2 != 0 {
+    if !cursor.len().is_multiple_of(2) {
         return None;
     }
     let bytes = (0..cursor.len())
