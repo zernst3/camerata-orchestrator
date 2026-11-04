@@ -18,6 +18,7 @@
 
 mod archive;
 mod consistency;
+pub mod engine_check;
 pub mod evidence;
 pub mod held;
 pub mod holds;
@@ -75,6 +76,9 @@ pub struct ProductPackage {
     /// Findings the reviewer restored after the engine threw them out that carry no decision
     /// since, one problem each (A12 item 2).
     pub restored_without_decision: Vec<Problem>,
+    /// Sites the Engine Check said No to that carry no correction, one problem each, and one
+    /// problem when the Engine Check file cannot be read (design A2b).
+    pub engine_check_no_without_correction: Vec<Problem>,
     /// M4: the rows marked as junk (`junk_finding::JUNK_CONTENT_CAPTURE`) that carry no reviewer
     /// decision in the export request, one problem each. Worked out beside the evidence check, for
     /// the same reason, and recorded by [`release`] under the content check.
@@ -219,6 +223,7 @@ pub(crate) fn assemble_package(
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
+        engine_check_no_without_correction: engine_check::problems(&report.findings, reviewed),
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         internal: options.internal,
     })
@@ -574,6 +579,14 @@ fn release_checked(
             Vec::new()
         } else {
             package.restored_without_decision.clone()
+        },
+    );
+    report.record(
+        CheckId::EngineCheckNoWithoutCorrection,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.engine_check_no_without_correction.clone()
         },
     );
     report.record(

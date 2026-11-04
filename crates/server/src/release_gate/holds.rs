@@ -4,19 +4,20 @@
 //! The gate's reviewer-decision checks each answer one question about a reviewed report: which
 //! rows are held for a ruling nobody has made? Each check owns the filter that answers it
 //! ([`super::evidence::undecided_unverified`], [`super::junk::undecided_junk`],
-//! [`super::held::undecided_restored`], [`super::held::merge_is_backed`] and
-//! [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
+//! [`super::held::undecided_restored`], [`super::engine_check::uncorrected_no`],
+//! [`super::held::merge_is_backed`] and [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
 //! turns the same rows into an [`ExportGateView`], so the panel lists exactly what the gate
 //! refuses for the same reviewed report and cannot drift from it. It adds no rule of its own.
 //!
-//! The Engine Check's pending No is NOT here: the gate has no check for it yet, so it is listed by
-//! the composer from [`crate::engine_check::uncorrected_keys`] and carried apart.
+//! The Engine Check's pending No is here too: [`super::engine_check`] reads the evidence attached
+//! to the reviewed report ([`ReviewedReport::engine_check`]). An Engine Check file that cannot be
+//! read lists no row (the gate refuses with a problem naming the file instead).
 
 use std::collections::HashMap;
 
 use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
-use super::{evidence, held, junk};
+use super::{engine_check, evidence, held, junk};
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::decision_rows;
 use crate::report_export::overlay::merged_target;
@@ -50,6 +51,11 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
     rows.extend(
         held::undecided_restored(findings, reviewed)
             .map(|f| held_row(f, HoldReason::RestoredWithoutDecision, "")),
+    );
+    rows.extend(
+        engine_check::uncorrected_no(findings, reviewed)
+            .into_iter()
+            .map(|f| held_row(f, HoldReason::EngineCheckNoWithoutCorrection, "")),
     );
 
     // Merges and group decisions are checked against the decision records the package prints.

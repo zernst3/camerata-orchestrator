@@ -218,16 +218,13 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             // Held rows are never covered by a batch: the gate needs a ruling on them by name,
             // and an inherited record would hide that nobody looked.
             let mut with_held = req.clone();
-            let mut held = super::held_keys(&latest.report.findings, &state.decisions.active(id));
-            // An Engine Check No nobody has corrected is held too (design A2b): the rule is
-            // `engine_check::uncorrected_keys`, which `held_keys` cannot call (it holds no
-            // verdicts), so the route adds its rows here.
-            held.extend(crate::engine_check::uncorrected_keys(
-                &state.engine_check.latest_for_run(id, &latest.id),
-                &latest.id,
+            let held = super::held_keys(
+                &latest.report.findings,
                 &state.decisions.active(id),
-                &state.edits.active(id),
-            ));
+                &state
+                    .engine_check
+                    .evidence_for(id, &latest.id, state.edits.active(id)),
+            );
             with_held.except.extend(
                 members
                     .iter()

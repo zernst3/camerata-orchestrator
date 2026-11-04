@@ -57,6 +57,15 @@ pub(crate) fn compose<R>(
     stores: &Stores,
     f: impl FnOnce(&ReviewComposer<'_>) -> R,
 ) -> R {
+    // The Engine Check's holds are read from the reviewed report, as the routes build it.
+    let reviewed =
+        &reviewed
+            .clone()
+            .with_engine_check(crate::engine_check::EngineCheckEvidence::Recorded {
+                run_id: RUN.to_string(),
+                verdicts: stores.verdicts.clone(),
+                edits: stores.edits.clone(),
+            });
     let inputs = ReviewInputs {
         run_id: RUN,
         engine_version: "0.0.0-test",

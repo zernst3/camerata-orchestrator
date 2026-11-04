@@ -3530,12 +3530,24 @@ fn reviewed_for_export(
         request_dispositions,
     );
     effective.log_disagreements(project_id);
+    // The Engine Check's verdicts of the run being exported (the latest inspection's): a No
+    // nobody corrected is refused by the release gate, and an unreadable file is too.
+    let run_id = state
+        .inspections
+        .latest(project_id)
+        .map(|e| e.id)
+        .unwrap_or_default();
     let reviewed = crate::report_export::apply_overlay(
         sealed,
         &state.decisions.list(project_id),
         &state.edits.list(project_id),
         &state.edits.added(project_id),
-    );
+    )
+    .with_engine_check(state.engine_check.evidence_for(
+        project_id,
+        &run_id,
+        state.edits.active(project_id),
+    ));
     if state.decisions.has_active_records(project_id) {
         reviewed
     } else {

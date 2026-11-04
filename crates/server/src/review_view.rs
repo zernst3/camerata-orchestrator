@@ -183,24 +183,9 @@ impl<'a> ReviewComposer<'a> {
             .map(|s| (s.edit.id.as_str(), s))
             .collect();
 
-        // What the release gate refuses, from its own refusal functions, then the Engine Check's
-        // pending No (the gate has no check for it yet).
-        let mut gate = crate::release_gate::holds::gate_holds(inputs.reviewed);
-        let decisions = inputs.reviewed.records();
-        for key in crate::engine_check::uncorrected_keys(
-            inputs.verdicts,
-            inputs.run_id,
-            decisions,
-            inputs.edits,
-        ) {
-            if let Some(f) = rows.get(key.as_str()) {
-                gate.held.push(crate::release_gate::holds::held_row(
-                    f,
-                    HoldReason::EngineCheckNoWithoutCorrection,
-                    "",
-                ));
-            }
-        }
+        // What the release gate refuses, from its own refusal functions (the Engine Check's
+        // pending No among them: the reviewed report carries the store's evidence).
+        let gate = crate::release_gate::holds::gate_holds(inputs.reviewed);
         let mut held: HashMap<String, HoldReason> = HashMap::new();
         for h in gate.held.iter().chain(&gate.merged_without_decision) {
             held.entry(h.key.clone()).or_insert(h.reason);

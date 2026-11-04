@@ -34,6 +34,12 @@ pub enum CheckId {
     /// A finding the engine threw out and the reviewer put back is decided before it ships
     /// (A12 item 2).
     RestoredWithoutDecision,
+    /// A site the Engine Check (the reviewer's internal quality control of the engine) said No to
+    /// carries a correction, a decision or a later edit before it ships (design A2b). An Engine
+    /// Check file that cannot be read refuses too: with the verdicts unknown, no No can be ruled
+    /// out. Its operator-facing name says "Engine Check"; the label the README prints does not,
+    /// because the Engine Check never appears in a client output.
+    EngineCheckNoWithoutCorrection,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -48,7 +54,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 13] = [
+    pub const ALL: [CheckId; 14] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -58,6 +64,7 @@ impl CheckId {
         CheckId::EvidenceUnverified,
         CheckId::MergedWithoutDecision,
         CheckId::RestoredWithoutDecision,
+        CheckId::EngineCheckNoWithoutCorrection,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -76,6 +83,7 @@ impl CheckId {
             CheckId::EvidenceUnverified => "reviewer decision on unverified evidence",
             CheckId::MergedWithoutDecision => "decision records behind merged rows",
             CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
+            CheckId::EngineCheckNoWithoutCorrection => "reviewer correction on flagged findings",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",

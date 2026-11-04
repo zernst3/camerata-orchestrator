@@ -260,6 +260,52 @@ impl EngineCheckStore {
         Ok(verdict)
     }
 
+    /// What the gate and the read model need to know of this project's Engine Check on `run_id`.
+    /// The store is read twice over: the copy it holds in memory (and whether the file was
+    /// damaged when it opened), and the file itself as it is on disk now. A file that exists and
+    /// cannot be read or parsed makes the evidence [`EngineCheckEvidence::Unreadable`], so the
+    /// gate refuses rather than guess that no verdict was a No.
+    pub fn evidence_for(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        edits: Vec<Edit>,
+    ) -> EngineCheckEvidence {
+        let unreadable = || {
+            let name = self.file_for(project_id).map_or_else(
+                || format!("{}.json", crate::inspections::file_stem(project_id)),
+                |p| {
+                    let part = |s: Option<&std::ffi::OsStr>| {
+                        s.map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    };
+                    format!(
+                        "{}/{}",
+                        part(p.parent().and_then(Path::file_name)),
+                        part(p.file_name())
+                    )
+                },
+            );
+            EngineCheckEvidence::Unreadable { file: name }
+        };
+        if self.is_corrupt(project_id) {
+            return unreadable();
+        }
+        if let Some(path) = self.file_for(project_id).filter(|p| p.exists()) {
+            let parses = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|s| serde_json::from_str::<StoredFile>(&s).map_err(|e| e.to_string()));
+            if parses.is_err() {
+                return unreadable();
+            }
+        }
+        EngineCheckEvidence::Recorded {
+            run_id: run_id.to_string(),
+            verdicts: self.latest_for_run(project_id, run_id),
+            edits,
+        }
+    }
+
     fn persist_locked(&self, project_id: &str, data: &ProjectVerdicts) -> std::io::Result<()> {
         let (Some(dir), Some(path)) = (self.dir.as_ref(), self.file_for(project_id)) else {
             return Ok(());
@@ -276,6 +322,50 @@ impl EngineCheckStore {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)
+    }
+}
+
+/// What the Engine Check store holds about one run, as the release gate and the review read model
+/// need it. Built from the store by [`EngineCheckStore::evidence_for`]; a caller that holds no
+/// store (the headless `camerata inspect`, a test of something else) carries
+/// [`EngineCheckEvidence::NotRecorded`], which holds nothing.
+#[derive(Debug, Clone, Default)]
+pub enum EngineCheckEvidence {
+    /// No Engine Check store was consulted. Nothing is held on the Engine Check's account.
+    #[default]
+    NotRecorded,
+    /// The store was read: the verdicts of `run_id` and the live edits of the project.
+    Recorded {
+        run_id: String,
+        verdicts: Vec<EngineCheckVerdict>,
+        edits: Vec<Edit>,
+    },
+    /// The store exists but could not be read or parsed. The gate refuses, naming `file`: with
+    /// the verdicts unknown, no No can be ruled out.
+    Unreadable { file: String },
+}
+
+impl EngineCheckEvidence {
+    /// The site keys an Engine Check No holds, given the live `decisions`
+    /// ([`uncorrected_keys`]). Empty when nothing was recorded or the store was unreadable (the
+    /// unreadable store is its own refusal, see [`Self::unreadable_file`]).
+    pub fn uncorrected(&self, decisions: &[Decision]) -> Vec<String> {
+        match self {
+            Self::Recorded {
+                run_id,
+                verdicts,
+                edits,
+            } => uncorrected_keys(verdicts, run_id, decisions, edits),
+            Self::NotRecorded | Self::Unreadable { .. } => Vec::new(),
+        }
+    }
+
+    /// The file that could not be read, when the store was unreadable.
+    pub fn unreadable_file(&self) -> Option<&str> {
+        match self {
+            Self::Unreadable { file } => Some(file),
+            Self::NotRecorded | Self::Recorded { .. } => None,
+        }
     }
 }
 

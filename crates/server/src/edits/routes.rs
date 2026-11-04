@@ -136,6 +136,11 @@ pub(crate) fn review_of(
         &decisions,
         &state.edits.list(id),
         &state.edits.added(id),
+    )
+    .with_engine_check(
+        state
+            .engine_check
+            .evidence_for(id, &latest.id, state.edits.active(id)),
     );
     (sealed, reviewed)
 }
@@ -644,9 +649,13 @@ pub(crate) async fn get_reviewed_report(
     };
     let (_, reviewed) = review_of(&state, &id, &latest);
     let report = reviewed.report();
-    let mut held: Vec<String> = crate::decisions::held_keys(&report.findings, reviewed.records())
-        .into_iter()
-        .collect();
+    let mut held: Vec<String> = crate::decisions::held_keys(
+        &report.findings,
+        reviewed.records(),
+        reviewed.engine_check(),
+    )
+    .into_iter()
+    .collect();
     held.sort();
     Json(ReviewedReportResp {
         run_id: latest.id.clone(),

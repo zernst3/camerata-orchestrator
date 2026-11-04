@@ -136,12 +136,29 @@ pub struct ReviewedReport {
     /// Dispositions that came from an export request rather than the store (an older client
     /// while the store is empty). They answer the gate's question too.
     legacy: bool,
+    /// What the Engine Check store holds about this run, attached by the caller that has the
+    /// store ([`Self::with_engine_check`]). Nothing recorded holds nothing.
+    engine_check: crate::engine_check::EngineCheckEvidence,
 }
 
 impl ReviewedReport {
     /// The rows an export reads: the sealed set with the overlay applied.
     pub fn report(&self) -> &SealedReport {
         &self.report
+    }
+
+    /// What the Engine Check store holds about this run: the release gate holds every site the
+    /// Engine Check said No to until it is corrected.
+    pub fn engine_check(&self) -> &crate::engine_check::EngineCheckEvidence {
+        &self.engine_check
+    }
+
+    /// This report with the Engine Check's evidence attached. Every caller that holds the store
+    /// attaches it before the gate or the read model looks at the report.
+    #[must_use]
+    pub fn with_engine_check(mut self, evidence: crate::engine_check::EngineCheckEvidence) -> Self {
+        self.engine_check = evidence;
+        self
     }
 
     /// The reviewer's decisions as the exporters read them, by site key.
@@ -298,6 +315,7 @@ pub fn apply_overlay(
         merges,
         levels,
         legacy: false,
+        engine_check: crate::engine_check::EngineCheckEvidence::default(),
     }
 }
 
