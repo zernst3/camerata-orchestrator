@@ -264,6 +264,78 @@ fn a_no_holds_the_row_until_a_correction_a_decision_or_an_edit_follows_it() {
     assert!(uncorrected_keys(&[no("a")], "insp-2", &[], &[]).is_empty());
 }
 
+// ── an earlier run's No is carried to the same site ────────────────────────────────────────
+
+fn on_run(mut v: EngineCheckVerdict, run: &str) -> EngineCheckVerdict {
+    v.run_id = run.to_string();
+    v
+}
+
+#[test]
+fn an_uncorrected_no_from_an_earlier_run_still_holds_the_site_and_a_new_yes_or_correction_clears_it(
+) {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T09:05:00Z";
+    let t2 = "2026-11-04T09:10:00Z";
+    // Run 1's No on "a" (unchanged in run 2) and on "m" (moved to "m2"); "gone" is not in run 2.
+    let earlier = [
+        on_run(verdict("a", false, t0, None), "insp-0"),
+        on_run(verdict("m", false, t0, None), "insp-0"),
+        on_run(verdict("gone", false, t0, None), "insp-0"),
+        on_run(verdict("y", true, t0, None), "insp-0"),
+    ];
+    let site = |v: &EngineCheckVerdict| match v.key.as_str() {
+        "m" => Some("m2".to_string()),
+        "gone" => None,
+        other => Some(other.to_string()),
+    };
+    let carried = carry_forward(&earlier, RUN, site);
+    let mut keys: Vec<(&str, &str)> = carried
+        .iter()
+        .map(|v| (v.key.as_str(), v.run_id.as_str()))
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [("a", RUN), ("m2", RUN)],
+        "the Nos follow their sites to this run; a gone site and a Yes carry nothing"
+    );
+    assert_eq!(
+        uncorrected_keys(&carried, RUN, &[], &[]),
+        vec!["a", "m2"],
+        "the gate keeps refusing them"
+    );
+    assert!(
+        carried.iter().all(|v| v.at == t0),
+        "the time of the No is kept"
+    );
+
+    // A correction made since the No clears the carried No, on the site's new key.
+    assert_eq!(
+        uncorrected_keys(&carried, RUN, &[decision("d", "m2", t1)], &[]),
+        vec!["a"]
+    );
+    assert_eq!(
+        uncorrected_keys(&carried, RUN, &[], &[edit("e", "a", t1)]),
+        vec!["m2"]
+    );
+
+    // A Yes on this run replaces the old No; a No on this run replaces it too.
+    let mut all = earlier.to_vec();
+    all.push(verdict("a", true, t1, None));
+    all.push(verdict("m2", false, t2, None));
+    let carried = carry_forward(&all, RUN, site);
+    assert_eq!(uncorrected_keys(&carried, RUN, &[], &[]), vec!["m2"]);
+    assert_eq!(
+        carried
+            .iter()
+            .find(|v| v.key == "m2")
+            .map(|v| v.at.as_str()),
+        Some(t2),
+        "the new run's own verdict stands as it is"
+    );
+}
+
 // ── the store ─────────────────────────────────────────────────────────────────────────────
 
 fn req(right: bool, wrong: Option<EngineCheckError>) -> EngineCheckVerdictReq {

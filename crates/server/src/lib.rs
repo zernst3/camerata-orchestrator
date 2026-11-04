@@ -366,6 +366,7 @@ impl AppState {
     /// Build state from an explicit story store, with the native (in-process)
     /// provider.
     pub fn new(stories: Arc<dyn StoryStore>) -> Self {
+        let inspections = crate::inspections::InspectionStore::new();
         Self {
             stories,
             runs: RunStore::new(),
@@ -384,10 +385,11 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
-            inspections: crate::inspections::InspectionStore::new(),
+            inspections: inspections.clone(),
             decisions: crate::decisions::DecisionStore::new(),
             edits: crate::edits::EditStore::new(),
-            engine_check: crate::engine_check::EngineCheckStore::new(),
+            engine_check: crate::engine_check::EngineCheckStore::new()
+                .with_inspections(inspections),
             source_records: crate::client_source::records::SourceRecordStore::new(),
             source_ops: crate::client_source::ops::SourceOps::new(),
             git_remotes: crate::client_source::remote::GitRemotes::default(),
@@ -1177,7 +1179,8 @@ impl AppState {
         // The reviewer's edits, beside the decisions. Not disposable either.
         self.edits = crate::edits::EditStore::at(dir.join("edits"));
         // The Engine Check's verdicts, beside the edits. Not disposable either.
-        self.engine_check = crate::engine_check::EngineCheckStore::at(dir.join("engine-check"));
+        self.engine_check = crate::engine_check::EngineCheckStore::at(dir.join("engine-check"))
+            .with_inspections(self.inspections.clone());
         // The proof of what source deletion removed, and when source was fetched back.
         self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
             dir.join("source-records.json"),

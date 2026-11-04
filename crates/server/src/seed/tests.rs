@@ -534,6 +534,30 @@ async fn seeded_project_export_is_blocked_by_exactly_the_seeded_held_rows() {
     }
 }
 
+#[tokio::test]
+async fn an_uncorrected_engine_check_no_is_still_refused_after_a_rerun() {
+    // The No was given on the first run; the rerun (the moved variant) has the same site under
+    // the same key and no verdict of its own.
+    let (_dir, seeded) = seed(Variant::Moved).await;
+    let (state, app) = reopen(&seeded);
+    let (path, line) = place_of("sql-11", Variant::Moved);
+    let want: Held = (HoldReason::EngineCheckNoWithoutCorrection, path, line);
+
+    let gate: ExportGateView = get(&app, &seeded, "the export gate", "review/export-gate").await;
+    assert!(
+        view_rows(&gate).contains(&want),
+        "the panel still lists the row: {:?}",
+        view_rows(&gate)
+    );
+    let latest = state.inspections().latest(&seeded.project_id).unwrap();
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &seeded.project_id, &latest);
+    let refused = gate_refusals(&reviewed).expect("the gate must refuse the seeded project");
+    assert!(
+        refused.contains(&want),
+        "the export is refused naming the site: {refused:?}"
+    );
+}
+
 // ── a loader that forgets the Engine Check's evidence lets the gate pass silently ─────────
 
 /// The non-test source files, relative to the crate's `src`.

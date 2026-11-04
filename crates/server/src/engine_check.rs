@@ -16,7 +16,7 @@
 //!
 //! Nothing here reads a model, and nothing here writes into the sealed report or into any export.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -127,6 +127,9 @@ pub struct EngineCheckStore {
     dir: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<BTreeMap<String, ProjectVerdicts>>>,
     corrupt: Arc<BTreeSet<String>>,
+    /// The project's inspections, to find where a site went between runs. Without them a verdict
+    /// holds only the run it was given on.
+    inspections: Option<crate::inspections::InspectionStore>,
 }
 
 impl EngineCheckStore {
@@ -177,7 +180,16 @@ impl EngineCheckStore {
             dir: Some(Arc::new(dir)),
             mem: Arc::new(Mutex::new(mem)),
             corrupt: Arc::new(corrupt),
+            inspections: None,
         }
+    }
+
+    /// The same store, reading earlier runs from `inspections` so an uncorrected No is carried
+    /// forward to the same site in later runs ([`carry_forward`]).
+    #[must_use]
+    pub fn with_inspections(mut self, inspections: crate::inspections::InspectionStore) -> Self {
+        self.inspections = Some(inspections);
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ProjectVerdicts>> {
@@ -301,9 +313,65 @@ impl EngineCheckStore {
         }
         EngineCheckEvidence::Recorded {
             run_id: run_id.to_string(),
-            verdicts: self.latest_for_run(project_id, run_id),
+            verdicts: self.verdicts_in_force(project_id, run_id),
             edits,
         }
+    }
+
+    /// The verdicts the hold rule reads for `run_id`: the run's own, and an earlier run's No that
+    /// nothing on this run has answered, carried to the site's key here ([`carry_forward`]). A
+    /// verdict is per run, but the wrong finding it names does not stop being wrong because the
+    /// engine ran again. Without the project's inspections, only the run's own.
+    fn verdicts_in_force(&self, project_id: &str, run_id: &str) -> Vec<EngineCheckVerdict> {
+        let all = self.list(project_id);
+        let Some(entries) = self
+            .inspections
+            .as_ref()
+            .map(|i| i.list(project_id))
+            .filter(|_| all.iter().any(|v| v.run_id != run_id))
+        else {
+            return latest_per_key(&all, run_id);
+        };
+        let Some(latest) = entries.iter().find(|e| e.id == run_id) else {
+            return latest_per_key(&all, run_id);
+        };
+        let here: HashSet<&str> = latest
+            .report
+            .findings
+            .iter()
+            .chain(&latest.report.discarded)
+            .map(|f| f.site_key.as_str())
+            .collect();
+        // Where each earlier run's moved sites went in this one.
+        let mut moved: HashMap<&str, HashMap<String, String>> = HashMap::new();
+        for run in all
+            .iter()
+            .map(|v| v.run_id.as_str())
+            .filter(|r| *r != run_id)
+        {
+            if moved.contains_key(run) {
+                continue;
+            }
+            let links = entries
+                .iter()
+                .find(|e| e.id == run)
+                .map(|prev| {
+                    crate::review_tree::match_runs(&prev.report.findings, &latest.report.findings)
+                        .moved
+                        .into_iter()
+                        .map(|l| (l.old_key, l.new_key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            moved.insert(run, links);
+        }
+        carry_forward(&all, run_id, |v| {
+            if here.contains(v.key.as_str()) {
+                Some(v.key.clone())
+            } else {
+                moved.get(v.run_id.as_str())?.get(&v.key).cloned()
+            }
+        })
     }
 
     fn persist_locked(&self, project_id: &str, data: &ProjectVerdicts) -> std::io::Result<()> {
@@ -380,6 +448,51 @@ pub fn latest_per_key(verdicts: &[EngineCheckVerdict], run_id: &str) -> Vec<Engi
         }
     }
     order.into_iter().map(|k| latest[k].clone()).collect()
+}
+
+/// The verdicts that stand for `run_id`: for each site of that run, its latest verdict in the
+/// order they were given, whichever run it was given on. `site_in_run` says where a verdict's
+/// site is in `run_id` (its own key when the site is unchanged, its new key when the engine found
+/// it moved, `None` when it is gone). A verdict of this run stands as it is; a No from an earlier
+/// run stands as a No on the new key, with its original time, so a correction or a decision made
+/// since still clears it. A Yes from an earlier run stands for nothing. A later verdict on the
+/// site, on any run, replaces an earlier one, so a Yes on this run clears an old No.
+pub fn carry_forward(
+    all: &[EngineCheckVerdict],
+    run_id: &str,
+    site_in_run: impl Fn(&EngineCheckVerdict) -> Option<String>,
+) -> Vec<EngineCheckVerdict> {
+    let mut order: Vec<String> = Vec::new();
+    let mut latest: HashMap<String, &EngineCheckVerdict> = HashMap::new();
+    for v in all {
+        let key = if v.run_id == run_id {
+            Some(v.key.clone())
+        } else {
+            site_in_run(v)
+        };
+        if let Some(key) = key {
+            if latest.insert(key.clone(), v).is_none() {
+                order.push(key);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let v = latest[&key];
+            if v.run_id == run_id {
+                Some(v.clone())
+            } else if v.right {
+                None
+            } else {
+                Some(EngineCheckVerdict {
+                    key,
+                    run_id: run_id.to_string(),
+                    ..v.clone()
+                })
+            }
+        })
+        .collect()
 }
 
 // ── the hold rule ─────────────────────────────────────────────────────────────────────────
