@@ -275,6 +275,7 @@ impl InspectArgs {
                 escalation_floor: self.escalation_floor.unwrap_or(defaults.escalation_floor),
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
+                sample_size_per_run: defaults.sample_size_per_run,
             },
             efficiency,
             max_cost_usd,

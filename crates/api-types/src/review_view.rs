@@ -105,6 +105,15 @@ pub enum HoldReason {
 }
 
 impl HoldReason {
+    /// Every reason, in the order the release gate runs its checks.
+    pub const ALL: [HoldReason; 5] = [
+        Self::JunkContent,
+        Self::EvidenceUnverified,
+        Self::RestoredWithoutDecision,
+        Self::MergedWithoutDecision,
+        Self::EngineCheckNoWithoutCorrection,
+    ];
+
     /// The reason in words, for the export-blocked panel.
     pub fn phrase(self) -> &'static str {
         match self {
