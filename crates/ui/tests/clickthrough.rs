@@ -266,7 +266,7 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
 
     // What the batch covers, worked out from the fixture: the sub-group's sites, less the held
     // rows (always excluded), the ones that already say Confirmed and the row a merge took
-    // out of play (the server never overwrites a merge). The two outliers are ticked; one of
+    // out of play (a batch never overwrites a merge). The two outliers are ticked; one of
     // them is held, so it stays out and the other goes in.
     let members = model.subgroup_of_rule(rule);
     let held = model.held();
@@ -281,16 +281,21 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
         2,
         "the fixture has two outliers in the sub-group: {outliers:?}"
     );
-    let in_plan: Vec<&String> = members
+    let covered: Vec<&String> = members
         .iter()
-        .filter(|m| !held.contains(*m) && prior.get(*m).map(String::as_str) != Some("confirmed"))
-        .collect();
-    let covered: Vec<&String> = in_plan
-        .iter()
-        .copied()
-        .filter(|m| prior.get(*m).map(String::as_str) != Some("merged"))
+        .filter(|m| {
+            !held.contains(*m)
+                && !matches!(
+                    prior.get(*m).map(String::as_str),
+                    Some("confirmed" | "merged")
+                )
+        })
         .collect();
     let held_here = members.iter().filter(|m| held.contains(*m)).count();
+    let merged_here = members
+        .iter()
+        .filter(|m| !held.contains(*m) && prior.get(*m).map(String::as_str) == Some("merged"))
+        .count();
     let already = members
         .iter()
         .filter(|m| !held.contains(*m) && prior.get(*m).map(String::as_str) == Some("confirmed"))
@@ -299,11 +304,11 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
         (
             members.len(),
             held_here,
+            merged_here,
             already,
-            in_plan.len(),
             covered.len()
         ),
-        (13, 5, 2, 6, 5),
+        (13, 5, 1, 2, 5),
         "the fixture's arithmetic"
     );
 
@@ -340,10 +345,9 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
     stack.click(".tree-right .pane-dispose", "Confirm all");
     stack.wait_for("the plan", "T.has('.batch-sentence', 'This writes')");
     let sentence = stack.text(".batch-sentence");
-    // The plan counts the merged row among the writes (the server leaves it alone): see the
-    // report. Everything else in the sentence is the fixture's arithmetic.
+    // The prompt says what the server will write, and names what stays out by count.
     assert!(
-        sentence.starts_with(&format!("This writes {} site records.", in_plan.len())),
+        sentence.starts_with(&format!("This writes {} site records.", covered.len())),
         "{sentence}"
     );
     assert!(
@@ -352,6 +356,10 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
     );
     assert!(
         sentence.contains(&format!("{held_here} held rows are excluded.")),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains(&format!("{merged_here} merged row is excluded.")),
         "{sentence}"
     );
     assert!(
@@ -378,6 +386,16 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
     assert_eq!(node_rec["state"], "confirmed", "{node_rec}");
     assert_eq!(node_rec["reason"], reason, "{node_rec}");
     assert_eq!(node_rec["scope"]["node"], subgroup.as_str(), "{node_rec}");
+    // The plan's count is the number of site records the server wrote.
+    let written = all[before + 1..].len();
+    assert_eq!(
+        sentence
+            .split_whitespace()
+            .nth(2)
+            .and_then(|n| n.parse::<usize>().ok()),
+        Some(written),
+        "the plan said {sentence:?}, the server wrote {written} site records"
+    );
     assert_eq!(
         node_rec["applies_to"].as_array().expect("applies_to").len(),
         covered.len(),

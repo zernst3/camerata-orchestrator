@@ -39,6 +39,9 @@ pub struct BatchPlan {
     pub excluded_outliers: Vec<String>,
     /// Held rows: always left out, because the gate needs a ruling on each by name.
     pub excluded_held: Vec<String>,
+    /// Rows merged into another site: a batch never overwrites a merge (the server leaves them
+    /// out), so they are not written to and are named by count.
+    pub excluded_merged: Vec<String>,
     /// Members that already hold this decision: left as they are.
     pub already_recorded: Vec<String>,
     /// Outliers the reviewer ticked, so they are in `keys`.
@@ -52,6 +55,7 @@ impl BatchPlan {
             .excluded_outliers
             .iter()
             .chain(&self.excluded_held)
+            .chain(&self.excluded_merged)
             .chain(&self.already_recorded)
             .cloned()
             .collect();
@@ -80,12 +84,19 @@ pub fn batch_plan(
         keys: Vec::new(),
         excluded_outliers: Vec::new(),
         excluded_held: Vec::new(),
+        excluded_merged: Vec::new(),
         already_recorded: Vec::new(),
         ticked_included: 0,
     };
     for row in rows {
         if row.held.is_some() {
             plan.excluded_held.push(row.site_key.clone());
+        } else if row
+            .decision
+            .as_ref()
+            .is_some_and(|d| matches!(d.state, DecisionState::MergedInto(_)))
+        {
+            plan.excluded_merged.push(row.site_key.clone());
         } else if is_outlier(row) && !ticked.contains(&row.site_key) {
             plan.excluded_outliers.push(row.site_key.clone());
         } else if row.decision.as_ref().is_some_and(|d| d.state == *state) {
@@ -109,7 +120,7 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 }
 
 /// The sentence the prompt shows: `This writes 12 site records. 2 outliers are excluded unless
-/// you tick them. 1 held row is excluded.` Clauses with nothing to say are left out.
+/// you tick them. 1 held row is excluded. 1 merged row is excluded.` Clauses with nothing to say are left out.
 pub fn plan_sentence(plan: &BatchPlan) -> String {
     let n = plan.keys.len();
     let mut s = format!(
@@ -139,6 +150,14 @@ pub fn plan_sentence(plan: &BatchPlan) -> String {
             " {} held {} excluded.",
             thousands(h),
             plural(h, "row is", "rows are")
+        ));
+    }
+    let m = plan.excluded_merged.len();
+    if m > 0 {
+        s.push_str(&format!(
+            " {} merged {} excluded.",
+            thousands(m),
+            plural(m, "row is", "rows are")
         ));
     }
     let a = plan.already_recorded.len();
@@ -377,7 +396,7 @@ mod tests {
     use super::*;
     use crate::tree::tests::data;
     use camerata_api_types::review::OutlierReason;
-    use camerata_api_types::review_view::{HoldReason, Marker};
+    use camerata_api_types::review_view::{DecisionView, HoldReason, Marker};
 
     /// A plain row, copied from the fixture and given a distinct key.
     fn plain(n: usize) -> SiteRow {
@@ -413,6 +432,70 @@ mod tests {
         rows.extend((100..102).map(outlier));
         rows.push(held(200));
         rows
+    }
+
+    /// A row the reviewer merged into another site: it holds a `MergedInto` decision.
+    fn merged(n: usize) -> SiteRow {
+        let mut r = plain(n);
+        r.decision = Some(DecisionView {
+            id: format!("dec-{n}"),
+            state: DecisionState::MergedInto("repo\0other.ts\0fp\00".to_string()),
+            reason: "the same problem".to_string(),
+            scope: Scope::Site,
+            inherited_from: None,
+            decided_by: "zach".to_string(),
+            decided_at: "2026-11-03T09:00:00Z".to_string(),
+            needed_me: None,
+            confirmed_by_client: None,
+        });
+        r
+    }
+
+    #[test]
+    fn batch_plan_counts_exactly_the_sites_the_server_writes() {
+        // One of each way a row stays out of a batch (spec U3): every kind of hold, and a row
+        // the reviewer merged. Only the plain rows are written.
+        let mut rows: Vec<SiteRow> = (0..4).map(plain).collect();
+        for (i, reason) in HoldReason::ALL.into_iter().enumerate() {
+            let mut r = held(300 + i);
+            r.held = Some(reason);
+            rows.push(r);
+        }
+        rows.push(merged(400));
+        let plan = batch_plan(
+            "sub:X/1",
+            &DecisionState::Confirmed,
+            &rows,
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            plan.keys.len(),
+            4,
+            "only the plain rows are written: {plan:?}"
+        );
+        assert_eq!(plan.excluded_held.len(), HoldReason::ALL.len(), "{plan:?}");
+        assert_eq!(
+            plan.excluded_merged,
+            vec![rows[9].site_key.clone()],
+            "{plan:?}"
+        );
+        let all = plan.keys.len()
+            + plan.excluded_outliers.len()
+            + plan.excluded_held.len()
+            + plan.excluded_merged.len()
+            + plan.already_recorded.len();
+        assert_eq!(all, rows.len(), "every member is in exactly one place");
+        assert!(
+            plan.except().contains(&rows[9].site_key),
+            "the request leaves the merge out"
+        );
+        let sentence = plan_sentence(&plan);
+        assert!(
+            sentence.starts_with("This writes 4 site records."),
+            "{sentence}"
+        );
+        assert!(sentence.contains("5 held rows are excluded."), "{sentence}");
+        assert!(sentence.contains("1 merged row is excluded."), "{sentence}");
     }
 
     #[test]
