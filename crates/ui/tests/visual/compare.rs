@@ -10,9 +10,67 @@ use image::RgbaImage;
 /// The two widths of spec U6. No third.
 pub const WIDTHS: [u32; 2] = [1440, 1000];
 
-/// The height of every stored screenshot. A state taller than this is cut here, in the baseline
-/// and the actual alike.
+/// The probe page's fill colour (see `probe_html`).
+pub const PROBE_COLOUR: [u8; 4] = [255, 0, 0, 255];
+
+/// A page whose only content is a `100vh` block of `PROBE_COLOUR`: in a screenshot, the painted
+/// rows are exactly the viewport, and the rows below them (white) are the window-to-viewport bar.
+pub const PROBE_HTML: &str = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\
+    html, body { margin: 0; padding: 0; } \
+    div { height: 100vh; background: rgb(255, 0, 0); }</style></head><body><div></div></body></html>";
+
+/// How many rows from the top of a probe screenshot are `PROBE_COLOUR`: the viewport height.
+pub fn painted_rows(img: &RgbaImage) -> u32 {
+    (0..img.height())
+        .take_while(|y| img.get_pixel(0, *y).0 == PROBE_COLOUR)
+        .count() as u32
+}
+
+/// The window-to-viewport bar: what a window of `window` pixels loses to browser chrome, given
+/// the viewport height the probe painted.
+pub fn bar_from_probe(window: u32, painted: u32) -> u32 {
+    window.saturating_sub(painted)
+}
+
+/// The window height whose viewport is exactly `capture` rows (a window is `bar` taller than its
+/// viewport). The page is then laid out for the captured height, so every painted row is
+/// compared and none hides below the crop.
+pub fn window_height(capture: u32, bar: u32) -> u32 {
+    capture + bar
+}
+
+/// The least height of a stored screenshot, and the whole height of every `shell/*` one (the shell
+/// frame is short, and its gradient background depends on the window, so it is cut here).
 pub const CAPTURE_HEIGHT: u32 = 1400;
+
+/// The most a screenshot keeps. Every other state is stored as tall as its painted content
+/// (`kept_height`), at least `CAPTURE_HEIGHT` and at most this, so a change anywhere in a page
+/// shorter than this is compared. Measured 2026-11-05: every state but one paints at most 3868
+/// rows (`queue/30k` at 1000); `tree/30k` paints at least 12,000 (a long generated list of
+/// near-identical rows) and keeps its first 4000, which is what bounds its baseline to about 1 MB.
+pub const MAX_CAPTURE_HEIGHT: u32 = 4000;
+
+/// The flat page background the test paints off the shell screen (see `FLAT_BACKGROUND_STYLE`),
+/// the colour whose absence marks a row as content.
+pub const FLAT_BG: [u8; 3] = [0x12, 0x11, 0x10];
+
+/// Rows from the top up to and including the last one holding any pixel that is not `FLAT_BG`.
+pub fn content_height(img: &RgbaImage) -> u32 {
+    (0..img.height())
+        .rev()
+        .find(|y| (0..img.width()).any(|x| img.get_pixel(x, *y).0[..3] != FLAT_BG))
+        .map_or(0, |y| y + 1)
+}
+
+/// How many rows of a screenshot of `screen` are stored and compared: `CAPTURE_HEIGHT` for the
+/// shell, otherwise the painted content height clamped to `CAPTURE_HEIGHT..=MAX_CAPTURE_HEIGHT`.
+pub fn kept_height(img: &RgbaImage, screen: &str) -> u32 {
+    if screen == "shell" {
+        CAPTURE_HEIGHT
+    } else {
+        content_height(img).clamp(CAPTURE_HEIGHT, MAX_CAPTURE_HEIGHT)
+    }
+}
 
 /// What counts as a visual change. A pixel is "changed" when any of its four channels differs by
 /// more than `max_channel_delta`; an image matches when it has at most `max_changed_pixels`
@@ -46,13 +104,13 @@ pub fn decode(bytes: &[u8]) -> Result<RgbaImage, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Decode a Chrome screenshot and keep its top `CAPTURE_HEIGHT` rows (see `WINDOW_HEIGHT`). A
-/// screenshot already that size or shorter is returned as it is, so a short one still reads as a
-/// size change.
-pub fn decode_actual(bytes: &[u8]) -> Result<RgbaImage, String> {
+/// Decode a Chrome screenshot of `screen` and keep its top `kept_height` rows. A screenshot
+/// already that size or shorter is returned as it is, so a short one still reads as a size change.
+pub fn decode_actual(screen: &str, bytes: &[u8]) -> Result<RgbaImage, String> {
     let img = decode(bytes)?;
-    if img.height() > CAPTURE_HEIGHT {
-        Ok(image::imageops::crop_imm(&img, 0, 0, img.width(), CAPTURE_HEIGHT).to_image())
+    let keep = kept_height(&img, screen);
+    if img.height() > keep {
+        Ok(image::imageops::crop_imm(&img, 0, 0, img.width(), keep).to_image())
     } else {
         Ok(img)
     }
@@ -79,7 +137,7 @@ pub fn pixel_stats(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (u8, usize) {
 }
 
 /// Compare an actual screenshot with its baseline (`None` when no baseline exists).
-pub fn compare(baseline: Option<&[u8]>, actual: &[u8], tol: Tolerance) -> Verdict {
+pub fn compare(screen: &str, baseline: Option<&[u8]>, actual: &[u8], tol: Tolerance) -> Verdict {
     let Some(baseline) = baseline else {
         return Verdict::MissingBaseline;
     };
@@ -87,7 +145,7 @@ pub fn compare(baseline: Option<&[u8]>, actual: &[u8], tol: Tolerance) -> Verdic
         Ok(i) => i,
         Err(e) => return Verdict::Undecodable(format!("baseline: {e}")),
     };
-    let act = match decode_actual(actual) {
+    let act = match decode_actual(screen, actual) {
         Ok(i) => i,
         Err(e) => return Verdict::Undecodable(format!("actual: {e}")),
     };
@@ -111,24 +169,22 @@ pub fn compare(baseline: Option<&[u8]>, actual: &[u8], tol: Tolerance) -> Verdic
     }
 }
 
-/// The top `CAPTURE_HEIGHT` rows of a screenshot, re-encoded as an RGB PNG (lossless: no pixel
-/// in the kept rows changes). Chrome's window is taller than `CAPTURE_HEIGHT` (see
-/// `WINDOW_HEIGHT`) so the whole kept area is inside its viewport, where painting is
-/// deterministic; the rows below it are dropped. Used to store a baseline; a comparison crops
-/// with `decode_actual` and never re-encodes.
-pub fn normalize_screenshot(png: &[u8]) -> Result<Vec<u8>, String> {
+/// The top `kept_height` rows of a screenshot of `screen`, re-encoded as an RGB PNG (lossless: no
+/// pixel in the kept rows changes). Used to store a baseline; a comparison crops with
+/// `decode_actual` and never re-encodes. A screenshot shorter than `CAPTURE_HEIGHT` is refused.
+pub fn normalize_screenshot(screen: &str, png: &[u8]) -> Result<Vec<u8>, String> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
     use image::ImageEncoder;
-    let rgb = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?
-        .to_rgb8();
-    if rgb.height() < CAPTURE_HEIGHT {
+    let rgba = decode(png)?;
+    if rgba.height() < CAPTURE_HEIGHT {
         return Err(format!(
             "Chrome's screenshot is only {} pixels tall, need at least {CAPTURE_HEIGHT}",
-            rgb.height()
+            rgba.height()
         ));
     }
-    let kept = image::imageops::crop_imm(&rgb, 0, 0, rgb.width(), CAPTURE_HEIGHT).to_image();
+    let keep = kept_height(&rgba, screen);
+    let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    let kept = image::imageops::crop_imm(&rgb, 0, 0, rgb.width(), keep).to_image();
     let mut out = Vec::new();
     PngEncoder::new_with_quality(&mut out, CompressionType::Default, FilterType::Adaptive)
         .write_image(
@@ -217,7 +273,7 @@ pub fn check_states(
                 continue;
             };
             let baseline = std::fs::read(baselines.join(format!("{name}.png"))).ok();
-            let verdict = compare(baseline.as_deref(), &actual, tol);
+            let verdict = compare(screen, baseline.as_deref(), &actual, tol);
             let why = match &verdict {
                 Verdict::Match => continue,
                 Verdict::MissingBaseline => {
@@ -243,8 +299,10 @@ pub fn check_states(
                 let actual_out = dir.join(format!("{name}-actual.png"));
                 std::fs::write(&actual_out, &actual).unwrap();
                 why.push_str(&format!("; actual: {}", actual_out.display()));
-                if let (Some(b), Ok(a)) = (baseline.as_deref().map(decode), decode_actual(&actual))
-                {
+                if let (Some(b), Ok(a)) = (
+                    baseline.as_deref().map(decode),
+                    decode_actual(screen, &actual),
+                ) {
                     if let Some(diff) = b.ok().and_then(|b| diff_image(&b, &a, tol)) {
                         let diff_out = dir.join(format!("{name}-diff.png"));
                         diff.save(&diff_out).unwrap();

@@ -33,12 +33,17 @@ mod compare;
 
 use compare::*;
 
-/// The Chrome window height. Headless Chrome's viewport is about 130 pixels shorter than its
-/// window, and content below the viewport is painted only sometimes (a measured flake: the
-/// bottom 130 rows of `queue/line-lowered` were white in one render and content in another). The
-/// window is made tall enough that the whole `CAPTURE_HEIGHT` is inside the viewport, and
-/// `normalize_screenshot` crops to it.
-const WINDOW_HEIGHT: u32 = CAPTURE_HEIGHT + 300;
+/// The window-to-viewport bar this Chrome loses to its own chrome, in pixels, as measured by the
+/// 100vh probe (`measure_bar`) at both widths: 0 on Chrome 156 (macOS arm64), where a screenshot's
+/// viewport is exactly its window (probe windows of 1000 to 8600 tall painted all their rows).
+/// Every state is screenshotted in a window `MAX_CAPTURE_HEIGHT + bar` tall (`window_height`), so
+/// its viewport is the whole screenshot, and `kept_height` then keeps the rows down to the last
+/// painted content (at least `CAPTURE_HEIGHT`, at most `MAX_CAPTURE_HEIGHT`). History: a 1700-tall
+/// window with the top 1400 rows compared left content in rows 1400 to 1699 painted but never
+/// compared, and a 1400-tall window would have cut the same content off instead; neither compared
+/// the bottom of a tall screen. If a Chrome build gives a window a bar, the test fails and says
+/// so: re-measure, update this number in review, then re-approve.
+const EXPECTED_BAR: u32 = 0;
 
 /// Chrome processes run at once. The machine also builds Rust, so a few, not all cores.
 const WORKERS: usize = 4;
@@ -181,7 +186,14 @@ fn render_gallery(tag: &str) -> PathBuf {
 }
 
 /// Run one Chrome launch to completion or kill it at the timeout.
-fn run_chrome(chrome: &Path, profile: &Path, page: &Path, width: u32, out: &Path) -> bool {
+fn run_chrome(
+    chrome: &Path,
+    profile: &Path,
+    page: &Path,
+    width: u32,
+    window: u32,
+    out: &Path,
+) -> bool {
     let mut child = match Command::new(chrome)
         .args([
             "--headless=new",
@@ -194,7 +206,7 @@ fn run_chrome(chrome: &Path, profile: &Path, page: &Path, width: u32, out: &Path
             "--force-device-scale-factor=1",
         ])
         .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!("--window-size={width},{WINDOW_HEIGHT}"))
+        .arg(format!("--window-size={width},{window}"))
         .arg(format!("--screenshot={}", out.display()))
         .arg(format!("file://{}", page.display()))
         .stdout(Stdio::null())
@@ -222,11 +234,31 @@ fn run_chrome(chrome: &Path, profile: &Path, page: &Path, width: u32, out: &Path
 
 /// Screenshot `states` of a rendered gallery at every width into `shots`, a few Chromes at once.
 /// Returns the stems that could not be captured.
+/// The two window heights: the tall one every screen but `shell` is photographed in, and the
+/// `CAPTURE_HEIGHT` one for `shell`, whose gradient background is drawn across the viewport and
+/// so must be photographed in a viewport of the height that is kept.
+#[derive(Clone, Copy)]
+struct Windows {
+    tall: u32,
+    shell: u32,
+}
+
+impl Windows {
+    fn for_screen(self, screen: &str) -> u32 {
+        if screen == "shell" {
+            self.shell
+        } else {
+            self.tall
+        }
+    }
+}
+
 fn screenshot_all(
     chrome: &Path,
     gallery: &Path,
     shots: &Path,
     states: &[(String, String)],
+    windows: Windows,
 ) -> Vec<String> {
     std::fs::create_dir_all(shots).unwrap();
     let jobs: Vec<(String, String, u32)> = states
@@ -248,8 +280,21 @@ fn screenshot_all(
                     let page = gallery.join(screen).join(format!("{state}.html"));
                     let out = shots.join(format!("{}.png", stem(screen, state, *w)));
                     // One retry: a Chrome launch can fail once under load.
-                    let ok = run_chrome(chrome, &profile, &page, *w, &out)
-                        || run_chrome(chrome, &profile, &page, *w, &out);
+                    let ok = run_chrome(
+                        chrome,
+                        &profile,
+                        &page,
+                        *w,
+                        windows.for_screen(screen),
+                        &out,
+                    ) || run_chrome(
+                        chrome,
+                        &profile,
+                        &page,
+                        *w,
+                        windows.for_screen(screen),
+                        &out,
+                    );
                     if !ok {
                         failed.lock().unwrap().push(stem(screen, state, *w));
                     }
@@ -261,12 +306,69 @@ fn screenshot_all(
 }
 
 /// Render and screenshot everything: the gallery folder, its states and the screenshot folder.
+/// Screenshot the 100vh probe page at `width` in a window of `window` pixels and return how many
+/// rows from the top it painted (the viewport height) and the screenshot's own height.
+fn probe(chrome: &Path, gallery: &Path, width: u32, window: u32) -> (u32, u32) {
+    let page = gallery.join("probe.html");
+    std::fs::write(&page, PROBE_HTML).unwrap();
+    let out = gallery.join(format!("probe-{width}-{window}.png"));
+    let profile = gallery.join(".chrome-profile-probe");
+    assert!(
+        run_chrome(chrome, &profile, &page, width, window, &out),
+        "Chrome could not screenshot the viewport probe page"
+    );
+    let img = decode(&std::fs::read(&out).unwrap()).unwrap();
+    (painted_rows(&img), img.height())
+}
+
+/// Measure the window-to-viewport bar with the probe at both widths (in a window far taller than
+/// the capture, so the whole viewport shows) and fail if it is not `EXPECTED_BAR` or differs by
+/// width.
+fn measure_bar(chrome: &Path, gallery: &Path) -> u32 {
+    let tall = MAX_CAPTURE_HEIGHT + 600;
+    let bars: Vec<u32> = WIDTHS
+        .iter()
+        .map(|w| bar_from_probe(tall, probe(chrome, gallery, *w, tall).0))
+        .collect();
+    assert!(
+        bars.iter().all(|b| *b == EXPECTED_BAR),
+        "Chrome's window-to-viewport bar is {bars:?} pixels at widths {WIDTHS:?}, not the \
+         EXPECTED_BAR of {EXPECTED_BAR} the baselines were laid out with: re-measure, update \
+         EXPECTED_BAR in review, then re-approve with scripts/visual-approve.sh"
+    );
+    bars[0]
+}
+
 fn capture(tag: &str) -> (Vec<(String, String)>, PathBuf, Vec<String>) {
     let (chrome, _) = installed_chrome();
     let gallery = render_gallery(tag);
+    let bar = measure_bar(&chrome, &gallery);
+    let windows = Windows {
+        tall: window_height(MAX_CAPTURE_HEIGHT, bar),
+        shell: window_height(CAPTURE_HEIGHT, bar),
+    };
+    // The proof the layout and the capture agree: in each window used, the probe's last painted
+    // row is the window's last row, so the viewport is the whole screenshot and every row a state
+    // paints (up to MAX_CAPTURE_HEIGHT; CAPTURE_HEIGHT for shell) is there to be kept and compared.
+    for (window, rows) in [
+        (windows.tall, MAX_CAPTURE_HEIGHT),
+        (windows.shell, CAPTURE_HEIGHT),
+    ] {
+        for w in WIDTHS {
+            let (painted, shot_height) = probe(&chrome, &gallery, w, window);
+            assert_eq!(
+                painted, rows,
+                "at {w} wide a {window}-tall window paints {painted} rows, not the {rows} that are kept"
+            );
+            assert!(
+                shot_height >= rows,
+                "the probe screenshot is only {shot_height} rows tall"
+            );
+        }
+    }
     let states = gallery_states(&gallery);
     let shots = gallery.join("shots");
-    let failed = screenshot_all(&chrome, &gallery, &shots, &states);
+    let failed = screenshot_all(&chrome, &gallery, &shots, &states, windows);
     (states, shots, failed)
 }
 
@@ -367,9 +469,9 @@ fn visual_approve() {
             let existing = std::fs::read(&target).ok();
             let differs = environment_changed
                 || std::env::var_os("CAMERATA_VISUAL_APPROVE_FORCE").is_some()
-                || compare(existing.as_deref(), &actual, TOLERANCE) != Verdict::Match;
+                || compare(screen, existing.as_deref(), &actual, TOLERANCE) != Verdict::Match;
             if differs {
-                std::fs::write(&target, normalize_screenshot(&actual).unwrap()).unwrap();
+                std::fs::write(&target, normalize_screenshot(screen, &actual).unwrap()).unwrap();
                 written.push(format!("{name}.png"));
             } else {
                 unchanged += 1;

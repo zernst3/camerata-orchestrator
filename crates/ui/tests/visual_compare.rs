@@ -34,7 +34,7 @@ const STRICT: Tolerance = Tolerance {
 #[test]
 fn identical_images_match() {
     let img = png_of(&flat(10, 10, 200));
-    assert_eq!(compare(Some(&img), &img, STRICT), Verdict::Match);
+    assert_eq!(compare("tree", Some(&img), &img, STRICT), Verdict::Match);
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn noise_inside_the_tolerance_matches() {
         act.put_pixel(x, 1, image::Rgba([209, 200, 200, 255]));
     }
     assert_eq!(
-        compare(Some(&png_of(&base)), &png_of(&act), STRICT),
+        compare("tree", Some(&png_of(&base)), &png_of(&act), STRICT),
         Verdict::Match
     );
 }
@@ -61,7 +61,7 @@ fn a_change_past_the_tolerance_is_reported_with_its_size() {
         act.put_pixel(x, 0, image::Rgba([230, 200, 200, 255]));
     }
     assert_eq!(
-        compare(Some(&png_of(&base)), &png_of(&act), STRICT),
+        compare("tree", Some(&png_of(&base)), &png_of(&act), STRICT),
         Verdict::Changed {
             changed_pixels: 4,
             max_delta: 30
@@ -72,6 +72,7 @@ fn a_change_past_the_tolerance_is_reported_with_its_size() {
 #[test]
 fn a_changed_image_size_is_a_failure_not_a_match() {
     let v = compare(
+        "tree",
         Some(&png_of(&flat(10, 10, 200))),
         &png_of(&flat(10, 11, 200)),
         STRICT,
@@ -88,7 +89,7 @@ fn a_changed_image_size_is_a_failure_not_a_match() {
 #[test]
 fn a_missing_baseline_is_a_failure() {
     assert_eq!(
-        compare(None, &png_of(&flat(4, 4, 0)), STRICT),
+        compare("tree", None, &png_of(&flat(4, 4, 0)), STRICT),
         Verdict::MissingBaseline
     );
 }
@@ -203,23 +204,90 @@ fn chrome_version_is_parsed_from_its_banner() {
     assert_eq!(parse_chrome_version("no version here"), None);
 }
 
+fn page(height: u32, content_rows: &[u32]) -> RgbaImage {
+    // A page on the flat test background with one content pixel on each of `content_rows`.
+    let [r, g, b] = FLAT_BG;
+    let mut img = RgbaImage::from_pixel(16, height, image::Rgba([r, g, b, 255]));
+    for y in content_rows {
+        img.put_pixel(3, *y, image::Rgba([250, 10, 120, 255]));
+    }
+    img
+}
+
 #[test]
-fn normalizing_keeps_the_top_rows_pixel_for_pixel_and_drops_the_rest() {
-    let mut img = flat(16, CAPTURE_HEIGHT + 50, 40);
-    img.put_pixel(3, 7, image::Rgba([250, 10, 120, 255]));
-    img.put_pixel(3, CAPTURE_HEIGHT + 10, image::Rgba([1, 2, 3, 255]));
-    let out = decode(&normalize_screenshot(&png_of(&img)).unwrap()).unwrap();
-    assert_eq!(out.dimensions(), (16, CAPTURE_HEIGHT));
-    assert_eq!(*out.get_pixel(3, 7), image::Rgba([250, 10, 120, 255]));
+fn content_height_is_the_last_row_off_the_flat_background() {
+    assert_eq!(content_height(&page(3000, &[])), 0);
+    assert_eq!(content_height(&page(3000, &[7])), 8);
+    assert_eq!(content_height(&page(3000, &[7, 2000])), 2001);
+}
+
+#[test]
+fn a_page_is_kept_as_tall_as_its_content_between_the_floor_and_the_cap() {
+    assert_eq!(kept_height(&page(3000, &[7]), "queue"), CAPTURE_HEIGHT);
+    assert_eq!(kept_height(&page(3000, &[2000]), "queue"), 2001);
     assert_eq!(
-        *out.get_pixel(3, CAPTURE_HEIGHT - 1),
-        image::Rgba([40, 40, 40, 255])
+        kept_height(
+            &page(MAX_CAPTURE_HEIGHT + 100, &[MAX_CAPTURE_HEIGHT + 50]),
+            "tree"
+        ),
+        MAX_CAPTURE_HEIGHT
     );
 }
 
 #[test]
+fn the_shell_screen_is_always_cut_at_the_floor() {
+    assert_eq!(kept_height(&page(3000, &[2000]), "shell"), CAPTURE_HEIGHT);
+}
+
+#[test]
+fn content_below_the_old_1400_cut_is_compared() {
+    // The same page with one pixel changed at row 1900 must not match: that row used to sit in
+    // the band under the capture where a change passed unseen.
+    let base = page(3000, &[10, 1900]);
+    let mut act = base.clone();
+    act.put_pixel(3, 1900, image::Rgba([0, 255, 0, 255]));
+    let stored = normalize_screenshot("queue", &png_of(&base)).unwrap();
+    let v = compare(
+        "queue",
+        Some(&stored),
+        &png_of(&act),
+        Tolerance {
+            max_channel_delta: 0,
+            max_changed_pixels: 0,
+        },
+    );
+    assert!(
+        matches!(
+            v,
+            Verdict::Changed {
+                changed_pixels: 1,
+                ..
+            }
+        ),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn normalizing_keeps_the_content_rows_pixel_for_pixel_and_drops_the_rest() {
+    let img = page(3000, &[7, 2500]);
+    let out = decode(&normalize_screenshot("queue", &png_of(&img)).unwrap()).unwrap();
+    assert_eq!(out.dimensions(), (16, 2501));
+    assert_eq!(*out.get_pixel(3, 7), image::Rgba([250, 10, 120, 255]));
+    assert_eq!(*out.get_pixel(3, 2500), image::Rgba([250, 10, 120, 255]));
+    let shell = decode(&normalize_screenshot("shell", &png_of(&img)).unwrap()).unwrap();
+    assert_eq!(shell.dimensions(), (16, CAPTURE_HEIGHT));
+}
+
+#[test]
+fn the_flat_background_colour_matches_the_injected_style() {
+    let [r, g, b] = FLAT_BG;
+    assert!(FLAT_BACKGROUND_STYLE.contains(&format!("#{r:02x}{g:02x}{b:02x}")));
+}
+
+#[test]
 fn a_screenshot_shorter_than_the_capture_height_is_refused() {
-    assert!(normalize_screenshot(&png_of(&flat(16, 100, 0))).is_err());
+    assert!(normalize_screenshot("tree", &png_of(&flat(16, 100, 0))).is_err());
 }
 
 const HTML: &str = "<html><head><title>t</title></head><body>x</body></html>";
@@ -246,4 +314,48 @@ fn the_shell_screen_keeps_the_real_background() {
     let page = prepare_page(HTML, "shell");
     assert!(!page.contains("background-image"), "{page}");
     assert!(!page.contains("background:"), "{page}");
+}
+
+fn probe_image(width: u32, window: u32, painted: u32) -> RgbaImage {
+    // What the 100vh probe screenshot looks like: PROBE_COLOUR down to the viewport's last row,
+    // then the unpainted (white) bar below it.
+    RgbaImage::from_fn(width, window, |_, y| {
+        if y < painted {
+            image::Rgba(PROBE_COLOUR)
+        } else {
+            image::Rgba([255, 255, 255, 255])
+        }
+    })
+}
+
+#[test]
+fn the_window_is_the_captured_height_plus_the_measured_bar() {
+    assert_eq!(window_height(CAPTURE_HEIGHT, 129), CAPTURE_HEIGHT + 129);
+    assert_eq!(window_height(1400, 0), 1400);
+}
+
+#[test]
+fn the_bar_is_the_window_minus_the_rows_the_probe_painted() {
+    let img = probe_image(8, 2000, 1871);
+    assert_eq!(painted_rows(&img), 1871);
+    assert_eq!(bar_from_probe(2000, painted_rows(&img)), 129);
+}
+
+#[test]
+fn the_probe_is_exact_only_when_its_last_painted_row_is_the_capture_s_last_row() {
+    let exact = probe_image(8, window_height(CAPTURE_HEIGHT, 129), CAPTURE_HEIGHT);
+    assert_eq!(painted_rows(&exact), CAPTURE_HEIGHT);
+    // A viewport taller than the capture (the old 1700 window) hides rows below the crop.
+    let too_tall = probe_image(8, 1700, 1571);
+    assert_ne!(painted_rows(&too_tall), CAPTURE_HEIGHT);
+    // A viewport shorter than the capture leaves unpainted rows inside it.
+    let too_short = probe_image(8, 1529, 1398);
+    assert_ne!(painted_rows(&too_short), CAPTURE_HEIGHT);
+}
+
+#[test]
+fn the_probe_page_is_one_viewport_tall_block_of_the_probe_colour() {
+    assert!(PROBE_HTML.contains("height: 100vh"));
+    let [r, g, b, _] = PROBE_COLOUR;
+    assert!(PROBE_HTML.contains(&format!("rgb({r}, {g}, {b})")));
 }
