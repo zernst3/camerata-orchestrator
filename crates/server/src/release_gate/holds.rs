@@ -39,6 +39,51 @@ pub fn held_row(f: &Finding, reason: HoldReason, detail: impl Into<String>) -> H
     }
 }
 
+/// The hold sets of one sealed, overlaid report (WO16d F1). There is one function for "which
+/// rows are held": every reader (the shell's Held count, `/reviewed-report`, the export panel)
+/// and every writer (the node decision's left-out list) takes its answer from here, computed from
+/// the report the release gate reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldSet {
+    /// The rows waiting for a ruling nobody has made: exactly the rows the release gate refuses
+    /// (junk, unverified evidence, restored without a decision, an uncorrected Engine Check No,
+    /// merged without a decision), by site key. The shell's count is this set's size.
+    pub awaiting_a_ruling: std::collections::BTreeSet<String>,
+    /// The rows a batch decision must leave alone: [`Self::awaiting_a_ruling`] plus the rows a
+    /// ruling already stands on, which a group's inherited record would overwrite (a merge the
+    /// reviewer recorded, an evidence or junk row they ruled on): the reasons in
+    /// [`crate::decisions::held_keys`], read from the sealed report.
+    pub kept_out_of_a_batch: std::collections::HashSet<String>,
+}
+
+/// The hold sets for `reviewed`. Nothing here is a rule of its own: the gate's rows come from
+/// [`gate_holds`] and the reasons a batch leaves a row alone from [`crate::decisions::held_keys`].
+pub fn hold_set(reviewed: &ReviewedReport) -> HoldSet {
+    let gate = gate_holds(reviewed);
+    let awaiting_a_ruling: std::collections::BTreeSet<String> = gate
+        .held
+        .iter()
+        .chain(&gate.merged_without_decision)
+        .map(|h| h.key.clone())
+        .collect();
+    let mut kept_out_of_a_batch = crate::decisions::held_keys(
+        &reviewed.report().findings,
+        reviewed.records(),
+        reviewed.engine_check(),
+    );
+    // A decision may name a thrown-out node, whose rows are in `discarded` and not in `findings`.
+    kept_out_of_a_batch.extend(crate::decisions::held_keys(
+        &reviewed.report().discarded,
+        reviewed.records(),
+        reviewed.engine_check(),
+    ));
+    kept_out_of_a_batch.extend(awaiting_a_ruling.iter().cloned());
+    HoldSet {
+        awaiting_a_ruling,
+        kept_out_of_a_batch,
+    }
+}
+
 /// Every row the release gate refuses for `reviewed`, by kind. Rows are in the order of the
 /// report's rows within each kind, kinds in the order the gate runs its checks.
 pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {

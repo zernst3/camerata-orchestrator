@@ -621,10 +621,12 @@ struct StoredFileRef<'a> {
 /// merged into another site, or when the reviewer put it back after the engine threw it out and
 /// has not ruled on it since (A12 item 2).
 ///
-/// This is THE hold list: every hold reason lives in this function, a batch decision on a node
-/// and the decision route both leave out exactly these keys, and a new kind of hold is added here
-/// and nowhere else. The Engine Check's pending No (a wrong finding held until a correction or a
-/// decision is recorded, design A2b) is [`engine_check_holds`].
+/// Every hold reason a batch decision respects lives in this function, and a new kind of hold is
+/// added here and nowhere else. Callers do not read it on the raw report: the one hold function
+/// ([`crate::release_gate::holds::hold_set`]) calls it on the sealed, overlaid report and unions
+/// the rows the release gate refuses, so a screen and the gate cannot disagree. The Engine
+/// Check's pending No (a wrong finding held until a correction or a decision is recorded, design
+/// A2b) is [`engine_check_holds`].
 pub fn held_keys(
     rows: &[crate::onboard::Finding],
     active: &[Decision],

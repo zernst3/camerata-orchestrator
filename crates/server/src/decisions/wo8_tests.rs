@@ -347,10 +347,8 @@ async fn held_keys_is_the_only_hold_list() {
         "not found near the cited line".to_string(),
     );
     let mut junk = row("SEC-1", "src/junk.rs", 3, "let j = junk();");
-    junk.captures.insert(
-        crate::junk_finding::JUNK_CONTENT_CAPTURE.to_string(),
-        "placeholder headline".to_string(),
-    );
+    // Real junk text (a refusal): the seal marks it, and the hold function reads the sealed report.
+    junk.detail = "A title \u{2014} I cannot say.".to_string();
     let merged = row("SEC-1", "src/merged.rs", 4, "let m = merged();");
     let restored = row("SEC-1", "src/restored.rs", 5, "let r = restored();");
 
@@ -412,11 +410,9 @@ async fn held_keys_is_the_only_hold_list() {
         .unwrap();
 
     // Each reason is in the hold list, from one function.
-    let held = held_keys(
-        &entry.report.findings,
-        &state.decisions.active(&pid),
-        &none(),
-    );
+    // The one hold function reads the sealed report the gate reads.
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &pid, &entry);
+    let held = crate::release_gate::holds::hold_set(&reviewed).kept_out_of_a_batch;
     for (reason, key) in [
         ("evidence unverified", &unverified_k),
         ("junk", &junk_k),

@@ -653,7 +653,8 @@ pub struct ReviewedReportResp {
     pub run_id: String,
     pub findings: Vec<Finding>,
     pub tree: Option<crate::review_tree::ReviewTree>,
-    /// Rows held for a ruling of their own (the one hold list).
+    /// Rows waiting for a ruling of their own: the rows the release gate refuses, from the one
+    /// hold function ([`crate::release_gate::holds::hold_set`]), sorted.
     pub held: Vec<String>,
     pub applied_edit_ids: Vec<String>,
     pub stale: Vec<StaleEditView>,
@@ -692,14 +693,10 @@ pub(crate) async fn get_reviewed_report(
     };
     let (_, reviewed) = review_of(&state, &id, &latest);
     let report = reviewed.report();
-    let mut held: Vec<String> = crate::decisions::held_keys(
-        &report.findings,
-        reviewed.records(),
-        reviewed.engine_check(),
-    )
-    .into_iter()
-    .collect();
-    held.sort();
+    let held: Vec<String> = crate::release_gate::holds::hold_set(&reviewed)
+        .awaiting_a_ruling
+        .into_iter()
+        .collect();
     Json(ReviewedReportResp {
         run_id: latest.id.clone(),
         findings: report.findings.clone(),
