@@ -1517,7 +1517,7 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     assert!(
         on_sites
             .iter()
-            .all(|r| r.get(6).map(String::as_str) == Some("Low")),
+            .all(|r| r.get(6).map(String::as_str) == Some("High")),
         "the Sites sheet's row for {first} does not carry the edited severity: {on_sites:?}"
     );
     stack.assert_no_model_calls();
