@@ -733,3 +733,33 @@ fn a_carried_no_shows_on_its_card_as_carried_and_does_not_count_in_this_runs_rat
         "an earlier run's No is not an answer on this run, so it is not in this run's rate"
     );
 }
+
+/// A row that is new since a group decision carries the decision's state, so a lane with no tree
+/// loaded (the queue) says the same verb the tree does.
+#[test]
+fn a_row_new_since_a_group_decision_carries_that_decisions_state() {
+    let report = staged();
+    let covered = key_of(&report, "src/q00.rs");
+    let sub = report
+        .findings
+        .iter()
+        .find(|f| f.path == "src/q00.rs")
+        .unwrap()
+        .group_path[2]
+        .clone();
+    let mut group = decision("dec-000001", &sub, DecisionState::Ignored, "insp-run-1");
+    group.scope = Scope::Node(sub.clone());
+    group.applies_to = vec![covered.clone()];
+    let reviewed = apply_overlay(&report, &[group], &[], &[]);
+    let page = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page(&sub, None, 500).unwrap()
+    });
+    let new = page
+        .rows
+        .iter()
+        .find(|r| r.site_key != covered && r.new_since_decision.is_some())
+        .expect("a member the group decision did not cover is new since it");
+    let n = new.new_since_decision.as_ref().unwrap();
+    assert_eq!(n.covered, 1);
+    assert_eq!(n.node_state, Some(DecisionState::Ignored));
+}

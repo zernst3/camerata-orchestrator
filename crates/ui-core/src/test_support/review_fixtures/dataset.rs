@@ -1270,6 +1270,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
             node_id: node.map(|d| d.node.clone()).unwrap_or_default(),
             decided_at: timestamp(1),
             covered: node.map_or(0, |d| d.covered),
+            node_state: node.map(|d| d.state.clone()),
         });
     }
     // Site decisions on rows nobody has touched.

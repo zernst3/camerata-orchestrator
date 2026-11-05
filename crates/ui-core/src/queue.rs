@@ -557,7 +557,13 @@ pub fn detail_context(view: &QueueView, row: &QueueRow) -> DetailContext {
         crumbs,
         rule_ids,
         subgroups,
-        node_decision: None,
+        // The row carries the state of the group decision it is new since, so the queue says the
+        // verb the tree says without loading the tree.
+        node_decision: row
+            .site
+            .new_since_decision
+            .as_ref()
+            .and_then(|n| n.node_state.clone()),
         pool: all().map(|r| PoolSite::of(&r.site)).collect(),
         pool_none: POOL_NONE_QUEUE,
     }

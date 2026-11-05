@@ -1356,6 +1356,7 @@ fn the_context_names_the_crumbs_the_rules_the_other_sub_groups_and_the_loaded_si
         node_id: decided.id.clone(),
         decided_at: "2026-11-04T09:00:00Z".into(),
         covered: 3,
+        node_state: None,
     });
     let ctx = context_for(&index, &state, &sub.id, &new_row);
     assert_eq!(
