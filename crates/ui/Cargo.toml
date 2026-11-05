@@ -80,6 +80,9 @@ wiremock = "0.6"
 # workspace (CAMERATA_SERVER_BIN too), because two keys would not exclude each other.
 serial_test = "3"
 camerata-test-env = { path = "../test-env" }
+# Pixel-diff visual regression over the review gallery (tests/visual.rs): decodes the headless
+# Chrome PNGs and the approved baselines to compare them. PNG only, no other codec.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
 # NSEvents and posts them to the probe's own process, so the macOS clipboard behavior
