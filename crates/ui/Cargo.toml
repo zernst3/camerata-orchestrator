@@ -105,7 +105,7 @@ camerata-test-env = { path = "../test-env" }
 headless_chrome = { version = "1.0", default-features = false, features = ["offline"] }
 # Fresh data folders for each seeded server, and the unzip that reads the export back.
 tempfile = "3"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # The ledger block (the escalation sentence) is printed in the export's PDF only; the same extractor
 # the server's own export tests use reads it back.
 pdf-extract = "0.12"

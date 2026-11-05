@@ -638,15 +638,23 @@ fn export_zip(stack: &Stack) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("the app saved nothing at {}: {e}", path.display()))
 }
 
+/// The names of the files in a zip.
+fn zip_names<R: std::io::Read + std::io::Seek>(archive: &zip::ZipArchive<R>) -> Vec<String> {
+    archive
+        .file_names()
+        .filter_map(Result::ok)
+        .map(|n| n.to_string())
+        .collect()
+}
+
 /// Every text part of an xlsx inside the export zip (shared strings and sheets), as one string.
 fn workbook_text(zip_bytes: &[u8]) -> String {
     use std::io::Read;
     let mut outer = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("a zip");
-    let name = outer
-        .file_names()
+    let name = zip_names(&outer)
+        .into_iter()
         .find(|n| n.ends_with(".xlsx"))
-        .expect("the export holds a workbook")
-        .to_string();
+        .expect("the export holds a workbook");
     let mut book = Vec::new();
     outer
         .by_name(&name)
@@ -657,7 +665,7 @@ fn workbook_text(zip_bytes: &[u8]) -> String {
     let mut text = String::new();
     for i in 0..inner.len() {
         let mut part = inner.by_index(i).expect("a part");
-        if part.name().ends_with(".xml") {
+        if part.name().is_ok_and(|n| n.ends_with(".xml")) {
             let mut xml = String::new();
             let _ = part.read_to_string(&mut xml);
             text.push_str(&xml);
@@ -711,7 +719,7 @@ fn edit_a_headline_and_the_workbook_export_carries_it() {
     {
         use std::io::Read;
         let mut outer = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
-        let names: Vec<String> = outer.file_names().map(str::to_string).collect();
+        let names = zip_names(&outer);
         let name = names
             .iter()
             .find(|n| n.ends_with(".json") && !n.contains("manifest"))
@@ -980,11 +988,10 @@ fn moved_place(model: &Model, id: &str) -> String {
 fn pdf_text(zip_bytes: &[u8]) -> String {
     use std::io::Read;
     let mut outer = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("a zip");
-    let name = outer
-        .file_names()
+    let name = zip_names(&outer)
+        .into_iter()
         .find(|n| n.ends_with(".pdf"))
-        .expect("the export holds a PDF")
-        .to_string();
+        .expect("the export holds a PDF");
     let mut pdf = Vec::new();
     outer
         .by_name(&name)
