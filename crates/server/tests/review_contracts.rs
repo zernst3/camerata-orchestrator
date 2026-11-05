@@ -1370,7 +1370,50 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
         posted.push((field, recorded.edit.id));
     }
 
-    // The kind: the detail offers `defect` only. A deviation cannot be typed (it carries
+    // The kind: the detail offers `defect` only, so the edit is made on a deviation row (a
+    // row that is a defect already has nothing to change to).
+    let dev_page: SitesPage = get(
+        &f,
+        "the deviation's sites",
+        &format!(
+            "/review/sites?node={}&limit=500",
+            path_key(&f.deviation_sub)
+        ),
+    )
+    .await;
+    let dev_row = dev_page
+        .rows
+        .iter()
+        .find(|r| r.site_key == f.keys.deviation)
+        .expect("the deviation row")
+        .clone();
+    assert_eq!(
+        camerata_ui_core::tree::kind_tag_of(&dev_row),
+        "deviation",
+        "the fixture's deviation row"
+    );
+    let req = edit_request(
+        &dev_row,
+        EditField::Kind,
+        "defect",
+        "the convention does not apply here",
+        &ctx,
+        &dev_page.run_id,
+    )
+    .unwrap_or_else(|e| panic!("kind: {}", e.message()));
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/edits", base(&f)),
+        Some(serde_json::to_value(&req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200, "the kind was refused: {text}");
+    let recorded: camerata_api_types::edits::EditRecorded = serde_json::from_str(&text).unwrap();
+    assert_eq!(recorded.edit.field, EditField::Kind);
+    posted.push((EditField::Kind, recorded.edit.id));
+
+    // A deviation cannot be typed (it carries
     // numbers the engine measured), and the server refuses it too. The value a row already has
     // is refused by the detail before anything is posted (the server, comparing the bare tag
     // with the stored JSON, would record it as a change).
@@ -1477,14 +1520,38 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
     for (field, id) in &posted {
-        // A sub-group edit moves the row in the tree; the other eight are on the row itself.
-        if *field != EditField::Subgroup {
+        // The overlay records every applied edit's id on the row, a split included.
+        if *field != EditField::Kind {
             assert!(
                 ids.contains(id),
                 "{field:?} ({id}) is not in the export: {ids:?}"
             );
         }
     }
+    // The kind edit is on the deviation row, which exports as a defect with the edit's id.
+    let kind_id = &posted
+        .iter()
+        .find(|(field, _)| *field == EditField::Kind)
+        .expect("the kind was posted")
+        .1;
+    let deviated = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["site_id"] == camerata_server::report_export::site_id(&f.keys.deviation).as_str()
+        })
+        .expect("the deviation row is exported");
+    assert_eq!(deviated["reviewer_edited"], true);
+    assert_eq!(deviated["kind"], "defect", "{deviated}");
+    assert!(
+        deviated["edit_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == kind_id.as_str()),
+        "the kind edit ({kind_id}) is not in the export: {deviated}"
+    );
     assert_eq!(exported["severity"], "low");
     let text = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
     assert!(

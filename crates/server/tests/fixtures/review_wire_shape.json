@@ -212,6 +212,10 @@
           "headline": "string",
           "held": "string",
           "kind": {
+            "assessed_sites": "number",
+            "convention_label": "string",
+            "convention_option_id": "string",
+            "deviating_sites": "number",
             "kind": "string"
           },
           "line": "number",
