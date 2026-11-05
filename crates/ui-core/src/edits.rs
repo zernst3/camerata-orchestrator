@@ -21,7 +21,9 @@ pub mod bridge;
 use std::collections::BTreeMap;
 
 use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
-use camerata_api_types::edits::{AddFindingReq, ClientAckReq, EditField, FindingAdded, NewEditReq};
+use camerata_api_types::edits::{
+    AddFindingReq, ClientAckReq, EditField, FindingAdded, NewEditReq, KNOWN_CATEGORIES,
+};
 use camerata_api_types::review::{DisagreementField, EscalationState, ReviewLevel};
 use camerata_api_types::review_view::{DecisionView, EditView, SiteRow, TreeLevel};
 
@@ -51,24 +53,6 @@ pub const SEVERITIES: [&str; 4] = ["critical", "high", "medium", "low"];
 
 /// The two fix labels the exports print.
 pub const FIX_TYPES: [&str; 2] = ["Tailored fix", "Standard fix"];
-
-/// The closed category taxonomy the engine groups by (the server's `KNOWN_CATEGORIES`). The
-/// server takes any label here, so this list is the select's suggestions and a drift from the
-/// engine's list changes what is offered and nothing else.
-pub const CATEGORIES: [&str; 12] = [
-    "authorization",
-    "authentication",
-    "secret-exposure",
-    "injection",
-    "transport-security",
-    "rls-policy",
-    "resource-exposure",
-    "input-validation",
-    "error-handling",
-    "arch-conformance",
-    "testing-style",
-    "performance",
-];
 
 /// The field's name on the screen.
 pub fn field_label(field: EditField) -> &'static str {
@@ -285,10 +269,12 @@ pub fn control_for(field: EditField, row: &SiteRow, ctx: &DetailContext) -> Cont
         }
         EditField::Kind => Control::Select(kind_options(row)),
         EditField::Category => {
-            let mut options: Vec<ControlOption> =
-                CATEGORIES.iter().map(|c| ControlOption::same(c)).collect();
+            let mut options: Vec<ControlOption> = KNOWN_CATEGORIES
+                .iter()
+                .map(|c| ControlOption::same(c))
+                .collect();
             if let Some(current) = row.category.as_deref().filter(|c| !c.is_empty()) {
-                if !CATEGORIES.contains(&current) {
+                if !KNOWN_CATEGORIES.contains(&current) {
                     options.insert(0, ControlOption::same(current));
                 }
             }

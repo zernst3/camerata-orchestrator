@@ -1484,3 +1484,18 @@ fn the_merge_picker_reports_every_match_and_says_when_it_shows_fewer() {
         Some("12 of 20 shown, narrow the search")
     );
 }
+
+#[test]
+fn the_category_select_offers_exactly_the_engines_taxonomy() {
+    let mut row = plain();
+    row.category = None;
+    let Control::Select(options) = control_for(EditField::Category, &row, &ctx()) else {
+        panic!("the category is a select");
+    };
+    let offered: Vec<&str> = options
+        .iter()
+        .map(|o| o.value.as_str())
+        .filter(|v| !v.is_empty())
+        .collect();
+    assert_eq!(offered, camerata_api_types::edits::KNOWN_CATEGORIES);
+}

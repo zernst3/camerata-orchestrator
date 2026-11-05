@@ -16,6 +16,23 @@ use serde::{Deserialize, Serialize};
 use crate::audit::FindingKind;
 use crate::decisions::Decision;
 
+/// The closed category taxonomy the engine groups by: the one list. The server validates a
+/// semantic merge against it and the review UI offers it in the category select.
+pub const KNOWN_CATEGORIES: [&str; 12] = [
+    "authorization",
+    "authentication",
+    "secret-exposure",
+    "injection",
+    "transport-security",
+    "rls-policy",
+    "resource-exposure",
+    "input-validation",
+    "error-handling",
+    "arch-conformance",
+    "testing-style",
+    "performance",
+];
+
 /// A field of a finding row a reviewer can change before a client sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
