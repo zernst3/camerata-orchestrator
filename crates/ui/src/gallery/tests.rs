@@ -25,6 +25,8 @@ const SPEC_STATES: &[&str] = &[
     "queue/line-lowered",
     "queue/rate-changed-toast",
     "queue/30k",
+    "queue/detail-form-open",
+    "queue/merge-picker-empty-pool",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -33,6 +35,9 @@ const SPEC_STATES: &[&str] = &[
     "engine/no-corrected",
     "engine/all-verdicts",
     "engine/small-category",
+    "engine/thrown-out-held",
+    "engine/thrown-out-confirmed",
+    "engine/floor-binds",
     "detail/empty",
     "detail/plain",
     "detail/escalated",
@@ -52,6 +57,10 @@ const SPEC_STATES: &[&str] = &[
     "detail/split-picker",
     "detail/add-form",
     "detail/add-refused",
+    "detail/possible-duplicate",
+    "detail/merge-picker-duplicate-first",
+    "detail/over-budget",
+    "detail/viewer-commit",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",
@@ -60,6 +69,7 @@ const SPEC_STATES: &[&str] = &[
     "settings/run-in-flight",
     "export/clear",
     "export/blocked",
+    "export/one-line-two-reasons",
 ];
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a

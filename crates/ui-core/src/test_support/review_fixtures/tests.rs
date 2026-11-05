@@ -122,7 +122,7 @@ fn a_different_seed_gives_different_data() {
 fn fixtures_cover_every_state() {
     let unique: BTreeSet<&str> = FIXTURE_IDS.iter().copied().collect();
     assert_eq!(unique.len(), FIXTURE_IDS.len(), "no id is listed twice");
-    assert_eq!(FIXTURE_IDS.len(), 56);
+    assert_eq!(FIXTURE_IDS.len(), 66);
     for id in FIXTURE_IDS {
         assert!(fixture(id).is_some(), "no fixture for {id}");
     }
@@ -922,6 +922,12 @@ fn the_fixture_shell_names_the_inspected_commit_of_every_repo_its_rows_are_in() 
             .expect("a commit for the repo");
         assert_eq!(sha.len(), 40, "{repo}: {sha}");
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+        // The viewer's header shows the first seven characters: a gallery page must show a commit
+        // that reads as one, not a run of zeros.
+        assert!(
+            sha[..7].chars().any(|c| c != '0'),
+            "{repo}: {sha} reads as a placeholder"
+        );
     }
 }
 
@@ -956,4 +962,31 @@ fn over_budget_rows_are_the_rows_the_server_would_let_exceed_the_budget() {
             "{name}: some over-budget row is over for a critical D5 reason, not only for evidence"
         );
     }
+}
+
+/// The server's allocation lists the categories of the kept rows (`sample.unread`); the thrown-out
+/// stratum is its own line in `strata`. The fixture drew a "Thrown out by the engine" category
+/// into the allocation, which made the floor line count five categories where there are four.
+#[test]
+fn the_engine_allocation_lists_kept_categories_and_never_the_thrown_out_stratum() {
+    let ds = dataset_base();
+    assert!(ds
+        .engine
+        .cards
+        .iter()
+        .any(|c| c.stratum == camerata_api_types::review_view::SampleStratum::ThrownOut));
+    assert!(!ds.engine.allocation.is_empty());
+    assert!(ds
+        .engine
+        .allocation
+        .iter()
+        .all(|a| a.category != "Thrown out by the engine"));
+    let drawn: usize = ds.engine.allocation.iter().map(|a| a.drawn).sum();
+    let kept = ds
+        .engine
+        .cards
+        .iter()
+        .filter(|c| c.stratum == camerata_api_types::review_view::SampleStratum::Kept)
+        .count();
+    assert_eq!(drawn, kept, "the allocation covers the kept cards");
 }

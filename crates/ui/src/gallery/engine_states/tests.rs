@@ -3,7 +3,7 @@ use crate::style::GLOBAL_CSS;
 use camerata_api_types::review_view::EngineCheckError;
 use camerata_ui_core::engine_check::{card_for_door, sample_line};
 use camerata_ui_core::test_support::review_fixtures::{
-    build, dataset_base, EngineMode, Params, SEED,
+    build, dataset_base, fixture, EngineMode, Params, SEED,
 };
 use camerata_ui_core::tree::export::Door;
 
@@ -13,7 +13,7 @@ fn page(id: &str) -> String {
 
 #[test]
 fn every_engine_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 8, "every engine state is built");
+    assert_eq!(states().len(), 11, "every engine state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -208,5 +208,108 @@ fn a_corrected_card_shows_what_was_done() {
     // A card with nothing corrected shows no summary.
     for id in ["engine/card-pending", "engine/no-pending-correction"] {
         assert!(!page(id).contains("engine-fix-summary"), "{id}");
+    }
+}
+
+fn thrown_out_ds(
+    mode: EngineMode,
+) -> camerata_ui_core::test_support::review_fixtures::ReviewDataSet {
+    let mut p = Params::base(SEED);
+    p.engine_mode = mode;
+    build(&p)
+}
+
+/// Wave 17 soft (b): a thrown-out card held by an uncorrected No names both ways out and offers
+/// the second as its own control.
+#[test]
+fn a_held_thrown_out_card_offers_put_it_back_and_confirm_thrown_out() {
+    let html = page("engine/thrown-out-held");
+    assert!(
+        html.contains("thrown out by the engine"),
+        "the stratum chip"
+    );
+    assert!(html.contains("Confirm thrown out"), "{html}");
+    assert!(html.contains("Put it back into review"));
+    assert!(html.contains("held from export until put back or confirmed"));
+    assert!(
+        html.contains("confirm it was rightly thrown out"),
+        "the state line names the second way out"
+    );
+    assert!(
+        !html.contains("held from export until corrected"),
+        "the kept-row wording is not used on a thrown-out card"
+    );
+    // The shell's Held count and the export gate both carry the row.
+    let ds = thrown_out_ds(EngineMode::ThrownOutNo);
+    let base = dataset_base();
+    assert_eq!(ds.shell.counts.held, base.shell.counts.held + 1);
+    assert!(
+        html.contains(&format!("Held {}", ds.shell.counts.held)),
+        "the strip"
+    );
+    let card = ds
+        .engine
+        .cards
+        .iter()
+        .find(|c| c.verdict.is_some())
+        .expect("the thrown-out card");
+    assert!(ds.gate.held.iter().any(|h| h.key == card.site.site_key
+        && h.reason
+            == camerata_api_types::review_view::HoldReason::EngineCheckNoWithoutCorrection));
+    // A kept row's hold keeps its own words and no confirmation.
+    let kept = page("engine/no-pending-correction");
+    assert!(kept.contains("held from export until corrected"));
+    assert!(!kept.contains("Confirm thrown out"));
+}
+
+#[test]
+fn a_confirmed_throw_out_shows_what_was_decided_and_no_confirm_control() {
+    let html = page("engine/thrown-out-confirmed");
+    assert!(html.contains("throw-out confirmed"), "{html}");
+    assert!(html.contains("stays out of the client package"));
+    assert!(!html.contains("Confirm thrown out"), "it is settled");
+    assert!(!html.contains("Put it back into review"));
+    assert!(!html.contains("what ships"));
+    assert!(
+        html.contains("False positive"),
+        "the card shows the decision that settled it"
+    );
+    let ds = thrown_out_ds(EngineMode::ThrownOutConfirmed);
+    assert_eq!(
+        ds.shell.counts.held,
+        dataset_base().shell.counts.held,
+        "nothing holds the export on its account"
+    );
+}
+
+/// Ruling 2 of 2026-11-04: when the per-category floor beats the sample size, the header says so.
+#[test]
+fn a_floor_binding_lane_says_the_floor_won_over_the_sample_size() {
+    let html = page("engine/floor-binds");
+    let lane = match fixture("engine/floor-binds").unwrap().body {
+        camerata_ui_core::test_support::review_fixtures::Body::Engine(b) => match b.lane {
+            camerata_ui_core::test_support::review_fixtures::Loaded::Ready(l) => l,
+            other => panic!("{other:?}"),
+        },
+        _ => panic!("not an engine state"),
+    };
+    assert!(
+        lane.drawn > lane.setting,
+        "{} drawn of {}",
+        lane.drawn,
+        lane.setting
+    );
+    let line = sample_line(&lane);
+    assert!(
+        line.contains("at least 3 from each of 4 categories, above your sample size of 6"),
+        "{line}"
+    );
+    assert!(html.contains(&line), "the header carries it");
+    assert!(
+        !html.contains("Allocated by unread share"),
+        "the floor line replaces the share note"
+    );
+    for a in lane.allocation.iter().filter(|a| a.unread >= 3) {
+        assert!(a.drawn >= 3, "{} drew {}", a.category, a.drawn);
     }
 }

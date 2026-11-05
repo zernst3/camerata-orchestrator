@@ -653,7 +653,11 @@ fn a_new_since_decision_row_in_the_queue_says_the_verb_the_tree_says() {
     row.site.stale_decision = None;
     let new_since = |state: Option<DecisionState>| NewSinceDecisionView {
         decision_id: "dec-9".to_string(),
-        node_id: row.node_path.last().map(|c| c.id.clone()).unwrap_or_default(),
+        node_id: row
+            .node_path
+            .last()
+            .map(|c| c.id.clone())
+            .unwrap_or_default(),
         decided_at: "2026-11-04T09:00:00Z".to_string(),
         covered: 12,
         node_state: state,

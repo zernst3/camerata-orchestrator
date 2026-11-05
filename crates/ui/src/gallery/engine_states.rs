@@ -74,6 +74,9 @@ states! {
     no_corrected => "engine/no-corrected",
     all_verdicts => "engine/all-verdicts",
     small_category => "engine/small-category",
+    thrown_out_held => "engine/thrown-out-held",
+    thrown_out_confirmed => "engine/thrown-out-confirmed",
+    floor_binds => "engine/floor-binds",
 }
 
 #[cfg(test)]

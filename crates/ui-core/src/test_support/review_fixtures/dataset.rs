@@ -23,8 +23,8 @@ use camerata_api_types::review_view::{
     PlacementView, QueueRow, QueueView, ReviewCounts, ReviewSettingsView, ReviewShellView,
     SampleStratum, SettingsLimits, SiteRow, SitesPage, Stage1View, Stage2View, StageModelsView,
     StaleSummary, StratumRate, SummarySource, TreeLevel, TreeNodeKind, TreeNodeView, TreeView,
-    ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX, QUEUE_BELOW_PAGE_SIZE, SAMPLE_SIZE_MAX,
-    SAMPLE_SIZE_SUGGESTED, SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
+    ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX, QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR,
+    SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED, SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
 use serde::Serialize;
 
@@ -147,6 +147,10 @@ pub struct Params {
     pub added: usize,
     /// What the Engine Check cards carry.
     pub engine_mode: EngineMode,
+    /// The per-category floor beats the sample size: every category with enough unread rows
+    /// draws at least [`SAMPLE_CATEGORY_FLOOR`] cards, so the lane draws more than its setting
+    /// (ruling 2 of 2026-11-04).
+    pub floor_binds: bool,
 }
 
 /// Which verdicts the Engine Check cards carry.
@@ -160,6 +164,12 @@ pub enum EngineMode {
     NoCorrected,
     /// Every card has a verdict; each No is corrected.
     AllVerdicts,
+    /// The first thrown-out card says No (the engine threw out a real problem) and nothing
+    /// settles it: the gate holds the export on the row.
+    ThrownOutNo,
+    /// The first thrown-out card says No and a false-positive decision confirms the throw-out was
+    /// right: the row stays thrown out and the hold is gone.
+    ThrownOutConfirmed,
 }
 
 /// The reasons that may exceed the budget (design A4 and D5): the server's default set.
@@ -207,6 +217,7 @@ impl Params {
             group_reviewed: true,
             added: 3,
             engine_mode: EngineMode::Pending,
+            floor_binds: false,
         }
     }
 
@@ -247,6 +258,7 @@ impl Params {
             group_reviewed: true,
             added: 5,
             engine_mode: EngineMode::Pending,
+            floor_binds: false,
         }
     }
 }
@@ -1583,7 +1595,9 @@ fn assemble(
         count_state(&|s| matches!(s, DecisionState::TechDebtNow | DecisionState::TechDebtLater));
     let merged = count_state(&|s| matches!(s, DecisionState::MergedInto(_)));
     let decided = confirmed + ignored + false_positive + tech_debt + merged;
-    let held_rows: Vec<&SiteRow> = live.iter().copied().filter(|r| r.held.is_some()).collect();
+    // A thrown-out row the Engine Check said No to is held too: it is in no package, but the
+    // export waits until it is put back or the throw-out is confirmed.
+    let held_rows: Vec<&SiteRow> = rows.iter().filter(|r| r.held.is_some()).collect();
 
     // The export gate.
     let held_row = |r: &SiteRow| HeldRow {
@@ -1676,9 +1690,17 @@ fn assemble(
                 .into_iter()
                 .enumerate()
                 .map(|(i, repo)| {
+                    // Forty hex characters from the seeded generator, so the first seven read as
+                    // a commit (the viewer's header shows them).
+                    let mut rng = Rng::new(p.seed ^ (i as u64 + 1));
                     (
                         repo.to_string(),
-                        format!("{:040x}", (i as u128 + 1) * 0x9e37_79b9),
+                        format!(
+                            "{:016x}{:016x}{:08x}",
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64() as u32
+                        ),
                     )
                 })
                 .collect()
@@ -1821,7 +1843,13 @@ fn build_engine(
 /// Recompute the allocation table and the strata rates from the cards' verdicts.
 pub fn refresh_lane_totals(lane: &mut EngineCheckLane, rows: &[SiteRow]) {
     let mut by_cat: BTreeMap<String, CategoryAllocation> = BTreeMap::new();
-    for card in &lane.cards {
+    // The allocation is the kept rows' (the server's `sample.unread`); the thrown-out stratum is
+    // its own line in `strata`, not a category.
+    for card in lane
+        .cards
+        .iter()
+        .filter(|c| c.stratum == SampleStratum::Kept)
+    {
         let cat = card
             .site
             .category
@@ -1916,12 +1944,29 @@ fn pick_sample(p: &Params, rows: &[SiteRow]) -> Vec<(usize, SampleStratum)> {
         .collect();
     let kept_n = p.sample_size.saturating_sub(thrown.len().min(2));
     let stride = (unread.len() / kept_n.max(1)).max(1);
-    let mut picks: Vec<(usize, SampleStratum)> = unread
-        .iter()
-        .step_by(stride)
-        .take(kept_n)
-        .map(|&i| (i, SampleStratum::Kept))
-        .collect();
+    let mut picks: Vec<(usize, SampleStratum)> = if p.floor_binds {
+        // The floor first: the first few unread rows of every category that has that many.
+        let mut by_category: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for &i in &unread {
+            by_category
+                .entry(rows[i].category.clone().unwrap_or_default())
+                .or_default()
+                .push(i);
+        }
+        by_category
+            .into_values()
+            .filter(|idx| idx.len() >= SAMPLE_CATEGORY_FLOOR)
+            .flat_map(|idx| idx.into_iter().take(SAMPLE_CATEGORY_FLOOR))
+            .map(|i| (i, SampleStratum::Kept))
+            .collect()
+    } else {
+        unread
+            .iter()
+            .step_by(stride)
+            .take(kept_n)
+            .map(|&i| (i, SampleStratum::Kept))
+            .collect()
+    };
     picks.extend(
         thrown
             .iter()
@@ -1931,11 +1976,63 @@ fn pick_sample(p: &Params, rows: &[SiteRow]) -> Vec<(usize, SampleStratum)> {
     picks
 }
 
+/// The No on the first thrown-out card, and (for `ThrownOutConfirmed`) the decision that confirms
+/// the throw-out. The row keeps its throw-out mark either way: a No says the engine threw out a
+/// real problem, and until it is put back or confirmed the gate holds the export on it.
+fn thrown_out_verdict(
+    p: &Params,
+    rows: &mut [SiteRow],
+    verdicts: &mut BTreeMap<String, EngineCheckVerdict>,
+) {
+    let Some((i, _)) = pick_sample(p, rows)
+        .into_iter()
+        .find(|(_, stratum)| *stratum == SampleStratum::ThrownOut)
+    else {
+        return;
+    };
+    let key = rows[i].site_key.clone();
+    let mut verdict = EngineCheckVerdict {
+        key: key.clone(),
+        run_id: RUN_ID.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::ThrownOutRealProblem),
+        correction: None,
+        by: "architect".to_string(),
+        at: timestamp(0),
+        carried_from: None,
+    };
+    if p.engine_mode == EngineMode::ThrownOutNo {
+        rows[i].held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+    } else {
+        let id = "dec-engine-confirm".to_string();
+        rows[i].decision = Some(DecisionView {
+            id: id.clone(),
+            state: DecisionState::FalsePositive,
+            reason: "A copy of a row the report already carries; the engine was right.".to_string(),
+            scope: Scope::Site,
+            inherited_from: None,
+            decided_by: "architect".to_string(),
+            decided_at: timestamp(1),
+            needed_me: None,
+            confirmed_by_client: None,
+        });
+        verdict.correction = Some(CorrectionRef::Decision(id));
+    }
+    verdicts.insert(key, verdict);
+}
+
 /// Give the cards the verdicts `p.engine_mode` asks for, and the rows the holds and corrections
 /// behind them. Only rows nothing else has touched are corrected.
 fn apply_engine_mode(p: &Params, rows: &mut [SiteRow]) -> BTreeMap<String, EngineCheckVerdict> {
     let mut verdicts = BTreeMap::new();
     if p.engine_mode == EngineMode::Pending {
+        return verdicts;
+    }
+    if matches!(
+        p.engine_mode,
+        EngineMode::ThrownOutNo | EngineMode::ThrownOutConfirmed
+    ) {
+        thrown_out_verdict(p, rows, &mut verdicts);
         return verdicts;
     }
     let errors = EngineCheckError::ALL;
@@ -1950,6 +2047,7 @@ fn apply_engine_mode(p: &Params, rows: &mut [SiteRow]) -> BTreeMap<String, Engin
                 EngineMode::Pending => false,
                 EngineMode::NoWithoutCorrection | EngineMode::NoCorrected => wrongs == 0,
                 EngineMode::AllVerdicts => n % 6 == 2,
+                EngineMode::ThrownOutNo | EngineMode::ThrownOutConfirmed => false,
             };
         if !wrong
             && matches!(

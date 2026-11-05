@@ -114,16 +114,11 @@ fn held_rows(gate: &ExportGateView) -> Vec<GateRow> {
     let mut order: Vec<&str> = Vec::new();
     let mut by_key: std::collections::HashMap<&str, Vec<(&HeldRow, GateRowKind)>> =
         std::collections::HashMap::new();
-    for (r, kind) in gate
-        .held
-        .iter()
-        .map(|r| (r, GateRowKind::Held))
-        .chain(
-            gate.merged_without_decision
-                .iter()
-                .map(|r| (r, GateRowKind::Merged)),
-        )
-    {
+    for (r, kind) in gate.held.iter().map(|r| (r, GateRowKind::Held)).chain(
+        gate.merged_without_decision
+            .iter()
+            .map(|r| (r, GateRowKind::Merged)),
+    ) {
         let entry = by_key.entry(r.key.as_str()).or_default();
         if entry.is_empty() {
             order.push(r.key.as_str());
@@ -312,7 +307,8 @@ mod tests {
         );
         let both = &rows[0];
         assert!(
-            both.reason.contains(HoldReason::RestoredWithoutDecision.phrase()),
+            both.reason
+                .contains(HoldReason::RestoredWithoutDecision.phrase()),
             "{}",
             both.reason
         );
