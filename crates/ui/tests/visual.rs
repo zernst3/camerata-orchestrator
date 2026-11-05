@@ -182,6 +182,11 @@ fn render_gallery(tag: &str) -> PathBuf {
         let html = std::fs::read_to_string(&page).unwrap();
         std::fs::write(&page, prepare_page(&html, &screen)).unwrap();
     }
+    // The "Show next 500" row of `tree/30k`, thousands of rows below the cap: its own short
+    // capture, so that row and its neighbours are compared (see `CAPPED`).
+    let long = dir.join("tree/30k.html");
+    let bottom = scrolled_to_show_next(&std::fs::read_to_string(&long).unwrap());
+    std::fs::write(dir.join(format!("tree/30k{SHOW_NEXT_SUFFIX}.html")), bottom).unwrap();
     dir
 }
 
@@ -234,9 +239,10 @@ fn run_chrome(
 
 /// Screenshot `states` of a rendered gallery at every width into `shots`, a few Chromes at once.
 /// Returns the stems that could not be captured.
-/// The two window heights: the tall one every screen but `shell` is photographed in, and the
-/// `CAPTURE_HEIGHT` one for `shell`, whose gradient background is drawn across the viewport and
-/// so must be photographed in a viewport of the height that is kept.
+/// The two window heights: the tall one most states are photographed in, and the `CAPTURE_HEIGHT`
+/// one for the short captures (`is_short`: `shell/*`, whose gradient background is drawn across
+/// the viewport, and the `-show-next` pages), which must be photographed in a viewport of the height
+/// that is kept.
 #[derive(Clone, Copy)]
 struct Windows {
     tall: u32,
@@ -244,8 +250,8 @@ struct Windows {
 }
 
 impl Windows {
-    fn for_screen(self, screen: &str) -> u32 {
-        if screen == "shell" {
+    fn for_state(self, screen: &str, state: &str) -> u32 {
+        if is_short(&format!("{screen}/{state}")) {
             self.shell
         } else {
             self.tall
@@ -285,14 +291,14 @@ fn screenshot_all(
                         &profile,
                         &page,
                         *w,
-                        windows.for_screen(screen),
+                        windows.for_state(screen, state),
                         &out,
                     ) || run_chrome(
                         chrome,
                         &profile,
                         &page,
                         *w,
-                        windows.for_screen(screen),
+                        windows.for_state(screen, state),
                         &out,
                     );
                     if !ok {
@@ -456,10 +462,33 @@ fn visual_approve() {
     let environment_changed =
         check_environment(recorded.as_deref(), &version, &platform()).is_err();
     let all = wanted.is_empty();
+    // A state that runs past the cap without being named in CAPPED (or a named one that no
+    // longer does) is not approved: its bottom would be compared from nowhere.
+    let mut cap_failures = Vec::new();
+    for (screen, state) in &states {
+        let id = format!("{screen}/{state}");
+        if !all && !wanted.contains(&id) {
+            continue;
+        }
+        for w in WIDTHS {
+            let name = stem(screen, state, w);
+            let actual = std::fs::read(shots.join(format!("{name}.png"))).unwrap();
+            let (_, reaches_cap) = compare_shot(&id, None, &actual, TOLERANCE);
+            if let Some(why) = cap_failure(&id, reaches_cap) {
+                cap_failures.push(format!("{id} @{w}: {why}"));
+            }
+        }
+    }
+    assert!(
+        cap_failures.is_empty(),
+        "nothing was approved:\n{}",
+        cap_failures.join("\n")
+    );
     let mut written = Vec::new();
     let mut unchanged = 0usize;
     for (screen, state) in &states {
-        if !all && !wanted.contains(&format!("{screen}/{state}")) {
+        let id = format!("{screen}/{state}");
+        if !all && !wanted.contains(&id) {
             continue;
         }
         for w in WIDTHS {
@@ -469,9 +498,9 @@ fn visual_approve() {
             let existing = std::fs::read(&target).ok();
             let differs = environment_changed
                 || std::env::var_os("CAMERATA_VISUAL_APPROVE_FORCE").is_some()
-                || compare(screen, existing.as_deref(), &actual, TOLERANCE) != Verdict::Match;
+                || compare(&id, existing.as_deref(), &actual, TOLERANCE) != Verdict::Match;
             if differs {
-                std::fs::write(&target, normalize_screenshot(screen, &actual).unwrap()).unwrap();
+                std::fs::write(&target, normalize_screenshot(&id, &actual).unwrap()).unwrap();
                 written.push(format!("{name}.png"));
             } else {
                 unchanged += 1;

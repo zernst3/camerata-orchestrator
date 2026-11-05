@@ -34,7 +34,7 @@ const STRICT: Tolerance = Tolerance {
 #[test]
 fn identical_images_match() {
     let img = png_of(&flat(10, 10, 200));
-    assert_eq!(compare("tree", Some(&img), &img, STRICT), Verdict::Match);
+    assert_eq!(compare("tree/x", Some(&img), &img, STRICT), Verdict::Match);
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn noise_inside_the_tolerance_matches() {
         act.put_pixel(x, 1, image::Rgba([209, 200, 200, 255]));
     }
     assert_eq!(
-        compare("tree", Some(&png_of(&base)), &png_of(&act), STRICT),
+        compare("tree/x", Some(&png_of(&base)), &png_of(&act), STRICT),
         Verdict::Match
     );
 }
@@ -61,7 +61,7 @@ fn a_change_past_the_tolerance_is_reported_with_its_size() {
         act.put_pixel(x, 0, image::Rgba([230, 200, 200, 255]));
     }
     assert_eq!(
-        compare("tree", Some(&png_of(&base)), &png_of(&act), STRICT),
+        compare("tree/x", Some(&png_of(&base)), &png_of(&act), STRICT),
         Verdict::Changed {
             changed_pixels: 4,
             max_delta: 30
@@ -89,7 +89,7 @@ fn a_changed_image_size_is_a_failure_not_a_match() {
 #[test]
 fn a_missing_baseline_is_a_failure() {
     assert_eq!(
-        compare("tree", None, &png_of(&flat(4, 4, 0)), STRICT),
+        compare("tree/x", None, &png_of(&flat(4, 4, 0)), STRICT),
         Verdict::MissingBaseline
     );
 }
@@ -223,8 +223,8 @@ fn content_height_is_the_last_row_off_the_flat_background() {
 
 #[test]
 fn a_page_is_kept_as_tall_as_its_content_between_the_floor_and_the_cap() {
-    assert_eq!(kept_height(&page(3000, &[7]), "queue"), CAPTURE_HEIGHT);
-    assert_eq!(kept_height(&page(3000, &[2000]), "queue"), 2001);
+    assert_eq!(kept_height(&page(3000, &[7]), "queue/x"), CAPTURE_HEIGHT);
+    assert_eq!(kept_height(&page(3000, &[2000]), "queue/x"), 2001);
     assert_eq!(
         kept_height(
             &page(MAX_CAPTURE_HEIGHT + 100, &[MAX_CAPTURE_HEIGHT + 50]),
@@ -236,7 +236,10 @@ fn a_page_is_kept_as_tall_as_its_content_between_the_floor_and_the_cap() {
 
 #[test]
 fn the_shell_screen_is_always_cut_at_the_floor() {
-    assert_eq!(kept_height(&page(3000, &[2000]), "shell"), CAPTURE_HEIGHT);
+    assert_eq!(
+        kept_height(&page(3000, &[2000]), "shell/empty"),
+        CAPTURE_HEIGHT
+    );
 }
 
 #[test]
@@ -246,9 +249,9 @@ fn content_below_the_old_1400_cut_is_compared() {
     let base = page(3000, &[10, 1900]);
     let mut act = base.clone();
     act.put_pixel(3, 1900, image::Rgba([0, 255, 0, 255]));
-    let stored = normalize_screenshot("queue", &png_of(&base)).unwrap();
+    let stored = normalize_screenshot("queue/x", &png_of(&base)).unwrap();
     let v = compare(
-        "queue",
+        "queue/x",
         Some(&stored),
         &png_of(&act),
         Tolerance {
@@ -271,11 +274,11 @@ fn content_below_the_old_1400_cut_is_compared() {
 #[test]
 fn normalizing_keeps_the_content_rows_pixel_for_pixel_and_drops_the_rest() {
     let img = page(3000, &[7, 2500]);
-    let out = decode(&normalize_screenshot("queue", &png_of(&img)).unwrap()).unwrap();
+    let out = decode(&normalize_screenshot("queue/x", &png_of(&img)).unwrap()).unwrap();
     assert_eq!(out.dimensions(), (16, 2501));
     assert_eq!(*out.get_pixel(3, 7), image::Rgba([250, 10, 120, 255]));
     assert_eq!(*out.get_pixel(3, 2500), image::Rgba([250, 10, 120, 255]));
-    let shell = decode(&normalize_screenshot("shell", &png_of(&img)).unwrap()).unwrap();
+    let shell = decode(&normalize_screenshot("shell/empty", &png_of(&img)).unwrap()).unwrap();
     assert_eq!(shell.dimensions(), (16, CAPTURE_HEIGHT));
 }
 
@@ -287,7 +290,7 @@ fn the_flat_background_colour_matches_the_injected_style() {
 
 #[test]
 fn a_screenshot_shorter_than_the_capture_height_is_refused() {
-    assert!(normalize_screenshot("tree", &png_of(&flat(16, 100, 0))).is_err());
+    assert!(normalize_screenshot("tree/x", &png_of(&flat(16, 100, 0))).is_err());
 }
 
 const HTML: &str = "<html><head><title>t</title></head><body>x</body></html>";
@@ -358,4 +361,85 @@ fn the_probe_page_is_one_viewport_tall_block_of_the_probe_colour() {
     assert!(PROBE_HTML.contains("height: 100vh"));
     let [r, g, b, _] = PROBE_COLOUR;
     assert!(PROBE_HTML.contains(&format!("rgb({r}, {g}, {b})")));
+}
+
+fn tall_page_with_content_at(row: u32) -> Vec<u8> {
+    png_of(&page(MAX_CAPTURE_HEIGHT, &[10, row]))
+}
+
+#[test]
+fn a_page_whose_content_reaches_the_cap_is_flagged() {
+    let (_, reaches) = compare_shot(
+        "queue/x",
+        None,
+        &tall_page_with_content_at(MAX_CAPTURE_HEIGHT - 1),
+        STRICT,
+    );
+    assert!(reaches);
+    let (_, reaches) = compare_shot(
+        "queue/x",
+        None,
+        &tall_page_with_content_at(MAX_CAPTURE_HEIGHT - CAP_MARGIN - 2),
+        STRICT,
+    );
+    assert!(!reaches);
+}
+
+#[test]
+fn a_state_that_reaches_the_cap_must_be_named_in_capped() {
+    let why = cap_failure("queue/30k", true).unwrap();
+    assert!(why.contains("grows past"), "{why}");
+    assert!(why.contains("CAPPED"), "{why}");
+    assert_eq!(cap_failure("tree/markers", false), None);
+}
+
+#[test]
+fn a_capped_state_that_no_longer_reaches_the_cap_must_leave_capped() {
+    assert!(CAPPED.contains(&"tree/30k"));
+    assert_eq!(cap_failure("tree/30k", true), None);
+    let why = cap_failure("tree/30k", false).unwrap();
+    assert!(why.contains("no longer reaches"), "{why}");
+}
+
+#[test]
+fn the_shell_and_show_next_captures_are_short_and_never_judged_against_the_cap() {
+    for id in ["shell/empty", "tree/30k-show-next"] {
+        assert_eq!(
+            kept_height(&page(3000, &[2000]), id),
+            CAPTURE_HEIGHT,
+            "{id}"
+        );
+        assert_eq!(cap_failure(id, true), None, "{id}");
+        assert_eq!(cap_failure(id, false), None, "{id}");
+    }
+}
+
+#[test]
+fn check_states_fails_an_unnamed_state_that_grows_past_the_cap() {
+    let baselines = scratch("cap-baselines");
+    let actual = scratch("cap-actual");
+    let states = vec![("queue".to_string(), "30k".to_string())];
+    for w in WIDTHS {
+        let shot = tall_page_with_content_at(MAX_CAPTURE_HEIGHT - 1);
+        std::fs::write(actual.join(format!("queue-30k-{w}.png")), &shot).unwrap();
+        let stored = normalize_screenshot("queue/30k", &shot).unwrap();
+        std::fs::write(baselines.join(format!("queue-30k-{w}.png")), stored).unwrap();
+    }
+    let failures = check_states(&baselines, &actual, &states, STRICT, None);
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(failures[0].why.contains("grows past"), "{failures:?}");
+}
+
+#[test]
+fn the_show_next_variant_slides_the_page_so_the_show_next_row_is_in_view() {
+    let page = scrolled_to_show_next(HTML);
+    let head = page.find("</head>").unwrap();
+    let script = page.find("<script>").unwrap();
+    assert!(page.find("overflow: hidden").unwrap() < head);
+    assert!(page.contains("translateY"));
+    assert!(page.contains("Show next"));
+    // `top` is a read-only global in a page: assigning it is silently ignored.
+    assert!(!page.contains("var top"));
+    assert!(script > head && script < page.find("</body>").unwrap());
+    assert!(page.contains(&format!("height: {CAPTURE_HEIGHT}px")));
 }
