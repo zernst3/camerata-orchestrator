@@ -81,7 +81,9 @@ pub enum CardState {
         error: Option<EngineCheckError>,
         carried_from: Option<String>,
     },
-    /// A No on a thrown-out row that nothing has acted on: the row is still thrown out.
+    /// A No on a thrown-out row that nothing has acted on, when the gate's hold is not on the card
+    /// (the server holds such a row, so a card it has read reads [`CardState::Held`]): the row is
+    /// still thrown out.
     ThrownOut,
     /// A thrown-out row the reviewer put back: it is back in review and held until it is decided.
     Restored,
@@ -115,7 +117,8 @@ fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
 
 /// The state of a card, read from the verdict, from whether the gate holds the row and from
 /// whether anything corrected it. A No is "corrected" only when something did; the absence of a
-/// hold proves nothing (a thrown-out row is never held for an uncorrected No).
+/// hold proves nothing (a thrown-out row with an uncorrected No is held too, but a card that
+/// does not carry the hold must still not read as corrected).
 pub fn card_state(card: &EngineCheckCard) -> CardState {
     match &card.verdict {
         None => CardState::Pending,

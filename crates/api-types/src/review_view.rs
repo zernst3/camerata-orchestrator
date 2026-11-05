@@ -772,8 +772,14 @@ impl ExportGateView {
     }
 
     /// How many rows need a decision ("3 rows need a decision before the package can be built").
+    /// A row two checks refuse (a restored row the Engine Check also said No to) is one row.
     pub fn rows_needing_a_decision(&self) -> usize {
-        self.held.len() + self.merged_without_decision.len()
+        self.held
+            .iter()
+            .chain(&self.merged_without_decision)
+            .map(|h| h.key.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     }
 }
 
@@ -913,6 +919,29 @@ mod tests {
         let view = ExportGateView::default();
         assert!(!view.is_blocked());
         assert_eq!(view.rows_needing_a_decision(), 0);
+    }
+
+    #[test]
+    fn a_row_two_checks_refuse_is_one_row_needing_a_decision() {
+        let row = |key: &str, reason| HeldRow {
+            key: key.to_string(),
+            path: "a.rs".to_string(),
+            line: 1,
+            rule_id: "R".to_string(),
+            reason,
+            detail: String::new(),
+            node_id: String::new(),
+        };
+        let view = ExportGateView {
+            held: vec![
+                row("k1", HoldReason::RestoredWithoutDecision),
+                row("k1", HoldReason::EngineCheckNoWithoutCorrection),
+                row("k2", HoldReason::JunkContent),
+            ],
+            merged_without_decision: vec![row("k2", HoldReason::MergedWithoutDecision)],
+            node_decisions_missing_members: Vec::new(),
+        };
+        assert_eq!(view.rows_needing_a_decision(), 2);
     }
 
     #[test]

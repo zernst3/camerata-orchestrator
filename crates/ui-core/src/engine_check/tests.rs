@@ -828,8 +828,8 @@ fn a_decision_at(at: &str) -> camerata_api_types::review_view::DecisionView {
 
 #[test]
 fn a_thrown_out_no_with_no_correction_is_not_corrected() {
-    // Esc after N on a thrown-out card stores a No with no correction; the gate does not hold
-    // the row (it is not in the report's findings), so `held` is empty. The card must not read
+    // Esc after N on a thrown-out card stores a No with no correction. The server holds such a
+    // row (see the next test); a card that arrives without the hold must still not read
     // "corrected: the corrected version is what ships".
     let mut card = no_card(None);
     card.stratum = SampleStratum::ThrownOut;
@@ -852,7 +852,27 @@ fn a_thrown_out_no_with_no_correction_is_not_corrected() {
             ..lane(EngineMode::Pending)
         }),
         0,
-        "the gate does not hold a thrown-out row, so the lane does not count it as held"
+        "a card without the gate's hold is not counted as held"
+    );
+}
+
+#[test]
+fn a_thrown_out_no_the_gate_holds_reads_as_held_and_is_counted() {
+    // The gate holds a thrown-out row the Engine Check said No to until it is put back or a
+    // correction confirms the throw-out, and the card carries that hold.
+    let mut card = no_card(None);
+    card.stratum = SampleStratum::ThrownOut;
+    card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let state = card_state(&card);
+    assert!(matches!(state, CardState::Held { .. }), "{state:?}");
+    assert!(card_state_text(&state).starts_with("No: held from export until corrected"));
+    assert_eq!(
+        held_count(&EngineCheckLane {
+            cards: vec![card],
+            ..lane(EngineMode::Pending)
+        }),
+        1
     );
 }
 
