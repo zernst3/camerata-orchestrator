@@ -307,7 +307,12 @@ pub struct ReplyOutlier {
 pub struct ReplyEscalation {
     pub index: usize,
     pub reason: EscalationReason,
+    /// The order within the group, 1 first. 0 when the reply left it out (see `rank_defaulted`):
+    /// the tree sorts rank 0 after every ranked escalation and keeps the engine's order among
+    /// them.
     pub rank: u32,
+    /// The reply gave no `rank`; the engine's order stands and the ledger says so.
+    pub rank_defaulted: bool,
     pub why: String,
 }
 
@@ -328,17 +333,27 @@ fn exact_object<'v>(
     allowed: &[&str],
     at: &str,
 ) -> Result<&'v Obj, String> {
+    object_with(value, allowed, &[], at)
+}
+
+/// `value` as an object whose fields are `required` plus any of `optional`.
+fn object_with<'v>(
+    value: &'v serde_json::Value,
+    required: &[&str],
+    optional: &[&str],
+    at: &str,
+) -> Result<&'v Obj, String> {
     let obj = value
         .as_object()
         .ok_or_else(|| format!("{at} is not an object"))?;
     for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
             return Err(format!(
                 "{at} has a field the schema does not have: `{key}`"
             ));
         }
     }
-    for key in allowed {
+    for key in required {
         if !obj.contains_key(*key) {
             return Err(format!("{at} is missing the field `{key}`"));
         }
@@ -436,19 +451,27 @@ impl Stage2Reply {
         let mut escalations = Vec::new();
         for (i, v) in array_of(top, "escalations")?.iter().enumerate() {
             let at = format!("escalations[{i}]");
-            let o = exact_object(v, &["index", "reason", "rank", "why"], &at)?;
+            // A reply that leaves `rank` out is read, not refused: the rank only orders the
+            // escalations of one group, and a refusal costs a whole call (4 of 90 on a real run).
+            let o = object_with(v, &["index", "reason", "why"], &["rank"], &at)?;
             let reason_name = text_of(o, "reason", &at)?;
             let reason = EscalationReason::parse(&reason_name).ok_or_else(|| {
                 format!("{at}.reason `{reason_name}` is not on the escalation list")
             })?;
-            let rank = o["rank"]
-                .as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| format!("{at}.rank is not a whole number"))?;
+            let (rank, rank_defaulted) = match o.get("rank") {
+                None | Some(serde_json::Value::Null) => (0, true),
+                Some(v) => (
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| format!("{at}.rank is not a whole number"))?,
+                    false,
+                ),
+            };
             escalations.push(ReplyEscalation {
                 index: index_of(o, "index", &at)?,
                 reason,
                 rank,
+                rank_defaulted,
                 why: prose_of(o, "why", &at)?,
             });
         }
@@ -1086,6 +1109,8 @@ const UNPLACED_CAUSE: &str =
 struct RuleApplied {
     unplaced: Vec<String>,
     stray_indexes: usize,
+    /// Site keys whose escalation came back without a `rank`.
+    ranks_defaulted: Vec<String>,
 }
 
 /// One chunk's reply, with the indexes the chunk was asked about.
@@ -1269,13 +1294,23 @@ fn apply_rule(
                 applied.stray_indexes += 1;
                 continue;
             }
-            // One reason per site: the highest-ranked one the reply gave.
+            if e.rank_defaulted {
+                let key = work.members[e.index].key.clone();
+                if !applied.ranks_defaulted.contains(&key) {
+                    applied.ranks_defaulted.push(key);
+                }
+            }
+            // One reason per site: the highest-ranked one the reply gave. Rank 0 (none given)
+            // sorts after every ranked one, as the tree does.
+            let order = |reason: EscalationReason, rank: u32| {
+                (reason.rank(), if rank == 0 { u32::MAX } else { rank })
+            };
             if !seen_escalation.insert(e.index) {
                 if let Some(have) = escalations
                     .iter_mut()
                     .find(|x| x.key == work.members[e.index].key)
                 {
-                    if (e.reason.rank(), e.rank) < (have.reason.rank(), have.rank) {
+                    if order(e.reason, e.rank) < order(have.reason, have.rank) {
                         have.reason = e.reason;
                         have.rank = e.rank;
                         have.why.clone_from(&e.why);
@@ -1567,6 +1602,9 @@ pub struct GroupReviewOutcome {
     pub unplaced: Vec<String>,
     /// Indexes a reply named that are not members of what it was asked about.
     pub stray_indexes: usize,
+    /// The site keys whose escalation came back with no `rank`: they keep the engine's order and
+    /// sort after every ranked escalation. Also recorded as an operator note in the ledger.
+    pub ranks_defaulted: Vec<String>,
     /// `(node id, bytes of the user prompt)` of every call planned, rule-level summary calls
     /// included.
     pub prompt_bytes: Vec<(String, usize)>,
@@ -1830,6 +1868,7 @@ pub async fn review_groups(
         );
         outcome.unplaced.extend(applied.unplaced);
         outcome.stray_indexes += applied.stray_indexes;
+        outcome.ranks_defaulted.extend(applied.ranks_defaulted);
         if failed_reasons.contains_key(&wi) {
             outcome.rules_failed += 1;
         } else {
@@ -1919,6 +1958,15 @@ pub async fn review_groups(
     report.tree = Some(rebuilt);
 
     record_ledger(report, cfg, &outcome, sites);
+    if !outcome.ranks_defaulted.is_empty() {
+        // Never silent: the operator is told which escalations had no rank from the reviewer.
+        report.ledger.record_runner_notes(vec![format!(
+            "group review: {} escalation(s) came back without a rank and were kept, not refused. \
+             They sort after every ranked escalation in the engine's order: {}",
+            outcome.ranks_defaulted.len(),
+            outcome.ranks_defaulted.join(", ")
+        )]);
+    }
     outcome
 }
 

@@ -2481,3 +2481,88 @@ async fn the_rule_level_summary_call_is_redacted_too() {
         .unwrap()
         .contains("sb_secret_\u{2026}"));
 }
+
+// ── A reply that leaves `rank` out ────────────────────────────────────────────────────────
+
+/// The reply shape a real run produced for ARCH-STRICT-LAYERING-1: every escalation complete
+/// except for the `rank`.
+fn reply_without_rank(call: &Call, escalated: &[usize]) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(&one_group(call, "Layering.")).unwrap();
+    v["escalations"] = serde_json::Value::Array(
+        escalated
+            .iter()
+            .map(|i| serde_json::json!({"index": i, "reason": "rule_misfit", "why": "Odd one."}))
+            .collect(),
+    );
+    v.to_string()
+}
+
+#[tokio::test]
+async fn an_escalation_without_a_rank_is_kept_unranked_and_recorded_not_refused() {
+    let mut report = report_of(&[(LAYERING, 4)]);
+    let llm = Reviewer::new(|call| {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&reply_without_rank(call, &[1, 2])).unwrap();
+        // Site 3 comes back fully ranked, so the order between the two kinds is observable.
+        v["escalations"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(
+                {"index": 3, "reason": "rule_misfit", "rank": 1, "why": "Worst."}
+            ));
+        Ok(v.to_string())
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(llm.calls().len(), 1, "no second call for a missing rank");
+    assert_eq!(outcome.rules_reviewed, 1);
+    assert_eq!(outcome.rules_failed, 0);
+    assert_eq!(outcome.ranks_defaulted.len(), 2);
+
+    // The ranked escalation comes first; the two with no rank follow in the engine's order.
+    let rule = node(&report, &rule_node(&report, LAYERING));
+    let by_key: BTreeMap<&str, u32> = rule
+        .escalations
+        .iter()
+        .map(|e| (e.key.as_str(), e.rank))
+        .collect();
+    let rows = sites_of(&report, LAYERING);
+    assert_eq!(by_key[rows[3].site_key.as_str()], 1);
+    assert_eq!(by_key[rows[1].site_key.as_str()], 0);
+    assert_eq!(by_key[rows[2].site_key.as_str()], 0);
+    let order: Vec<&str> = tree(&report)
+        .candidates
+        .iter()
+        .map(|c| c.key.as_str())
+        .collect();
+    assert_eq!(order[0], rows[3].site_key);
+
+    // Never silent: the ledger names the sites.
+    let notes = report.ledger.runner_notes().join("\n");
+    assert!(notes.contains("without a rank"), "{notes}");
+    assert!(notes.contains(&rows[1].site_key), "{notes}");
+    assert!(notes.contains(&rows[2].site_key), "{notes}");
+}
+
+#[test]
+fn a_rank_of_the_wrong_kind_is_still_refused_and_a_given_rank_is_not_recorded_as_defaulted() {
+    let bad = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "rule_misfit", "rank": "first", "why": "w"}],
+    })
+    .to_string();
+    let why = Stage2Reply::parse(&bad).unwrap_err();
+    assert!(why.contains("rank is not a whole number"), "{why}");
+    let ok = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "rule_misfit", "rank": 2, "why": "w"}],
+    })
+    .to_string();
+    let parsed = Stage2Reply::parse(&ok).unwrap();
+    assert_eq!(
+        (
+            parsed.escalations[0].rank,
+            parsed.escalations[0].rank_defaulted
+        ),
+        (2, false)
+    );
+}
