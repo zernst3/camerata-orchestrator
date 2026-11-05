@@ -129,26 +129,34 @@ impl Platform for DesktopPlatform {
     }
 
     fn copy_text<'a>(&'a self, text: &'a str) -> PlatformFuture<'a, bool> {
-        Box::pin(async move {
-            // The clipboard bridge's own channel when it is installed (the desktop webview cannot
-            // reliably copy from page script), else the page-script fallback.
-            if let Some(script) = bridge_copy_script(text) {
-                if matches!(
-                    dioxus::document::eval(&script).await,
-                    Ok(serde_json::Value::Bool(true))
-                ) {
-                    return true;
-                }
-            }
-            let Some(script) = copy_script(text) else {
-                return false;
-            };
+        Box::pin(copy_through(text, |script| async move {
             matches!(
                 dioxus::document::eval(&script).await,
                 Ok(serde_json::Value::Bool(true))
             )
-        })
+        }))
     }
+}
+
+/// The desktop copy, with the page-script runner passed in so the order can be tested without a
+/// webview: the clipboard bridge's own channel first when it is installed (the desktop webview
+/// cannot reliably copy from page script), and when the bridge is absent or declines, the
+/// page-script copy ([`copy_script`]: a selected textarea and `execCommand`, then the async API).
+/// `run` evaluates one script and says whether it returned `true`.
+pub async fn copy_through<R, Fut>(text: &str, mut run: R) -> bool
+where
+    R: FnMut(String) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    if let Some(script) = bridge_copy_script(text) {
+        if run(script).await {
+            return true;
+        }
+    }
+    let Some(script) = copy_script(text) else {
+        return false;
+    };
+    run(script).await
 }
 
 /// The text a permalink is copied with, through the clipboard bridge's own channel when it is
@@ -548,6 +556,43 @@ mod tests {
         let copy = copy_script("line1\n\"quoted\" </script>").unwrap();
         assert!(copy.contains("execCommand('copy')"));
         assert!(copy.contains("\\n"), "{copy}");
+    }
+
+    /// WO16b changed one desktop behaviour: every page-script copy tries the clipboard bridge
+    /// first. A copy must still reach the page-script path (the selected textarea and
+    /// `execCommand('copy')`, which is what lands on the system clipboard in the webview) when the
+    /// bridge is absent or declines, and must not run it when the bridge took the text.
+    #[tokio::test]
+    async fn a_desktop_copy_falls_through_to_the_page_script_when_the_bridge_is_absent() {
+        use std::cell::RefCell;
+        let text = "acme/app@abc1234:src/a.rs:3";
+        let ran = RefCell::new(Vec::<String>::new());
+
+        // The bridge is absent: its script answers false, then the page-script copy answers true.
+        let ok = copy_through(text, |script| {
+            ran.borrow_mut().push(script.clone());
+            async move { !script.contains("__camerataClipboardBridgeSend") }
+        })
+        .await;
+        assert!(ok, "the page-script copy reports the copy");
+        let ran_now = ran.borrow().clone();
+        assert_eq!(ran_now.len(), 2, "{ran_now:?}");
+        assert!(ran_now[0].contains("__camerataClipboardBridgeSend"));
+        assert!(ran_now[1].contains("execCommand('copy')"), "{}", ran_now[1]);
+        assert!(ran_now[1].contains(text), "the text is in the script");
+
+        // The bridge took it: the page-script copy never runs.
+        ran.borrow_mut().clear();
+        let ok = copy_through(text, |script| {
+            ran.borrow_mut().push(script);
+            async { true }
+        })
+        .await;
+        assert!(ok);
+        assert_eq!(ran.borrow().len(), 1, "{:?}", ran.borrow());
+
+        // Neither takes it: the copy reports failure.
+        assert!(!copy_through(text, |_| async { false }).await);
     }
 
     /// The rule the file's header states: native dialogs and clipboard scripts live here and
