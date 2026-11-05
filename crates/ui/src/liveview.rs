@@ -207,7 +207,20 @@ fn LiveviewApp(project_id: String) -> Element {
     use_context_provider(|| Signal::new(ViewerCache::new()));
     use_context_provider(|| ViewerSlot(Signal::new(None)));
     use_context_provider(|| StackSlot(Signal::new(None)));
-    use_context_provider(|| PaletteSlot(Signal::new(None)));
+    let palette = use_context_provider(|| PaletteSlot(Signal::new(None)));
+    // The desktop results view listens for Ctrl or Cmd K at the document (its review bridge) and
+    // hands the chord to the palette's link; the lanes' shell registers that link here too.
+    use_future(move || async move {
+        loop {
+            let mut listener = dioxus::document::eval(super::review::REVIEW_BRIDGE_JS);
+            while let Ok(msg) = listener.recv::<serde_json::Value>().await {
+                if let Some((key, mods, modal)) = super::review::parse_chord_message(&msg) {
+                    super::palette::route_chord(Some(palette), &key, mods, modal);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    });
     let hub_open = use_signal(|| Option::<RuleHubRequest>::None);
     use_context_provider(|| ViewerHubOpen(hub_open));
     let door = use_signal(|| Option::<Door>::None);

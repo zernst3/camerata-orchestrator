@@ -760,6 +760,30 @@ pub(crate) fn QueueHost(
             });
         }
     });
+    // The shell's palette asked for the first row that needs a decision: put the cursor on it and
+    // the keyboard on the queue, once the queue has loaded.
+    let needs_decision = try_use_context::<super::review_shell::NeedsDecisionRequest>();
+    use_effect(move || {
+        let Some(mut request) = needs_decision else {
+            return;
+        };
+        if !*request.0.read() {
+            return;
+        }
+        let key = view
+            .read()
+            .as_ref()
+            .and_then(camerata_ui_core::queue::first_needing_decision);
+        if let Some(key) = key {
+            state.write().focus(&key);
+            super::viewer::focus_element(QUEUE_REGION_ID);
+        }
+        // With no view yet the request waits for it; with a view and no such row there is
+        // nothing to land on.
+        if view.read().is_some() {
+            request.0.set(false);
+        }
+    });
     // Read the queue now and whenever any lane writes (the shell's counter).
     use_effect(move || {
         if let Some(r) = refresh {

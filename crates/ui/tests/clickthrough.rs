@@ -1464,3 +1464,91 @@ fn the_add_forms_file_picker_goes_through_the_platform_and_fills_the_path() {
     stack.assert_shell_counts(&BASE);
     stack.assert_no_model_calls();
 }
+
+#[test]
+fn the_command_palette_opens_from_the_review_shell_and_needed_lands_on_the_first_row() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Base);
+    let prior = model.prior_states();
+
+    // The row the palette must land on: the first escalated candidate no decision covers yet.
+    let escalated = model.run["stage2"]["candidates"].as_array().unwrap()[..4]
+        .iter()
+        .map(|c| c["site"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let first = escalated
+        .iter()
+        .find(|site| !prior.contains_key(*site))
+        .expect("an escalated row needs a decision");
+    let place = place_of(&model, first);
+
+    // Ctrl K from the tree: the palette opens over the shell with the lanes and the filters.
+    let mark = stack.mark();
+    stack.ctrl_key("k");
+    stack.wait_for("the palette", "T.count('.pal-overlay') === 1");
+    for lane in [
+        "Tree",
+        "Escalations",
+        "Engine Check",
+        "Flat view",
+        "Settings",
+    ] {
+        assert!(
+            stack.js_bool(&format!(
+                "T.has('.pal-row', {})",
+                support::js_str(&format!("Go to {lane}"))
+            )),
+            "no line goes to {lane}: {}",
+            stack.text(".pal-list")
+        );
+    }
+    // "needed" narrows it to the line that finds the rows that need a decision; Enter runs it.
+    stack.type_into(".pal-input", "", "needed");
+    stack.wait_for("one line", "T.count('.pal-row') === 1");
+    assert!(
+        stack.text(".pal-row").contains("needs a decision"),
+        "{}",
+        stack.text(".pal-row")
+    );
+    stack.key("Enter");
+    stack.wait_for("the palette to close", "T.count('.pal-overlay') === 0");
+    stack.wait_for(
+        "the Escalations lane",
+        "T.has('.triage-tab.active', 'Escalations')",
+    );
+    stack.wait_for("the cursor on a row", "T.count('.queue-row.focused') === 1");
+    assert_eq!(
+        stack.text(".queue-row.focused .col-loc"),
+        place,
+        "the first row that needs a decision"
+    );
+    assert!(
+        stack.js_bool(
+            "document.activeElement && document.activeElement.id === 'camerata-queue-region'"
+        ),
+        "the keyboard is on the queue"
+    );
+
+    // A lane line works the same way, and Esc closes the palette and writes nothing.
+    stack.ctrl_key("k");
+    stack.wait_for("the palette", "T.count('.pal-overlay') === 1");
+    stack.type_into(".pal-input", "", "settings");
+    stack.wait_for("one line", "T.count('.pal-row') === 1");
+    stack.key("Enter");
+    stack.wait_for(
+        "the Settings lane",
+        "T.has('.triage-tab.active', 'Settings') && T.count('#rs-rate') === 1",
+    );
+    stack.ctrl_key("k");
+    stack.wait_for("the palette", "T.count('.pal-overlay') === 1");
+    stack.key("Escape");
+    stack.wait_for("the palette to close", "T.count('.pal-overlay') === 0");
+    assert!(
+        stack.requests_since(mark).iter().all(|r| r.method == "GET"),
+        "the palette sends no write: {:?}",
+        stack.requests_since(mark)
+    );
+
+    stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}

@@ -631,3 +631,39 @@ fn the_queues_merge_picker_says_its_pool_is_its_own_escalated_rows() {
     );
     assert_ne!(ctx.pool_none, crate::edits::POOL_NONE_TREE);
 }
+
+#[test]
+fn the_first_row_needing_a_decision_is_the_first_undecided_escalated_row_in_table_order() {
+    let v = view();
+    let want = ordered(&v)
+        .into_iter()
+        .find(|r| r.candidate.escalated && r.site.decision.is_none())
+        .map(|r| r.site.site_key.clone());
+    assert!(
+        want.is_some(),
+        "the fixture queue has an undecided escalated row"
+    );
+    assert_eq!(first_needing_decision(&v), want);
+
+    // Decide that row: the next undecided one is first. Decide them all: there is none.
+    let mut v = v;
+    let decided = |r: &mut QueueRow| {
+        let mut d = ordered(&view())
+            .into_iter()
+            .find_map(|r| r.site.decision.clone())
+            .expect("the fixture decides some row");
+        d.needed_me = None;
+        r.site.decision = Some(d);
+    };
+    let first = first_needing_decision(&v).unwrap();
+    for r in v.escalated.iter_mut().chain(v.below.iter_mut()) {
+        if r.site.site_key == first {
+            decided(r);
+        }
+    }
+    assert_ne!(first_needing_decision(&v), Some(first));
+    for r in v.escalated.iter_mut().chain(v.below.iter_mut()) {
+        decided(r);
+    }
+    assert_eq!(first_needing_decision(&v), None);
+}

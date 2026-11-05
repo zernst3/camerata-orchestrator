@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use headless_chrome::browser::tab::ModifierKey;
 use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 use serde_json::{json, Value};
 
@@ -587,6 +588,13 @@ impl Stack {
         self.tab
             .press_key(key)
             .unwrap_or_else(|e| panic!("pressing {key} failed: {e}"));
+    }
+
+    /// Press a key with Control held.
+    pub fn ctrl_key(&self, key: &str) {
+        self.tab
+            .press_key_with_modifiers(key, Some(&[ModifierKey::Ctrl]))
+            .unwrap_or_else(|e| panic!("pressing Ctrl+{key} failed: {e}"));
     }
 
     /// Focus the first element matching `selector` (that contains `text`) and type `value`

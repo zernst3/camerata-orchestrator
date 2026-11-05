@@ -28,6 +28,7 @@
 //! the keyboard, and the palette's entries act on the Queue underneath.
 
 use crate::order_preset::OrderPreset;
+use crate::tree::shell::Lane;
 use crate::triage::{
     pane_command, state_hotkey, FocusMove, KeyMods, PaneCommand, PaneFocus, TriageState,
 };
@@ -148,6 +149,11 @@ pub enum PaletteAction {
     OpenStats,
     /// The Help menu's "Start walkthrough": the inspection walkthrough, from its first step.
     StartWalkthrough,
+    /// The review shell: switch to this lane (the same switch as its tab and its digit key).
+    GoLane(Lane),
+    /// The review shell: the Escalations lane, with the cursor on the first row that still needs
+    /// a decision.
+    FirstNeedingDecision,
 }
 
 impl PaletteAction {
@@ -165,6 +171,8 @@ impl PaletteAction {
             Self::Undo | Self::SetOrder(_) | Self::ToggleTimer => true,
             // The walkthrough's popup takes the keyboard itself.
             Self::OpenHub | Self::FullDetail | Self::OpenStats | Self::StartWalkthrough => false,
+            // A lane takes the keyboard itself, and so does the row the cursor is put on.
+            Self::GoLane(_) | Self::FirstNeedingDecision => false,
         }
     }
 }
@@ -377,6 +385,38 @@ pub fn entries(ctx: &PaletteContext) -> Vec<PaletteEntry> {
     out
 }
 
+/// The entries of the review shell's palette (Ctrl or Cmd K from any lane): one line to go to each
+/// lane, and the filters that land on a row. Nothing here acts on a finding: each line moves the
+/// reviewer to a place the tabs and keys already reach.
+pub fn shell_entries() -> Vec<PaletteEntry> {
+    let mut out: Vec<PaletteEntry> = Lane::ALL
+        .into_iter()
+        .map(|lane| PaletteEntry {
+            action: PaletteAction::GoLane(lane),
+            label: format!("Go to {}", lane.label()),
+            hint: lane.digit().to_string(),
+            keywords: lane_keywords(lane),
+        })
+        .collect();
+    out.push(entry(
+        PaletteAction::FirstNeedingDecision,
+        "Show the first escalated row that needs a decision",
+        "needed need undecided open pending queue next",
+    ));
+    out
+}
+
+/// The words each lane's line also answers to.
+fn lane_keywords(lane: Lane) -> &'static str {
+    match lane {
+        Lane::Tree => "groups nodes sites batch",
+        Lane::Escalations => "queue line budget candidates",
+        Lane::EngineCheck => "qc quality verdict yes no cards",
+        Lane::Flat => "queue table rows all",
+        Lane::Settings => "rate floor formula models sample",
+    }
+}
+
 /// The label of the walkthrough's line, the same words as the Help menu's item.
 pub const WALKTHROUGH_LABEL: &str = "Start walkthrough";
 
@@ -467,6 +507,43 @@ impl PaletteState {
     /// The highlighted entry among the narrowed list, or `None` when nothing matches.
     pub fn selected<'a>(&self, shown: &[&'a PaletteEntry]) -> Option<&'a PaletteEntry> {
         shown.get(self.cursor(shown.len())).copied()
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn the_shell_palette_has_a_line_for_each_lane_and_needed_finds_the_decision_filter() {
+        let all = shell_entries();
+        for lane in Lane::ALL {
+            let hits: Vec<_> = filter(&all, &format!("go to {}", lane.label()))
+                .into_iter()
+                .filter(|e| e.action == PaletteAction::GoLane(lane))
+                .collect();
+            assert_eq!(hits.len(), 1, "one line takes you to {}", lane.label());
+        }
+        let needed = filter(&all, "needed");
+        assert_eq!(needed.len(), 1, "{needed:?}");
+        assert_eq!(needed[0].action, PaletteAction::FirstNeedingDecision);
+        assert!(
+            needed[0].label.contains("needs a decision"),
+            "{}",
+            needed[0].label
+        );
+        for e in &all {
+            assert!(
+                !e.action.returns_focus(),
+                "{}: a lane takes the keyboard itself",
+                e.label
+            );
+            assert!(
+                !e.label.contains('\u{2014}') && !e.label.contains('\u{2013}'),
+                "{}",
+                e.label
+            );
+        }
     }
 }
 

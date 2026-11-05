@@ -1573,6 +1573,8 @@ pub(in crate::cockpit) fn FindingsTable(
                     tour.start(camerata_ui_core::walkthrough::StartSource::Palette);
                 }
             }
+            // The review shell's own lines: this palette never lists them.
+            PaletteAction::GoLane(_) | PaletteAction::FirstNeedingDecision => return false,
         }
         true
     });
