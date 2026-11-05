@@ -74,10 +74,10 @@ impl<'a> ReviewComposer<'a> {
     /// reviewer upheld as an answer that agrees with the engine. A No on a kept row that names a
     /// false positive says the row was not real, and still counts as wrong.
     fn confirms_throw_out(&self, v: &camerata_api_types::review_view::EngineCheckVerdict) -> bool {
-        if !self
+        let still_thrown_out = self
             .row(&v.key)
-            .is_some_and(|f| crate::engine_discard::reason_of(f).is_some())
-        {
+            .is_some_and(|f| crate::engine_discard::reason_of(f).is_some());
+        if !still_thrown_out {
             return false;
         }
         match &v.correction {
