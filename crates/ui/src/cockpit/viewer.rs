@@ -188,29 +188,14 @@ pub(super) async fn fetch_symbol_refs(
     Some(view)
 }
 
-/// The text a permalink is copied with, through the clipboard bridge's own channel when it is
-/// installed (the desktop webview cannot reliably copy from page script), else the page-script
-/// fallback every other "Copy" in the app uses. Returns the script for the bridge. Pure.
-pub(super) fn bridge_copy_script(text: &str) -> Option<String> {
-    let literal = serde_json::to_string(text).ok()?;
-    Some(format!(
-        "if (window.__camerataClipboardBridgeSend) {{ \
-           window.__camerataClipboardBridgeSend({{ op: 'copy', text: {literal} }}); return true; \
-         }} return false;"
-    ))
-}
+#[cfg(test)]
+use camerata_ui::platform::bridge_copy_script;
 
-/// Copy `text`; `true` when something took it.
+/// Copy `text`, through the clipboard bridge's own channel when it is installed and else the
+/// page-script fallback every other "Copy" in the app uses (both are the platform's); `true` when
+/// something took it.
 async fn copy_text(text: &str) -> bool {
-    if let Some(script) = bridge_copy_script(text) {
-        if matches!(
-            dioxus::document::eval(&script).await,
-            Ok(serde_json::Value::Bool(true))
-        ) {
-            return true;
-        }
-    }
-    crate::source_ui::copy_to_clipboard(text).await
+    camerata_ui::platform::current().copy_text(text).await
 }
 
 // ── What the props-only component is given ───────────────────────────────────────────────

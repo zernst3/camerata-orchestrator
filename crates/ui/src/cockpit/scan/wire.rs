@@ -10,25 +10,25 @@ pub(in crate::cockpit) async fn save_csv(default_name: &str, content: String) ->
 /// [`save_csv`] that tells a cancelled dialog (`None`) from a failed write (`Some(false)`), for
 /// callers that report a failure.
 pub(in crate::cockpit) async fn save_text(default_name: &str, content: String) -> Option<bool> {
-    let file = rfd::AsyncFileDialog::new()
-        .set_file_name(default_name)
-        .save_file()
-        .await?;
-    Some(file.write(content.as_bytes()).await.is_ok())
+    use camerata_ui::platform::SaveOutcome;
+    match camerata_ui::platform::current()
+        .save_file(default_name, content.as_bytes())
+        .await
+    {
+        SaveOutcome::Saved => Some(true),
+        SaveOutcome::Failed => Some(false),
+        SaveOutcome::Cancelled => None,
+    }
 }
 
 /// Byte-based sibling of `save_csv` — same native-save-dialog idiom, but for raw bytes
 /// (the audit-report PDF export; `save_csv`'s `String` param can't carry PDF bytes, which
 /// aren't valid UTF-8 in general).
 pub(in crate::cockpit) async fn save_bytes(default_name: &str, content: Vec<u8>) -> bool {
-    match rfd::AsyncFileDialog::new()
-        .set_file_name(default_name)
-        .save_file()
+    camerata_ui::platform::current()
+        .save_file(default_name, &content)
         .await
-    {
-        Some(file) => file.write(&content).await.is_ok(),
-        None => false,
-    }
+        == camerata_ui::platform::SaveOutcome::Saved
 }
 
 /// Build CSV for the audit findings table.

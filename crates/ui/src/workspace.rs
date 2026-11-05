@@ -448,19 +448,14 @@ async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
         .collect::<Vec<_>>()
         .join("-");
     let filename = format!("camerata-project-{slug}.json");
-    match rfd::AsyncFileDialog::new()
-        .set_file_name(&filename)
-        .save_file()
+    use camerata_ui::platform::SaveOutcome;
+    match camerata_ui::platform::current()
+        .save_file(&filename, text.as_bytes())
         .await
     {
-        Some(file) => {
-            if file.write(text.as_bytes()).await.is_ok() {
-                ExportOutcome::Ok
-            } else {
-                ExportOutcome::Failed
-            }
-        }
-        None => ExportOutcome::Cancelled,
+        SaveOutcome::Saved => ExportOutcome::Ok,
+        SaveOutcome::Failed => ExportOutcome::Failed,
+        SaveOutcome::Cancelled => ExportOutcome::Cancelled,
     }
 }
 
@@ -574,12 +569,11 @@ pub fn WorkspaceView() -> Element {
                                 class: "btn-edit-sm",
                                 onclick: move |_| {
                                     spawn(async move {
-                                        if let Some(folder) = rfd::AsyncFileDialog::new()
-                                            .set_title("Choose workspace folder")
-                                            .pick_folder()
+                                        if let Some(folder) = camerata_ui::platform::current()
+                                            .pick_folder("Choose workspace folder")
                                             .await
                                         {
-                                            let p = folder.path().to_string_lossy().to_string();
+                                            let p = folder.to_string_lossy().to_string();
                                             if set_workspace(&p).await.is_some() {
                                                 refresh += 1;
                                             }
@@ -629,12 +623,11 @@ pub fn WorkspaceView() -> Element {
                                         class: "btn-edit-sm",
                                         onclick: move |_| {
                                             spawn(async move {
-                                                if let Some(folder) = rfd::AsyncFileDialog::new()
-                                                    .set_title("Choose workspace folder")
-                                                    .pick_folder()
+                                                if let Some(folder) = camerata_ui::platform::current()
+                                                    .pick_folder("Choose workspace folder")
                                                     .await
                                                 {
-                                                    let p = folder.path().to_string_lossy().to_string();
+                                                    let p = folder.to_string_lossy().to_string();
                                                     if set_workspace(&p).await.is_some() {
                                                         refresh += 1;
                                                     }
@@ -653,12 +646,11 @@ pub fn WorkspaceView() -> Element {
                                         class: "btn-run",
                                         onclick: move |_| {
                                             spawn(async move {
-                                                if let Some(folder) = rfd::AsyncFileDialog::new()
-                                                    .set_title("Choose workspace folder")
-                                                    .pick_folder()
+                                                if let Some(folder) = camerata_ui::platform::current()
+                                                    .pick_folder("Choose workspace folder")
                                                     .await
                                                 {
-                                                    let p = folder.path().to_string_lossy().to_string();
+                                                    let p = folder.to_string_lossy().to_string();
                                                     if set_workspace(&p).await.is_some() {
                                                         refresh += 1;
                                                     }
@@ -1057,14 +1049,13 @@ fn RepoCard(
                                 let (pid, rp) = (pid.clone(), rp.clone());
                                 link_err.set(String::new());
                                 spawn(async move {
-                                    let Some(folder) = rfd::AsyncFileDialog::new()
-                                        .set_title("Select the existing local clone of this repo")
-                                        .pick_folder()
+                                    let Some(folder) = camerata_ui::platform::current()
+                                        .pick_folder("Select the existing local clone of this repo")
                                         .await
                                     else {
                                         return; // user cancelled — no state change
                                     };
-                                    let path = folder.path().to_string_lossy().to_string();
+                                    let path = folder.to_string_lossy().to_string();
                                     linking.set(true);
                                     match crate::readiness_gate::link_repo(&pid, &rp, &path).await {
                                         crate::readiness_gate::LinkOutcome::Linked(_) => {

@@ -21,6 +21,18 @@ workspace = true
 name = "camerata-ui"
 path = "src/main.rs"
 
+# The liveview build (review UI spec section 13): `camerata-ui liveview` serves the review lanes
+# (and only those) to a browser on localhost, against a seeded server, so a test can click them.
+# The browser-driven tests live in `tests/clickthrough.rs` and need this feature; without it the
+# default build is the desktop app exactly as before.
+[features]
+liveview-review = ["dep:dioxus-liveview", "dep:axum", "tokio/net"]
+
+[[test]]
+name = "clickthrough"
+path = "tests/clickthrough.rs"
+required-features = ["liveview-review"]
+
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 # `time` drives the calm Build-narrative dwell; `rt-multi-thread` lets the desktop
@@ -68,6 +80,12 @@ pulldown-cmark = { version = "0.12", default-features = false, features = ["html
 # dependency since 2026-11-03, no longer dev only).
 dioxus-ssr = "0.7"
 
+# The liveview build (feature `liveview-review`). Dioxus 0.7 ships an official liveview
+# integration with axum (`dioxus-liveview`, feature `axum`); it needs axum 0.8, so this is a
+# second axum major beside the server crate's 0.7. Nothing in the desktop build links it.
+dioxus-liveview = { version = "=0.7.9", features = ["axum", "multi-thread"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"], optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread", "test-util"] }
 # UI testing (#112 follow-up). wiremock stands up a fake BFF so the reqwest network helpers can be
@@ -80,6 +98,17 @@ wiremock = "0.6"
 # workspace (CAMERATA_SERVER_BIN too), because two keys would not exclude each other.
 serial_test = "3"
 camerata-test-env = { path = "../test-env" }
+# The click-through tests (tests/clickthrough.rs, feature `liveview-review`) drive Google Chrome
+# over its DevTools protocol. `headless_chrome` is synchronous (no second async runtime in the
+# test), maintained (1.0.22, June 2026), and its default `offline` feature bundles the protocol
+# definitions, so building it needs no network and it never downloads a browser (`fetch` is off).
+headless_chrome = { version = "1.0", default-features = false, features = ["offline"] }
+# Fresh data folders for each seeded server, and the unzip that reads the export back.
+tempfile = "3"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# The ledger block (the escalation sentence) is printed in the export's PDF only; the same extractor
+# the server's own export tests use reads it back.
+pdf-extract = "0.12"
 
 # Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
 # NSEvents and posts them to the probe's own process, so the macOS clipboard behavior
