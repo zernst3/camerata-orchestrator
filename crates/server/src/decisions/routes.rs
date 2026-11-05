@@ -226,7 +226,7 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             let mut with_held = req.clone();
             let (_, reviewed) = crate::edits::routes::review_of(state, id, &latest);
             let mut held = super::held_keys(
-                &reviewed.report().findings,
+                &latest.report.findings,
                 &state.decisions.active(id),
                 reviewed.engine_check(),
             );
