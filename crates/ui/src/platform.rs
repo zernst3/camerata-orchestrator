@@ -561,11 +561,19 @@ mod tests {
                     walk(&path, hits);
                     continue;
                 }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs")
-                    || path.file_name().and_then(|n| n.to_str()) == Some("platform.rs")
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") || name == "platform.rs"
                 {
                     continue;
                 }
+                // The two files that legitimately drive the webview's own editing commands: the
+                // native Cmd C / Cmd X / Cmd A bridge and the clipboard probe. Neither is a
+                // page-script copy; any other file calling `execCommand` in any quoting is a
+                // bypass of the Platform.
+                let may_edit = matches!(name, "desktop_chrome.rs" | "clipboard_probe.rs");
                 let text = std::fs::read_to_string(&path).unwrap();
                 for (n, line) in text.lines().enumerate() {
                     let code = line.trim_start();
@@ -573,7 +581,7 @@ mod tests {
                         continue;
                     }
                     if code.contains("rfd::")
-                        || code.contains("execCommand('copy')")
+                        || (!may_edit && code.contains("execCommand("))
                         || code.contains("clipboard.writeText")
                     {
                         hits.push(format!("{}:{}: {code}", path.display(), n + 1));
