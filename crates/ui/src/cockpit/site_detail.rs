@@ -122,6 +122,10 @@ pub(crate) fn SiteDetailView(
     /// one site at a time, so it asks for no tick.
     #[props(default = true)]
     batch_tick: bool,
+    /// The lane has a stacked view of the sub-group to open (B). The tree does; the queue's
+    /// rows are not a sub-group, so it asks for no Stack button.
+    #[props(default = true)]
+    stack: bool,
     #[props(default)] on_event: Callback<DetailEvent>,
     /// The lane's reason prompt for a site decision, drawn above the buttons.
     children: Element,
@@ -175,11 +179,13 @@ pub(crate) fn SiteDetailView(
                         onclick: move |_| on_event.call(DetailEvent::OpenCode),
                         "Code"
                     }
-                    button {
-                        class: "btn-edit-sm site-detail-stack",
-                        title: "Open the stacked view of this sub-group (B)",
-                        onclick: move |_| on_event.call(DetailEvent::OpenStack),
-                        "Stack"
+                    if stack {
+                        button {
+                            class: "btn-edit-sm site-detail-stack",
+                            title: "Open the stacked view of this sub-group (B)",
+                            onclick: move |_| on_event.call(DetailEvent::OpenStack),
+                            "Stack"
+                        }
                     }
                 }
             }
@@ -708,7 +714,7 @@ fn MergeForm(
             }
             ul { class: "site-detail-candidates", role: "listbox",
                 if candidates.is_empty() {
-                    li { class: "site-detail-candidate-none", "No loaded site matches. Open its sub-group in the tree first." }
+                    li { class: "site-detail-candidate-none", "{ctx.pool_none}" }
                 }
                 for c in candidates {
                     li {

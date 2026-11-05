@@ -606,6 +606,7 @@ fn QueueSide(
             position: format!("rank {}", thousands(row.candidate.global_rank as usize)),
             ticked: false,
             batch_tick: false,
+            stack: false,
             panel: detail,
             ctx,
             row: row.site.clone(),
@@ -1137,7 +1138,7 @@ pub(crate) fn QueueHost(
             on_retry: move |()| reload.call(()),
             detail: detail.panel(),
             on_detail: move |event: DetailEvent| match event {
-                // The lane's own: a decision, the code viewer and the stacked view.
+                // The lane's own: a decision and the code viewer.
                 DetailEvent::Decide(st) => decide_cursor.call(st),
                 DetailEvent::OpenCode => {
                     if let Some(key) = state.peek().cursor.clone() {
@@ -1148,13 +1149,6 @@ pub(crate) fn QueueHost(
                             .map(|(n, _)| n.clone())
                             .unwrap_or_default();
                         bridge.open_code.call((node, key));
-                    }
-                }
-                DetailEvent::OpenStack => {
-                    if let Some(key) = state.peek().cursor.clone() {
-                        if let Some(d) = find_row(&key).and_then(|row| node_door(&row)) {
-                            open_door.call(d);
-                        }
                     }
                 }
                 // There is no batch in the queue to tick an outlier into.

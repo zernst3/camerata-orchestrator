@@ -157,7 +157,13 @@ pub struct DetailContext {
     pub node_decision: Option<DecisionState>,
     /// The sites the host has loaded, for the merge picker: `(site key, path, line, rule id)`.
     pub pool: Vec<PoolSite>,
+    /// The merge picker's line when no site in the pool matches: it says what the pool is and
+    /// the remedy that works in the lane that drew it.
+    pub pool_none: &'static str,
 }
+
+/// The tree's merge-picker line for an empty match: its pool is the sub-groups it has opened.
+pub const POOL_NONE_TREE: &str = "No loaded site matches. Open its sub-group in the tree first.";
 
 /// A site the merge picker can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +245,7 @@ pub fn context_for(
         subgroups,
         node_decision,
         pool,
+        pool_none: POOL_NONE_TREE,
     }
 }
 

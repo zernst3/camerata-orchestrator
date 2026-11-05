@@ -618,3 +618,16 @@ fn the_detail_context_of_a_queue_row_is_read_from_the_queue_it_sits_in() {
     seen.dedup();
     assert_eq!(seen.len(), ctx.subgroups.len(), "each once");
 }
+
+#[test]
+fn the_queues_merge_picker_says_its_pool_is_its_own_escalated_rows() {
+    let v = view();
+    let ctx = detail_context(&v, &v.escalated[0]);
+    // Opening a sub-group in the tree adds nothing to the queue's pool, so the tree's remedy
+    // is not offered; the line names the pool and the way out.
+    assert_eq!(
+        ctx.pool_none,
+        "No escalated row matches. Open in the tree to merge into a site that is not in the queue."
+    );
+    assert_ne!(ctx.pool_none, crate::edits::POOL_NONE_TREE);
+}

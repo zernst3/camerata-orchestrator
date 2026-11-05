@@ -509,6 +509,11 @@ pub fn is_merge(row: &QueueRow) -> bool {
 
 // ── The site detail's surroundings ────────────────────────────────────────────────────────
 
+/// The merge picker's empty line in the queue: opening a sub-group in the tree adds nothing to
+/// the queue's pool, so the line names the pool and the way out.
+pub const POOL_NONE_QUEUE: &str =
+    "No escalated row matches. Open in the tree to merge into a site that is not in the queue.";
+
 /// What the site detail needs to know about a queue row's surroundings (the tree gives it the
 /// same from its index, [`crate::edits::context_for`]). The queue holds only its own rows, so
 /// the rule select, the split's sub-groups and the merge picker's pool are the rows it has
@@ -546,6 +551,7 @@ pub fn detail_context(view: &QueueView, row: &QueueRow) -> DetailContext {
         subgroups,
         node_decision: None,
         pool: all().map(|r| PoolSite::of(&r.site)).collect(),
+        pool_none: POOL_NONE_QUEUE,
     }
 }
 

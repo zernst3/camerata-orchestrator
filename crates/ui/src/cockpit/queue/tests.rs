@@ -160,7 +160,7 @@ fn a_queue_row_opens_the_site_detail_with_that_sites_fields() {
     // The same pane the tree opens: the head with the rule, the crumb, the fields, the doors.
     assert!(pane.contains("class=\"site-detail\""), "{pane}");
     assert!(pane.contains("site-detail-head") && pane.contains("site-detail-crumb"));
-    assert!(pane.contains("site-detail-code") && pane.contains("site-detail-stack"));
+    assert!(pane.contains("site-detail-code"));
     assert!(
         pane.contains(&format!(">{}</span>", row.site.rule_id)),
         "the rule id is in the head"
@@ -209,4 +209,12 @@ fn the_queues_detail_does_not_offer_a_batch_tick_the_queue_has_no_batch_for() {
         !pane.contains("Include this outlier in the next batch decision"),
         "{pane}"
     );
+}
+
+#[test]
+fn the_queues_detail_has_no_stack_button_the_stacked_view_is_not_a_queue_key() {
+    let view = dataset_base().queue(false, 0, 100);
+    let pane = pane_of(&view, &view.escalated[0]);
+    assert!(pane.contains("site-detail-code"), "the code door stays");
+    assert!(!pane.contains("site-detail-stack"), "{pane}");
 }

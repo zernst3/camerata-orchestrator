@@ -52,6 +52,7 @@ fn ctx() -> DetailContext {
         subgroups: vec!["sub 1: policies".into(), "sub 2: grants".into()],
         node_decision: Some(DecisionState::Confirmed),
         pool: rows().iter().take(30).map(PoolSite::of).collect(),
+        pool_none: camerata_ui_core::edits::POOL_NONE_TREE,
     }
 }
 
@@ -1230,4 +1231,35 @@ fn the_chord_and_the_forms_follow_the_pure_reducer() {
         assert!(format!("{m:?}").starts_with(want), "{key:?}: {m:?}");
     }
     let _ = Marker::Edited;
+}
+
+#[test]
+fn the_merge_pickers_empty_line_is_the_hosts_own_text() {
+    let row = plain();
+    let mut context = ctx();
+    context.pool = Vec::new();
+    context.pool_none =
+        "No escalated row matches. Open in the tree to merge into a site that is not in the queue.";
+    let m = camerata_ui_core::edits::reduce(
+        DetailMode::Viewing,
+        &DetailAction::BeginMerge,
+        &row,
+        &context,
+    );
+    let html = test_harness::render_props(
+        Harness,
+        Case {
+            row,
+            ctx: context.clone(),
+            panel: mode(m),
+            ticked: false,
+        },
+    )
+    .replace(GLOBAL_CSS, "");
+    assert!(html.contains("site-detail-candidate-none"), "{html}");
+    assert!(html.contains(context.pool_none), "{html}");
+    assert!(
+        !html.contains("Open its sub-group in the tree first"),
+        "{html}"
+    );
 }

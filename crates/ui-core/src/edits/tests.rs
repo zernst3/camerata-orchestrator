@@ -48,6 +48,7 @@ fn ctx() -> DetailContext {
         subgroups: vec!["sub 1: policies".into(), "sub 2: grants".into()],
         node_decision: Some(DecisionState::Confirmed),
         pool: Vec::new(),
+        pool_none: POOL_NONE_TREE,
     }
 }
 
@@ -1336,6 +1337,11 @@ fn the_context_names_the_crumbs_the_rules_the_other_sub_groups_and_the_loaded_si
     assert_eq!(ctx.pool.len(), state.loaded[&sub.id].rows.len());
     assert!(ctx.pool.iter().any(|p| p.key == row.site_key));
     assert_eq!(ctx.node_decision, None);
+    // The tree's merge picker keeps its own remedy for an empty match.
+    assert_eq!(
+        ctx.pool_none,
+        "No loaded site matches. Open its sub-group in the tree first."
+    );
 
     // A row new since a group decision learns the group decision's state.
     let decided = ds
