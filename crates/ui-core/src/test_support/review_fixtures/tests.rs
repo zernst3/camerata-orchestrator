@@ -122,7 +122,7 @@ fn a_different_seed_gives_different_data() {
 fn fixtures_cover_every_state() {
     let unique: BTreeSet<&str> = FIXTURE_IDS.iter().copied().collect();
     assert_eq!(unique.len(), FIXTURE_IDS.len(), "no id is listed twice");
-    assert_eq!(FIXTURE_IDS.len(), 66);
+    assert_eq!(FIXTURE_IDS.len(), 67);
     for id in FIXTURE_IDS {
         assert!(fixture(id).is_some(), "no fixture for {id}");
     }

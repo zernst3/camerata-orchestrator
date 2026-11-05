@@ -23,12 +23,12 @@ use camerata_api_types::review_view::SiteRow;
 use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
-    flagged_by_line, head_chips, held_line, merge_candidate_total, merge_candidates,
+    flagged_by_line, head_chips, held_line, is_thrown_out, merge_candidate_total, merge_candidates,
     merge_shown_line, reapply_decision_request, reapply_done_message, reduce, review_level_text,
     severity_note, snippet_at_line, split_choice_from_value, split_option_value, stage1_line,
     stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
     Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
-    LineAction, LineTone, Snippet, SplitChoice, UndoAction, SPLIT_NEW_VALUE,
+    LineAction, LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -163,6 +163,9 @@ pub(crate) fn SiteDetailView(
     .map(|f| field_state(&row, f, &ctx))
     .collect();
     let has_form = |f: EditField| editing(f);
+    // A row the engine threw out is in no package. The server takes only two decisions on it, so
+    // the pane offers only those two and none it would refuse.
+    let thrown_out = is_thrown_out(&row);
     rsx! {
         div { class: "site-detail",
             div { class: "site-detail-head",
@@ -286,11 +289,13 @@ pub(crate) fn SiteDetailView(
                 p { class: "site-detail-line site-detail-dup",
                     span { class: "site-detail-label", "Possible duplicate of" }
                     span { class: "site-detail-value", title: "{hint}", "{place}" }
+                    if !thrown_out {
                     button {
                         class: "btn-edit-sm",
                         title: "Merge this row into the possible duplicate (M)",
                         onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
                         "merge into"
+                    }
                     }
                 }
             }
@@ -359,29 +364,57 @@ pub(crate) fn SiteDetailView(
             if let DetailMode::Add(draft) = mode.clone() {
                 AddForm { draft: *draft, ctx: ctx.clone(), on_event }
             }
+            if let DetailMode::ThrowOut(draft) = mode.clone() {
+                ThrowOutForm { draft, on_event }
+            }
 
             {children}
 
-            div { class: "pane-actions site-detail-actions",
-                for state in [TriageState::Confirmed, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
-                    button {
-                        key: "{state.label()}",
-                        class: "btn-edit-sm pane-dispose",
-                        onclick: move |_| on_event.call(DetailEvent::Decide(state)),
-                        "{state.label()}"
+            if thrown_out {
+                p { class: "site-detail-line site-detail-thrown-out", role: "status",
+                    span { class: "site-detail-label", "Thrown out" }
+                    span { class: "site-detail-value",
+                        "{row.thrown_out_reason.clone().unwrap_or_default()}. It is in no package. Put it back into review to rule on it, or confirm it was rightly thrown out."
                     }
                 }
-                button {
-                    class: "btn-edit-sm site-detail-merge",
-                    title: "Merge this row into another site (M)",
-                    onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
-                    "Merge into"
+                div { class: "pane-actions site-detail-actions",
+                    for choice in [ThrowOutChoice::PutBack, ThrowOutChoice::Confirm] {
+                        button {
+                            key: "{choice.label()}",
+                            class: "btn-edit-sm site-detail-throw-out",
+                            onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginThrowOut(choice))),
+                            "{choice.label()}"
+                        }
+                    }
+                    button {
+                        class: "btn-edit-sm site-detail-add",
+                        title: "Add a finding the engine missed (A)",
+                        onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginAdd)),
+                        "Add finding"
+                    }
                 }
-                button {
-                    class: "btn-edit-sm site-detail-add",
-                    title: "Add a finding the engine missed (A)",
-                    onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginAdd)),
-                    "Add finding"
+            } else {
+            div { class: "pane-actions site-detail-actions",
+                    for state in [TriageState::Confirmed, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
+                        button {
+                            key: "{state.label()}",
+                            class: "btn-edit-sm pane-dispose",
+                            onclick: move |_| on_event.call(DetailEvent::Decide(state)),
+                            "{state.label()}"
+                        }
+                    }
+                    button {
+                        class: "btn-edit-sm site-detail-merge",
+                        title: "Merge this row into another site (M)",
+                        onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
+                        "Merge into"
+                    }
+                    button {
+                        class: "btn-edit-sm site-detail-add",
+                        title: "Add a finding the engine missed (A)",
+                        onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginAdd)),
+                        "Add finding"
+                    }
                 }
             }
             if picking {
@@ -851,6 +884,38 @@ fn AckForm(draft: camerata_ui_core::edits::AckDraft, on_event: Callback<DetailEv
     }
 }
 
+/// The put-back or confirm form of a thrown-out row: a required reason, then the one decision.
+#[component]
+fn ThrowOutForm(
+    draft: camerata_ui_core::edits::ThrowOutDraft,
+    on_event: Callback<DetailEvent>,
+) -> Element {
+    let (title, placeholder) = match draft.choice {
+        ThrowOutChoice::PutBack => (
+            "Why this row is a real problem the engine should not have thrown out (required)",
+            "why (the row returns to review, held until you decide it)",
+        ),
+        ThrowOutChoice::Confirm => (
+            "Why the engine was right to throw this row out (required)",
+            "why (the row stays out of the client package)",
+        ),
+    };
+    rsx! {
+        div { class: "queue-reason-prompt site-detail-form site-detail-throw-out-form", id: "{DETAIL_FORM_ID}",
+            label { class: "rule-modal-label", "{title}" }
+            ReasonInput {
+                value: draft.reason.clone(),
+                placeholder,
+                focus: true,
+                on_text: move |t: String| on_event.call(DetailEvent::Form(DetailAction::Reason(t))),
+                on_commit: move |()| on_event.call(DetailEvent::Commit),
+                on_cancel: move |()| on_event.call(DetailEvent::Cancel),
+            }
+            FormFooter { error: draft.error.clone(), commit_label: draft.choice.label(), on_event }
+        }
+    }
+}
+
 /// The add form: where, what, why, and the code at that line, read-only.
 #[component]
 fn AddForm(draft: AddDraft, ctx: DetailContext, on_event: Callback<DetailEvent>) -> Element {
@@ -1251,6 +1316,32 @@ impl DetailCtl {
 }
 
 // ── The writes, as plain async functions (tested without a runtime) ───────────────────────
+
+/// Post a site ruling from a key or a button. A ruling the server would refuse on a thrown-out
+/// row is refused here in words, and nothing is posted. `row` is the site when the lane has it
+/// loaded; without it the server's own refusal stands as the backstop.
+pub(crate) async fn post_ruling(
+    writes: &dyn ReviewWrites,
+    row: Option<&SiteRow>,
+    key: &str,
+    state: TriageState,
+    reason: &str,
+    run_id: &str,
+) -> Result<Decision, String> {
+    let req = match row {
+        Some(row) => camerata_ui_core::edits::ruling_request(row, state, reason, run_id)?,
+        None => {
+            let decision = camerata_ui_core::tree::batch::decision_state_for(state)
+                .ok_or_else(|| "That is not a ruling.".to_string())?;
+            camerata_ui_core::tree::batch::site_decision_request(key, decision, reason, run_id)
+        }
+    };
+    writes
+        .post_decision(req)
+        .await
+        .map(|r| r.decision)
+        .map_err(|e| e.message)
+}
 
 /// What a posted write answered.
 #[derive(Debug, Clone, PartialEq)]

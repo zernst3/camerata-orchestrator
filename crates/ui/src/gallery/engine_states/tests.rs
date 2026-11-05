@@ -270,6 +270,11 @@ fn a_confirmed_throw_out_shows_what_was_decided_and_no_confirm_control() {
     assert!(!html.contains("Confirm thrown out"), "it is settled");
     assert!(!html.contains("Put it back into review"));
     assert!(!html.contains("what ships"));
+    // Wave 19 D2: the engine was right, so the thrown-out rate is not "100%".
+    assert!(
+        html.contains("Real problems among thrown-out findings: 0% "),
+        "{html}"
+    );
     assert!(
         html.contains("False positive"),
         "the card shows the decision that settled it"

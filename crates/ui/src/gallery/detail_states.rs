@@ -177,6 +177,7 @@ states! {
     merge_picker_duplicate_first => "detail/merge-picker-duplicate-first",
     over_budget => "detail/over-budget",
     viewer_commit => "detail/viewer-commit",
+    thrown_out => "detail/thrown-out",
 }
 
 #[cfg(test)]

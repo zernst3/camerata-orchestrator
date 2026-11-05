@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 66] = [
+pub const FIXTURE_IDS: [&str; 67] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -75,6 +75,7 @@ pub const FIXTURE_IDS: [&str; 66] = [
     "detail/merge-picker-duplicate-first",
     "detail/over-budget",
     "detail/viewer-commit",
+    "detail/thrown-out",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",
@@ -856,6 +857,10 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 }),
                 None,
             )
+        }
+        "detail/thrown-out" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| r.thrown_out_reason.is_some()), None)
         }
         "detail/viewer-commit" => {
             let ds = base();

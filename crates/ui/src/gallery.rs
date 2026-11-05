@@ -156,6 +156,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "merge-picker-duplicate-first",
             "over-budget",
             "viewer-commit",
+            "thrown-out",
         ],
     ),
     (

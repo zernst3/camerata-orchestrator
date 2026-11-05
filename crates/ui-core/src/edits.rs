@@ -29,6 +29,7 @@ use camerata_api_types::review_view::{DecisionView, EditView, SiteRow, TreeLevel
 
 use crate::tree::state::{TreeIndex, TreeState};
 use crate::tree::{decision_label, kind_tag_of, marker_chips, outlier_phrase, short_date, Chip};
+use crate::triage::TriageState;
 use crate::triage::UNDO_WINDOW_MS;
 
 // ── The editable fields ───────────────────────────────────────────────────────────────────
@@ -688,6 +689,68 @@ fn decision_request(
     }
 }
 
+// ── A row the engine threw out ───────────────────────────────────────────────────────────
+
+/// What the detail says when a ruling is refused on a thrown-out row: the server's own rule, in
+/// words, before any request is made.
+pub const THROWN_OUT_REFUSAL: &str = "The engine threw this row out, so it is in no package. Put it back into review to rule on it, or confirm it was rightly thrown out.";
+
+/// Whether `row` is thrown out and not put back (it carries its throw-out reason until it is
+/// restored). Such a row takes only two decisions, which the server enforces: put it back, or
+/// confirm the throw-out (a false positive).
+pub fn is_thrown_out(row: &SiteRow) -> bool {
+    row.thrown_out_reason.is_some()
+}
+
+/// Whether a ruling of `state` is refused on `row` (the server answers 409): every ruling but a
+/// false positive on a thrown-out row.
+pub fn ruling_refused(row: &SiteRow, state: TriageState) -> bool {
+    is_thrown_out(row) && state != TriageState::FalsePositive
+}
+
+/// The request for a site ruling from the keyboard or a button, or the words that say why it is
+/// not made. A ruling the server would refuse is refused here, so nothing is posted.
+pub fn ruling_request(
+    row: &SiteRow,
+    state: TriageState,
+    reason: &str,
+    run_id: &str,
+) -> Result<NewDecisionReq, String> {
+    if ruling_refused(row, state) {
+        return Err(THROWN_OUT_REFUSAL.to_string());
+    }
+    let decision = crate::tree::batch::decision_state_for(state)
+        .ok_or_else(|| "That is not a ruling.".to_string())?;
+    Ok(decision_request(row, decision, reason, run_id))
+}
+
+/// The two things a thrown-out row can be given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThrowOutChoice {
+    /// Put it back into review: it is then held until decided.
+    PutBack,
+    /// Confirm the engine was right to throw it out: it stays out of every package.
+    Confirm,
+}
+
+impl ThrowOutChoice {
+    /// The button and the form's commit word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PutBack => "Put it back into review",
+            Self::Confirm => "Confirm thrown out",
+        }
+    }
+}
+
+/// The put-back or confirm form: a required reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThrowOutDraft {
+    pub choice: ThrowOutChoice,
+    pub reason: String,
+    pub error: Option<String>,
+}
+
 // ── Add a finding ─────────────────────────────────────────────────────────────────────────
 
 /// One field of the add form.
@@ -1062,7 +1125,13 @@ pub fn decision_line(row: &SiteRow, ctx: &DetailContext) -> DecisionLine {
             text: stale_decision_text(stale),
             tone: LineTone::Warning,
             inherited: false,
-            actions: vec![LineAction::Reapply, LineAction::Discard],
+            // Reapply posts the old ruling again; on a thrown-out row the server takes only a
+            // false positive, so anything else could only be refused.
+            actions: if is_thrown_out(row) && stale.state != DecisionState::FalsePositive {
+                vec![LineAction::Discard]
+            } else {
+                vec![LineAction::Reapply, LineAction::Discard]
+            },
         };
     }
     if let Some(n) = &row.new_since_decision {
@@ -1131,6 +1200,10 @@ pub fn reapply_decision_request(row: &SiteRow, run_id: &str) -> Option<NewDecisi
     let stale = row.stale_decision.as_ref()?;
     // A merge's target is a site key of the old run; it cannot be carried over.
     if matches!(stale.state, DecisionState::MergedInto(_)) {
+        return None;
+    }
+    // A thrown-out row takes only a false positive; any other old ruling would be refused.
+    if is_thrown_out(row) && stale.state != DecisionState::FalsePositive {
         return None;
     }
     Some(decision_request(
@@ -1359,6 +1432,7 @@ pub enum DetailMode {
     Split(SplitDraft),
     Add(Box<AddDraft>),
     Ack(AckDraft),
+    ThrowOut(ThrowOutDraft),
 }
 
 impl DetailMode {
@@ -1375,6 +1449,7 @@ impl DetailMode {
             Self::Split(d) => d.error.as_deref(),
             Self::Add(d) => d.error.as_deref(),
             Self::Ack(d) => d.error.as_deref(),
+            Self::ThrowOut(d) => d.error.as_deref(),
             Self::Viewing | Self::PickField => None,
         }
     }
@@ -1387,6 +1462,7 @@ impl DetailMode {
             Self::Split(d) => d.error = Some(message),
             Self::Add(d) => d.error = Some(message),
             Self::Ack(d) => d.error = Some(message),
+            Self::ThrowOut(d) => d.error = Some(message),
             Self::Viewing | Self::PickField => {}
         }
         self
@@ -1404,6 +1480,8 @@ pub enum DetailAction {
     /// Open the add form; the line comes from the focused site, or from the code viewer.
     BeginAdd,
     BeginAck,
+    /// Put back or confirm a thrown-out row.
+    BeginThrowOut(ThrowOutChoice),
     /// The main value of the open form: the field's text, the merge search, the new sub-group's
     /// label or who acknowledged.
     Text(String),
@@ -1440,6 +1518,8 @@ pub fn reduce(
                 error: None,
             })
         }
+        // A merge is a ruling the server refuses on a thrown-out row: the form does not open.
+        DetailAction::BeginMerge if is_thrown_out(row) => mode,
         DetailAction::BeginMerge => DetailMode::Merge(MergeDraft {
             query: String::new(),
             target: row
@@ -1468,6 +1548,14 @@ pub fn reduce(
             }),
             _ => mode,
         },
+        DetailAction::BeginThrowOut(choice) if is_thrown_out(row) => {
+            DetailMode::ThrowOut(ThrowOutDraft {
+                choice: *choice,
+                reason: String::new(),
+                error: None,
+            })
+        }
+        DetailAction::BeginThrowOut(_) => mode,
         DetailAction::Cancel => DetailMode::Viewing,
         DetailAction::Text(text) => match mode {
             DetailMode::Edit(d) => DetailMode::Edit(EditDraft {
@@ -1510,6 +1598,11 @@ pub fn reduce(
             }),
             DetailMode::Ack(d) => DetailMode::Ack(AckDraft {
                 note: text.clone(),
+                error: None,
+                ..d
+            }),
+            DetailMode::ThrowOut(d) => DetailMode::ThrowOut(ThrowOutDraft {
+                reason: text.clone(),
                 error: None,
                 ..d
             }),
@@ -1622,6 +1715,34 @@ pub fn commit(
             let (decision_id, req) =
                 client_ack_request(row, &d.by, &d.note).map_err(|e| e.message().to_string())?;
             Ok(DetailWrite::Ack { decision_id, req })
+        }
+        DetailMode::ThrowOut(d) => {
+            let reason = d.reason.trim();
+            if reason.is_empty() {
+                return Err(match d.choice {
+                    ThrowOutChoice::PutBack => {
+                        "A reason is required to put this row back into review.".to_string()
+                    }
+                    ThrowOutChoice::Confirm => {
+                        "A reason is required to confirm the engine was right to throw this row out."
+                            .to_string()
+                    }
+                });
+            }
+            let (state, done) = match d.choice {
+                ThrowOutChoice::PutBack => (
+                    DecisionState::EngineRestored,
+                    "Put back into review. It is held from export until you decide it.",
+                ),
+                ThrowOutChoice::Confirm => (
+                    DecisionState::FalsePositive,
+                    "Confirmed: the engine was right to throw it out. It stays out of the client package.",
+                ),
+            };
+            Ok(DetailWrite::Decision {
+                req: decision_request(row, state, reason, run_id),
+                done: done.to_string(),
+            })
         }
     }
 }

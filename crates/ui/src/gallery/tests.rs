@@ -61,6 +61,7 @@ const SPEC_STATES: &[&str] = &[
     "detail/merge-picker-duplicate-first",
     "detail/over-budget",
     "detail/viewer-commit",
+    "detail/thrown-out",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",

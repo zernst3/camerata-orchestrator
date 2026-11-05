@@ -26,7 +26,7 @@ fn plain_text(html: &str) -> String {
 
 #[test]
 fn every_detail_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 23, "every detail state is built");
+    assert_eq!(states().len(), 24, "every detail state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -371,4 +371,23 @@ fn the_meta_grid_is_two_columns_so_four_items_never_leave_one_alone() {
         ),
         "two columns at every width"
     );
+}
+
+/// Wave 19 D1: a thrown-out row offers its two real choices and none the server would refuse.
+#[test]
+fn detail_thrown_out_offers_put_it_back_and_confirm_thrown_out_only() {
+    let row = site_of("detail/thrown-out");
+    assert!(row.thrown_out_reason.is_some());
+    let html = plain_text(&page("detail/thrown-out"));
+    assert!(html.contains("Put it back into review"), "{html}");
+    assert!(html.contains("Confirm thrown out"));
+    for refused in [
+        ">Confirmed<",
+        ">Ignored<",
+        ">Tech debt<",
+        "pane-dispose",
+        "Merge into",
+    ] {
+        assert!(!html.contains(refused), "{refused}");
+    }
 }
