@@ -189,7 +189,14 @@ fn a_chrome_major_or_platform_mismatch_fails_with_the_approve_instruction() {
         major_err.contains("scripts/visual-approve.sh"),
         "{major_err}"
     );
-    let plat_err = check_environment(Some(&recorded), "156.0.1.1", "linux-x86_64").unwrap_err();
+    // A platform other than the one running the test (Linux CI recorded a false pass when this
+    // was the literal "linux-x86_64", which is CI's own platform).
+    let other = if plat == "linux-x86_64" {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64"
+    };
+    let plat_err = check_environment(Some(&recorded), "156.0.1.1", other).unwrap_err();
     assert!(plat_err.contains("platform differs"), "{plat_err}");
     let missing = check_environment(None, "156.0.1.1", &plat).unwrap_err();
     assert!(missing.contains("CHROME_VERSION is missing"), "{missing}");

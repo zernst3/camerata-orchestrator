@@ -17,6 +17,10 @@ ignore = [
     # pane). It is only used for serial-port support Camerata never opens. Removing it means
     # moving to portable-pty 0.9, a dependency upgrade that is tracked separately.
     { id = "RUSTSEC-2017-0008", reason = "unmaintained, via portable-pty 0.8; serial ports are never opened" },
+    # `pin-utils` is unmaintained (archived 2026-10-01; RUSTSEC-2026-0441, no safe upgrade). It
+    # comes from `nix` 0.25 <- `portable-pty` 0.8, the same chain as `serial` above, and leaves
+    # with the portable-pty 0.9 upgrade tracked there.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained, via nix 0.25 <- portable-pty 0.8; no safe upgrade; leaves with portable-pty 0.9" },
     # `fxhash` is unmaintained. It comes from `selectors` <- `kuchikiki` <- `wry`
     # (dioxus-desktop). It is a hash function with no security role. No release of the
     # chain has dropped it yet.
