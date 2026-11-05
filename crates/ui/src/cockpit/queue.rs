@@ -35,7 +35,7 @@ use camerata_ui_core::queue::{
     rate_changed_text, reason_cell, site_door, Band, Entry, Layout, QueueCommand, QueueState,
     NEEDED_ME_HINT, ROWS_PER_PAGE,
 };
-use camerata_ui_core::tree::batch::{decision_state_for, site_decision_request, TreeUndo};
+use camerata_ui_core::tree::batch::TreeUndo;
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::shell::{lane_for_key, Lane};
 use camerata_ui_core::tree::{
@@ -843,16 +843,31 @@ pub(crate) fn QueueHost(
     let decide = use_callback({
         let api = api.clone();
         move |(key, st, reason): (String, TriageState, String)| {
-            let Some(decision) = decision_state_for(st) else {
-                return;
-            };
-            let req = site_decision_request(&key, decision, &reason, &run_id());
+            // The row, when loaded: a ruling the server would refuse on a thrown-out row is
+            // refused in words and nothing is posted.
+            let row = view.peek().as_ref().and_then(|v| {
+                v.escalated
+                    .iter()
+                    .chain(&v.below)
+                    .find(|r| r.candidate.key == key)
+                    .map(|r| r.site.clone())
+            });
+            let run = run_id();
             let api = api.clone();
             spawn(async move {
-                match api.writes.post_decision(req).await {
-                    Ok(done) => {
+                match super::site_detail::post_ruling(
+                    &*api.writes,
+                    row.as_ref(),
+                    &key,
+                    st,
+                    &reason,
+                    &run,
+                )
+                .await
+                {
+                    Ok(decision) => {
                         undo.set(Some(TreeUndo::for_site(
-                            &done.decision.id,
+                            &decision.id,
                             st,
                             epoch.elapsed().as_millis() as u64,
                         )));
@@ -860,11 +875,11 @@ pub(crate) fn QueueHost(
                         super::viewer::focus_element(QUEUE_REGION_ID);
                         after_write.call(());
                     }
-                    Err(e) => {
+                    Err(message) => {
                         if let Some(p) = prompt.write().as_mut() {
-                            p.error = Some(e.message);
+                            p.error = Some(message);
                         } else {
-                            toast.call((crate::toast::ToastKind::Error, e.message));
+                            toast.call((crate::toast::ToastKind::Error, message));
                         }
                     }
                 }
@@ -877,6 +892,21 @@ pub(crate) fn QueueHost(
         let Some(key) = state.peek().cursor.clone() else {
             return;
         };
+        // No prompt for a ruling the server would refuse on a thrown-out row.
+        let refused = view.peek().as_ref().is_some_and(|v| {
+            v.escalated
+                .iter()
+                .chain(&v.below)
+                .find(|r| r.candidate.key == key)
+                .is_some_and(|r| camerata_ui_core::edits::ruling_refused(&r.site, st))
+        });
+        if refused {
+            toast.call((
+                crate::toast::ToastKind::Info,
+                camerata_ui_core::edits::THROWN_OUT_REFUSAL.to_string(),
+            ));
+            return;
+        }
         match PaneCommand::decide(st) {
             PaneCommand::PromptFor(st) => prompt.set(Some(QueuePrompt {
                 key,

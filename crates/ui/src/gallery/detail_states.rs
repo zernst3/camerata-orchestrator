@@ -14,6 +14,7 @@ use camerata_ui_core::tree::state::{TreeIndex, TreeState};
 use dioxus::prelude::*;
 
 use crate::cockpit::review_shell::ReviewShell;
+use crate::cockpit::site_detail::code_bridge::InspectedViewer;
 use crate::cockpit::site_detail::{
     DetailBanner, DetailNotice, DetailPanel, SiteDetailEmpty, SiteDetailView,
 };
@@ -38,7 +39,7 @@ fn context_of(row: &SiteRow) -> DetailContext {
 }
 
 /// The mode a fixture's form stands for, with enough typed in it to read the page.
-fn mode_of(form: Option<&DetailForm>, row: &SiteRow, ctx: &DetailContext) -> DetailMode {
+pub(super) fn mode_of(form: Option<&DetailForm>, row: &SiteRow, ctx: &DetailContext) -> DetailMode {
     match form {
         None => DetailMode::Viewing,
         Some(DetailForm::Edit(field)) => reduce(
@@ -100,7 +101,18 @@ pub(super) fn DetailPage(props: PageProps) -> Element {
     else {
         return rsx! { p { "no detail fixture for {props.id}" } };
     };
-    let DetailBody { site, form, .. } = *body;
+    let DetailBody {
+        site, form, viewer, ..
+    } = *body;
+    let viewer_pane = match (viewer, site.as_ref()) {
+        (true, Some(row)) => rsx! {
+            InspectedViewer {
+                row: row.clone(),
+                audited_shas: shell.ready().map(|s| s.audited_shas.clone()).unwrap_or_default(),
+            }
+        },
+        _ => rsx! {},
+    };
     let pane = match site {
         None => rsx! { SiteDetailEmpty {} },
         Some(row) => {
@@ -121,6 +133,7 @@ pub(super) fn DetailPage(props: PageProps) -> Element {
     };
     rsx! {
         ReviewShell { status: (&shell).into(), active: Lane::Tree,
+            {viewer_pane}
             div { class: "site-detail-page", {pane} }
         }
     }
@@ -160,6 +173,11 @@ states! {
     split_picker => "detail/split-picker",
     add_form => "detail/add-form",
     add_refused => "detail/add-refused",
+    possible_duplicate => "detail/possible-duplicate",
+    merge_picker_duplicate_first => "detail/merge-picker-duplicate-first",
+    over_budget => "detail/over-budget",
+    viewer_commit => "detail/viewer-commit",
+    thrown_out => "detail/thrown-out",
 }
 
 #[cfg(test)]

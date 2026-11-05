@@ -7119,7 +7119,12 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 @media (max-width: 1100px) {
   .review-queue-lane { flex-direction: column; }
   .review-queue-left, .review-queue-right { flex: 1 1 auto; width: 100%; }
-  .review-queue-right { position: static; max-height: none; }
+  /* Narrow, the detail does not sit under fifty rows: it comes first and stays pinned to the top
+     while the table scrolls under it (its own scrollbar when it is taller than the share). */
+  .review-queue-right { order: -1; position: sticky; top: 0; z-index: 2; max-height: 46vh; }
+  /* A form open in the detail is written in the room it needs: unpinned and uncapped, since a
+     pinned pane taller than the window has a bottom nobody can scroll to. */
+  .review-queue-right:has(.site-detail-form) { position: static; max-height: none; }
 }
 .review-queue-head { margin: 0 0 8px; }
 .review-queue-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -7306,7 +7311,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-detail-note { color: var(--ink-soft); font-size: 11.5px; }
 .site-detail-edit { flex: none; margin-left: auto; padding: 1px 8px; font-size: 11px; }
 .site-detail-meta {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 14px; margin: 2px 0;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 14px; margin: 2px 0;
 }
 .site-detail-item { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 6px; min-width: 0; }
 .site-detail-item .site-detail-label { width: auto; flex: none; }

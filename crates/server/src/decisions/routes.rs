@@ -196,6 +196,30 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             );
         }
     }
+    // A row the engine threw out, and the reviewer has not put back, is in no package. Only two
+    // decisions settle it: put it back, or call it a false positive (the throw-out was right).
+    // Any other ruling would clear the Engine Check's hold on it while the row stayed out, a real
+    // problem nobody reported and nothing left to say so. Refused, the hold stands (fail closed).
+    if matches!(req.scope, Scope::Site)
+        && !matches!(
+            req.state,
+            DecisionState::EngineRestored | DecisionState::FalsePositive
+        )
+    {
+        let key = req.key.trim();
+        let thrown_out = latest.report.discarded.iter().any(|f| f.site_key == key);
+        let active = state.decisions.active(id);
+        if thrown_out && !camerata_api_types::decisions::restored_keys(&active).contains(key) {
+            return refusal(
+                StatusCode::CONFLICT,
+                "thrown_out_decision",
+                "The engine threw this finding out, so it is in no package. Put it back into \
+                 review to rule on it, or mark it a false positive to confirm the throw-out was \
+                 right. Any other ruling would clear the Engine Check's hold on it and leave a \
+                 real problem unreported.",
+            );
+        }
+    }
     let when = now();
     let ctx = DecisionCtx {
         run_id: &latest.id,

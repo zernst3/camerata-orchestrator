@@ -4,9 +4,10 @@
 //! drawn by [`crate::engine_check::draw_sample`], which depends on the run and the rows only, so
 //! the same run always shows the same cards in the same order.
 
+use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::review_view::{
-    CategoryAllocation, EngineCheckCard, EngineCheckLane, OutlierView, PlacementView,
-    SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
+    CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckLane, OutlierView,
+    PlacementView, SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
 };
 
 use super::ReviewComposer;
@@ -58,10 +59,44 @@ impl<'a> ReviewComposer<'a> {
                 .filter(|v| v.carried_from.is_none())
             {
                 verdicts += 1;
-                wrong += usize::from(!v.right);
+                wrong += usize::from(!v.right && !self.confirms_throw_out(v));
             }
         }
         (verdicts, wrong)
+    }
+
+    /// Whether a No is the reviewer confirming the engine was right to throw the row out, with
+    /// the row still thrown out. Either it names a false-positive decision on its own key (the
+    /// Engine Check card's Confirm), or it names nothing and the row's effective decision is a
+    /// false positive made strictly after the No (the detail's Confirm, which posts only the
+    /// decision; the same test as the gate's `decided_since`, so the card, the hold and the rate
+    /// agree). The rate of "real problems among thrown-out findings" counts a throw-out the
+    /// reviewer upheld as an answer that agrees with the engine. A No on a kept row that names a
+    /// false positive says the row was not real, and still counts as wrong.
+    fn confirms_throw_out(&self, v: &camerata_api_types::review_view::EngineCheckVerdict) -> bool {
+        let still_thrown_out = self
+            .row(&v.key)
+            .is_some_and(|f| crate::engine_discard::reason_of(f).is_some());
+        if !still_thrown_out {
+            return false;
+        }
+        match &v.correction {
+            Some(CorrectionRef::Decision(id)) => self
+                .records
+                .get(id.as_str())
+                .is_some_and(|d| d.state == DecisionState::FalsePositive && d.key == v.key),
+            Some(CorrectionRef::Edit(_)) => false,
+            None => self.decision_of(&v.key).is_some_and(|d| {
+                d.state == DecisionState::FalsePositive
+                    && match (
+                        chrono::DateTime::parse_from_rfc3339(&d.decided_at),
+                        chrono::DateTime::parse_from_rfc3339(&v.at),
+                    ) {
+                        (Ok(decided), Ok(no)) => decided > no,
+                        _ => false,
+                    }
+            }),
+        }
     }
 
     /// `GET /api/projects/:id/review/engine-check`.

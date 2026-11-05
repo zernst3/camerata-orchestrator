@@ -216,7 +216,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
     let mut pdf_found = false;
     for i in 0..archive.len() {
         let f = archive.by_index(i).expect("zip entry");
-        if f.name().ends_with(".pdf") {
+        if f.name().expect("zip entry name").ends_with(".pdf") {
             pdf_found = true;
         }
     }

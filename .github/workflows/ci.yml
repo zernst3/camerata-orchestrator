@@ -91,7 +91,7 @@ jobs:
       - name: Self-measurement gate (parity, conservation, non-execution)
         run: ./scripts/ci-gate.sh "Self-measurement gate" ./scripts/self-measurement.sh
 
-      # Gate 4: the test suite must pass.
+      # Gate 4: the test suite must pass. The macOS pixel baselines run in the local release gate through scripts/visual-check.sh.
       - name: Test gate
         run: ./scripts/ci-gate.sh "Test gate" cargo test --workspace --locked
 

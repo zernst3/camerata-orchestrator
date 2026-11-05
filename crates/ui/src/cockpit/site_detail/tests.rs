@@ -1263,3 +1263,140 @@ fn the_merge_pickers_empty_line_is_the_hosts_own_text() {
         "{html}"
     );
 }
+
+// ── A row the engine threw out (wave 19 D1) ──────────────────────────────────────────────
+
+fn thrown_out_row() -> SiteRow {
+    let mut row = plain();
+    row.thrown_out_reason = Some("its headline is a placeholder".to_string());
+    row.possible_duplicate_of = Some(camerata_api_types::review_view::DuplicateView {
+        key: "other".to_string(),
+        rule_id: "SEC-OTHER-1".to_string(),
+        path: "src/other.rs".to_string(),
+        line: 9,
+        hint: "same line".to_string(),
+    });
+    row
+}
+
+/// The server takes only a put-back or a false positive on a thrown-out row, so the pane draws
+/// those two choices and none it would refuse: no Confirmed, Ignored or Tech debt, no Merge into
+/// (its button or the possible-duplicate's).
+#[test]
+fn a_thrown_out_row_draws_only_put_it_back_and_confirm_thrown_out() {
+    let html = page(thrown_out_row(), DetailPanel::default());
+    clean(&html);
+    assert!(html.contains("Put it back into review"), "{html}");
+    assert!(html.contains("Confirm thrown out"));
+    assert!(html.contains("its headline is a placeholder"));
+    assert!(html.contains("It is in no package"));
+    for refused in [
+        ">Confirmed</button>",
+        ">Ignored</button>",
+        ">Tech debt</button>",
+        ">False positive</button>",
+        "Merge into",
+        "merge into",
+        "pane-dispose",
+        "site-detail-merge",
+        // The edits route finds only the report's findings: no edit control on a thrown-out row.
+        "site-detail-edit",
+        ">edit</button>",
+    ] {
+        assert!(
+            !html.contains(refused),
+            "a refused control is drawn: {refused}"
+        );
+    }
+    // A kept row keeps every control and none of the two.
+    let kept = page(plain(), DetailPanel::default());
+    for drawn in ["pane-dispose", "Merge into", ">Confirmed</button>"] {
+        assert!(kept.contains(drawn), "{drawn}");
+    }
+    assert!(!kept.contains("Confirm thrown out"));
+    assert!(
+        kept.contains("site-detail-edit"),
+        "a kept row keeps its edits"
+    );
+}
+
+#[test]
+fn the_put_back_and_confirm_forms_ask_for_a_reason() {
+    use camerata_ui_core::edits::{ThrowOutChoice, ThrowOutDraft};
+    for (choice, word) in [
+        (
+            ThrowOutChoice::PutBack,
+            "real problem the engine should not have thrown out",
+        ),
+        (
+            ThrowOutChoice::Confirm,
+            "the engine was right to throw this row out",
+        ),
+    ] {
+        let html = page(
+            thrown_out_row(),
+            mode(DetailMode::ThrowOut(ThrowOutDraft {
+                choice,
+                reason: String::new(),
+                error: None,
+            })),
+        );
+        assert!(html.contains("site-detail-throw-out-form"), "{html}");
+        assert!(html.contains(word), "{word}");
+        assert!(html.contains("(required)"));
+        assert!(html.contains(&format!("{} \u{2192}", choice.label())));
+    }
+}
+
+/// The key handler and every button go through `post_ruling`: a ruling the server would refuse on
+/// a thrown-out row is refused in words and nothing is posted.
+#[tokio::test]
+async fn a_ruling_the_server_would_refuse_on_a_thrown_out_row_posts_nothing() {
+    let writes = RecordingWrites::default();
+    let row = thrown_out_row();
+    for st in [
+        TriageState::Confirmed,
+        TriageState::Ignored,
+        TriageState::TechDebt,
+    ] {
+        let err = post_ruling(&writes, Some(&row), &row.site_key, st, "why", "run-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err, camerata_ui_core::edits::THROWN_OUT_REFUSAL);
+    }
+    assert!(writes.log.borrow().is_empty(), "nothing was posted");
+    // The false positive is the confirmation, and a kept row takes any ruling.
+    post_ruling(
+        &writes,
+        Some(&row),
+        &row.site_key,
+        TriageState::FalsePositive,
+        "rightly out",
+        "run-1",
+    )
+    .await
+    .unwrap();
+    let kept = plain();
+    post_ruling(
+        &writes,
+        Some(&kept),
+        &kept.site_key,
+        TriageState::Confirmed,
+        "",
+        "run-1",
+    )
+    .await
+    .unwrap();
+    // A row the lane has not loaded is left to the server's own refusal.
+    post_ruling(
+        &writes,
+        None,
+        "unloaded",
+        TriageState::Confirmed,
+        "",
+        "run-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(writes.log.borrow().len(), 3);
+}

@@ -25,13 +25,23 @@ path = "src/main.rs"
 # (and only those) to a browser on localhost, against a seeded server, so a test can click them.
 # The browser-driven tests live in `tests/clickthrough.rs` and need this feature; without it the
 # default build is the desktop app exactly as before.
+#
+# The pixel baselines (tests/visual.rs) are rendered by macOS Chrome and compared on that platform
+# only: GitHub CI (ubuntu) does not build them, the local release gate runs
+# scripts/visual-check.sh. The comparison's own unit tests (tests/visual_compare.rs) always run.
 [features]
 liveview-review = ["dep:dioxus-liveview", "dep:axum", "tokio/net"]
+visual-baselines = []
 
 [[test]]
 name = "clickthrough"
 path = "tests/clickthrough.rs"
 required-features = ["liveview-review"]
+
+[[test]]
+name = "visual"
+path = "tests/visual.rs"
+required-features = ["visual-baselines"]
 
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
@@ -109,6 +119,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # The ledger block (the escalation sentence) is printed in the export's PDF only; the same extractor
 # the server's own export tests use reads it back.
 pdf-extract = "0.12"
+# Pixel-diff visual regression over the review gallery (tests/visual.rs): decodes the headless
+# Chrome PNGs and the approved baselines to compare them. PNG only, no other codec.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
 # NSEvents and posts them to the probe's own process, so the macOS clipboard behavior

@@ -2,7 +2,9 @@ use super::*;
 use crate::style::GLOBAL_CSS;
 use camerata_api_types::review_view::QueueRow;
 use camerata_ui_core::queue::{layout, Entry, ROWS_PER_PAGE};
-use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base};
+use camerata_ui_core::test_support::review_fixtures::{
+    dataset_30k, dataset_base, fixture, Body, Loaded,
+};
 
 fn page(id: &str) -> String {
     render(id).replace(GLOBAL_CSS, "")
@@ -14,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 8, "every queue state is built");
+    assert_eq!(states().len(), 10, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -243,4 +245,78 @@ fn the_stage_1_cell_wraps_and_the_why_gives_up_the_room() {
         ),
         "Stage 1, the why and the decision keep their widths"
     );
+}
+
+/// Wave 18 soft: below 1100px the detail sat under the table, so on queue/30k at 1000 the detail
+/// of row 1 was under 50 rows. The narrow layout puts it first, pinned to the top of the window so
+/// it stays in view while the table scrolls under it.
+#[test]
+fn at_a_narrow_width_the_detail_comes_before_the_table_and_stays_in_view() {
+    let css: String = GLOBAL_CSS.split_whitespace().collect::<Vec<_>>().join(" ");
+    let at = css
+        .find("@media (max-width: 1100px) { .review-queue-lane")
+        .expect("the queue's narrow block");
+    let block = &css[at..css[at..].find("} }").map_or(css.len(), |e| at + e + 3)];
+    assert!(
+        block.contains(".review-queue-right { order: -1;"),
+        "the detail is ordered first: {block}"
+    );
+    assert!(
+        block.contains("position: sticky"),
+        "and stays in view: {block}"
+    );
+    assert!(
+        block.contains("max-height:"),
+        "and cannot take the window from the table: {block}"
+    );
+    // A form open in the detail needs the room to be written in: the pane stops being pinned and
+    // is not capped (a pinned pane taller than the window has a bottom nobody can reach).
+    assert!(
+        block.contains(
+            ".review-queue-right:has(.site-detail-form) { position: static; max-height: none; }"
+        ),
+        "an open form unpins the pane: {block}"
+    );
+    // The markup order stays table then detail (the keyboard and the tab order read the table
+    // first); only the stacked layout reorders them.
+    for id in ["queue/30k", "queue/over-budget", "queue/at-budget"] {
+        let html = page(id);
+        let left = html.find("review-queue-left").expect("the table side");
+        let right = html.find("review-queue-right").expect("the detail side");
+        assert!(left < right, "{id}");
+        assert!(html.contains("site-detail"), "{id}: the detail is drawn");
+    }
+}
+
+#[test]
+fn the_detail_form_state_shows_the_fix_form_beside_the_table() {
+    let html = page("queue/detail-form-open");
+    assert!(html.contains("queue-table"), "the table is there");
+    assert!(html.contains("site-detail-form"), "{html}");
+    assert!(html.contains("Fix"), "the field being edited is named");
+    assert!(
+        html.contains("Why (required)") || html.contains("required"),
+        "the form asks for the reason"
+    );
+}
+
+#[test]
+fn the_merge_picker_on_an_empty_pool_says_what_the_pool_is_and_the_remedy_that_works() {
+    let html = page("queue/merge-picker-empty-pool");
+    let q = match fixture("queue/merge-picker-empty-pool").unwrap().body {
+        Body::Queue(b) => match b.queue {
+            Loaded::Ready(v) => v,
+            other => panic!("{other:?}"),
+        },
+        _ => panic!("not a queue state"),
+    };
+    assert_eq!(q.escalated.len(), 1, "one escalated row");
+    assert!(q.below.is_empty(), "nothing below the line is loaded");
+    assert!(
+        html.contains(
+            "No escalated row matches. Open in the tree to merge into a site that is not in the queue."
+        ),
+        "{html}"
+    );
+    assert!(html.contains("site-detail-merge-form"));
 }

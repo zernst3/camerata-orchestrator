@@ -157,7 +157,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("valid zip");
     let mut names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect();
     names.sort();
     assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
@@ -407,7 +407,7 @@ fn artifact_texts(zip_bytes: &[u8], prefix: &str, out: &mut Vec<(String, String)
     };
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).expect("zip entry");
-        let path = format!("{prefix}{}", entry.name());
+        let path = format!("{prefix}{}", entry.name().unwrap());
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).expect("read entry");
         if bytes.starts_with(b"PK") {
@@ -1038,7 +1038,7 @@ fn product_zip_entries_carry_a_real_build_timestamp_not_the_1980_epoch() {
             (1980, 1, 1),
             "entry {:?} still carries the zip crate's 1980-01-01 default — \
                  last_modified_time() was not applied",
-            entry.name()
+            entry.name().unwrap()
         );
     }
 }

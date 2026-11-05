@@ -52,6 +52,7 @@ macro_rules! states {
 states! {
     clear => "export/clear",
     blocked => "export/blocked",
+    one_line_two_reasons => "export/one-line-two-reasons",
 }
 
 #[cfg(test)]

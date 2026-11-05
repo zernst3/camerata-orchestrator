@@ -1,7 +1,7 @@
 //! The `queue/*` gallery states (review UI spec section 12): the escalation queue lane under the
 //! shell, from the review fixtures, with the app's real stylesheet.
 
-use camerata_ui_core::queue::{rate_changed_text, QueueState};
+use camerata_ui_core::queue::{detail_context, rate_changed_text, QueueState};
 use camerata_ui_core::test_support::review_fixtures::{fixture, Body, Loaded, StateFixture};
 use camerata_ui_core::tree::shell::Lane;
 use camerata_ui_core::triage::PaneFocus;
@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 
 use crate::cockpit::queue::{QueueScreen, QueueStatus};
 use crate::cockpit::review_shell::ReviewShell;
+use crate::cockpit::site_detail::DetailPanel;
 use crate::test_harness;
 
 #[derive(Clone, PartialEq, Props)]
@@ -40,6 +41,26 @@ pub(super) fn QueuePage(props: PageProps) -> Element {
         ..QueueState::default()
     };
     let toast = body.rate_toast.as_ref().map(rate_changed_text);
+    // A form open in the detail beside the table, built the way the detail's own states build it.
+    let detail = match (
+        body.form.as_ref(),
+        view.as_ref().zip(state.cursor.as_deref()),
+    ) {
+        (Some(form), Some((v, key))) => v
+            .escalated
+            .iter()
+            .chain(&v.below)
+            .find(|r| r.candidate.key == key)
+            .map(|row| {
+                let ctx = detail_context(v, row);
+                DetailPanel {
+                    mode: super::detail_states::mode_of(Some(form), &row.site, &ctx),
+                    ..DetailPanel::default()
+                }
+            })
+            .unwrap_or_default(),
+        _ => DetailPanel::default(),
+    };
     rsx! {
         ReviewShell { status: (&shell).into(), active: Lane::Escalations,
             QueueScreen {
@@ -50,6 +71,7 @@ pub(super) fn QueuePage(props: PageProps) -> Element {
                 prompt: None,
                 undo: None,
                 toast,
+                detail,
             }
         }
     }
@@ -78,6 +100,8 @@ states! {
     line_lowered => "queue/line-lowered",
     rate_changed_toast => "queue/rate-changed-toast",
     thirty_k => "queue/30k",
+    detail_form_open => "queue/detail-form-open",
+    merge_picker_empty_pool => "queue/merge-picker-empty-pool",
 }
 
 #[cfg(test)]

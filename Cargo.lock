@@ -781,7 +781,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wiremock",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -1173,7 +1173,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -1215,6 +1215,7 @@ dependencies = [
  "dioxus-ssr",
  "dotenvy",
  "headless_chrome",
+ "image",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -1228,7 +1229,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wiremock",
- "zip 9.4.0",
+ "zip",
 ]
 
 [[package]]
@@ -6297,11 +6298,11 @@ dependencies = [
 
 [[package]]
 name = "rust_xlsxwriter"
-version = "0.96.0"
+version = "0.102.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd1746025420e17b5d62528b930e550e016e857038794d74e169018126ef3d14"
+checksum = "6ca3d0e879a578c1313c2800ab0c6c029d38eed18098675e50341a30d32372ed"
 dependencies = [
- "zip 7.2.0",
+ "zip",
 ]
 
 [[package]]
@@ -7983,12 +7984,6 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
-
-[[package]]
-name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
@@ -9581,34 +9576,6 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "7.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path 0.12.3",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path 0.12.3",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
 version = "9.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3cec733c9820347a592f6375c3c0089b479ba0a0b1cbf3dd1958b02959b7c033"
@@ -9620,7 +9587,7 @@ dependencies = [
  "libc",
  "memchr",
  "nix 0.31.3",
- "typed-path 0.13.0",
+ "typed-path",
  "windows-sys 0.61.2",
  "zopfli",
 ]

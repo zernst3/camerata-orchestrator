@@ -26,7 +26,9 @@ use dioxus::prelude::*;
 
 use crate::cockpit::scan::finding_table_state;
 use crate::cockpit::stack::{StackLink, StackOpen, StackSlot};
-use crate::cockpit::viewer::{focus_element, reach_finding, ViewerLink, ViewerSlot};
+use crate::cockpit::viewer::{
+    focus_element, reach_finding, CodeViewer, FileStateView, ViewerFinding, ViewerLink, ViewerSlot,
+};
 use crate::toast::{push_toast, Toast, ToastKind};
 
 /// What a lane calls to open the overlays. Both are `Copy`.
@@ -321,6 +323,34 @@ pub(crate) fn use_code_bridge(
     CodeBridge {
         open_code,
         open_stack,
+    }
+}
+
+/// The commit the viewer's header names for `row`: the one the run inspected the row's repo at
+/// (`audited_shas`), which is what `use_code_bridge` hands the viewer. Blank for a repo the
+/// inspection recorded no commit for.
+pub(crate) fn inspected_sha<'a>(
+    audited_shas: &'a BTreeMap<String, String>,
+    row: &SiteRow,
+) -> &'a str {
+    audited_shas.get(&row.repo).map_or("", String::as_str)
+}
+
+/// The code viewer as the bridge opens it on a site, props-only for the gallery: the header names
+/// the commit the run inspected, read from `audited_shas` like the bridge reads it. The file is
+/// still loading, which is how the header looks the moment the viewer opens.
+#[component]
+pub(crate) fn InspectedViewer(row: SiteRow, audited_shas: BTreeMap<String, String>) -> Element {
+    let view = finding_view_of(&row);
+    let finding = ViewerFinding::from_finding(&view, inspected_sha(&audited_shas, &row), false);
+    rsx! {
+        CodeViewer {
+            finding,
+            finding_key: row.site_key.clone(),
+            file: FileStateView::Loading,
+            position: (1usize, 12usize),
+            {rsx! {}}
+        }
     }
 }
 
