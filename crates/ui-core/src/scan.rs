@@ -205,6 +205,19 @@ pub const CALIBRATION_SITE_INPUT_TOKENS: f64 = 560.0;
 /// The verdict one site's reply holds; the server's cap per site is built from the same figure.
 pub const CALIBRATION_OUTPUT_TOKENS_PER_SITE: f64 = 150.0;
 
+/// What the Claude Code CLI itself adds to EVERY call it makes, on top of the stage's own prompt:
+/// its system prompt and tool framing, written to the prompt cache each time because every call is
+/// a fresh subprocess. MEASURED on the faktura cli run (20261105T205200Z-39d435), where each
+/// stage's cache writes per call exceeded the stage's own prompt by about this much: stage 1
+/// 11.0k written against a 3.5k prompt, stage 2 10.5k against 2.4k, a scan pass 21.5k against
+/// 15.7k. The API backend pays none of it.
+pub const CLI_CALL_OVERHEAD_TOKENS: f64 = 7_500.0;
+/// What a prompt-cache WRITE costs on the CLI backend, as a multiple of the input price. The CLI
+/// writes its cache with the one-hour lifetime, which bills at twice the input price (the API's
+/// default five-minute write is 1.25 times). MEASURED: Opus 5.5 stage 1 calls billed $0.093
+/// each for 11.0k written tokens at $4 per million, which is exactly twice the input price.
+pub const CLI_CACHE_WRITE_MULT: f64 = 2.0;
+
 /// What stage 1 costs over a number of sites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CalibrationEstimate {
@@ -231,7 +244,12 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
         };
     }
     let prefix = match backend {
-        ProjectBackend::Cli => CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT * calls as f64,
+        // The CLI's own per-call prompt is written to the cache with the prefix, every call.
+        ProjectBackend::Cli => {
+            (CALIBRATION_PREFIX_TOKENS + CLI_CALL_OVERHEAD_TOKENS)
+                * CLI_CACHE_WRITE_MULT
+                * calls as f64
+        }
         ProjectBackend::Api => {
             CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT
                 + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
@@ -259,25 +277,39 @@ pub const GROUP_REVIEW_INPUT_TOKENS_PER_SITE: f64 = 140.0;
 /// The reply's budget per site (its index in a sub-group and its share of the sub-group summaries
 /// and the other entries); the server's cap per call is built from the same figure.
 pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE: f64 = 40.0;
-/// Estimator assumption: sites in one rule group. Before the scan nobody knows how many rules
-/// fire; a group of 8 is the middle of what the scripted fixtures and the recorded runs show.
-pub const GROUP_REVIEW_SITES_PER_GROUP: f64 = 8.0;
+/// The reply's fixed part: the rule summary, a sub-group with its summary and the entries, which
+/// a one-site group writes as much of as a big one. MEASURED: 90 calls of the faktura cli run
+/// averaged 1,048 output tokens at about 1.3 sites each.
+pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL: f64 = 950.0;
+/// Estimator assumption: sites in one rule group (one group is one rule). MEASURED, not guessed:
+/// the faktura cli run found 116 sites in 90 rule groups, 1.3 each; the earlier assumption of 8
+/// priced 15 calls where the run made 90. A repository with many sites to a rule is priced as
+/// more calls than it makes, which errs high; [`group_review_estimate`] caps the groups at the
+/// number of rules.
+pub const GROUP_REVIEW_SITES_PER_GROUP: f64 = 1.3;
 /// The most sites one group reviewer call is asked about (`group_review::MAX_CHUNK_MEMBERS`).
 pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
 
 /// What stage 2 costs over a number of sites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupReviewEstimate {
-    /// Model calls: one per rule group, at least one per 150 sites.
+    /// Model calls: one per rule group (never more than the rules), at least one per 150 sites.
     pub calls: usize,
-    /// Input tokens at full price (nothing is cached).
+    /// Input tokens in full-price equivalents (nothing is shared between calls).
     pub input_tokens: f64,
     /// Output tokens, before the model's own scale.
     pub output_tokens: f64,
 }
 
-/// Stage 2 over `sites`.
-pub fn group_review_estimate(sites: f64) -> GroupReviewEstimate {
+/// Stage 2 over `sites` found by `rules` selected rules on `backend`. A group is one rule, so
+/// there are never more groups than rules; a group over 150 sites is read in more than one call.
+/// The CLI backend adds its own per-call prompt, written to the cache at twice the input price
+/// ([`CLI_CALL_OVERHEAD_TOKENS`]); the API backend sends the prompt once at the input price.
+pub fn group_review_estimate(
+    sites: f64,
+    rules: usize,
+    backend: ProjectBackend,
+) -> GroupReviewEstimate {
     let sites = sites.max(0.0);
     if sites < 1.0 {
         return GroupReviewEstimate {
@@ -286,15 +318,23 @@ pub fn group_review_estimate(sites: f64) -> GroupReviewEstimate {
             output_tokens: 0.0,
         };
     }
-    let calls = (sites / GROUP_REVIEW_SITES_PER_GROUP)
+    let groups = (sites / GROUP_REVIEW_SITES_PER_GROUP)
         .ceil()
+        .min(rules.max(1) as f64);
+    let calls = groups
         .max((sites / GROUP_REVIEW_MAX_CHUNK_SITES).ceil())
         .max(1.0);
+    let per_call = GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS;
+    let prompt = calls * per_call + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
+    let input_tokens = match backend {
+        ProjectBackend::Cli => (prompt + calls * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT,
+        ProjectBackend::Api => prompt,
+    };
     GroupReviewEstimate {
         calls: calls as usize,
-        input_tokens: calls * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
-            + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE,
-        output_tokens: sites * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE,
+        input_tokens,
+        output_tokens: calls * GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL
+            + sites * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE,
     }
 }
 
@@ -1063,6 +1103,11 @@ fn estimate_run_with_regeneration(
     const DEEP_PASSES: f64 = 3.0;
     const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
     const FIX_BATCH_FINDINGS: usize = 25;
+    // What the CLI's own prompt adds to every call, in full-price equivalents (zero on the API).
+    let cli_call = match flags.backend {
+        ProjectBackend::Cli => CLI_CALL_OVERHEAD_TOKENS * CLI_CACHE_WRITE_MULT,
+        ProjectBackend::Api => 0.0,
+    };
 
     let selected = repo.selected;
     let (scan_in_price, scan_out_price) = (models.scan.price_in, models.scan.price_out);
@@ -1092,7 +1137,7 @@ fn estimate_run_with_regeneration(
             return 0.0;
         }
         match flags.backend {
-            ProjectBackend::Cli => prefix_tokens * CACHE_WRITE_MULT * calls as f64,
+            ProjectBackend::Cli => prefix_tokens * CLI_CACHE_WRITE_MULT * calls as f64,
             ProjectBackend::Api => {
                 prefix_tokens * CACHE_WRITE_MULT
                     + prefix_tokens * CACHE_READ_MULT * (calls - 1) as f64
@@ -1101,11 +1146,12 @@ fn estimate_run_with_regeneration(
     };
 
     // ── Scan passes (batch discount applies) and the resolution round (it never does). ──
-    let scan_in = (prefix_billed(calls_per_chunk) + calls_per_chunk as f64 * PASS_OVERHEAD_TOKENS)
+    let scan_in = (prefix_billed(calls_per_chunk)
+        + calls_per_chunk as f64 * (PASS_OVERHEAD_TOKENS + cli_call))
         * chunks as f64;
     let resolution_calls = if selected > 0 { passes } else { 0 };
-    let resolution_in =
-        resolution_calls as f64 * (prefix_tokens * CACHE_READ_MULT + PASS_OVERHEAD_TOKENS);
+    let resolution_in = resolution_calls as f64
+        * (prefix_tokens * CACHE_READ_MULT + PASS_OVERHEAD_TOKENS + cli_call);
     let scan_out = (f64::from(SCAN_OUTPUT_TOKENS_PER_RULE) * selected as f64
         + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64)
         * scan_scale;
@@ -1129,7 +1175,7 @@ fn estimate_run_with_regeneration(
     // ── Group review: stage 2 reads each rule group once, in real time, on its own model. ──
     let (gr_in, gr_out, gr_dollars, gr_calls) = match models.group_review {
         Some(m) => {
-            let e = group_review_estimate(sites);
+            let e = group_review_estimate(sites, repo.selected, flags.backend);
             let gr_scale = output_scale(m.id);
             let gout = e.output_tokens * gr_scale;
             (
@@ -1146,7 +1192,7 @@ fn estimate_run_with_regeneration(
     // (never cached) with that batch's option sets. ──
     let multi = repo.multi_option_selected;
     let alt_calls = multi.div_ceil(ALTERNATIVES_BATCH_RULES);
-    let alt_in = alt_calls as f64 * prefix_tokens
+    let alt_in = alt_calls as f64 * (prefix_tokens + cli_call)
         + if multi > 0 {
             multi as f64 * ALTERNATIVES_INPUT_TOKENS_PER_RULE + ALTERNATIVES_INPUT_TOKENS_PER_CALL
         } else {
@@ -1167,6 +1213,7 @@ fn estimate_run_with_regeneration(
     };
     // The expected figure is the usual run's text; the model's scale applies to it. The ceiling
     // (every repeat round at the request cap) is already an upper bound and is not scaled.
+    let regen_in = regen.input_tokens + regen.calls as f64 * cli_call;
     let regen_out = if scale_regen_output {
         regen.output_tokens * scan_scale
     } else {
@@ -1176,7 +1223,8 @@ fn estimate_run_with_regeneration(
     // ── Fix stage: one sentence per finding on the fix model. ──
     let (fix_in, fix_out, fix_dollars, fix_calls) = match models.fix {
         Some(m) if findings > 0.0 => {
-            let fin = findings * FIX_INPUT_TOKENS_PER_FINDING;
+            let fin = findings * FIX_INPUT_TOKENS_PER_FINDING
+                + (findings as usize).div_ceil(FIX_BATCH_FINDINGS) as f64 * cli_call;
             let fout = findings * FIX_OUTPUT_TOKENS_PER_FINDING;
             (
                 fin,
@@ -1217,7 +1265,7 @@ fn estimate_run_with_regeneration(
         + (cal_in * cal_in_price + cal_out * cal_out_price)
         + (alt_in * scan_in_price + alt_out * scan_out_price)
         + (deep_in * scan_in_price + deep_out * scan_out_price)
-        + (regen.input_tokens * scan_in_price + regen_out * scan_out_price))
+        + (regen_in * scan_in_price + regen_out * scan_out_price))
         / 1_000_000.0
         + gr_dollars
         + fix_dollars
@@ -1232,7 +1280,7 @@ fn estimate_run_with_regeneration(
         + alt_out
         + deep_in
         + deep_out
-        + regen.input_tokens
+        + regen_in
         + regen_out
         + gr_in
         + gr_out
@@ -3123,23 +3171,32 @@ mod tests {
 
     #[test]
     fn group_review_is_priced_as_one_call_per_rule_group() {
-        let none = group_review_estimate(0.0);
+        let api = ProjectBackend::Api;
+        let none = group_review_estimate(0.0, 152, api);
         assert_eq!(
             (none.calls, none.input_tokens, none.output_tokens),
             (0, 0.0, 0.0)
         );
-        // 80 sites in groups of 8 are 10 calls; each carries the system prompt and its overhead.
-        let e = group_review_estimate(80.0);
-        assert_eq!(e.calls, 10);
-        let expected_in = 10.0 * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
-            + 80.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
+        // 78 sites at 1.3 to a group are 60 calls; each carries the system prompt and its
+        // overhead, and the reply's fixed part.
+        let e = group_review_estimate(78.0, 152, api);
+        assert_eq!(e.calls, 60);
+        let expected_in = 60.0 * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
+            + 78.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
         assert!((e.input_tokens - expected_in).abs() < 1e-6, "{e:?}");
-        assert!((e.output_tokens - 80.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE).abs() < 1e-6);
+        let expected_out =
+            60.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL + 78.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE;
+        assert!((e.output_tokens - expected_out).abs() < 1e-6, "{e:?}");
         // A single site is still one call.
-        assert_eq!(group_review_estimate(1.0).calls, 1);
-        // A group is never bigger than a call takes: 3,000 sites in 8s is 375 groups, and the
-        // 150-site cap would need only 20, so the groups stand.
-        assert_eq!(group_review_estimate(3_000.0).calls, 375);
+        assert_eq!(group_review_estimate(1.0, 152, api).calls, 1);
+        // A group is one rule: there are never more calls than rules.
+        assert_eq!(group_review_estimate(3_000.0, 152, api).calls, 152);
+        // And a group over 150 sites is read in more than one call.
+        assert_eq!(group_review_estimate(3_000.0, 5, api).calls, 20);
+        // On the CLI every call also carries the CLI's own prompt, written at twice the price.
+        let cli = group_review_estimate(78.0, 152, ProjectBackend::Cli);
+        let want_cli = (expected_in + 60.0 * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT;
+        assert!((cli.input_tokens - want_cli).abs() < 1e-6, "{cli:?}");
     }
 
     #[test]
@@ -3164,7 +3221,7 @@ mod tests {
         };
         let without = estimate_run_cost_bounds(&fixture(), "parallel", &models(None), flags());
         let with = estimate_run_cost_bounds(&fixture(), "parallel", &models(Some(fable)), flags());
-        let e = group_review_estimate(sites as f64);
+        let e = group_review_estimate(sites as f64, fixture().selected, ProjectBackend::Api);
         let dollars = with.expected.1 - without.expected.1;
         let want = (e.input_tokens * 10.0 + e.output_tokens * 50.0) / 1_000_000.0;
         assert!(want > 0.0, "{e:?}");
@@ -3193,10 +3250,12 @@ mod tests {
             + CALIBRATION_PREFIX_TOKENS * 1.25
             + CALIBRATION_PREFIX_TOKENS * 0.10 * 99.0;
         assert!((api.input_tokens - expected_api).abs() < 1e-6, "{api:?}");
-        // A CLI call is a fresh subprocess: every call pays the cache write.
+        // A CLI call is a fresh subprocess: every call pays the cache write, for the CLI's own
+        // prompt as well, at the one-hour write price.
         let cli = calibration_estimate(100.0, ProjectBackend::Cli);
-        let expected_cli =
-            100.0 * (CALIBRATION_SITE_INPUT_TOKENS + CALIBRATION_PREFIX_TOKENS * 1.25);
+        let expected_cli = 100.0
+            * (CALIBRATION_SITE_INPUT_TOKENS
+                + (CALIBRATION_PREFIX_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT);
         assert!((cli.input_tokens - expected_cli).abs() < 1e-6, "{cli:?}");
         assert!(cli.input_tokens > api.input_tokens);
         // No sites, no calls, no cost.
@@ -3531,5 +3590,105 @@ mod tests {
         assert!((both.ceiling_usd - one(&a).ceiling_usd - one(&b).ceiling_usd).abs() < 1e-9);
         // 400,000 characters is two chunks: more passes than one chunk of the same rules.
         assert!(one(&b).expected.2 > 2 * 2);
+    }
+    // ── The faktura accuracy run: the estimate against what the run modeled ────────────────
+
+    const FABLE: PricedModel<'static> = PricedModel {
+        id: "claude-fable-5-1",
+        price_in: 10.0,
+        price_out: 50.0,
+    };
+    const OPUS: PricedModel<'static> = PricedModel {
+        id: "claude-opus-5-5",
+        price_in: 4.0,
+        price_out: 20.0,
+    };
+
+    /// faktura on the CLI backend (cli run 20261105T205200Z-39d435): 25,871 characters of code,
+    /// 152 rules (34 with alternatives) in 4 routing groups; audit Sonnet 5.5, stage 1 Opus 5.5,
+    /// stage 2 Fable 5.1, fix Haiku 5.5. The pre-flight said about $4.53 over 168 calls and the
+    /// run modeled $40.77 over 249: scan $2.13 (22 calls), stage 1 $10.79 (116), alternatives
+    /// $0.46 (2), detail $1.09 (13), fix $2.68 (6), stage 2 $23.62 (90).
+    fn faktura() -> RunRepoInput {
+        RunRepoInput {
+            repo: "faktura".into(),
+            code_chars: 25_871,
+            selected: 152,
+            multi_option_selected: 34,
+            routing_groups: 4,
+        }
+    }
+
+    fn cli_flags() -> RunFlags {
+        RunFlags {
+            deep: false,
+            backend: ProjectBackend::Cli,
+            terse_output: true,
+        }
+    }
+
+    const FAKTURA_MODELED_USD: f64 = 40.77;
+    const FAKTURA_MODELED_CALLS: f64 = 249.0;
+
+    #[test]
+    fn the_faktura_estimate_is_within_a_third_of_what_the_run_modeled() {
+        let models = RunModels {
+            scan: SONNET,
+            calibration: OPUS,
+            group_review: Some(FABLE),
+            fix: Some(HAIKU),
+            clone_judge: None,
+        };
+        let bounds = estimate_run_cost_bounds(&faktura(), "parallel", &models, cli_flags());
+        let (_, dollars, calls) = bounds.expected;
+        assert!(
+            (FAKTURA_MODELED_USD * 0.67..=FAKTURA_MODELED_USD * 1.33).contains(&dollars),
+            "estimated ${dollars:.2} against ${FAKTURA_MODELED_USD} modeled"
+        );
+        assert!(
+            (FAKTURA_MODELED_CALLS * 0.8..=FAKTURA_MODELED_CALLS * 1.2).contains(&(calls as f64)),
+            "estimated {calls} calls against {FAKTURA_MODELED_CALLS} modeled"
+        );
+        // The ceiling carries stage 2 as well, so it is never under the expected figure.
+        assert!(bounds.ceiling_usd >= dollars);
+        let without = RunModels {
+            group_review: None,
+            ..models
+        };
+        let lacking = estimate_run_cost_bounds(&faktura(), "parallel", &without, cli_flags());
+        assert!(
+            bounds.ceiling_usd - lacking.ceiling_usd > 10.0,
+            "stage 2 is in the ceiling: {} vs {}",
+            bounds.ceiling_usd,
+            lacking.ceiling_usd
+        );
+    }
+
+    #[test]
+    fn the_faktura_stages_are_each_near_what_the_run_modeled() {
+        let sites = estimated_sites(&faktura(), "parallel") as f64;
+        assert!(
+            (100.0..=130.0).contains(&sites),
+            "116 sites were found: {sites}"
+        );
+        let cal = calibration_estimate(sites, ProjectBackend::Cli);
+        let cal_usd =
+            (cal.input_tokens * OPUS.price_in + cal.output_tokens * OPUS.price_out) / 1_000_000.0;
+        assert!(
+            (10.79 * 0.75..=10.79 * 1.25).contains(&cal_usd),
+            "stage 1 ${cal_usd:.2} against $10.79"
+        );
+        let gr = group_review_estimate(sites, faktura().selected, ProjectBackend::Cli);
+        let gr_usd =
+            (gr.input_tokens * FABLE.price_in + gr.output_tokens * FABLE.price_out) / 1_000_000.0;
+        assert!(
+            (23.62 * 0.75..=23.62 * 1.25).contains(&gr_usd),
+            "stage 2 ${gr_usd:.2} against $23.62"
+        );
+        assert!(
+            (70..=110).contains(&gr.calls),
+            "90 rule groups were read: {}",
+            gr.calls
+        );
     }
 }
