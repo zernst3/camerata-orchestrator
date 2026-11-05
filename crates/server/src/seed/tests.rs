@@ -390,6 +390,82 @@ async fn a_seeded_project_carries_the_escalation_block_in_its_ledger() {
     }
 }
 
+/// Spec U3: a merged row is always left out of a node batch, whoever sends the request. The
+/// click-through's screen sends its own `except`; this sends none, so only the server's own hold
+/// list stands between the batch and the row the engine merged with no merge decision behind it.
+#[tokio::test]
+async fn a_node_batch_writes_no_site_record_for_a_merged_without_decision_row() {
+    let (_dir, seeded) = seed(Variant::Base).await;
+    let (_state, app) = reopen(&seeded);
+    let (path, line) = place_of("sql-10", Variant::Base);
+    let node = "sub:SEC-NO-RAW-SQL-CONCAT-1/0";
+    let page: SitesPage = get(
+        &app,
+        &seeded,
+        "the sub-group's sites",
+        &format!("review/sites?node={node}&limit=50"),
+    )
+    .await;
+    let merged = page
+        .rows
+        .iter()
+        .find(|r| r.path == path && r.line == line)
+        .expect("sql-10 is in the sub-group");
+    assert_eq!(merged.held, Some(HoldReason::MergedWithoutDecision));
+
+    let body = serde_json::json!({
+        "scope": { "node": node },
+        "key": "",
+        "state": "confirmed",
+        "reason": "every query here concatenates a request value",
+        "decided_by": "zach",
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/decisions", seeded.project_id))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let recorded: Value = serde_json::from_slice(&bytes).unwrap();
+    let covered = recorded["decision"]["applies_to"].as_array().unwrap();
+    assert!(
+        !covered.iter().any(|k| *k == merged.site_key),
+        "the batch covers a row merged with no decision behind it: {recorded}"
+    );
+    assert!(
+        recorded["decision"]["except"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| *k == merged.site_key),
+        "and it is named as left out: {recorded}"
+    );
+    // No site record was written for it either.
+    let after: SitesPage = get(
+        &app,
+        &seeded,
+        "the sub-group's sites",
+        &format!("review/sites?node={node}&limit=50"),
+    )
+    .await;
+    let row = after
+        .rows
+        .iter()
+        .find(|r| r.site_key == merged.site_key)
+        .unwrap();
+    assert!(row.decision.is_none(), "{:?}", row.decision);
+}
+
 #[tokio::test]
 async fn seed_moved_variant_produces_stale_records() {
     let (_dir, seeded) = seed(Variant::Moved).await;
