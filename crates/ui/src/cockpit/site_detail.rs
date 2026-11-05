@@ -226,29 +226,29 @@ pub(crate) fn SiteDetailView(
                 }
             }
 
-            FieldRow { state: headline, on_event }
+            FieldRow { state: headline, editable: !thrown_out, on_event }
             if has_form(EditField::Headline) {
                 EditFormFor { field: EditField::Headline, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: severity, note: sev_note, badge: Some(row.severity.clone()), on_event }
+            FieldRow { state: severity, note: sev_note, badge: Some(row.severity.clone()), editable: !thrown_out, on_event }
             if has_form(EditField::Severity) {
                 EditFormFor { field: EditField::Severity, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: detail, multiline: true, on_event }
+            FieldRow { state: detail, multiline: true, editable: !thrown_out, on_event }
             if has_form(EditField::Detail) {
                 EditFormFor { field: EditField::Detail, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: fix, multiline: true, on_event }
+            FieldRow { state: fix, multiline: true, editable: !thrown_out, on_event }
             if has_form(EditField::Fix) {
                 EditFormFor { field: EditField::Fix, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: fix_type, on_event }
+            FieldRow { state: fix_type, editable: !thrown_out, on_event }
             if has_form(EditField::FixType) {
                 EditFormFor { field: EditField::FixType, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
             div { class: "site-detail-meta",
                 for state in meta {
-                    FieldRow { key: "{state.label}", state, compact: true, on_event }
+                    FieldRow { key: "{state.label}", state, compact: true, editable: !thrown_out, on_event }
                 }
             }
             for field in [EditField::RuleId, EditField::Kind, EditField::Category] {
@@ -439,6 +439,9 @@ fn FieldRow(
     /// Drawn as a small item of the meta line.
     #[props(default)]
     compact: bool,
+    /// The edit button is drawn. A row the engine threw out cannot be edited.
+    #[props(default = true)]
+    editable: bool,
     on_event: Callback<DetailEvent>,
 ) -> Element {
     let field = state.field;
@@ -474,11 +477,13 @@ fn FieldRow(
             if let Some(edit) = stale.as_ref() {
                 span { class: "mark-stale", title: "{stale_edit_tip(edit)}", "stale edit" }
             }
-            button {
-                class: "btn-edit-sm site-detail-edit",
-                title: "Edit {state.label.to_lowercase()}{letter}",
-                onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginEdit(field))),
-                "edit"
+            if editable {
+                button {
+                    class: "btn-edit-sm site-detail-edit",
+                    title: "Edit {state.label.to_lowercase()}{letter}",
+                    onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginEdit(field))),
+                    "edit"
+                }
             }
         }
         if let Some(edit) = stale {

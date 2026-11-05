@@ -1502,6 +1502,16 @@ pub fn reduce(
     row: &SiteRow,
     ctx: &DetailContext,
 ) -> DetailMode {
+    // The edits route finds only the report's findings, so an edit on a thrown-out row would
+    // answer `unknown_site`: no edit or split form opens on one.
+    if is_thrown_out(row)
+        && matches!(
+            action,
+            DetailAction::PickField | DetailAction::BeginEdit(_) | DetailAction::BeginSplit
+        )
+    {
+        return mode;
+    }
     match action {
         DetailAction::PickField => DetailMode::PickField,
         DetailAction::BeginEdit(field) => {

@@ -1642,3 +1642,35 @@ fn a_stale_decision_on_a_thrown_out_row_offers_reapply_only_when_the_server_woul
         assert_eq!(decision_line(&row, &ctx()).actions, actions, "{state:?}");
     }
 }
+
+/// Wave 20 D1 residue: the edits route searches only the report's findings, so an edit on a
+/// thrown-out row answers `unknown_site`. The form (and the E chord) does not open on one.
+#[test]
+fn a_thrown_out_row_opens_no_edit_form() {
+    let row = thrown_out();
+    for action in [
+        DetailAction::PickField,
+        DetailAction::BeginEdit(EditField::Headline),
+        DetailAction::BeginEdit(EditField::Severity),
+        DetailAction::BeginEdit(EditField::Subgroup),
+        DetailAction::BeginSplit,
+    ] {
+        let next = reduce(DetailMode::Viewing, &action, &row, &ctx());
+        assert_eq!(next, DetailMode::Viewing, "{action:?}");
+    }
+    // A kept row keeps them.
+    let kept = plain();
+    assert!(matches!(
+        reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginEdit(EditField::Headline),
+            &kept,
+            &ctx()
+        ),
+        DetailMode::Edit(_)
+    ));
+    assert_eq!(
+        reduce(DetailMode::Viewing, &DetailAction::PickField, &kept, &ctx()),
+        DetailMode::PickField
+    );
+}

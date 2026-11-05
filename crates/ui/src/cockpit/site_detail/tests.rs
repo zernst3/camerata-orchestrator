@@ -1299,6 +1299,9 @@ fn a_thrown_out_row_draws_only_put_it_back_and_confirm_thrown_out() {
         "merge into",
         "pane-dispose",
         "site-detail-merge",
+        // The edits route finds only the report's findings: no edit control on a thrown-out row.
+        "site-detail-edit",
+        ">edit</button>",
     ] {
         assert!(
             !html.contains(refused),
@@ -1311,6 +1314,10 @@ fn a_thrown_out_row_draws_only_put_it_back_and_confirm_thrown_out() {
         assert!(kept.contains(drawn), "{drawn}");
     }
     assert!(!kept.contains("Confirm thrown out"));
+    assert!(
+        kept.contains("site-detail-edit"),
+        "a kept row keeps its edits"
+    );
 }
 
 #[test]
