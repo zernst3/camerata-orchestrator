@@ -990,3 +990,25 @@ fn the_engine_allocation_lists_kept_categories_and_never_the_thrown_out_stratum(
         .count();
     assert_eq!(drawn, kept, "the allocation covers the kept cards");
 }
+
+/// Wave 19 D2, mirrored from the server's `verdict_counts`: a thrown-out No the reviewer confirmed
+/// (a false-positive decision on the still thrown-out row) agrees with the engine and is not a
+/// real problem in the thrown-out rate; an unsettled No still is one.
+#[test]
+fn the_thrown_out_rate_does_not_count_a_confirmed_throw_out_as_a_real_problem() {
+    use camerata_api_types::review_view::SampleStratum;
+    let thrown = |mode: EngineMode| {
+        let mut p = Params::base(SEED);
+        p.engine_mode = mode;
+        let lane = build(&p).engine;
+        lane.strata
+            .into_iter()
+            .find(|s| s.stratum == SampleStratum::ThrownOut)
+            .unwrap()
+    };
+    let confirmed = thrown(EngineMode::ThrownOutConfirmed);
+    assert_eq!((confirmed.verdicts, confirmed.wrong), (1, 0));
+    assert_eq!(confirmed.rate_percent, Some(0.0));
+    let unsettled = thrown(EngineMode::ThrownOutNo);
+    assert_eq!((unsettled.verdicts, unsettled.wrong), (1, 1));
+}

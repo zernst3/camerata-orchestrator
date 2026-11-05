@@ -4,9 +4,10 @@
 //! drawn by [`crate::engine_check::draw_sample`], which depends on the run and the rows only, so
 //! the same run always shows the same cards in the same order.
 
+use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::review_view::{
-    CategoryAllocation, EngineCheckCard, EngineCheckLane, OutlierView, PlacementView,
-    SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
+    CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckLane, OutlierView,
+    PlacementView, SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
 };
 
 use super::ReviewComposer;
@@ -58,10 +59,28 @@ impl<'a> ReviewComposer<'a> {
                 .filter(|v| v.carried_from.is_none())
             {
                 verdicts += 1;
-                wrong += usize::from(!v.right);
+                wrong += usize::from(!v.right && !self.confirms_throw_out(v));
             }
         }
         (verdicts, wrong)
+    }
+
+    /// Whether a No is the reviewer confirming the engine was right to throw the row out: it names
+    /// a false-positive decision on its own key, and the row is still thrown out. The rate of
+    /// "real problems among thrown-out findings" counts a throw-out the reviewer upheld as an
+    /// answer that agrees with the engine, not as a real problem. A No on a kept row that names a
+    /// false positive says the row was not real, and still counts as wrong.
+    fn confirms_throw_out(&self, v: &camerata_api_types::review_view::EngineCheckVerdict) -> bool {
+        let Some(CorrectionRef::Decision(id)) = &v.correction else {
+            return false;
+        };
+        self.records.get(id.as_str()).is_some_and(|d| {
+            d.state == DecisionState::FalsePositive
+                && d.key == v.key
+                && self
+                    .row(&v.key)
+                    .is_some_and(|f| crate::engine_discard::reason_of(f).is_some())
+        })
     }
 
     /// `GET /api/projects/:id/review/engine-check`.

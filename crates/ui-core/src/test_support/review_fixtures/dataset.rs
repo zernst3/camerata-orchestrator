@@ -1891,9 +1891,25 @@ pub fn refresh_lane_totals(lane: &mut EngineCheckLane, rows: &[SiteRow]) {
             let cards: Vec<&EngineCheckCard> =
                 lane.cards.iter().filter(|c| c.stratum == stratum).collect();
             let verdicts = cards.iter().filter(|c| c.verdict.is_some()).count();
+            // As the server counts: a No that confirms a throw-out (a false-positive decision on
+            // the still thrown-out row) agrees with the engine and is not a real problem.
+            let confirms_throw_out = |c: &EngineCheckCard| match c
+                .verdict
+                .as_ref()
+                .and_then(|v| v.correction.as_ref())
+            {
+                Some(CorrectionRef::Decision(id)) => {
+                    c.site.thrown_out_reason.is_some()
+                        && c.site
+                            .decision
+                            .as_ref()
+                            .is_some_and(|d| d.id == *id && d.state == DecisionState::FalsePositive)
+                }
+                _ => false,
+            };
             let wrong = cards
                 .iter()
-                .filter(|c| c.verdict.as_ref().is_some_and(|v| !v.right))
+                .filter(|c| c.verdict.as_ref().is_some_and(|v| !v.right) && !confirms_throw_out(c))
                 .count();
             let (rate_percent, margin_percent) = rate_and_margin(verdicts, wrong);
             StratumRate {
