@@ -1,4 +1,3 @@
-#![allow(dead_code)] // DEVTEMP
 //! What every click-through test stands on: a fresh seeded server on a free port, a request-logging
 //! proxy between it and the liveview build, the liveview build itself, and a Chrome tab.
 //!
@@ -15,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use headless_chrome::browser::tab::ModifierKey;
 use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 use serde_json::{json, Value};
 
@@ -543,14 +541,6 @@ impl Stack {
         );
     }
 
-    /// Wait until nothing matching `selector` contains `text`.
-    pub fn wait_gone(&self, selector: &str, text: &str) {
-        self.wait_for(
-            &format!("{text:?} gone from {selector}"),
-            &format!("!T.has({}, {})", js_str(selector), js_str(text)),
-        );
-    }
-
     // ── What the reviewer does ──
 
     /// A real mouse click on the first element matching `selector` whose text contains `text`
@@ -597,13 +587,6 @@ impl Stack {
         self.tab
             .press_key(key)
             .unwrap_or_else(|e| panic!("pressing {key} failed: {e}"));
-    }
-
-    /// Press a key with Control held.
-    pub fn ctrl_key(&self, key: &str) {
-        self.tab
-            .press_key_with_modifiers(key, Some(&[ModifierKey::Ctrl]))
-            .unwrap_or_else(|e| panic!("pressing Ctrl+{key} failed: {e}"));
     }
 
     /// Focus the first element matching `selector` (that contains `text`) and type `value`
@@ -708,6 +691,58 @@ impl Stack {
         out
     }
 
+    /// Make a real git clone of `repo` (`owner/name`) with `files`, on disk under the data folder,
+    /// and link the project's repo to it, so the app can read code at a line. Returns the clone's
+    /// folder.
+    pub fn link_repo(&self, repo: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = self.data.path().join("clone").join(repo.replace('/', "-"));
+        std::fs::create_dir_all(&dir).expect("a clone folder");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            &format!("https://github.com/{repo}.git"),
+        ]);
+        for (path, text) in files {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().expect("a parent")).expect("a folder");
+            std::fs::write(&full, text).expect("a file");
+        }
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "the clone the click-through test reads",
+        ]);
+        let enc = repo.replace('/', "%2F");
+        let (status, body) = post_json(
+            &format!("{}/repos/{enc}/link", self.api),
+            &json!({ "path": dir }),
+        );
+        assert_eq!(status, 200, "linking {repo} failed: {body}");
+        dir
+    }
+
     /// The rows the release gate refuses, as the server lists them (held and merged without a
     /// decision).
     pub fn gate_held(&self) -> Vec<Value> {
@@ -741,14 +776,6 @@ impl Stack {
     pub fn script_platform(&self, script: &Value) {
         let (status, body) = post_json(&format!("{}/__platform/script", self.page), script);
         assert_eq!(status, 204, "scripting the platform failed: {body}");
-    }
-
-    /// Open the page again from scratch (what a reviewer's reload does).
-    pub fn reload(&self) {
-        self.tab.navigate_to(&self.page).expect("the page loads");
-        self.tab.wait_until_navigated().expect("the page loaded");
-        self.install_helpers();
-        self.wait_for("the lane tabs", "T.has('.triage-tab', 'Tree')");
     }
 }
 

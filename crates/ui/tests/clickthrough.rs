@@ -1,5 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(dead_code)] // DEVTEMP
 //! Click-through tests of the review lanes (review UI spec sections 13 and 14).
 //!
 //! Each test starts a fresh `camerata seed-review` server on a free port, the liveview build in
@@ -633,7 +632,7 @@ fn export_zip(stack: &Stack) -> Vec<u8> {
     stack.click(".export-clear .btn-run", "Export product");
     stack.wait_for(
         "the save dialog to have been asked",
-        &format!("T.has('.toast-host', 'Product export saved.')"),
+        "T.has('.toast-host', 'Product export saved.')",
     );
     std::fs::read(&path)
         .unwrap_or_else(|e| panic!("the app saved nothing at {}: {e}", path.display()))
@@ -1075,5 +1074,317 @@ fn changing_the_rate_moves_the_budget_sentence_and_the_ledger_block() {
 
     // Changing the line changes no decision: the counts are the clean variant's.
     stack.assert_shell_counts(&clean);
+    stack.assert_no_model_calls();
+}
+
+#[test]
+fn adding_a_finding_with_a_stale_snippet_is_held_and_the_gate_refuses_the_export() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Clean);
+    let clean = model.clean_strip();
+    stack.assert_shell_counts(&clean);
+    assert_eq!(
+        stack.js("T.count('.export-blocked')"),
+        0,
+        "the gate starts clear"
+    );
+
+    // The code the reviewer will quote, on disk where the app reads it from.
+    let first = "pub fn delete_session(token: &str) {\n";
+    let offending = "    let q = format!(\"DELETE FROM sessions WHERE token = '{}'\", token);\n";
+    let clone = stack.link_repo(
+        "acme/portal",
+        &[(
+            "src/orders/repo.rs",
+            &format!("// sessions\nuse std::fmt;\n\n{first}{offending}}}\n"),
+        )],
+    );
+
+    // Open a site (the Add button lives in the detail pane) and open the form.
+    open_site(
+        &stack,
+        "cat:injection",
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        &place_of(&model, "sql-01"),
+    );
+    stack.click(".site-detail-add", "");
+    stack.wait_for("the add form", "T.count('.site-detail-add-form') === 1");
+
+    // Fill it in: the repo, the file, the line the code is on, the rule, the words.
+    let fill = |nth: usize, value: &str| {
+        stack.js(&format!(
+            "(() => {{ const e = T.all('.site-detail-add-form input.addressee-input, .site-detail-add-form textarea.addressee-input')[{nth}]; e.focus(); e.select && e.select(); return true; }})()"
+        ));
+        stack.tab.send_character(value).expect("typing");
+    };
+    // Repo, File, Line, Rule, (Kind and Severity are selects), Headline; Detail, Fix and the reason are text areas.
+    fill(0, "acme/portal");
+    fill(1, "src/orders/repo.rs");
+    fill(2, "5");
+    fill(3, "SEC-NO-RAW-SQL-CONCAT-1");
+    fill(4, "Session delete builds SQL from the token");
+    fill(
+        5,
+        "The token is pasted into the DELETE statement between quotes.",
+    );
+    let reason = "found reading the session code";
+    stack.type_into(".site-detail-add-form .queue-reason-input", "", reason);
+
+    // Without the code loaded the form refuses, and nothing is sent.
+    let before = stack.mark();
+    stack.click(".site-detail-add-form .queue-prompt-commit", "");
+    stack.wait_text(
+        ".site-detail-add-form .site-detail-error",
+        "Load the code at that line first",
+    );
+    assert!(
+        stack
+            .requests_since(before)
+            .iter()
+            .all(|r| r.method == "GET"),
+        "a refused form posts nothing: {:?}",
+        stack.requests_since(before)
+    );
+
+    // Load the code at the line: it is the quote the finding will carry.
+    stack.click(".site-detail-add-form button", "Load code");
+    stack.wait_text(".site-detail-snippet", "DELETE FROM sessions WHERE token");
+
+    // The code changes on disk before the reviewer presses Add: the quoted line is gone.
+    std::fs::write(
+        clone.join("src/orders/repo.rs"),
+        format!("// sessions\nuse std::fmt;\n\n{first}    let q = sqlx::query(\"DELETE FROM sessions WHERE token = $1\");\n}}\n"),
+    )
+    .expect("the file changes");
+    stack.click(".site-detail-add-form .queue-prompt-commit", "");
+
+    // The row was added, and the evidence check could not find the quote near the line: the
+    // gate now refuses the export and names the row.
+    stack.wait_for("the gate's refusal", "T.count('.export-blocked') === 1");
+    let held = stack.gate_held();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["reason"], "evidence_unverified", "{held:?}");
+    assert_eq!(held[0]["path"], "src/orders/repo.rs", "{held:?}");
+    assert_eq!(held[0]["line"], 5, "{held:?}");
+    let panel = stack.text(".export-blocked");
+    assert!(
+        panel.contains("Export blocked: 1 row needs a decision"),
+        "{panel}"
+    );
+    assert!(panel.contains("src/orders/repo.rs:5"), "{panel}");
+    assert!(panel.contains("evidence unverified"), "{panel}");
+    assert_eq!(
+        stack.js("T.count('.export-clear .btn-run')"),
+        0,
+        "the Export button is gone"
+    );
+    let added = stack.store("edits");
+    let rows = added["added"].as_array().expect("added");
+    assert_eq!(rows.len(), 1, "{added}");
+    assert_eq!(rows[0]["reason"], reason, "{}", rows[0]);
+
+    stack.assert_shell_counts(&Strip {
+        unresolved: clean.unresolved + 1,
+        total: clean.total + 1,
+        held: 1,
+        ..clean
+    });
+    stack.assert_no_model_calls();
+}
+
+#[test]
+fn keyboard_descend_opens_the_sub_group_and_focuses_its_first_site() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Base);
+    let rule = "SEC-NO-RAW-SQL-CONCAT-1";
+    // Put the cursor on the tree (one click, as a reviewer does), then use only the keyboard:
+    // Down to Injection, Right to open it, Down to the rule, Right, Down to the sub-group,
+    // Right, then Enter to go into its sites.
+    stack.click(".tree-node .tree-label", "Authorization");
+    stack.wait_for("the keys to arm", "T.has('.pane-keys.armed', '')");
+    let node_is = |id: &str| {
+        format!("T.find('.tree-node.focused', '') && T.find('.tree-node.focused', '').getAttribute('data-node') === {}", support::js_str(&token(id)))
+    };
+    for (key, then_on) in [
+        ("ArrowDown", "cat:injection"),
+        ("ArrowRight", ""),
+        ("ArrowDown", &format!("rule:{rule}")),
+        ("ArrowRight", ""),
+        ("ArrowDown", &format!("sub:{rule}/0")),
+    ] {
+        stack.key(key);
+        if !then_on.is_empty() {
+            stack.wait_for(&format!("the cursor on {then_on}"), &node_is(then_on));
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    stack.key("ArrowRight");
+    stack.wait_for("the sub-group's sites", "T.count('.site-row') === 13");
+    stack.key("Enter");
+
+    // The first site is focused (the first row the server returns) and the right pane shows it.
+    stack.wait_for("a focused site", "T.count('.site-row.focused') === 1");
+    let focused_place = stack.text(".site-row.focused .col-loc");
+    let first_place = stack.text(".site-row .col-loc");
+    assert_eq!(
+        focused_place, first_place,
+        "the first site is the focused one"
+    );
+    stack.wait_text(".site-detail .site-detail-where", &focused_place);
+    // It is one of the sub-group's own sites.
+    let members: Vec<String> = model
+        .subgroup_of_rule(rule)
+        .iter()
+        .map(|id| place_of(&model, id))
+        .collect();
+    assert!(
+        members.contains(&focused_place),
+        "{focused_place} is not in {members:?}"
+    );
+
+    // Navigating by keys changed nothing on the server.
+    stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}
+
+#[test]
+fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_doors() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Clean);
+    let clean = model.clean_strip();
+    assert_eq!(clean.held, 0);
+    stack.assert_shell_counts(&clean);
+    assert_eq!(
+        stack.js("T.count('.export-clear .btn-run')"),
+        1,
+        "the Export button is there"
+    );
+
+    // Engine Check, card 1: press N, pick "wrong severity" with its digit, change it to high,
+    // commit. The Held count stays where it was and the card says corrected.
+    stack.click(".triage-tab", "Engine Check");
+    stack.wait_for("the first card", "T.count('.engine-card') === 1");
+    stack.click(".engine-card-pos", "");
+    stack.wait_for("the keys to arm", "T.has('.pane-keys.armed', '')");
+    let first = stack.text(".engine-card .site-pane-code");
+    stack.key("n");
+    stack.wait_for(
+        "the list of what was wrong",
+        "T.count('.engine-wrong') === 1",
+    );
+    stack.key("2");
+    stack.wait_for("the correction form", "T.count('.engine-correction') === 1");
+    stack.js("(() => { const s = T.find('.engine-correction select'); s.value = 'high'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()");
+    stack.type_into(
+        ".engine-correction .queue-reason-input",
+        "",
+        "this one is reachable without signing in",
+    );
+    stack.click(".engine-correction .queue-prompt-commit", "");
+    stack.wait_text(".engine-state-text", "corrected");
+    assert_eq!(stack.strip().held, 0, "a corrected No holds nothing");
+
+    // Card 2: press N, start the correction, then go Next without finishing it. The No is
+    // stored uncorrected, so Held rises by one and the export panel lists the row.
+    stack.click(".engine-card-keys button", "Next");
+    stack.wait_for(
+        "card 2",
+        "T.text('.engine-card-pos').startsWith('Card 2 of')",
+    );
+    let second = stack.text(".engine-card .site-pane-code");
+    assert_ne!(first, second);
+    stack.click(".engine-card-pos", "");
+    stack.key("n");
+    stack.wait_for("the list", "T.count('.engine-wrong') === 1");
+    stack.key("2");
+    stack.wait_for("the correction form", "T.count('.engine-correction') === 1");
+    stack.click(".engine-card-keys button", "Next");
+    stack.wait_for(
+        "card 3",
+        "T.text('.engine-card-pos').startsWith('Card 3 of')",
+    );
+    let mut held_one = clean;
+    held_one.held = 1;
+    stack.assert_shell_counts(&held_one);
+    stack.wait_for("the export panel", "T.count('.export-blocked') === 1");
+    let panel = stack.text(".export-blocked");
+    assert!(
+        panel.contains("Export blocked: 1 row needs a decision"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains(&second),
+        "the panel lists the row of card 2: {panel}"
+    );
+    assert!(
+        panel.contains("Engine Check said No, no correction yet"),
+        "{panel}"
+    );
+    assert_eq!(
+        stack.js("T.count('.export-clear .btn-run')"),
+        0,
+        "the Export button is gone"
+    );
+
+    // The panel's door on that row takes the reviewer to that card in the Engine Check lane.
+    stack.click_in(".gate-row", &second, "button");
+    stack.wait_for(
+        "card 2 again",
+        "T.text('.engine-card-pos').startsWith('Card 2 of')",
+    );
+    assert_eq!(stack.text(".engine-card .site-pane-code"), second);
+    assert!(
+        stack.js_bool("T.has('.triage-tab.active', 'Engine Check')"),
+        "the Engine Check lane is showing"
+    );
+
+    // Correct it: the Held count falls and the Export button is back.
+    stack.click(".engine-card button", "Correct it");
+    stack.wait_for("the correction form", "T.count('.engine-correction') === 1");
+    stack.type_into(
+        ".engine-correction .queue-reason-input",
+        "",
+        "this one is a real finding at critical",
+    );
+    stack.js("(() => { const s = T.find('.engine-correction select'); s.value = 'critical'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()");
+    stack.click(".engine-correction .queue-prompt-commit", "");
+    stack.wait_for(
+        "the Export button",
+        "T.count('.export-clear .btn-run') === 1",
+    );
+    stack.assert_shell_counts(&clean);
+
+    // Export: the save dialog goes through the platform, and the package carries the severity
+    // edited on card 1.
+    let zip_bytes = export_zip(&stack);
+    let calls = stack.platform_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        (calls[0]["call"].as_str(), calls[0]["outcome"].as_str()),
+        (Some("save_file"), Some("Saved"))
+    );
+    let (path, line) = first.rsplit_once(':').expect("path:line");
+    let all = {
+        use std::io::Read;
+        let mut outer = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
+        let mut text = String::new();
+        outer
+            .by_name("json/all-findings.json")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        serde_json::from_str::<Value>(&text).unwrap()
+    };
+    let row = all
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|f| f["path"] == path && f["line"].as_u64() == line.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("{first} is in the export"));
+    assert_eq!(
+        row["severity"], "high",
+        "the edit made on card 1 ships: {row}"
+    );
     stack.assert_no_model_calls();
 }
