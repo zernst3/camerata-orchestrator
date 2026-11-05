@@ -948,7 +948,29 @@ fn AddForm(draft: AddDraft, ctx: DetailContext, on_event: Callback<DetailEvent>)
                 label { "Repo" }
                 input { class: "addressee-input", r#type: "text", value: "{draft.repo}", oninput: text(AddField::Repo) }
                 label { "File" }
-                input { class: "addressee-input", r#type: "text", value: "{draft.path}", oninput: text(AddField::Path) }
+                div { class: "site-detail-line-load",
+                    input { class: "addressee-input", r#type: "text", value: "{draft.path}", oninput: text(AddField::Path) }
+                    button {
+                        class: "btn-edit-sm site-detail-pick-path",
+                        title: "Choose the file in a file dialog. It fills the File field.",
+                        onclick: {
+                            let repo = draft.repo.clone();
+                            move |_| {
+                                let repo = repo.clone();
+                                spawn(async move {
+                                    let picked = camerata_ui::platform::current()
+                                        .pick_path("Choose the file the finding is in")
+                                        .await;
+                                    if let Some(picked) = picked {
+                                        let path = camerata_ui::platform::path_in_repo(&picked, &repo);
+                                        on_event.call(DetailEvent::Form(DetailAction::Add(AddField::Path, path)));
+                                    }
+                                });
+                            }
+                        },
+                        "Choose file"
+                    }
+                }
                 label { "Line" }
                 div { class: "site-detail-line-load",
                     input { class: "addressee-input", r#type: "text", inputmode: "numeric", value: "{draft.line}", oninput: text(AddField::Line) }

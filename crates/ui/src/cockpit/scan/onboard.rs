@@ -41,14 +41,13 @@ pub(in crate::cockpit) enum RepoDetect {
 /// Let the user NAVIGATE to a local repo folder; derive its `owner/repo` from the git
 /// origin remote (server-side).
 pub(in crate::cockpit) async fn detect_local_repo() -> RepoDetect {
-    let Some(folder) = rfd::AsyncFileDialog::new()
-        .set_title("Choose a local repo folder")
-        .pick_folder()
+    let Some(folder) = camerata_ui::platform::current()
+        .pick_folder("Choose a local repo folder")
         .await
     else {
         return RepoDetect::Cancelled;
     };
-    let path = folder.path().to_string_lossy().to_string();
+    let path = folder.to_string_lossy().to_string();
     let resp = match reqwest::Client::new()
         .post(format!("{}/api/git/detect-repo", crate::bff_base()))
         .json(&serde_json::json!({ "path": path }))
@@ -619,14 +618,13 @@ pub(in crate::cockpit) fn GreenfieldForm(
                         class: "btn-edit-sm",
                         onclick: move |_| {
                             spawn(async move {
-                                let Some(folder) = rfd::AsyncFileDialog::new()
-                                    .set_title("Choose the PARENT folder — Camerata creates the repo directory inside it")
-                                    .pick_folder()
+                                let Some(folder) = camerata_ui::platform::current()
+                                    .pick_folder("Choose the PARENT folder — Camerata creates the repo directory inside it")
                                     .await
                                 else {
                                     return;
                                 };
-                                let parent = folder.path().to_string_lossy().to_string();
+                                let parent = folder.to_string_lossy().to_string();
                                 let name = gf_name.peek().trim().to_string();
                                 let dest = if name.is_empty() {
                                     parent.clone()

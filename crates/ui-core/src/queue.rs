@@ -68,6 +68,15 @@ pub fn ordered(view: &QueueView) -> Vec<&QueueRow> {
     rows
 }
 
+/// The site key of the first row, in the order the table draws them, that still needs a decision:
+/// an escalated row with none yet.
+pub fn first_needing_decision(view: &QueueView) -> Option<String> {
+    ordered(view)
+        .into_iter()
+        .find(|r| r.candidate.escalated && r.site.decision.is_none())
+        .map(|r| r.site.site_key.clone())
+}
+
 // ── What the view is showing ──────────────────────────────────────────────────────────────
 
 /// The queue's own view state. "Show below the line" is a flag here and nothing more: it changes

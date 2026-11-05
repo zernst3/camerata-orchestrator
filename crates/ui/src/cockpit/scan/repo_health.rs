@@ -106,12 +106,11 @@ pub(in crate::cockpit) fn RepoHealthPanel(project_id: String) -> Element {
                                     onclick: move |_| {
                                         let repo = repo.clone();
                                         spawn(async move {
-                                            if let Some(folder) = rfd::AsyncFileDialog::new()
-                                                .set_title("Choose this repo's local folder")
-                                                .pick_folder()
+                                            if let Some(folder) = camerata_ui::platform::current()
+                                                .pick_folder("Choose this repo's local folder")
                                                 .await
                                             {
-                                                let p = folder.path().to_string_lossy().to_string();
+                                                let p = folder.to_string_lossy().to_string();
                                                 if set_repo_path(&repo, &p).await {
                                                     refresh += 1;
                                                 } else {

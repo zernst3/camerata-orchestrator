@@ -88,14 +88,10 @@ pub(super) async fn add_custom_rule(
 /// Pop a native save dialog and write `content` to disk. Returns true on success, false if the
 /// user cancelled or the write failed.
 pub(super) async fn save_json_file(default_name: &str, content: String) -> bool {
-    match rfd::AsyncFileDialog::new()
-        .set_file_name(default_name)
-        .save_file()
+    camerata_ui::platform::current()
+        .save_file(default_name, content.as_bytes())
         .await
-    {
-        Some(file) => file.write(content.as_bytes()).await.is_ok(),
-        None => false,
-    }
+        == camerata_ui::platform::SaveOutcome::Saved
 }
 
 /// Rewrite a ruleset JSON so every base selection and custom rule targets `repos`. Used by import

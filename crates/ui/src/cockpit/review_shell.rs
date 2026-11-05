@@ -27,6 +27,11 @@ use camerata_ui::review_io::ReviewApi;
 use camerata_ui_core::queue::applied_budget_stands;
 use camerata_ui_core::review_settings::effect_sentence;
 
+/// A request, from the shell's palette to the Escalations lane, to put the cursor on the first row
+/// that still needs a decision. The lane clears it once it has done so.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct NeedsDecisionRequest(pub Signal<bool>);
+
 /// The lane signal, provided by the host so a lane can switch to another with `1` to `5`.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct LaneControl(pub Signal<Lane>);
@@ -179,6 +184,67 @@ pub(crate) fn ReviewShellHost(
             lane.set(wanted.lane());
         }
     });
+
+    // The command palette (Ctrl or Cmd K): lines to go to each lane and to the first row that
+    // needs a decision. The shell registers its link in the slot the results view provides, like
+    // the flat Queue does, and takes it back when it unmounts.
+    let palette_slot = try_use_context::<super::palette::PaletteSlot>();
+    let mut palette_open = use_signal(|| Option::<super::palette::PaletteOpen>::None);
+    let mut palette_serial = use_signal(|| 0u64);
+    let mut needs_decision = use_signal(|| false);
+    use_context_provider(|| NeedsDecisionRequest(needs_decision));
+    let run_palette = use_callback(
+        move |entry: camerata_ui_core::palette::PaletteEntry| -> bool {
+            use camerata_ui_core::palette::PaletteAction;
+            match entry.action {
+                PaletteAction::GoLane(next) => {
+                    lane.set(next);
+                    true
+                }
+                PaletteAction::FirstNeedingDecision => {
+                    lane.set(Lane::Escalations);
+                    needs_decision.set(true);
+                    true
+                }
+                _ => false,
+            }
+        },
+    );
+    let toggle_palette = use_callback(move |dom_modal: bool| {
+        if palette_open.peek().is_some() {
+            palette_open.set(None);
+            super::palette::restore_focus();
+            return;
+        }
+        // A dialog the page has up draws above the palette: refuse, as the flat Queue does.
+        if dom_modal {
+            return;
+        }
+        super::palette::remember_focus();
+        let id = *palette_serial.peek() + 1;
+        palette_serial.set(id);
+        palette_open.set(Some(super::palette::PaletteOpen {
+            id,
+            entries: camerata_ui_core::palette::shell_entries(),
+        }));
+    });
+    {
+        let link = use_hook(|| super::palette::PaletteLink {
+            open: palette_open,
+            on_run: run_palette,
+            on_chord: toggle_palette,
+        });
+        use_effect(move || {
+            if let Some(mut slot) = palette_slot {
+                slot.0.set(Some(link.clone()));
+            }
+        });
+        use_drop(move || {
+            if let Some(mut slot) = palette_slot {
+                slot.0.set(None);
+            }
+        });
+    }
 
     let active = lane();
     // The commit each repo was inspected at, for the code viewer and the stack the tree opens.

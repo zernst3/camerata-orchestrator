@@ -19,6 +19,8 @@ pub enum VariantArg {
     Base,
     /// A second inspection after the code moved: a stale decision, a stale edit, a new site.
     Moved,
+    /// The base project with every held row released: the release gate refuses nothing.
+    Clean,
 }
 
 impl From<VariantArg> for Variant {
@@ -26,6 +28,7 @@ impl From<VariantArg> for Variant {
         match v {
             VariantArg::Base => Variant::Base,
             VariantArg::Moved => Variant::Moved,
+            VariantArg::Clean => Variant::Clean,
         }
     }
 }
@@ -86,6 +89,10 @@ fn report(args: &SeedReviewArgs, seeded: &Seeded) -> String {
         s.stale.stale_edits,
         s.stale.moved,
         s.stale.new_since_decision,
+    ));
+    out.push_str(&format!(
+        "  code: a git repo at {} (the commit each inspection read)\n",
+        seeded.clone_dir.display()
     ));
     out.push_str("  wrote:\n");
     for file in seed::written_files(&seeded.store_dir) {

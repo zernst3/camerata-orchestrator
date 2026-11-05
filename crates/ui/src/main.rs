@@ -59,6 +59,12 @@ fn main() {
     // `cargo run -p camerata-ui -- gallery <out dir>` writes the review gallery's static pages and
     // never opens the cockpit window; with no arguments the app launches as always.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `camerata-ui liveview --project <id>` (feature `liveview-review`) serves the review lanes to a
+    // browser on localhost, for the click-through tests (review UI spec section 13).
+    #[cfg(feature = "liveview-review")]
+    if args.first().map(String::as_str) == Some("liveview") {
+        std::process::exit(cockpit::liveview::run_cli(&args[1..]));
+    }
     if let gallery::Launch::Gallery(rest) = gallery::route(&args) {
         std::process::exit(gallery::run_cli(&rest));
     }

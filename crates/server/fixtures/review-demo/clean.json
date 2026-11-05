@@ -1,0 +1,45 @@
+{
+  "about": "The clean variant: the base project after the reviewer has released every held row, so the release gate refuses nothing and the export panel shows its Export button. Each held row of the base variant gets the decision a reviewer would give it (the row the engine merged gets a recorded merge), and the Engine Check No on sql-11 is given its correction (the verdict is posted again with the correction named, replacing the uncorrected one).",
+  "decisions": [
+    {
+      "site": "sql-02",
+      "state": "false_positive",
+      "reason": "the quoted code is not at the cited line and the query below it already binds its value",
+      "decided_by": "zach",
+      "decided_at": "2026-11-03T10:00:00Z"
+    },
+    {
+      "site": "sql-12",
+      "state": "confirmed",
+      "reason": "the phone number is placed inside the query text between quotes",
+      "decided_by": "zach",
+      "decided_at": "2026-11-03T10:02:00Z"
+    },
+    {
+      "site": "thrown-01",
+      "state": "confirmed",
+      "reason": "the headline is a placeholder but the code is a real concatenation",
+      "decided_by": "zach",
+      "decided_at": "2026-11-03T10:03:00Z"
+    }
+  ],
+  "merges": [
+    {
+      "site": "sql-10",
+      "into": "sql-08",
+      "reason": "the engine merged these two on its own: the same month number reaches both reports",
+      "by": "zach"
+    }
+  ],
+  "engine_check": [
+    {
+      "site": "sql-11",
+      "right": false,
+      "wrong": "wrong_severity",
+      "correct_with": {
+        "state": "confirmed",
+        "reason": "real, and the severity stands at high once the email address is checked"
+      }
+    }
+  ]
+}

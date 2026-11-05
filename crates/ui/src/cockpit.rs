@@ -1840,19 +1840,14 @@ async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
         .collect::<Vec<_>>()
         .join("-");
     let filename = format!("camerata-project-{slug}.json");
-    match rfd::AsyncFileDialog::new()
-        .set_file_name(&filename)
-        .save_file()
+    use camerata_ui::platform::SaveOutcome;
+    match camerata_ui::platform::current()
+        .save_file(&filename, text.as_bytes())
         .await
     {
-        Some(file) => {
-            if file.write(text.as_bytes()).await.is_ok() {
-                ExportOutcome::Saved
-            } else {
-                ExportOutcome::Failed
-            }
-        }
-        None => ExportOutcome::Cancelled,
+        SaveOutcome::Saved => ExportOutcome::Saved,
+        SaveOutcome::Failed => ExportOutcome::Failed,
+        SaveOutcome::Cancelled => ExportOutcome::Cancelled,
     }
 }
 
@@ -1900,14 +1895,13 @@ async fn reset_project_onboarding(id: &str) -> bool {
 /// `overwrite: false`. Returns `ImportResult` so the caller can decide whether to
 /// prompt for overwrite confirmation.
 async fn import_project_json() -> ImportResult {
-    let Some(file) = rfd::AsyncFileDialog::new()
-        .add_filter("JSON", &["json"])
-        .pick_file()
+    let Some(file) = camerata_ui::platform::current()
+        .pick_file("JSON", &["json"])
         .await
     else {
         return ImportResult::Cancelled;
     };
-    let Ok(raw) = String::from_utf8(file.read().await) else {
+    let Ok(raw) = String::from_utf8(file.bytes) else {
         return ImportResult::Failed;
     };
     import_project_payload(&raw, false).await
@@ -3442,6 +3436,9 @@ pub(crate) mod engine_check;
 pub(crate) mod export_gate;
 mod freshness;
 pub mod live_run;
+#[cfg(feature = "liveview-review")]
+#[path = "liveview.rs"]
+pub(crate) mod liveview;
 mod palette;
 mod pane_context;
 pub(crate) mod queue;
