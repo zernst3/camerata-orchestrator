@@ -2379,3 +2379,105 @@ async fn resume_re_asks_only_the_failed_group_review_chunks() {
     // The SQL group's reply was applied from the checkpoint: its sites carry its sub-group.
     assert!(subgroups_of(&report, &rule_node(&report, SQL)).len() == 1);
 }
+
+// ── Output-side redaction of everything the reviewer writes ───────────────────────────────
+
+/// The config sentence the reviewer wrote on a real run: it quotes a documented Supabase setting
+/// value, which is not a secret and must stay as written.
+fn password_policy_sentence() -> String {
+    format!(
+        "Set `minimum_password_length = 8` and `password_requirements = \"{}\"` or stronger.",
+        ["lower_upper_", "letters_digits"].concat()
+    )
+}
+
+fn secret_hits(value: &serde_json::Value) -> usize {
+    camerata_secrets::find_secret_hits_in_json(value).len()
+}
+
+#[tokio::test]
+async fn a_secret_the_reviewer_echoes_ships_redacted_in_every_string_it_wrote() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+    let leak = planted.value.clone();
+    let sentence = password_policy_sentence();
+    let mut report = report_of(&[(SQL, 4)]);
+    let llm = Reviewer::new({
+        let leak = leak.clone();
+        let sentence = sentence.clone();
+        move |call| {
+            Ok(serde_json::json!({
+                "summary": format!("{sentence} The key {leak} is committed."),
+                "subgroups": [{
+                    "label": format!("Key {leak}"),
+                    "cause": format!("Cause {leak}"),
+                    "summary": format!("Sub-group {leak}. {sentence}"),
+                    "members": call.indices,
+                }],
+                "outliers": [{"index": 1, "reason": "different_object", "why": format!("Why {leak}")}],
+                "escalations": [{"index": 2, "reason": "rule_misfit", "rank": 1, "why": format!("Esc {leak}")}],
+                "disagreements": [{
+                    "index": 3, "field": "real", "stage1": "yes", "mine": "no",
+                    "why": format!("Dis {leak}")
+                }],
+            })
+            .to_string())
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(outcome.rules_reviewed, 1);
+
+    let tree_json = serde_json::to_value(tree(&report)).unwrap();
+    let rows_json = serde_json::to_value(
+        report
+            .findings
+            .iter()
+            .map(|f| &f.review)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    for (what, json) in [("tree", &tree_json), ("rows", &rows_json)] {
+        let text = json.to_string();
+        assert!(!text.contains(&leak), "the {what} carries the planted key");
+        assert_eq!(secret_hits(json), 0, "the gate would refuse the {what}");
+    }
+    // The redaction is the same one the other stages use, and the documented setting value is
+    // left exactly as the reviewer wrote it.
+    let rule = node(&report, &rule_node(&report, SQL));
+    let summary = rule.summary.as_deref().unwrap();
+    assert!(summary.contains(&sentence), "{summary}");
+    assert!(summary.contains("sb_secret_\u{2026}"), "{summary}");
+    let sub = &subgroups_of(&report, &rule.id)[0];
+    assert!(sub.label.contains("sb_secret_\u{2026}"));
+    assert!(sub.cause.as_deref().unwrap().contains("sb_secret_\u{2026}"));
+    assert!(sub.summary.as_deref().unwrap().contains(&sentence));
+    assert!(rule.escalations[0].why.contains("sb_secret_\u{2026}"));
+}
+
+#[tokio::test]
+async fn the_rule_level_summary_call_is_redacted_too() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+    let leak = planted.value.clone();
+    let mut report = report_of(&[(SQL, 151)]);
+    let llm = Reviewer::new({
+        let leak = leak.clone();
+        move |call| {
+            if call.summary_call {
+                Ok(summary_reply(&format!("Rule level {leak}.")))
+            } else {
+                Ok(one_group(call, "Part."))
+            }
+        }
+    });
+    run(&mut report, &llm).await;
+    let json = serde_json::to_value(tree(&report)).unwrap();
+    assert!(!json.to_string().contains(&leak));
+    assert_eq!(secret_hits(&json), 0);
+    let rule = node(&report, &rule_node(&report, SQL));
+    assert!(rule
+        .summary
+        .as_deref()
+        .unwrap()
+        .contains("sb_secret_\u{2026}"));
+}

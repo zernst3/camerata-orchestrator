@@ -353,6 +353,14 @@ fn text_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{at}.{key} is not a string"))
 }
 
+/// A text field the reviewer wrote for the client to read, redacted on the way in. Every parse
+/// of a reply (a live one, a stored one a resume replays) goes through here, so no summary,
+/// label, cause or reason reaches the tree or a row with a secret in it. The same detector the
+/// release gate runs does the redacting, so what ships passes the gate.
+fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
+    text_of(obj, key, at).map(|text| camerata_secrets::redact_str(&text).into_owned())
+}
+
 fn index_of(obj: &Obj, key: &str, at: &str) -> Result<usize, String> {
     obj[key]
         .as_u64()
@@ -388,7 +396,7 @@ impl Stage2Reply {
             ],
             "the reply",
         )?;
-        let summary = text_of(top, "summary", "the reply")?;
+        let summary = prose_of(top, "summary", "the reply")?;
 
         let mut subgroups = Vec::new();
         for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
@@ -404,9 +412,9 @@ impl Stage2Reply {
                 })
                 .collect::<Result<Vec<usize>, String>>()?;
             subgroups.push(ReplySubgroup {
-                label: text_of(o, "label", &at)?,
-                cause: text_of(o, "cause", &at)?,
-                summary: text_of(o, "summary", &at)?,
+                label: prose_of(o, "label", &at)?,
+                cause: prose_of(o, "cause", &at)?,
+                summary: prose_of(o, "summary", &at)?,
                 members,
             });
         }
@@ -421,7 +429,7 @@ impl Stage2Reply {
             outliers.push(ReplyOutlier {
                 index: index_of(o, "index", &at)?,
                 reason,
-                why: text_of(o, "why", &at)?,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
@@ -441,7 +449,7 @@ impl Stage2Reply {
                 index: index_of(o, "index", &at)?,
                 reason,
                 rank,
-                why: text_of(o, "why", &at)?,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
@@ -467,9 +475,9 @@ impl Stage2Reply {
             disagreements.push(ReplyDisagreement {
                 index: index_of(o, "index", &at)?,
                 field,
-                stage1: text_of(o, "stage1", &at)?,
+                stage1: prose_of(o, "stage1", &at)?,
                 mine,
-                why: text_of(o, "why", &at)?,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
@@ -489,7 +497,7 @@ pub(crate) fn parse_rule_summary(raw: &str) -> Result<String, String> {
         .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
         .ok_or_else(|| "the reply is not a JSON object".to_string())?;
     let o = exact_object(&json, &["summary"], "the reply")?;
-    text_of(o, "summary", "the reply")
+    prose_of(o, "summary", "the reply")
 }
 
 // ── Chunks ─────────────────────────────────────────────────────────────────────────────────
