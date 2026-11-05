@@ -267,7 +267,7 @@ fn flatten_zip_entries(bytes: &[u8], prefix: &str, out: &mut BTreeMap<String, Ve
         zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("must be a valid zip");
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("zip entry by index");
-        let name = file.name().to_string();
+        let name = file.name().expect("zip entry name").to_string();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).expect("read zip entry content");
         let key = format!("{prefix}{name}");

@@ -16,11 +16,16 @@ pub fn read_zip_entries(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Strin
         if entry.is_dir() {
             continue;
         }
+        // zip 9 returns the name as a Result: a member name that is not valid UTF-8 is an error.
+        let name = entry
+            .name()
+            .map_err(|e| format!("unreadable archive member #{i} name: {e}"))?
+            .into_owned();
         let mut data = Vec::new();
         entry
             .read_to_end(&mut data)
-            .map_err(|e| format!("unreadable archive member {}: {e}", entry.name()))?;
-        out.insert(entry.name().to_string(), data);
+            .map_err(|e| format!("unreadable archive member {name}: {e}"))?;
+        out.insert(name, data);
     }
     Ok(out)
 }

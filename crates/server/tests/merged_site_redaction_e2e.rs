@@ -234,7 +234,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
         let mut part = archive.by_index(i).unwrap();
         let mut text = String::new();
         std::io::Read::read_to_string(&mut part, &mut text).ok();
-        out.push((format!("workbook {}", part.name()), text));
+        out.push((format!("workbook {}", part.name().unwrap()), text));
     }
     (out, merged)
 }

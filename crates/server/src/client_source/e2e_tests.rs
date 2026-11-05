@@ -624,7 +624,7 @@ fn unzip(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
         }
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
-        out.insert(file.name().to_string(), data);
+        out.insert(file.name().unwrap().to_string(), data);
     }
     out
 }

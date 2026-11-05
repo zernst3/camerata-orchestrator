@@ -267,7 +267,7 @@ fn entries(path: &Path) -> BTreeMap<String, Vec<u8>> {
         let mut file = archive.by_index(i).unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
-        out.insert(file.name().to_string(), bytes);
+        out.insert(file.name().unwrap().to_string(), bytes);
     }
     out
 }
@@ -340,7 +340,7 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).unwrap();
-                let inner = file.name().to_string();
+                let inner = file.name().unwrap().to_string();
                 if inner.starts_with("docProps") {
                     continue;
                 }

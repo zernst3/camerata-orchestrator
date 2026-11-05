@@ -159,7 +159,14 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("the export must be a valid zip");
     let names: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).expect("zip entry").name().to_string())
+        .map(|i| {
+            archive
+                .by_index(i)
+                .expect("zip entry")
+                .name()
+                .unwrap()
+                .to_string()
+        })
         .collect();
     assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
     assert!(

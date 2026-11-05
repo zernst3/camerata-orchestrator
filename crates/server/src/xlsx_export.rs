@@ -4087,7 +4087,7 @@ mod tests {
             .expect("workbook must be a valid zip");
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).expect("zip entry");
-            let name = file.name().to_string();
+            let name = file.name().unwrap().to_string();
             if !name.starts_with("xl/worksheets/") {
                 continue;
             }
