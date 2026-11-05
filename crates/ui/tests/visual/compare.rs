@@ -331,7 +331,7 @@ pub const FREEZE_STYLE: &str = "<style>*, *::before, *::after { animation: none 
 /// Added to every page except the `shell` screen's. The app's background is a dithered radial
 /// gradient, and Chrome writes a dithered gradient as noise a PNG cannot compress: it made the
 /// 112 baselines 59 MB, in a public repository that grows by every re-approval. A flat colour
-/// compresses to almost nothing. The six `shell/*` images keep the real background, so a change
+/// compresses to almost nothing. The eight `shell/*` images (four states at two widths) keep the real background, so a change
 /// to the background itself is still caught there (the shell frame is on every screen). The
 /// colour is the gradient's edge colour; it changes the copy under `target/` only.
 pub const FLAT_BACKGROUND_STYLE: &str = "<style>html, body { background: #121110 !important; \
