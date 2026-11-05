@@ -1751,7 +1751,8 @@ fn a_copy_without_the_clipboard_bridge_selects_the_text_and_asks_the_webview_to_
         Value::Bool(true),
         "the page-script copy reports the copy"
     );
-    let asked = stack.js("window.__asked");
+    let asked: Value = serde_json::from_str(&stack.js_string("JSON.stringify(window.__asked)"))
+        .expect("the spy recorded the call");
     assert_eq!(asked["command"], "copy", "{asked}");
     assert_eq!(asked["selected"], text, "the text was selected: {asked}");
     stack.assert_no_model_calls();
