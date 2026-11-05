@@ -370,6 +370,16 @@ pub enum UnsyncedKind {
     Undo,
 }
 
+/// `POST /api/projects/:id/decisions/:id/needed-me`: whether the reviewer needed to see an
+/// escalated site (spec section 6, "Needed me"). It changes the flag on the record in place and
+/// nothing else about it: not the ruling, the reason, the time, nor a client's acknowledgement.
+/// The reply is the updated [`Decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NeededMeReq {
+    pub needed_me: bool,
+}
+
 /// `POST /api/projects/:id/decisions/:id/revoke`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RevokeReq {

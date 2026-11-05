@@ -38,7 +38,7 @@ const FILE_VERSION: u32 = 1;
 pub const DEFAULT_CHECKER: &str = "reviewer";
 
 /// The fewest rows a category with unread rows gets in the sample (design A2).
-pub const CATEGORY_FLOOR: usize = 3;
+pub const CATEGORY_FLOOR: usize = camerata_api_types::review_view::SAMPLE_CATEGORY_FLOOR;
 
 /// The share of the sample, at least [`THROWN_OUT_MINIMUM`] rows, drawn from the rows the engine
 /// threw out (design A10 item 2).
@@ -262,6 +262,7 @@ impl EngineCheckStore {
             correction: req.correction.clone(),
             by: if by.is_empty() { DEFAULT_CHECKER } else { by }.to_string(),
             at: now.to_string(),
+            carried_from: None,
         };
         let mut guard = self.lock();
         let mut working = guard.get(project_id).cloned().unwrap_or_default();
@@ -322,7 +323,7 @@ impl EngineCheckStore {
     /// nothing on this run has answered, carried to the site's key here ([`carry_forward`]). A
     /// verdict is per run, but the wrong finding it names does not stop being wrong because the
     /// engine ran again. Without the project's inspections, only the run's own.
-    fn verdicts_in_force(&self, project_id: &str, run_id: &str) -> Vec<EngineCheckVerdict> {
+    pub fn verdicts_in_force(&self, project_id: &str, run_id: &str) -> Vec<EngineCheckVerdict> {
         let all = self.list(project_id);
         let Some(entries) = self
             .inspections
@@ -488,6 +489,9 @@ pub fn carry_forward(
                 Some(EngineCheckVerdict {
                     key,
                     run_id: run_id.to_string(),
+                    // Said so, so the lane shows "No from an earlier run, still uncorrected" and
+                    // not a fresh unanswered card.
+                    carried_from: Some(v.run_id.clone()),
                     ..v.clone()
                 })
             }

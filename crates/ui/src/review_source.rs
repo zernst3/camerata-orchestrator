@@ -11,12 +11,13 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use camerata_api_types::decisions::{DecisionRecorded, NewDecisionReq, RevokeResp};
+use camerata_api_types::decisions::{Decision, DecisionRecorded, NewDecisionReq, RevokeResp};
 use camerata_api_types::edits::{EditRecorded, NewEditReq};
 use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
-    EngineCheckLane, EscalationBudgetOutcome, EscalationBudgetReq, ExportGateView, QueueView,
-    ReviewSettingsView, ReviewShellView, SampleSizeResp, SitesPage, TreeView,
+    EngineCheckLane, EngineCheckVerdict, EngineCheckVerdictReq, EscalationBudgetOutcome,
+    EscalationBudgetReq, ExportGateView, QueueView, ReviewSettingsView, ReviewShellView,
+    SampleSizeResp, SitesPage, TreeView,
 };
 use camerata_ui_core::test_support::review_fixtures::{dataset_30k, dataset_base, ReviewDataSet};
 
@@ -258,6 +259,24 @@ impl ReviewWrites for FixtureReviewSource {
                 lane_off: sample_size_per_run == 0,
             })
         })
+    }
+
+    fn post_engine_verdict<'a>(
+        &'a self,
+        key: &'a str,
+        req: EngineCheckVerdictReq,
+    ) -> SourceFuture<'a, EngineCheckVerdict> {
+        self.log("post_engine_verdict");
+        self.recorded.post_engine_verdict(key, req)
+    }
+
+    fn set_needed_me<'a>(
+        &'a self,
+        decision_id: &'a str,
+        needed_me: bool,
+    ) -> SourceFuture<'a, Decision> {
+        self.log("set_needed_me");
+        self.recorded.set_needed_me(decision_id, needed_me)
     }
 
     fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {

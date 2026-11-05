@@ -543,6 +543,20 @@ impl ReviewWrites for HeldPreview {
     fn set_stage_model<'a>(&'a self, step: &'a str, model: &'a str) -> SourceFuture<'a, ()> {
         self.inner.set_stage_model(step, model)
     }
+    fn post_engine_verdict<'a>(
+        &'a self,
+        key: &'a str,
+        req: camerata_api_types::review_view::EngineCheckVerdictReq,
+    ) -> SourceFuture<'a, camerata_api_types::review_view::EngineCheckVerdict> {
+        self.inner.post_engine_verdict(key, req)
+    }
+    fn set_needed_me<'a>(
+        &'a self,
+        decision_id: &'a str,
+        needed_me: bool,
+    ) -> SourceFuture<'a, camerata_api_types::decisions::Decision> {
+        self.inner.set_needed_me(decision_id, needed_me)
+    }
 }
 
 type PreviewSignals = (

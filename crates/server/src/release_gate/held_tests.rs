@@ -695,6 +695,9 @@ fn export_gate_view_equals_release_gate_refusals() {
     report.findings.push(second_row("src/cart.rs", 7));
     report.findings.push(second_row("src/wishlist.rs", 9));
     report.findings.push(second_row("src/profile.rs", 3));
+    // And a seventh, a row the engine threw out when the report sealed that the Engine Check said
+    // No to: held too, though it is not among the report's kept rows.
+    report.findings.push(thrown_out_row());
     let row = |report: &mut ScanReport, path: &str| -> usize {
         report
             .findings
@@ -739,8 +742,11 @@ fn export_gate_view_equals_release_gate_refusals() {
         )
     };
     let profile = key_of("src/profile.rs");
-    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&node), &[], &[])
-        .with_engine_check(recorded(vec![no_verdict(&profile)], Vec::new()));
+    assert_eq!(sealed.discarded.len(), 1);
+    let thrown = sealed.discarded[0].site_key.clone();
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&node), &[], &[]).with_engine_check(
+        recorded(vec![no_verdict(&profile), no_verdict(&thrown)], Vec::new()),
+    );
 
     let view = crate::release_gate::holds::gate_holds(&reviewed);
     let failure = gate_problems(&reviewed);
@@ -777,9 +783,26 @@ fn export_gate_view_equals_release_gate_refusals() {
         kind(HoldReason::RestoredWithoutDecision),
         located_in(CheckId::RestoredWithoutDecision, "findings.json")
     );
+    // The Engine Check's kept row is a problem in findings.json; its thrown-out row is a problem
+    // against the thrown-out findings, which the client package never carries.
     assert_eq!(
         kind(HoldReason::EngineCheckNoWithoutCorrection),
-        located_in(CheckId::EngineCheckNoWithoutCorrection, "findings.json")
+        sorted(
+            located_in(CheckId::EngineCheckNoWithoutCorrection, "findings.json")
+                .into_iter()
+                .chain(located_in(
+                    CheckId::EngineCheckNoWithoutCorrection,
+                    "thrown-out findings"
+                ))
+                .collect()
+        )
+    );
+    assert_eq!(
+        located_in(
+            CheckId::EngineCheckNoWithoutCorrection,
+            "thrown-out findings"
+        ),
+        vec![("lib/placeholder_zone.ts".to_string(), 8)]
     );
     assert_eq!(
         view_rows(&view.merged_without_decision),
@@ -795,14 +818,17 @@ fn export_gate_view_equals_release_gate_refusals() {
         ("evidence", kind(HoldReason::EvidenceUnverified)),
         ("junk", kind(HoldReason::JunkContent)),
         ("restored", kind(HoldReason::RestoredWithoutDecision)),
-        (
-            "engine check",
-            kind(HoldReason::EngineCheckNoWithoutCorrection),
-        ),
         ("merged", view_rows(&view.merged_without_decision)),
     ] {
         assert_eq!(rows.len(), 1, "{what}: {rows:?}");
     }
+    // The Engine Check holds two rows: the kept one and the thrown-out one.
+    assert_eq!(
+        kind(HoldReason::EngineCheckNoWithoutCorrection).len(),
+        2,
+        "{:?}",
+        view.held
+    );
 
     // The group decision's gap: one problem per site, one gap entry naming the same site.
     let gap_problems = check_problems(&failure, CheckId::MergedWithoutDecision)
@@ -852,6 +878,7 @@ fn export_gate_view_equals_release_gate_refusals() {
         report.findings.push(second_row("src/cart.rs", 7));
         report.findings.push(second_row("src/wishlist.rs", 9));
         report.findings.push(second_row("src/profile.rs", 3));
+        report.findings.push(thrown_out_row());
         let db = row(&mut report, "src/db.rs");
         let users = row(&mut report, "src/users.rs");
         let cart = row(&mut report, "src/cart.rs");
@@ -888,9 +915,19 @@ fn export_gate_view_equals_release_gate_refusals() {
         DecisionState::MergedInto(db.clone()),
         "same query helper",
     ));
+    // A correction that confirms the engine was right to throw the other row out.
+    let thrown = sealed.discarded[0].site_key.clone();
+    records.push(decision(
+        "dec-300000",
+        &thrown,
+        DecisionState::FalsePositive,
+        "rightly thrown out",
+    ));
     // The decision on the profile row is later than the Engine Check's No: it is the correction.
-    let reviewed = apply_overlay(&sealed, &records, &[], &[])
-        .with_engine_check(recorded(vec![no_verdict(&profile)], Vec::new()));
+    let reviewed = apply_overlay(&sealed, &records, &[], &[]).with_engine_check(recorded(
+        vec![no_verdict(&profile), no_verdict(&thrown)],
+        Vec::new(),
+    ));
     assert_eq!(
         crate::release_gate::holds::gate_holds(&reviewed),
         ExportGateView::default()
@@ -913,6 +950,7 @@ fn no_verdict(key: &str) -> camerata_api_types::review_view::EngineCheckVerdict 
         correction: None,
         by: "reviewer".to_string(),
         at: VERDICT_AT.to_string(),
+        carried_from: None,
     }
 }
 
@@ -1016,6 +1054,199 @@ fn a_correction_clears_an_engine_check_no_at_the_gate() {
     let earlier = Decision {
         decided_at: "2026-11-04T07:00:00Z".to_string(),
         ..decision("dec-000001", &key, DecisionState::FalsePositive, "")
+    };
+    let reviewed = apply_overlay(&sealed, &[earlier], &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert_eq!(engine_check_problems(&reviewed).len(), 1);
+}
+
+// ── an Engine Check No on a thrown-out finding is held too (design A10 item 2) ────────────
+
+/// A row the engine throws out when the report seals: a placeholder rule id.
+fn thrown_out_row() -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: "lib/placeholder_zone.ts".to_string(),
+        line: 8,
+        rule_id: "AI-TYPESCRIPT-PLACEHOLDER".to_string(),
+        severity: "low".to_string(),
+        snippet: "x".to_string(),
+        detail: "placeholder \u{2014} x".to_string(),
+        ..Finding::default()
+    }
+}
+
+/// A sealed report whose one thrown-out row is the placeholder above, and that row's key.
+fn sealed_with_a_thrown_out_row() -> (crate::onboard::SealedReport, String) {
+    let mut report = report_of_three();
+    report.findings.push(thrown_out_row());
+    let sealed = report.seal();
+    assert_eq!(
+        sealed.discarded.len(),
+        1,
+        "the placeholder row is thrown out"
+    );
+    let key = sealed.discarded[0].site_key.clone();
+    assert!(!key.is_empty());
+    (sealed, key)
+}
+
+const THROWN_OUT_PLACE: &str = "lib/placeholder_zone.ts line 8";
+
+#[test]
+fn the_gate_refuses_an_engine_check_no_on_a_thrown_out_finding_and_names_it() {
+    use camerata_api_types::review_view::HoldReason;
+
+    let (sealed, key) = sealed_with_a_thrown_out_row();
+    let reviewed = apply_overlay(&sealed, &[], &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    let problems = engine_check_problems(&reviewed);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].location, THROWN_OUT_PLACE);
+    assert_eq!(
+        problems[0].evidence.as_deref(),
+        Some("AI-TYPESCRIPT-PLACEHOLDER")
+    );
+    assert!(
+        problems[0].message.contains("threw") || problems[0].message.contains("thrown"),
+        "the problem says the engine threw the finding out: {}",
+        problems[0].message
+    );
+
+    // The panel lists the same row, for the same reason.
+    let view = crate::release_gate::holds::gate_holds(&reviewed);
+    let rows: Vec<_> = view
+        .held
+        .iter()
+        .filter(|h| h.reason == HoldReason::EngineCheckNoWithoutCorrection)
+        .collect();
+    assert_eq!(rows.len(), 1, "{view:?}");
+    assert_eq!(rows[0].key, key);
+    assert_eq!(
+        (rows[0].path.as_str(), rows[0].line),
+        ("lib/placeholder_zone.ts", 8)
+    );
+
+    // A Yes on the same thrown-out row holds nothing, and neither does a store nobody consulted.
+    let yes = camerata_api_types::review_view::EngineCheckVerdict {
+        right: true,
+        wrong: None,
+        ..no_verdict(&key)
+    };
+    let reviewed =
+        apply_overlay(&sealed, &[], &[], &[]).with_engine_check(recorded(vec![yes], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    assert!(engine_check_problems(&reviewed).is_empty());
+}
+
+#[test]
+fn restoring_a_thrown_out_no_puts_it_in_its_rule_node_held_until_it_is_decided() {
+    use camerata_api_types::review_view::HoldReason;
+
+    let (sealed, key) = sealed_with_a_thrown_out_row();
+    let restore = decision(
+        "dec-000001",
+        &key,
+        DecisionState::EngineRestored,
+        "a real one",
+    );
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&restore), &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert!(reviewed.report().discarded.is_empty(), "the row is back");
+    assert!(
+        reviewed.report().findings.iter().any(|f| f.site_key == key),
+        "the row is back among the kept rows"
+    );
+
+    // Still refused: a restore is not a ruling, so the No stays uncorrected AND the restore is
+    // held until decided.
+    assert_eq!(engine_check_problems(&reviewed).len(), 1);
+    let view = crate::release_gate::holds::gate_holds(&reviewed);
+    let reasons: Vec<HoldReason> = view
+        .held
+        .iter()
+        .filter(|h| h.key == key)
+        .map(|h| h.reason)
+        .collect();
+    assert!(
+        reasons.contains(&HoldReason::RestoredWithoutDecision),
+        "{reasons:?}"
+    );
+    assert_eq!(
+        restored_without_decision(&reviewed.report().findings, &reviewed).len(),
+        1
+    );
+    // It sits in its rule node, not in the thrown-out one.
+    let row = view.held.iter().find(|h| h.key == key).unwrap();
+    assert!(
+        !row.node_id.is_empty() && !crate::review_tree::is_thrown_out_id(&row.node_id),
+        "{row:?}"
+    );
+
+    // Decided, both holds clear and the package goes through.
+    let ruling = decision("dec-000002", &key, DecisionState::Confirmed, "");
+    let reviewed = apply_overlay(&sealed, &[restore, ruling], &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+    assert!(restored_without_decision(&reviewed.report().findings, &reviewed).is_empty());
+    assert!(release(package_of(&reviewed)).is_ok());
+}
+
+#[test]
+fn a_correction_that_confirms_the_throw_out_clears_the_hold_and_the_row_stays_out() {
+    let (sealed, key) = sealed_with_a_thrown_out_row();
+    let correction = decision(
+        "dec-000001",
+        &key,
+        DecisionState::FalsePositive,
+        "rightly out",
+    );
+
+    // A decision made after the verdict.
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&correction), &[], &[])
+        .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+    assert!(
+        crate::release_gate::holds::gate_holds(&reviewed)
+            .held
+            .iter()
+            .all(|h| h.key != key),
+        "the panel no longer lists it"
+    );
+    assert_eq!(
+        reviewed.report().discarded.len(),
+        1,
+        "the row stays thrown out"
+    );
+    let released = release(package_of(&reviewed)).expect("the gate lets the package through");
+    for (name, bytes) in read_zip_entries(&released.bytes).expect("zip") {
+        let text = if name.ends_with(".xlsx") {
+            xlsx_strings(&bytes).expect("strings").join("\n")
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        assert!(
+            !text.contains("placeholder_zone"),
+            "the thrown-out row is in {name}"
+        );
+    }
+
+    // A correction the verdict names.
+    let named = camerata_api_types::review_view::EngineCheckVerdict {
+        correction: Some(camerata_api_types::review_view::CorrectionRef::Decision(
+            "dec-000001".to_string(),
+        )),
+        ..no_verdict(&key)
+    };
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&correction), &[], &[])
+        .with_engine_check(recorded(vec![named], Vec::new()));
+    assert!(engine_check_problems(&reviewed).is_empty());
+
+    // A decision made BEFORE the verdict is not a correction of it.
+    let earlier = Decision {
+        decided_at: "2026-11-04T07:00:00Z".to_string(),
+        ..correction
     };
     let reviewed = apply_overlay(&sealed, &[earlier], &[], &[])
         .with_engine_check(recorded(vec![no_verdict(&key)], Vec::new()));

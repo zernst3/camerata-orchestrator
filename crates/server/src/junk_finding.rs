@@ -27,7 +27,8 @@
 //!   id, a filler word where the title should be (`x`, `n/a`, `tbd`, ...), no code and no
 //!   explanation, or the model's own verdict "discard this finding". The engine keeps the row,
 //!   marks it `engine_discarded` and leaves it out of the client export (`crate::engine_discard`).
-//!   It is not held, so it never blocks an export.
+//!   It is not held for a ruling of its own; only an Engine Check No on it holds the export
+//!   (`crate::engine_discard`).
 //! * **Held** ([`JunkReason`]) is broken text on a finding that may be real: an empty
 //!   explanation, a refusal or chat lead-in where the explanation should be ("I cannot ...",
 //!   "Here is the ..."), or an untranslated JSON fragment. A reviewer might never open the row,

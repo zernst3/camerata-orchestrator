@@ -43,6 +43,10 @@ pub const SAMPLE_SIZE_SUGGESTED: usize = 50;
 /// A category sampled fewer times than this has a rate that is indicative only (spec section 7).
 pub const SMALL_CATEGORY_DRAWN: usize = 10;
 
+/// The fewest cards the sample draws from each category that has that many unread rows (design
+/// A2). The lane says so when this floor puts the sample above the setting.
+pub const SAMPLE_CATEGORY_FLOOR: usize = 3;
+
 // ── Shared pieces ─────────────────────────────────────────────────────────────────────────
 
 /// A chip on a site row (spec section 2). A row lists every marker it has, in the precedence the
@@ -553,6 +557,10 @@ pub enum EngineCheckError {
     WordingOrFixWrong,
     /// Design A9 item 3.
     GroupSummaryDoesNotDescribe,
+    /// A No on a row the engine THREW OUT (design A10 item 2): it was a real problem. Not in
+    /// [`Self::ALL`], the list the reviewer picks from on a kept row; the thrown-out card has
+    /// this one answer, and it puts the row back (a restore decision) as its correction.
+    ThrownOutRealProblem,
 }
 
 impl EngineCheckError {
@@ -604,6 +612,12 @@ pub struct EngineCheckVerdict {
     pub correction: Option<CorrectionRef>,
     pub by: String,
     pub at: String,
+    /// Set on a No that was given on an EARLIER run and stands for this one because nothing on
+    /// this run has answered it: the id of the run it was given on. The lane shows such a card as
+    /// "No from an earlier run, still uncorrected", not as a fresh unanswered card. Never
+    /// stored: only the read model sets it, when it carries a No forward.
+    #[serde(default)]
+    pub carried_from: Option<String>,
 }
 
 /// `POST /api/projects/:id/review/engine-check/:key` (spec section 7).
@@ -758,8 +772,14 @@ impl ExportGateView {
     }
 
     /// How many rows need a decision ("3 rows need a decision before the package can be built").
+    /// A row two checks refuse (a restored row the Engine Check also said No to) is one row.
     pub fn rows_needing_a_decision(&self) -> usize {
-        self.held.len() + self.merged_without_decision.len()
+        self.held
+            .iter()
+            .chain(&self.merged_without_decision)
+            .map(|h| h.key.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     }
 }
 
@@ -899,6 +919,29 @@ mod tests {
         let view = ExportGateView::default();
         assert!(!view.is_blocked());
         assert_eq!(view.rows_needing_a_decision(), 0);
+    }
+
+    #[test]
+    fn a_row_two_checks_refuse_is_one_row_needing_a_decision() {
+        let row = |key: &str, reason| HeldRow {
+            key: key.to_string(),
+            path: "a.rs".to_string(),
+            line: 1,
+            rule_id: "R".to_string(),
+            reason,
+            detail: String::new(),
+            node_id: String::new(),
+        };
+        let view = ExportGateView {
+            held: vec![
+                row("k1", HoldReason::RestoredWithoutDecision),
+                row("k1", HoldReason::EngineCheckNoWithoutCorrection),
+                row("k2", HoldReason::JunkContent),
+            ],
+            merged_without_decision: vec![row("k2", HoldReason::MergedWithoutDecision)],
+            node_decisions_missing_members: Vec::new(),
+        };
+        assert_eq!(view.rows_needing_a_decision(), 2);
     }
 
     #[test]

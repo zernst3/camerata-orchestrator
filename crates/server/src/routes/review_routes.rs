@@ -196,7 +196,9 @@ fn with_composer(
     }
     let (_, reviewed) = crate::edits::routes::review_of(state, id, &latest);
     let edits = state.edits.active(id);
-    let verdicts = state.engine_check.latest_for_run(id, &latest.id);
+    // The verdicts in force for this run: its own, and an earlier run's No that nothing here has
+    // answered (marked `carried_from`), so the lane shows the card as the No it still is.
+    let verdicts = state.engine_check.verdicts_in_force(id, &latest.id);
     let (links, moved) = moved_sites(state, id, &latest);
     let inputs = ReviewInputs {
         run_id: &latest.id,

@@ -4,13 +4,16 @@
 //! The gate's reviewer-decision checks each answer one question about a reviewed report: which
 //! rows are held for a ruling nobody has made? Each check owns the filter that answers it
 //! ([`super::evidence::undecided_unverified`], [`super::junk::undecided_junk`],
-//! [`super::held::undecided_restored`], [`super::engine_check::uncorrected_no`],
+//! [`super::held::undecided_restored`], [`super::engine_check::uncorrected_no`] and
+//! [`super::engine_check::uncorrected_no_thrown_out`],
 //! [`super::held::merge_is_backed`] and [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
 //! turns the same rows into an [`ExportGateView`], so the panel lists exactly what the gate
 //! refuses for the same reviewed report and cannot drift from it. It adds no rule of its own.
 //!
-//! The Engine Check's pending No is here too: [`super::engine_check`] reads the evidence attached
-//! to the reviewed report ([`ReviewedReport::engine_check`]). An Engine Check file that cannot be
+//! The Engine Check's pending No is here too, on a kept row and on a thrown-out one (the export
+//! waits for the reviewer to put a thrown-out row back or to confirm the throw-out):
+//! [`super::engine_check`] reads the evidence attached to the reviewed report
+//! ([`ReviewedReport::engine_check`]). An Engine Check file that cannot be
 //! read lists no row (the gate refuses with a problem naming the file instead).
 
 use std::collections::HashMap;
@@ -40,6 +43,7 @@ pub fn held_row(f: &Finding, reason: HoldReason, detail: impl Into<String>) -> H
 /// report's rows within each kind, kinds in the order the gate runs its checks.
 pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
     let findings = &reviewed.report().findings;
+    let discarded = &reviewed.report().discarded;
 
     let mut rows: Vec<HeldRow> = Vec::new();
     rows.extend(
@@ -57,6 +61,17 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
         engine_check::uncorrected_no(findings, reviewed)
             .into_iter()
             .map(|f| held_row(f, HoldReason::EngineCheckNoWithoutCorrection, "")),
+    );
+    rows.extend(
+        engine_check::uncorrected_no_thrown_out(discarded, reviewed)
+            .into_iter()
+            .map(|f| {
+                held_row(
+                    f,
+                    HoldReason::EngineCheckNoWithoutCorrection,
+                    "Engine Check said No to throwing it out, no correction yet",
+                )
+            }),
     );
 
     // Merges and group decisions are checked against the decision records the package prints.

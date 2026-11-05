@@ -70,7 +70,8 @@ fn decision_refusal(e: &DecisionStoreError) -> Response {
         | DecisionStoreError::KeyRequired
         | DecisionStoreError::MergeTargetInvalid
         | DecisionStoreError::NodeMerge
-        | DecisionStoreError::AckNeedsWho => StatusCode::UNPROCESSABLE_ENTITY,
+        | DecisionStoreError::AckNeedsWho
+        | DecisionStoreError::NeededMeNeedsSite(_) => StatusCode::UNPROCESSABLE_ENTITY,
         DecisionStoreError::UnknownNode(_) | DecisionStoreError::NotFound(_) => {
             StatusCode::NOT_FOUND
         }

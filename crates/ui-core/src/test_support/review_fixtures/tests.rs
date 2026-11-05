@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use camerata_api_types::decisions::DecisionState;
-use camerata_api_types::review::EscalationBudget;
+use camerata_api_types::review::{EscalationBudget, EscalationReason};
 use camerata_api_types::review_view::{
     CorrectionRef, EngineCheckLane, ExportGateView, HoldReason, Marker, QueueView,
     ReviewSettingsView, ReviewShellView, SitesPage, TreeLevel, TreeView, SITES_PAGE_SIZE,
@@ -907,4 +907,37 @@ fn the_base_set_has_a_fully_decided_sub_group_and_the_node_decided_state_opens_i
         whole.iter().any(|w| t.open_nodes.iter().any(|o| o == w)),
         "the state opens a fully decided sub-group"
     );
+}
+
+/// The server marks a row over budget only when its reason may exceed it at its severity
+/// (`EscalationReason::may_exceed_budget`: a D5 reason at critical, or unverified evidence at any
+/// severity). The fixture must hold the same line, or a screen built on it asserts what the
+/// server never produces (a Low row under a band that says "at critical").
+#[test]
+fn over_budget_rows_are_the_rows_the_server_would_let_exceed_the_budget() {
+    for (name, ds) in [("base", dataset_base()), ("30k", dataset_30k())] {
+        let allowed = &ds.settings.escalation.over_budget_reasons;
+        let over: Vec<_> = ds
+            .candidates
+            .iter()
+            .filter(|c| c.over_budget_reason.is_some())
+            .collect();
+        assert!(
+            !over.is_empty(),
+            "{name}: the fixture still has over-budget rows"
+        );
+        for c in &over {
+            assert!(
+                c.reason.may_exceed_budget(&c.severity, allowed),
+                "{name}: {} at {} is over budget on reason alone",
+                c.reason.as_str(),
+                c.severity
+            );
+        }
+        assert!(
+            over.iter()
+                .any(|c| c.reason != EscalationReason::EvidenceUnverified),
+            "{name}: some over-budget row is over for a critical D5 reason, not only for evidence"
+        );
+    }
 }
