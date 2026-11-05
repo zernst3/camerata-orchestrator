@@ -321,20 +321,23 @@ fn EngineCardView(
             }
             div { class: "engine-question",
                 span { class: "engine-q", "{q}" }
-                span { class: "engine-answers",
-                    button {
-                        class: "btn-run engine-yes",
-                        disabled: working,
-                        title: "Press Y while the card has focus",
-                        onclick: move |_| on_yes.call(()),
-                        "Yes (Y)"
-                    }
-                    button {
-                        class: "btn-edit-sm engine-no",
-                        disabled: working,
-                        title: "Press N while the card has focus",
-                        onclick: move |_| on_no.call(()),
-                        "No (N)"
+                // A settled card has nothing left to answer.
+                if !confirmed {
+                    span { class: "engine-answers",
+                        button {
+                            class: "btn-run engine-yes",
+                            disabled: working,
+                            title: "Press Y while the card has focus",
+                            onclick: move |_| on_yes.call(()),
+                            "Yes (Y)"
+                        }
+                        button {
+                            class: "btn-edit-sm engine-no",
+                            disabled: working,
+                            title: "Press N while the card has focus",
+                            onclick: move |_| on_no.call(()),
+                            "No (N)"
+                        }
                     }
                 }
             }
@@ -888,6 +891,9 @@ pub(crate) fn EngineHost() -> Element {
             let Some(card) = current_card() else {
                 return;
             };
+            if matches!(card_state(&card), CardState::ThrownOutConfirmed { .. }) {
+                return;
+            }
             let count = lane.peek().as_ref().map_or(0, |l| l.cards.len());
             let api = api.clone();
             ls.write().busy = true;
@@ -924,6 +930,9 @@ pub(crate) fn EngineHost() -> Element {
         let Some(card) = current_card() else {
             return;
         };
+        if matches!(card_state(&card), CardState::ThrownOutConfirmed { .. }) {
+            return;
+        }
         if card.stratum == SampleStratum::ThrownOut {
             // A No on a thrown-out finding has one answer, and puts the row back.
             pick.call(EngineCheckError::ThrownOutRealProblem);

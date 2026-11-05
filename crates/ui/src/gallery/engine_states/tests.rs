@@ -268,6 +268,12 @@ fn a_confirmed_throw_out_shows_what_was_decided_and_no_confirm_control() {
     assert!(html.contains("throw-out confirmed"), "{html}");
     assert!(html.contains("stays out of the client package"));
     assert!(!html.contains("Confirm thrown out"), "it is settled");
+    // Nothing is left to answer: no live Yes or No on a settled card.
+    assert!(!html.contains("engine-yes"), "{html}");
+    assert!(!html.contains("engine-no\""));
+    assert!(!html.contains("Yes (Y)"));
+    // A card still being judged keeps them.
+    assert!(page("engine/card-pending").contains("engine-yes"));
     assert!(!html.contains("Put it back into review"));
     assert!(!html.contains("what ships"));
     // Wave 19 D2: the engine was right, so the thrown-out rate is not "100%".
