@@ -334,6 +334,39 @@ impl Stack {
     /// Seed `seed` into a fresh folder, start the server and the liveview build, and open the
     /// page in a new Chrome. Waits until the review shell has drawn its lane tabs.
     pub fn open(seed: Seed) -> Self {
+        Self::open_with(seed, |_| {})
+    }
+
+    /// The same, with the seeded project's inspections recording no commit: the inspection read
+    /// a folder with no git history, so the app reads the working tree of whatever clone is
+    /// linked. (With a commit recorded it reads that commit, and a changed file shows nothing.)
+    pub fn open_without_commit(seed: Seed) -> Self {
+        Self::open_with(seed, |data_dir| {
+            fn clear(v: &mut Value) {
+                match v {
+                    Value::Object(o) => {
+                        if o.contains_key("repo") && o.contains_key("sha") {
+                            o.insert("sha".to_string(), Value::Null);
+                        }
+                        o.values_mut().for_each(clear);
+                    }
+                    Value::Array(a) => a.iter_mut().for_each(clear),
+                    _ => {}
+                }
+            }
+            let dir = data_dir.join("camerata/inspections");
+            for entry in std::fs::read_dir(&dir).expect("the inspections folder") {
+                let path = entry.expect("an entry").path();
+                let mut json: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).expect("readable"))
+                        .expect("json");
+                clear(&mut json);
+                std::fs::write(&path, json.to_string()).expect("writable");
+            }
+        })
+    }
+
+    fn open_with(seed: Seed, prepare: impl FnOnce(&Path)) -> Self {
         let serial = serial();
         let (camerata, server_bin) = binaries();
         let work = tempfile::tempdir().expect("a work folder");
@@ -363,6 +396,8 @@ impl Stack {
             .and_then(|s| s.split_whitespace().next())
             .expect("the seed names the project")
             .to_string();
+
+        prepare(&data_dir);
 
         // The server: no model credentials, no keychain, the seeded folder, a free port.
         let server_port = free_port();

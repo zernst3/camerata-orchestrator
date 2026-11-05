@@ -1105,7 +1105,7 @@ fn changing_the_rate_moves_the_budget_sentence_and_the_ledger_block() {
 #[test]
 fn adding_a_finding_with_a_stale_snippet_is_held_and_the_gate_refuses_the_export() {
     let model = Model::load();
-    let stack = Stack::open(Seed::Clean);
+    let stack = Stack::open_without_commit(Seed::Clean);
     let clean = model.clean_strip();
     stack.assert_shell_counts(&clean);
     assert_eq!(
