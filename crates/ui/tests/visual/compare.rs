@@ -67,11 +67,17 @@ pub const CAPPED: &[&str] = &["tree/30k"];
 /// the page it is named after, around its "Show next" row.
 pub const SHOW_NEXT_SUFFIX: &str = "-show-next";
 
+/// States whose page is a full-window overlay (the code viewer is sized to the viewport), so a
+/// taller window only makes the overlay taller: the first WO16c re-approval found
+/// `detail/viewer-commit` "reaching the cap" in the 4800 window for that reason, not content.
+pub const VIEWPORT_SIZED: &[&str] = &["detail/viewer-commit"];
+
 /// Whether the capture of state `id` (`screen/state`) is the short kind: `CAPTURE_HEIGHT` tall, in
 /// a window that tall. That is every `shell/*` state (whose gradient background is drawn across
-/// the viewport) and every `-show-next` capture (one screenful of a long page).
+/// the viewport), every `-show-next` capture (one screenful of a long page) and every
+/// `VIEWPORT_SIZED` overlay.
 pub fn is_short(id: &str) -> bool {
-    id.starts_with("shell/") || id.ends_with(SHOW_NEXT_SUFFIX)
+    id.starts_with("shell/") || id.ends_with(SHOW_NEXT_SUFFIX) || VIEWPORT_SIZED.contains(&id)
 }
 
 /// The failure, if any, for state `id` whose actual screenshot's content does or does not

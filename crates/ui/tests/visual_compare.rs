@@ -402,8 +402,8 @@ fn a_capped_state_that_no_longer_reaches_the_cap_must_leave_capped() {
 }
 
 #[test]
-fn the_shell_and_show_next_captures_are_short_and_never_judged_against_the_cap() {
-    for id in ["shell/empty", "tree/30k-show-next"] {
+fn the_shell_show_next_and_overlay_captures_are_short_and_never_judged_against_the_cap() {
+    for id in ["shell/empty", "tree/30k-show-next", "detail/viewer-commit"] {
         assert_eq!(
             kept_height(&page(3000, &[2000]), id),
             CAPTURE_HEIGHT,
