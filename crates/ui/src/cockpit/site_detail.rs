@@ -372,9 +372,9 @@ pub(crate) fn SiteDetailView(
 
             if thrown_out {
                 p { class: "site-detail-line site-detail-thrown-out", role: "status",
-                    span { class: "site-detail-label", "Thrown out" }
+                    span { class: "site-detail-label", "Next" }
                     span { class: "site-detail-value",
-                        "{row.thrown_out_reason.clone().unwrap_or_default()}. It is in no package. Put it back into review to rule on it, or confirm it was rightly thrown out."
+                        "It is in no package. Put it back into review to rule on it, or confirm it was rightly thrown out."
                     }
                 }
                 div { class: "pane-actions site-detail-actions",
