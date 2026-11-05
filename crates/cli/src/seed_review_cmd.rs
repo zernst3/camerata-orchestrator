@@ -90,6 +90,10 @@ fn report(args: &SeedReviewArgs, seeded: &Seeded) -> String {
         s.stale.moved,
         s.stale.new_since_decision,
     ));
+    out.push_str(&format!(
+        "  code: a git repo at {} (the commit each inspection read)\n",
+        seeded.clone_dir.display()
+    ));
     out.push_str("  wrote:\n");
     for file in seed::written_files(&seeded.store_dir) {
         out.push_str(&format!("    {}\n", file.display()));

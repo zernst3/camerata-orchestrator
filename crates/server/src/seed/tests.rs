@@ -466,6 +466,66 @@ async fn a_node_batch_writes_no_site_record_for_a_merged_without_decision_row() 
     assert!(row.decision.is_none(), "{:?}", row.decision);
 }
 
+/// The viewer needs code: the seed makes a small git repository under the data folder whose
+/// files hold each finding's snippet at its line, records it as the repo's checkout and as the
+/// commit the inspection read, for every run the variant writes.
+#[tokio::test]
+async fn a_seeded_project_has_a_clone_whose_commit_holds_each_finding_at_its_line() {
+    use crate::client_source::read::{source_for_read, SourceRead};
+    use crate::onboard::source_file::{read_bytes, Origin};
+    for variant in [Variant::Base, Variant::Moved] {
+        let (dir, seeded) = seed(variant).await;
+        let (state, _app) = reopen(&seeded);
+        let SourceRead::Git {
+            dir: clone, sha, ..
+        } = source_for_read(&state, Some(&seeded.project_id), "acme/portal", None)
+            .await
+            .unwrap_or_else(|_| panic!("{variant:?}: the read is refused"))
+        else {
+            panic!("{variant:?}: the repo is not read through git at the inspected commit");
+        };
+        assert!(
+            clone.starts_with(dir.path()),
+            "{variant:?}: the clone is under the data folder"
+        );
+        assert_eq!(sha.len(), 40, "{variant:?}: {sha}");
+        assert_eq!(seeded.clone_dir, clone);
+
+        // Every row of the latest run: its snippet is at its line in the file, at that commit.
+        let latest = state.inspections().latest(&seeded.project_id).unwrap();
+        assert_eq!(latest.sha_for("acme/portal"), Some(sha.as_str()));
+        let mut checked = 0;
+        for f in latest
+            .report
+            .findings
+            .iter()
+            .chain(&latest.report.discarded)
+        {
+            let bytes = read_bytes(
+                Origin::Git {
+                    dir: &clone,
+                    sha: &sha,
+                },
+                &f.path,
+                1 << 20,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{variant:?}: {} is not in the commit: {e:?}", f.path));
+            let text = String::from_utf8(bytes).unwrap();
+            let at = text.lines().nth(f.line - 1).unwrap_or_default();
+            assert_eq!(
+                at.trim(),
+                f.snippet.lines().next().unwrap_or_default().trim(),
+                "{variant:?}: {}:{}",
+                f.path,
+                f.line
+            );
+            checked += 1;
+        }
+        assert!(checked >= 32 - 1, "{variant:?}: {checked} rows checked");
+    }
+}
+
 #[tokio::test]
 async fn seed_moved_variant_produces_stale_records() {
     let (_dir, seeded) = seed(Variant::Moved).await;

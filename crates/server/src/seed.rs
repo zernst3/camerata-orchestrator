@@ -19,6 +19,13 @@
 //!   shape, validation and fingerprint the server gives it, and a seed can never hold a record
 //!   the server would not have written.
 //!
+//! The code the findings point at is real too: the seed makes a small git repository under the data
+//! folder (`<data dir>/clones/<owner>-<name>`) whose files hold each finding's snippet at its line,
+//! commits it, records it as the repo's checkout and records the commit as the one the inspection
+//! read, so the code viewer opens real code and its permalink names a real commit. A rerun (the
+//! `moved` variant) is a second commit with the moved lines. It needs `git` on the path, and the
+//! commits carry a fixed identity and date so the same fixture gives the same commit ids.
+//!
 //! The `clean` variant is the base project with every held row released: `clean.json` lists the
 //! decisions the reviewer then makes on them and the Engine Check correction. The release gate
 //! refuses nothing, so the export panel shows its Export button (the click-through tests need it).
@@ -417,6 +424,8 @@ pub struct Seeded {
     pub run_ids: Vec<String>,
     /// The review shell as the server reads it back from the stores that were written.
     pub shell: ReviewShellView,
+    /// The small git repository the findings' code is read from (under the data folder).
+    pub clone_dir: PathBuf,
 }
 
 /// The directory the stores live in for a data directory: `<data dir>/camerata`, the same place
@@ -564,11 +573,13 @@ impl Seeding {
 
         self.check_expected_held(variant, &last_keys).await?;
         let shell: ReviewShellView = self.fetch("the review shell", "review").await?;
+        let clone_dir = self.clone_dir();
         Ok(Seeded {
             store_dir: self.store_dir,
             project_id: self.project_id,
             run_ids,
             shell,
+            clone_dir,
         })
     }
 
@@ -598,6 +609,8 @@ impl Seeding {
         };
         let mut report = ScanReport::gated(&run.project.repos);
         report.gated = false;
+        let all_sites: Vec<&SiteSpec> = sites.iter().chain(thrown.iter()).collect();
+        report.provenance.audited_refs = self.commit_clone(&all_sites, &started_at)?;
         report.code_lines = run.run.code_lines;
         report.provenance.started_at = started_at;
         report.provenance.finished_at = finished_at;
@@ -628,6 +641,95 @@ impl Seeding {
             run_id: entry.id,
             keys,
         })
+    }
+
+    /// Write the sites' files into the clone (making it on the first run), commit them and return
+    /// the audited ref the inspection records: the repo, the commit, a clean tree.
+    fn commit_clone(
+        &self,
+        sites: &[&SiteSpec],
+        when: &str,
+    ) -> Result<Vec<crate::onboard::AuditedRef>, SeedError> {
+        let Some(repo) = self.fixture.run.project.repos.first() else {
+            return Ok(Vec::new());
+        };
+        let dir = self.clone_dir();
+        let fresh = !dir.join(".git").exists();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SeedError::Store(format!("cannot create {}: {e}", dir.display())))?;
+        let origin = format!("https://github.com/{repo}.git");
+        let git = |args: &[&str]| -> Result<String, SeedError> {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Camerata seed")
+                .env("GIT_AUTHOR_EMAIL", "seed@example.com")
+                .env("GIT_COMMITTER_NAME", "Camerata seed")
+                .env("GIT_COMMITTER_EMAIL", "seed@example.com")
+                .env("GIT_AUTHOR_DATE", when)
+                .env("GIT_COMMITTER_DATE", when)
+                .output()
+                .map_err(|e| {
+                    SeedError::Store(format!("git is needed to make the demo repo: {e}"))
+                })?;
+            if !out.status.success() {
+                return Err(SeedError::Store(format!(
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                )));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        if fresh {
+            git(&["init", "-q", "-b", "main"])?;
+            git(&["remote", "add", "origin", &origin])?;
+        }
+        for (path, text) in clone_files(sites) {
+            let full = dir.join(&path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    SeedError::Store(format!("cannot create {}: {e}", parent.display()))
+                })?;
+            }
+            std::fs::write(&full, text)
+                .map_err(|e| SeedError::Store(format!("cannot write {}: {e}", full.display())))?;
+        }
+        git(&["add", "-A"])?;
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("The code the inspection of {when} read"),
+        ])?;
+        let sha = git(&["rev-parse", "HEAD"])?;
+        // The folder is this repo's checkout on this machine, exactly as a linked clone is.
+        self.state
+            .settings
+            .set_repo_path(repo, Some(dir.to_string_lossy().into_owned()));
+        Ok(vec![crate::onboard::AuditedRef {
+            repo: repo.clone(),
+            sha: Some(sha),
+            branch: Some("main".to_string()),
+            dirty: false,
+            origin_url: Some(origin),
+            ..Default::default()
+        }])
+    }
+
+    /// Where the demo repo is: `<data dir>/clones/<owner>-<name>`.
+    fn clone_dir(&self) -> PathBuf {
+        let data_dir = self.store_dir.parent().unwrap_or(&self.store_dir);
+        let repo = self
+            .fixture
+            .run
+            .project
+            .repos
+            .first()
+            .map_or("repo".to_string(), |r| r.replace('/', "-"));
+        data_dir.join("clones").join(repo)
     }
 
     /// The group reviewer's stage 2 data: candidates and the line, summaries, outliers.
@@ -1055,6 +1157,34 @@ fn path_key(key: &str) -> String {
 }
 
 /// A finding row for `site`, before the engine has keyed it.
+/// The files of the demo repo: for each path, a file whose lines hold the sites' snippets at the
+/// sites' lines and a comment everywhere else.
+fn clone_files(sites: &[&SiteSpec]) -> std::collections::BTreeMap<String, String> {
+    let mut by_path: std::collections::BTreeMap<&str, std::collections::BTreeMap<usize, &str>> =
+        Default::default();
+    for site in sites {
+        let lines = by_path.entry(site.path.as_str()).or_default();
+        for (i, line) in site.snippet.lines().enumerate() {
+            lines.insert(site.line + i, line);
+        }
+    }
+    by_path
+        .into_iter()
+        .map(|(path, lines)| {
+            let last = lines.keys().next_back().copied().unwrap_or(1) + 2;
+            let mut text = String::new();
+            for n in 1..=last {
+                match lines.get(&n) {
+                    Some(code) => text.push_str(code),
+                    None => text.push_str(&format!("// {path} line {n}")),
+                }
+                text.push('\n');
+            }
+            (path.to_string(), text)
+        })
+        .collect()
+}
+
 fn finding_of(repos: &[String], site: &SiteSpec) -> Finding {
     let mut f = Finding {
         repo: repos.first().cloned().unwrap_or_default(),
