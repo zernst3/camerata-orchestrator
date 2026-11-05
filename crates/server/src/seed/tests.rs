@@ -121,6 +121,7 @@ fn expected_held(variant: Variant) -> Vec<Held> {
     let key = match variant {
         Variant::Base => "base",
         Variant::Moved => "moved",
+        Variant::Clean => "clean",
     };
     let rows: Vec<Held> = overlays["expected_held"][key]
         .as_array()
@@ -293,6 +294,53 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
     assert_eq!(report["merges"].as_array().unwrap().len(), 1);
     assert_eq!(report["held"].as_array().unwrap().len(), 5);
     assert_eq!(report["findings"].as_array().unwrap().len(), 31);
+}
+
+#[tokio::test]
+async fn seed_clean_variant_releases_every_held_row() {
+    let (_dir, seeded) = seed(Variant::Clean).await;
+    assert_eq!(seeded.run_ids.len(), 1, "one inspection, like the base");
+    let (state, app) = reopen(&seeded);
+
+    // Nothing is held: the shell, the panel and the release gate over the very bytes it would
+    // ship agree, so the export panel shows its button and the package ships.
+    let shell: ReviewShellView = get(&app, &seeded, "the shell", "review").await;
+    assert_eq!(shell.counts.held, 0, "{:?}", shell.counts);
+    assert_eq!(shell.counts.total, 31, "the same run as the base variant");
+    let gate: ExportGateView = get(&app, &seeded, "the gate", "review/export-gate").await;
+    assert!(view_rows(&gate).is_empty(), "{gate:?}");
+    let latest = state.inspections().latest(&seeded.project_id).unwrap();
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &seeded.project_id, &latest);
+    assert_eq!(
+        gate_refusals(&reviewed),
+        None,
+        "the release gate lets the clean project ship"
+    );
+    let report: Value = get(&app, &seeded, "the reviewed report", "reviewed-report").await;
+
+    // The held rows are released by decisions, not dropped: every site is still on a page, and
+    // the Engine Check No on sql-11 has its correction (the lane still draws the card).
+    let rows = all_rows(&app, &seeded).await;
+    assert_eq!(rows.len(), 31);
+    let lane: EngineCheckLane = get(&app, &seeded, "the lane", "review/engine-check").await;
+    let uncorrected = lane
+        .cards
+        .iter()
+        .filter_map(|c| c.verdict.as_ref())
+        .filter(|v| !v.right && v.correction.is_none())
+        .count();
+    assert_eq!(uncorrected, 0, "every No has its correction");
+    assert_eq!(
+        lane.cards.iter().filter(|c| c.verdict.is_some()).count(),
+        3,
+        "the same three verdicts as the base variant"
+    );
+
+    // The other states are untouched: the line and the edits; the merges are the base one and
+    // the one recorded for the row the engine had merged on its own.
+    assert_eq!(shell.budget.escalated, 4);
+    assert_eq!(report["applied_edit_ids"].as_array().unwrap().len(), 3);
+    assert_eq!(report["merges"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

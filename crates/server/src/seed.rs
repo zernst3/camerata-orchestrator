@@ -19,6 +19,10 @@
 //!   shape, validation and fingerprint the server gives it, and a seed can never hold a record
 //!   the server would not have written.
 //!
+//! The `clean` variant is the base project with every held row released: `clean.json` lists the
+//! decisions the reviewer then makes on them and the Engine Check correction. The release gate
+//! refuses nothing, so the export panel shows its Export button (the click-through tests need it).
+//!
 //! The `moved` variant then appends a second inspection built from `moved.json`: the same
 //! project after the code changed. Records made against the first run stay where they were
 //! written, so some become stale and one site is new since a group decision, exactly as after a
@@ -272,6 +276,7 @@ pub struct CorrectionSpec {
 pub struct ExpectedHeld {
     pub base: Vec<HeldSpec>,
     pub moved: Vec<HeldSpec>,
+    pub clean: Vec<HeldSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,6 +321,22 @@ pub struct Fixture {
     pub run: RunFile,
     pub overlays: OverlayFile,
     pub moved: MovedFile,
+    pub clean: CleanFile,
+}
+
+/// `clean.json`: what the reviewer does on top of the base project to release every held row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanFile {
+    #[serde(default)]
+    pub about: String,
+    /// Decisions on the held rows, after the base overlays.
+    pub decisions: Vec<DecisionSpec>,
+    /// Merges the reviewer records for rows the engine merged on its own (a merge with no
+    /// decision record is held).
+    pub merges: Vec<MergeSpec>,
+    /// Engine Check verdicts that replace the base ones (a No gets its correction).
+    pub engine_check: Vec<EngineCheckSpec>,
 }
 
 fn read_json<T: DeserializeOwned>(dir: &Path, file: &str) -> Result<T, SeedError> {
@@ -332,6 +353,7 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, SeedError> {
         run: read_json(dir, "run.json")?,
         overlays: read_json(dir, "overlays.json")?,
         moved: read_json(dir, "moved.json")?,
+        clean: read_json(dir, "clean.json")?,
     })
 }
 
@@ -345,6 +367,8 @@ pub enum Variant {
     Base,
     /// The base project, then a second inspection after the code moved.
     Moved,
+    /// The base project with every held row released, so the release gate refuses nothing.
+    Clean,
 }
 
 /// What the caller asked for besides the two paths.
@@ -527,6 +551,10 @@ impl Seeding {
 
         let last_keys = match variant {
             Variant::Base => first.keys,
+            Variant::Clean => {
+                self.apply_clean(&first.keys).await?;
+                first.keys
+            }
             Variant::Moved => {
                 let second = self.append_run(Some(&self.fixture.moved.clone()))?;
                 run_ids.push(second.run_id);
@@ -731,6 +759,29 @@ impl Seeding {
         Ok(())
     }
 
+    /// What the reviewer does after the base overlays to release every held row: the decisions on
+    /// them, and the Engine Check verdicts posted again with their corrections.
+    async fn apply_clean(&self, keys: &Keys) -> Result<(), SeedError> {
+        let clean = self.fixture.clean.clone();
+        for d in &clean.decisions {
+            self.decide(d, keys).await?;
+        }
+        for m in &clean.merges {
+            let req = MergeReq {
+                key: key_of(keys, &m.site, "clean.json merges")?,
+                target: key_of(keys, &m.into, "clean.json merges")?,
+                reason: m.reason.clone(),
+                by: m.by.clone(),
+            };
+            self.send("record a merge", "POST", "merge", Some(to_value(&req)?))
+                .await?;
+        }
+        for v in &clean.engine_check {
+            self.judge(v, keys).await?;
+        }
+        Ok(())
+    }
+
     async fn decide(&self, d: &DecisionSpec, keys: &Keys) -> Result<DecisionRecorded, SeedError> {
         let (scope, key) = match (&d.site, &d.node_of) {
             (Some(site), None) => (Scope::Site, key_of(keys, site, "overlays.json decisions")?),
@@ -855,6 +906,7 @@ impl Seeding {
         let expected = match variant {
             Variant::Base => &self.fixture.overlays.expected_held.base,
             Variant::Moved => &self.fixture.overlays.expected_held.moved,
+            Variant::Clean => &self.fixture.overlays.expected_held.clean,
         };
         let mut want: Vec<(String, String)> = Vec::new();
         for h in expected {

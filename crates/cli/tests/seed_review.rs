@@ -93,3 +93,28 @@ fn seed_review_moved_variant_writes_two_inspections() {
     assert!(stdout.contains("stale edits 1"), "{stdout}");
     assert!(stdout.contains("new since decision 1"), "{stdout}");
 }
+
+#[test]
+fn seed_review_clean_variant_holds_nothing() {
+    let work = tempfile::tempdir().unwrap();
+    let data = work.path().join("seed-data");
+    let out = camerata(
+        work.path(),
+        &[
+            "seed-review",
+            fixture().to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--variant",
+            "clean",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("held 0"), "{stdout}");
+    assert!(stdout.contains("stale decisions 0"), "{stdout}");
+}

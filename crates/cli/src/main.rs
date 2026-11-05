@@ -325,8 +325,9 @@ enum Command {
         /// `CAMERATA_DATA_DIR=<data-dir>` makes the server look.
         #[arg(long)]
         data_dir: PathBuf,
-        /// `base` (one inspection) or `moved` (a second inspection after the code moved, so a
-        /// decision and an edit are stale and one site is new since a group decision).
+        /// `base` (one inspection), `moved` (a second inspection after the code moved, so a
+        /// decision and an edit are stale and one site is new since a group decision) or `clean`
+        /// (the base project with every held row released, so the export has nothing refused).
         #[arg(long, value_enum, default_value = "base")]
         variant: camerata::seed_review_cmd::VariantArg,
         /// Seed a data directory that is not empty, adding the project beside what is there.

@@ -19,6 +19,8 @@ pub enum VariantArg {
     Base,
     /// A second inspection after the code moved: a stale decision, a stale edit, a new site.
     Moved,
+    /// The base project with every held row released: the release gate refuses nothing.
+    Clean,
 }
 
 impl From<VariantArg> for Variant {
@@ -26,6 +28,7 @@ impl From<VariantArg> for Variant {
         match v {
             VariantArg::Base => Variant::Base,
             VariantArg::Moved => Variant::Moved,
+            VariantArg::Clean => Variant::Clean,
         }
     }
 }
