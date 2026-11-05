@@ -12,7 +12,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use camerata_api_types::decisions::{Decision, DecisionRecorded, NewDecisionReq, RevokeResp};
-use camerata_api_types::edits::{EditRecorded, NewEditReq};
+use camerata_api_types::edits::{
+    AddFindingReq, ClientAckRecorded, ClientAckReq, EditDiscarded, EditRecorded, FindingAdded,
+    NewEditReq,
+};
 use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
     EngineCheckLane, EngineCheckVerdict, EngineCheckVerdictReq, EscalationBudgetOutcome,
@@ -67,6 +70,26 @@ pub trait ReviewSource {
     fn export_gate(&self) -> SourceFuture<'_, ExportGateView>;
     /// The review settings (spec section 9).
     fn settings(&self) -> SourceFuture<'_, ReviewSettingsView>;
+    /// The source around one line of a file, as it was inspected, for the add form's read-only
+    /// snippet (spec section 8). The default cannot read source.
+    fn source_window<'a>(
+        &'a self,
+        _repo: &'a str,
+        _path: &'a str,
+        _line: usize,
+    ) -> SourceFuture<'a, SourceWindow> {
+        Box::pin(std::future::ready(Err(ReviewSourceError {
+            message: "This version of the app cannot read source here.".to_string(),
+        })))
+    }
+}
+
+/// A few lines of a file around the line asked about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceWindow {
+    /// The 1-based line number of `lines[0]`.
+    pub start_line: usize,
+    pub lines: Vec<String>,
 }
 
 /// A source over a seeded fixture data set, or one that fails every read.
@@ -152,6 +175,31 @@ impl FixtureReviewSource {
 }
 
 impl ReviewSource for FixtureReviewSource {
+    fn source_window<'a>(
+        &'a self,
+        repo: &'a str,
+        path: &'a str,
+        line: usize,
+    ) -> SourceFuture<'a, SourceWindow> {
+        self.log("source_window");
+        self.read(move |d| {
+            // The site at that place quotes its own snippet; every other line is filler.
+            let quoted = d
+                .rows
+                .iter()
+                .find(|r| r.repo == repo && r.path == path && r.line == line)
+                .map(|r| r.snippet.lines().next().unwrap_or_default().to_string());
+            let start_line = line.saturating_sub(2).max(1);
+            let lines = (start_line..=line + 2)
+                .map(|n| match (&quoted, n == line) {
+                    (Some(q), true) => q.clone(),
+                    _ => format!("// line {n}"),
+                })
+                .collect();
+            Ok(SourceWindow { start_line, lines })
+        })
+    }
+
     fn shell(&self) -> SourceFuture<'_, ReviewShellView> {
         self.log("shell");
         self.read(|d| Ok(d.shell.clone()))
@@ -225,6 +273,30 @@ impl ReviewWrites for FixtureReviewSource {
     fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded> {
         self.log("post_edit");
         self.recorded.post_edit(req)
+    }
+
+    fn discard_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditDiscarded> {
+        self.log("discard_edit");
+        self.recorded.discard_edit(edit_id)
+    }
+
+    fn reapply_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditRecorded> {
+        self.log("reapply_edit");
+        self.recorded.reapply_edit(edit_id)
+    }
+
+    fn add_finding(&self, req: AddFindingReq) -> SourceFuture<'_, FindingAdded> {
+        self.log("add_finding");
+        self.recorded.add_finding(req)
+    }
+
+    fn client_ack<'a>(
+        &'a self,
+        decision_id: &'a str,
+        req: ClientAckReq,
+    ) -> SourceFuture<'a, ClientAckRecorded> {
+        self.log("client_ack");
+        self.recorded.client_ack(decision_id, req)
     }
 
     fn preview_budget(

@@ -64,27 +64,7 @@ const SPEC_STATES: &[&str] = &[
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a
 /// screen deletes its lines here in the same commit that registers the real renderer.
-const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
-    ("detail/empty", "WO11"),
-    ("detail/plain", "WO11"),
-    ("detail/escalated", "WO11"),
-    ("detail/outlier", "WO11"),
-    ("detail/edited-field", "WO11"),
-    ("detail/stale-edit", "WO11"),
-    ("detail/stale-decision", "WO11"),
-    ("detail/moved", "WO11"),
-    ("detail/new-since-decision", "WO11"),
-    ("detail/held", "WO11"),
-    ("detail/merged", "WO11"),
-    ("detail/added", "WO11"),
-    ("detail/ignored-needs-ack", "WO11"),
-    ("detail/ignored-acked", "WO11"),
-    ("detail/edit-open", "WO11"),
-    ("detail/merge-picker", "WO11"),
-    ("detail/split-picker", "WO11"),
-    ("detail/add-form", "WO11"),
-    ("detail/add-refused", "WO11"),
-];
+const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[];
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("camerata-gallery-{}-{name}", std::process::id()));
@@ -128,17 +108,18 @@ fn placeholders_are_listed_with_their_owner() {
     assert_eq!(listed, expected);
 }
 
+/// No screen is a placeholder any more, so the page that names what is not built is pinned on a
+/// made-up state: the page stays right for the next screen that is added before it is built.
 #[test]
 fn a_placeholder_page_says_what_is_not_built_and_who_owns_it() {
-    let state = registry()
-        .into_iter()
-        .find(|s| s.id() == "detail/plain")
-        .expect("detail/plain is registered");
+    let state = GalleryState {
+        screen: "x",
+        state: "y",
+        kind: StateKind::Placeholder { owner: "WOn" },
+    };
+    assert!(state.is_placeholder());
     let html = state.render();
-    assert!(
-        html.contains("not built: detail/plain, owned by WO11"),
-        "{html}"
-    );
+    assert!(html.contains("not built: x/y, owned by WOn"), "{html}");
 }
 
 #[test]

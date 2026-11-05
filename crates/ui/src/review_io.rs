@@ -21,7 +21,10 @@ use camerata_api_types::decisions::{
     Decision, DecisionError, DecisionRecorded, DecisionState, NeededMeReq, NewDecisionReq,
     RevokeResp,
 };
-use camerata_api_types::edits::{Edit, EditError, EditRecorded, NewEditReq};
+use camerata_api_types::edits::{
+    AddFindingReq, ClientAckRecorded, ClientAckReq, Edit, EditDiscarded, EditError, EditRecorded,
+    FindingAdded, NewEditReq,
+};
 use camerata_api_types::review_view::{
     EngineCheckLane, EngineCheckVerdict, EngineCheckVerdictReq, EscalationBudgetOutcome,
     EscalationBudgetReq, ExportGateView, QueueView, ReviewSettingsView, ReviewShellView,
@@ -31,7 +34,7 @@ use camerata_ui_core::tree::state::SitesRequest;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::review_source::{ReviewSource, ReviewSourceError, SourceFuture};
+use crate::review_source::{ReviewSource, ReviewSourceError, SourceFuture, SourceWindow};
 
 // ── The write side ────────────────────────────────────────────────────────────────────────
 
@@ -44,6 +47,34 @@ pub trait ReviewWrites {
     fn revoke_decision<'a>(&'a self, decision_id: &'a str) -> SourceFuture<'a, RevokeResp>;
     /// `POST /api/projects/:id/edits`: a field of a site, or a node's summary.
     fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded>;
+
+    // ── The site detail's writes (spec section 8). A merge is `post_decision` with a
+    // `MergedInto` state and a split is `post_edit` on the sub-group field, so neither needs a
+    // method of its own. The defaults refuse, so a write side that predates them still compiles.
+
+    /// `POST /api/projects/:id/edits/:id/discard`: the undo bar's "Undo edit", and a stale edit's
+    /// Discard.
+    fn discard_edit<'a>(&'a self, _edit_id: &'a str) -> SourceFuture<'a, EditDiscarded> {
+        unsupported("discarding an edit")
+    }
+    /// `POST /api/projects/:id/edits/:id/reapply`: a stale edit's Reapply, as a new edit with the
+    /// site's current fingerprint.
+    fn reapply_edit<'a>(&'a self, _edit_id: &'a str) -> SourceFuture<'a, EditRecorded> {
+        unsupported("reapplying an edit")
+    }
+    /// `POST /api/projects/:id/added-findings`: a finding the engine missed. The server runs the
+    /// evidence check and answers with its verdict.
+    fn add_finding(&self, _req: AddFindingReq) -> SourceFuture<'_, FindingAdded> {
+        unsupported("adding a finding")
+    }
+    /// `POST /api/projects/:id/decisions/:id/client-ack`: the client accepted an Ignored row.
+    fn client_ack<'a>(
+        &'a self,
+        _decision_id: &'a str,
+        _req: ClientAckReq,
+    ) -> SourceFuture<'a, ClientAckRecorded> {
+        unsupported("recording the client's acknowledgement")
+    }
 
     // ── The settings lane's writes (spec section 9). ──
 
@@ -77,6 +108,17 @@ pub trait ReviewWrites {
         needed_me: bool,
     ) -> SourceFuture<'a, Decision>;
 }
+
+/// A write this side does not make.
+fn unsupported<'a, T: 'a>(what: &str) -> SourceFuture<'a, T> {
+    let message = format!("This version of the app cannot do {what} here.");
+    Box::pin(std::future::ready(Err(ReviewSourceError { message })))
+}
+
+/// The project the review screens are about, provided beside [`ReviewApi`] by the shell host. The
+/// code viewer reads files through the project's own checkout, so the tree's `O` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewProject(pub String);
 
 /// The reads and writes a host holds. Cloning shares the same source.
 #[derive(Clone)]
@@ -216,7 +258,79 @@ pub fn refusal_message(status: u16, body: &[u8]) -> String {
     format!("The request failed with status {status}.")
 }
 
+impl HttpReviewSource {
+    /// `GET /api/onboard/finding-context`: the source around `line`, as inspected. Not a
+    /// project-scoped route, so the project rides along as a query parameter.
+    async fn finding_context(
+        &self,
+        repo: &str,
+        path: &str,
+        line: usize,
+    ) -> Result<SourceWindow, ReviewSourceError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/onboard/finding-context", self.base))
+            .query(&[
+                ("repo", repo.to_string()),
+                ("path", path.to_string()),
+                ("line", line.to_string()),
+                ("project", self.project_id.clone()),
+            ])
+            .send()
+            .await
+            .map_err(|e| unreachable_error(&self.base, &e))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| ReviewSourceError {
+            message: format!("The reply could not be read: {e}"),
+        })?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| ReviewSourceError {
+                message: refusal_message(status.as_u16(), &bytes),
+            })?;
+        window_of(&value)
+    }
+}
+
+/// The window a `finding-context` reply holds, or its own one-line reason.
+fn window_of(reply: &serde_json::Value) -> Result<SourceWindow, ReviewSourceError> {
+    if reply.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+        let start_line = reply
+            .get("start_line")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok());
+        let lines: Option<Vec<String>> = reply
+            .get("lines")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|l| l.as_str().unwrap_or_default().to_string())
+                    .collect()
+            });
+        if let (Some(start_line), Some(lines)) = (start_line, lines) {
+            return Ok(SourceWindow { start_line, lines });
+        }
+    }
+    let message = reply
+        .get("reason")
+        .or_else(|| reply.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("The code at that line could not be read.");
+    Err(ReviewSourceError {
+        message: message.to_string(),
+    })
+}
+
 impl ReviewSource for HttpReviewSource {
+    fn source_window<'a>(
+        &'a self,
+        repo: &'a str,
+        path: &'a str,
+        line: usize,
+    ) -> SourceFuture<'a, SourceWindow> {
+        Box::pin(self.finding_context(repo, path, line))
+    }
+
     fn shell(&self) -> SourceFuture<'_, ReviewShellView> {
         Box::pin(self.get_json("review", self.run_query()))
     }
@@ -281,6 +395,37 @@ impl ReviewWrites for HttpReviewSource {
 
     fn post_edit(&self, req: NewEditReq) -> SourceFuture<'_, EditRecorded> {
         Box::pin(async move { self.post_json("edits", &req).await })
+    }
+
+    fn discard_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditDiscarded> {
+        Box::pin(async move {
+            let body = camerata_api_types::edits::DiscardReq::default();
+            self.post_json(&format!("edits/{edit_id}/discard"), &body)
+                .await
+        })
+    }
+
+    fn reapply_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditRecorded> {
+        Box::pin(async move {
+            let body = camerata_api_types::edits::ReapplyReq::default();
+            self.post_json(&format!("edits/{edit_id}/reapply"), &body)
+                .await
+        })
+    }
+
+    fn add_finding(&self, req: AddFindingReq) -> SourceFuture<'_, FindingAdded> {
+        Box::pin(async move { self.post_json("added-findings", &req).await })
+    }
+
+    fn client_ack<'a>(
+        &'a self,
+        decision_id: &'a str,
+        req: ClientAckReq,
+    ) -> SourceFuture<'a, ClientAckRecorded> {
+        Box::pin(async move {
+            self.post_json(&format!("decisions/{decision_id}/client-ack"), &req)
+                .await
+        })
     }
 
     fn preview_budget(
@@ -377,6 +522,14 @@ pub enum Written {
     SampleSize(usize),
     /// A stage's model, as (step key, model id).
     StageModel(String, String),
+    /// The edit with this id was discarded.
+    DiscardEdit(String),
+    /// The stale edit with this id was reapplied.
+    ReapplyEdit(String),
+    /// A finding was added.
+    AddFinding(AddFindingReq),
+    /// The decision with this id was acknowledged by the client.
+    ClientAck(String, ClientAckReq),
     /// An Engine Check verdict, as (site key, request).
     EngineVerdict(String, EngineCheckVerdictReq),
     /// The Needed me flag, as (decision id, value).
@@ -476,6 +629,101 @@ impl ReviewWrites for RecordingWrites {
                 };
                 self.log.borrow_mut().push(Written::Edit(req));
                 Ok(EditRecorded { edit })
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn discard_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditDiscarded> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                self.log
+                    .borrow_mut()
+                    .push(Written::DiscardEdit(edit_id.to_string()));
+                Ok(EditDiscarded {
+                    edit: Edit {
+                        discarded_at: Some("2026-11-04T09:00:05Z".to_string()),
+                        ..a_made_up_edit(edit_id)
+                    },
+                })
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn reapply_edit<'a>(&'a self, edit_id: &'a str) -> SourceFuture<'a, EditRecorded> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                let new_id = format!("edit-{:06}", self.log.borrow().len() + 1);
+                self.log
+                    .borrow_mut()
+                    .push(Written::ReapplyEdit(edit_id.to_string()));
+                Ok(EditRecorded {
+                    edit: Edit {
+                        reapplied_from: Some(edit_id.to_string()),
+                        ..a_made_up_edit(&new_id)
+                    },
+                })
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn add_finding(&self, req: AddFindingReq) -> SourceFuture<'_, FindingAdded> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                let key = format!("added-{:06}", self.log.borrow().len() + 1);
+                self.log.borrow_mut().push(Written::AddFinding(req));
+                Ok(FindingAdded {
+                    key,
+                    evidence_verified: true,
+                    evidence_note: String::new(),
+                })
+            }
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn client_ack<'a>(
+        &'a self,
+        decision_id: &'a str,
+        req: ClientAckReq,
+    ) -> SourceFuture<'a, ClientAckRecorded> {
+        let result = match self.refused() {
+            Some(e) => Err(e),
+            None => {
+                let decision = Decision {
+                    id: decision_id.to_string(),
+                    key: "k".to_string(),
+                    state: DecisionState::Ignored,
+                    reason: String::new(),
+                    scope: camerata_api_types::decisions::Scope::Site,
+                    applies_to: Vec::new(),
+                    except: Vec::new(),
+                    inherited_from: None,
+                    decided_by: "reviewer".to_string(),
+                    decided_at: "2026-11-04T09:00:00Z".to_string(),
+                    run_id: String::new(),
+                    engine_version: "0.0.0-test".to_string(),
+                    needed_me: None,
+                    sample_verdict: None,
+                    confirmed_by_client: Some(camerata_api_types::decisions::ClientAck {
+                        by: req.by.clone(),
+                        at: "2026-11-05T10:00:00Z".to_string(),
+                        note: req.note.clone(),
+                    }),
+                    revoked_at: None,
+                };
+                self.log
+                    .borrow_mut()
+                    .push(Written::ClientAck(decision_id.to_string(), req));
+                Ok(ClientAckRecorded {
+                    decision,
+                    also_acknowledged: 0,
+                })
             }
         };
         Box::pin(std::future::ready(result))
@@ -602,6 +850,25 @@ impl RecordingWrites {
             confirmed_by_client: None,
             revoked_at: None,
         })
+    }
+}
+
+/// An edit the recording side answers with: nothing about it is real but its id.
+fn a_made_up_edit(id: &str) -> Edit {
+    Edit {
+        id: id.to_string(),
+        key: "k".to_string(),
+        field: camerata_api_types::edits::EditField::Headline,
+        old: String::new(),
+        new: String::new(),
+        reason: String::new(),
+        by: "reviewer".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        run_id: String::new(),
+        fingerprint_at_edit: String::new(),
+        stale: false,
+        discarded_at: None,
+        reapplied_from: None,
     }
 }
 

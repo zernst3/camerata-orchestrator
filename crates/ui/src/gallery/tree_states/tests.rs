@@ -329,7 +329,8 @@ fn tree_empty_loading_and_error_are_the_three_states_of_the_left_column() {
 fn tree_narrow_stacks_the_pane_under_the_tree_with_a_site_focused() {
     let html = page("tree/narrow");
     assert!(html.contains("tree-lane narrow"), "{html}");
-    assert!(html.contains("site-pane-head"), "a site is focused");
+    // The site detail replaced the tree's read-only site pane (WO11c).
+    assert!(html.contains("site-detail-head"), "a site is focused");
     assert!(html.contains("Include this outlier") || html.contains("Headline"));
 }
 

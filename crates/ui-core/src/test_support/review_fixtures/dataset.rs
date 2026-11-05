@@ -1667,6 +1667,21 @@ fn assemble(
                 .count(),
         },
         group_reviewed: p.group_reviewed,
+        // One fixed commit per repo of the run, as an inspection records them.
+        audited_shas: {
+            let repos: std::collections::BTreeSet<&str> =
+                rows.iter().map(|r| r.repo.as_str()).collect();
+            repos
+                .into_iter()
+                .enumerate()
+                .map(|(i, repo)| {
+                    (
+                        repo.to_string(),
+                        format!("{:040x}", (i as u128 + 1) * 0x9e37_79b9),
+                    )
+                })
+                .collect()
+        },
     };
     let settings = settings_for(p, &budget);
     ReviewDataSet {

@@ -654,6 +654,33 @@ fn a_node_summary_that_leaks_the_methodology_carries_its_prose_flag_on_the_tree_
     }
 }
 
+#[test]
+fn the_shell_carries_the_commit_each_repo_was_inspected_at() {
+    let sealed = sealed(vec![row("SEC-AUTHZ-4", "src/a.rs", 5, "high")], |report| {
+        let at = |repo: &str, sha: Option<&str>| crate::onboard::AuditedRef {
+            repo: repo.to_string(),
+            sha: sha.map(str::to_string),
+            ..crate::onboard::AuditedRef::default()
+        };
+        report.provenance.audited_refs = vec![
+            at("acme/app", Some("0123456789abcdef0123456789abcdef01234567")),
+            at("acme/no-git", None),
+            at("acme/blank", Some("")),
+        ];
+    });
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let shell = compose(&reviewed, &Stores::default(), |c| c.shell());
+    assert_eq!(
+        shell
+            .audited_shas
+            .iter()
+            .map(|(r, s)| (r.as_str(), s.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("acme/app", "0123456789abcdef0123456789abcdef01234567")],
+        "a repo with no recorded commit is left out"
+    );
+}
+
 // ── a carried No on the lane (WO11a) ───────────────────────────────────────────────────────
 
 #[test]

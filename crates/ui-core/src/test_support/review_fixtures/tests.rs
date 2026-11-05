@@ -909,6 +909,22 @@ fn the_base_set_has_a_fully_decided_sub_group_and_the_node_decided_state_opens_i
     );
 }
 
+#[test]
+fn the_fixture_shell_names_the_inspected_commit_of_every_repo_its_rows_are_in() {
+    let ds = dataset_base();
+    let repos: std::collections::BTreeSet<&str> = ds.rows.iter().map(|r| r.repo.as_str()).collect();
+    assert!(!repos.is_empty());
+    for repo in repos {
+        let sha = ds
+            .shell
+            .audited_shas
+            .get(repo)
+            .expect("a commit for the repo");
+        assert_eq!(sha.len(), 40, "{repo}: {sha}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
+
 /// The server marks a row over budget only when its reason may exceed it at its severity
 /// (`EscalationReason::may_exceed_budget`: a D5 reason at critical, or unverified evidence at any
 /// severity). The fixture must hold the same line, or a screen built on it asserts what the

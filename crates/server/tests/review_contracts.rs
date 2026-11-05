@@ -1303,3 +1303,389 @@ async fn a_thirty_thousand_site_project_serves_its_tree_and_a_page_through_the_r
     assert_eq!(page.total, sub.counts.sites);
     assert_eq!(entry.report.findings.len(), 30_000);
 }
+
+// ── the reviewed report and the export agree on the line ──────────────────────────────────
+
+/// One request, answered with raw bytes (the product export is a zip).
+async fn call_bytes(
+    f: &ReviewFixture,
+    uri: &str,
+    body: Value,
+) -> (axum::http::StatusCode, Vec<u8>) {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, bytes)
+}
+
+/// Review F3 (wave 7, round 2): after the rate and floor change, the screen's own inspection
+/// fetch (`/reviewed-report`) and the product export's `findings.json` name the same escalated
+/// rows. Both read the one re-marked line, so a changed budget cannot show on the screen and
+/// ship another set.
+#[tokio::test]
+async fn after_a_budget_post_the_reviewed_report_and_the_product_export_agree_on_the_escalated_keys(
+) {
+    let f = review_fixture(12);
+    // Clear the gate: the row with unverified evidence is decided and the merge has its record.
+    for (uri, body) in [
+        (
+            "/decisions",
+            decision(
+                Scope::Site,
+                &f.keys.unverified,
+                DecisionState::Confirmed,
+                "checked by hand",
+            ),
+        ),
+        (
+            "/merge",
+            json!({ "key": f.keys.merged, "target": f.keys.plain, "reason": "the same query helper" }),
+        ),
+    ] {
+        let (status, text) = call(&f.app, "POST", &format!("{}{uri}", base(&f)), Some(body)).await;
+        assert_eq!(status, 200, "{uri}: {text}");
+    }
+
+    // The inspection setup names the client, as an export needs.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/client-name", base(&f)),
+        Some(json!({ "client_name": "Acme Ltd" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+
+    // Move the line: one candidate stays above it, the other goes below.
+    let applied: EscalationBudgetOutcome = post_ok(
+        &f,
+        "the write",
+        "/escalation-budget",
+        json!({ "rate_per_kloc": 0.0, "floor": 1, "over_budget_reasons": ["evidence_unverified"] }),
+    )
+    .await;
+    assert!(applied.applied);
+    assert_eq!(applied.after.escalated, 1);
+
+    // The screen's fetch: the rows the overlay marks escalated, by their export ids.
+    let (status, text) = call(
+        &f.app,
+        "GET",
+        &format!("{}/reviewed-report", base(&f)),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let reviewed: Value = serde_json::from_str(&text).unwrap();
+    let mut on_screen: Vec<String> = reviewed["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["review"]["escalation_state"] == "escalated")
+        .map(|row| camerata_server::report_export::site_id(row["site_key"].as_str().unwrap()))
+        .collect();
+    on_screen.sort();
+    assert_eq!(
+        on_screen.len(),
+        1,
+        "one row is above the line: {on_screen:?}"
+    );
+
+    // The export: the same rows in findings.json.
+    let (status, bytes) = call_bytes(&f, &format!("{}/product-export", base(&f)), json!({})).await;
+    assert_eq!(
+        status,
+        200,
+        "the export clears the gate: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let entries = camerata_server::release_gate::read_zip_entries(&bytes).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let mut shipped: Vec<String> = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["escalated"] == true)
+        .map(|row| row["site_id"].as_str().unwrap().to_string())
+        .collect();
+    shipped.sort();
+    assert_eq!(
+        shipped, on_screen,
+        "the screen and the export name the same rows"
+    );
+}
+
+// ── every editable field round-trips from the detail's own request into the exports ───────
+
+/// The site detail builds each edit with `camerata_ui_core::edits::edit_request`. Posted to the
+/// edits route as they are, each one is accepted, shows on the screen's own reviewed fetch and
+/// reaches the product export with its edit id (design 5.5, spec section 3).
+#[tokio::test]
+async fn every_editable_field_round_trips_from_the_details_request_into_every_export() {
+    use camerata_ui_core::edits::{edit_request, DetailContext, SITE_FIELDS};
+    let f = review_fixture(12);
+    let page: SitesPage = get(
+        &f,
+        "the sites",
+        &format!("/review/sites?node={}&limit=500", path_key(&f.sql_sub)),
+    )
+    .await;
+    let mut row = page
+        .rows
+        .iter()
+        .find(|r| r.site_key == f.keys.plain)
+        .expect("the plain row")
+        .clone();
+    let ctx = DetailContext::default();
+    let mut posted: Vec<(EditField, String)> = Vec::new();
+    for field in SITE_FIELDS {
+        // The detail always builds an edit against the row as the lane last read it, so read it
+        // again after each write (a fix the reviewer wrote also makes it a tailored fix).
+        let page: SitesPage = get(
+            &f,
+            "the sites",
+            &format!("/review/sites?node={}&limit=500", path_key(&f.sql_sub)),
+        )
+        .await;
+        // (An edit of the rule or the sub-group moves the row out of this node; the lane would
+        // then read it where it went, and what the next edit needs is unchanged by the move.)
+        if let Some(fresh) = page.rows.iter().find(|r| r.site_key == f.keys.plain) {
+            row = fresh.clone();
+        }
+        let new = match field {
+            EditField::Headline => "A headline the reviewer wrote",
+            EditField::Detail => "An explanation the reviewer wrote.",
+            EditField::Fix => "A fix the reviewer wrote.",
+            EditField::FixType => {
+                if row.fix_type == "Tailored fix" {
+                    "Standard fix"
+                } else {
+                    "Tailored fix"
+                }
+            }
+            EditField::Severity => "low",
+            EditField::RuleId => "SEC-AUTHZ-4",
+            EditField::Category => "authorization",
+            EditField::Subgroup => "Reviewer's own sub-group",
+            EditField::Kind => continue,
+            EditField::Summary => unreachable!("not a site field"),
+        };
+        let req = edit_request(&row, field, new, "the engine was wrong", &ctx, &page.run_id)
+            .unwrap_or_else(|e| panic!("{field:?}: {}", e.message()));
+        let (status, text) = call(
+            &f.app,
+            "POST",
+            &format!("{}/edits", base(&f)),
+            Some(serde_json::to_value(&req).unwrap()),
+        )
+        .await;
+        assert_eq!(status, 200, "{field:?} was refused: {text}");
+        let recorded: camerata_api_types::edits::EditRecorded =
+            serde_json::from_str(&text).unwrap();
+        assert_eq!(recorded.edit.field, field);
+        posted.push((field, recorded.edit.id));
+    }
+
+    // The kind: the detail offers `defect` only, so the edit is made on a deviation row (a
+    // row that is a defect already has nothing to change to).
+    let dev_page: SitesPage = get(
+        &f,
+        "the deviation's sites",
+        &format!(
+            "/review/sites?node={}&limit=500",
+            path_key(&f.deviation_sub)
+        ),
+    )
+    .await;
+    let dev_row = dev_page
+        .rows
+        .iter()
+        .find(|r| r.site_key == f.keys.deviation)
+        .expect("the deviation row")
+        .clone();
+    assert_eq!(
+        camerata_ui_core::tree::kind_tag_of(&dev_row),
+        "deviation",
+        "the fixture's deviation row"
+    );
+    let req = edit_request(
+        &dev_row,
+        EditField::Kind,
+        "defect",
+        "the convention does not apply here",
+        &ctx,
+        &dev_page.run_id,
+    )
+    .unwrap_or_else(|e| panic!("kind: {}", e.message()));
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/edits", base(&f)),
+        Some(serde_json::to_value(&req).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 200, "the kind was refused: {text}");
+    let recorded: camerata_api_types::edits::EditRecorded = serde_json::from_str(&text).unwrap();
+    assert_eq!(recorded.edit.field, EditField::Kind);
+    posted.push((EditField::Kind, recorded.edit.id));
+
+    // A deviation cannot be typed (it carries
+    // numbers the engine measured), and the server refuses it too. The value a row already has
+    // is refused by the detail before anything is posted (the server, comparing the bare tag
+    // with the stored JSON, would record it as a change).
+    let kind_same = edit_request(&row, EditField::Kind, "defect", "why", &ctx, &page.run_id);
+    assert_eq!(
+        kind_same,
+        Err(camerata_ui_core::edits::EditRefusal::Unchanged),
+        "the detail refuses the value the row already has"
+    );
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/edits", base(&f)),
+        Some(json!({ "key": row.site_key, "field": "kind", "new": "deviation", "reason": "why" })),
+    )
+    .await;
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("invalid_value"), "{text}");
+
+    // The screen's own fetch carries every one.
+    let (status, text) = call(
+        &f.app,
+        "GET",
+        &format!("{}/reviewed-report", base(&f)),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let reviewed: Value = serde_json::from_str(&text).unwrap();
+    let applied: Vec<String> = reviewed["applied_edit_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    for (field, id) in &posted {
+        assert!(
+            applied.contains(id),
+            "{field:?} ({id}) is not applied on the screen"
+        );
+    }
+    let shown = reviewed["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["site_key"] == f.keys.plain.as_str())
+        .or_else(|| {
+            reviewed["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["captures"]["reviewer_edited"].is_string())
+        })
+        .expect("the edited row");
+    assert_eq!(shown["severity"], "low");
+    assert_eq!(shown["rule_id"], "SEC-AUTHZ-4");
+
+    // The product export: the row is marked edited and carries every edit id.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision(
+            Scope::Site,
+            &f.keys.unverified,
+            DecisionState::Confirmed,
+            "checked by hand",
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/merge", base(&f)),
+        Some(json!({ "key": f.keys.merged, "target": f.keys.plain, "reason": "the same helper" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/client-name", base(&f)),
+        Some(json!({ "client_name": "Acme Ltd" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let (status, bytes) = call_bytes(&f, &format!("{}/product-export", base(&f)), json!({})).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+    let entries = camerata_server::release_gate::read_zip_entries(&bytes).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let site = camerata_server::report_export::site_id(&f.keys.plain);
+    let exported = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["site_id"] == site.as_str())
+        .expect("the edited row is exported");
+    assert_eq!(exported["reviewer_edited"], true);
+    let ids: Vec<String> = exported["edit_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    for (field, id) in &posted {
+        // The overlay records every applied edit's id on the row, a split included.
+        if *field != EditField::Kind {
+            assert!(
+                ids.contains(id),
+                "{field:?} ({id}) is not in the export: {ids:?}"
+            );
+        }
+    }
+    // The kind edit is on the deviation row, which exports as a defect with the edit's id.
+    let kind_id = &posted
+        .iter()
+        .find(|(field, _)| *field == EditField::Kind)
+        .expect("the kind was posted")
+        .1;
+    let deviated = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["site_id"] == camerata_server::report_export::site_id(&f.keys.deviation).as_str()
+        })
+        .expect("the deviation row is exported");
+    assert_eq!(deviated["reviewer_edited"], true);
+    assert_eq!(deviated["kind"], "defect", "{deviated}");
+    assert!(
+        deviated["edit_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == kind_id.as_str()),
+        "the kind edit ({kind_id}) is not in the export: {deviated}"
+    );
+    assert_eq!(exported["severity"], "low");
+    let text = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
+    assert!(
+        text.contains("A headline the reviewer wrote"),
+        "the headline is exported"
+    );
+}

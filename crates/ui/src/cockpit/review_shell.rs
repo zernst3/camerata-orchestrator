@@ -122,6 +122,7 @@ pub(crate) fn ReviewShellHost(
     children: Element,
 ) -> Element {
     let api = use_context_provider(|| ReviewApi::http(crate::bff_base(), project_id.clone()));
+    use_context_provider(|| camerata_ui::review_io::ReviewProject(project_id.clone()));
     // One counter for everything that reads the shell: the results screen provides it so the
     // export panel's gate re-reads after a decision too; a shell mounted alone makes its own.
     let own = use_signal(|| 0u32);
@@ -167,6 +168,12 @@ pub(crate) fn ReviewShellHost(
     });
 
     let active = lane();
+    // The commit each repo was inspected at, for the code viewer and the stack the tree opens.
+    let audited_shas = shell
+        .read()
+        .ready()
+        .map(|v| v.audited_shas.clone())
+        .unwrap_or_default();
     rsx! {
         div {
             ReviewShell {
@@ -184,17 +191,21 @@ pub(crate) fn ReviewShellHost(
                     shell.set(ViewStatus::Loading);
                     refresh += 1;
                 },
-                {lane_body(active, &children)}
+                {lane_body(active, &children, audited_shas)}
             }
         }
     }
 }
 
 /// The lane that is showing.
-fn lane_body(active: Lane, flat: &Element) -> Element {
+fn lane_body(
+    active: Lane,
+    flat: &Element,
+    audited_shas: std::collections::BTreeMap<String, String>,
+) -> Element {
     match active {
-        Lane::Tree => rsx! { TreeHost {} },
-        Lane::Escalations => rsx! { QueueHost {} },
+        Lane::Tree => rsx! { TreeHost { audited_shas } },
+        Lane::Escalations => rsx! { QueueHost { audited_shas } },
         Lane::EngineCheck => rsx! { EngineHost {} },
         Lane::Flat => flat.clone(),
         Lane::Settings => rsx! { SettingsLane {} },
@@ -263,7 +274,7 @@ mod tests {
         let refresh = use_signal(|| 0u32);
         use_context_provider(|| ShellRefresh(refresh));
         let flat = rsx! { p { "the flat view" } };
-        lane_body(case.lane, &flat)
+        lane_body(case.lane, &flat, Default::default())
     }
 
     fn lane_html(lane: Lane) -> String {

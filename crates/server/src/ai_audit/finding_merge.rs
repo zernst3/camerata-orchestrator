@@ -667,20 +667,7 @@ pub(crate) const SEMANTIC_MERGE_WINDOW: usize = 5;
 /// SAME category, so the set is deliberately coarse — one bucket per defect *family*, not per
 /// rule. Membership is validated (`is_known_category`) so a mis-shaped calibration value can
 /// never invent a category and cause a wrong merge.
-pub(super) const KNOWN_CATEGORIES: &[&str] = &[
-    "authorization",
-    "authentication",
-    "secret-exposure",
-    "injection",
-    "transport-security",
-    "rls-policy",
-    "resource-exposure",
-    "input-validation",
-    "error-handling",
-    "arch-conformance",
-    "testing-style",
-    "performance",
-];
+pub(super) const KNOWN_CATEGORIES: &[&str] = &camerata_api_types::edits::KNOWN_CATEGORIES;
 
 /// True if `c` is a member of the closed taxonomy.
 pub(crate) fn is_known_category(c: &str) -> bool {
@@ -1752,4 +1739,21 @@ pub(crate) fn inherit_fix(primary: &mut Finding, donor: &Finding) {
         .filter(|flag| crate::review_flags::stage_of(flag) == crate::review_flags::FlagStage::Fix)
         .collect();
     crate::review_flags::set_stage_flags(primary, crate::review_flags::FlagStage::Fix, donated);
+}
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::{is_known_category, KNOWN_CATEGORIES};
+
+    /// The review UI's category select and the engine's merge read the same list.
+    #[test]
+    fn the_engines_taxonomy_is_the_wire_types_list() {
+        assert_eq!(
+            KNOWN_CATEGORIES,
+            &camerata_api_types::edits::KNOWN_CATEGORIES
+        );
+        for c in camerata_api_types::edits::KNOWN_CATEGORIES {
+            assert!(is_known_category(c), "{c}");
+        }
+    }
 }

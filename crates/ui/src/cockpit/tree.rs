@@ -27,10 +27,11 @@
 //! So sort and filter are not offered on these rows: the sites arrive in the server's fixed order
 //! (severity, path, line), which is the order the spec's Severity and File:line sorts give.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use camerata_api_types::review_view::{SiteRow, TreeNodeView, TreeView, SITES_PAGE_SIZE};
+use camerata_ui_core::edits::context_for;
 use camerata_ui_core::tree::batch::{
     batch_allowed, batch_blocked_reason, batch_heading, batch_plan, decision_request,
     decision_state_for, plan_sentence, site_decision_request, stale_summary_note,
@@ -44,13 +45,15 @@ use camerata_ui_core::tree::state::{
 };
 use camerata_ui_core::tree::{
     count_terms, decision_cell, dom_token, file_line, indent_px, is_fully_decided, is_outlier,
-    kind_tag_of, marker_cell, marker_chips, severity_badge, severity_label, stage1_cell,
-    stage2_cell, thousands, CountTone, DecisionTone,
+    kind_tag_of, marker_cell, severity_badge, severity_label, stage1_cell, stage2_cell, thousands,
+    CountTone, DecisionTone,
 };
 use camerata_ui_core::triage::{KeyMods, PaneCommand, PaneFocus, TriageState};
 use dioxus::prelude::*;
 
 use super::scan::kind_chip_parts;
+use super::site_detail::code_bridge::use_code_bridge;
+use super::site_detail::{use_detail, DetailEvent, DetailPanel, SiteDetailView};
 use camerata_ui::review_io::{fetch_page, read_all_sites, ReviewApi};
 
 /// The DOM id of the tree's focusable region. Tabbing into it arms the keys.
@@ -163,13 +166,18 @@ pub(crate) fn TreeScreen(
     #[props(default)] on_retry_node: Callback<String>,
     #[props(default)] on_retry: Callback<()>,
     #[props(default)] on_batch: Callback<TriageState>,
-    #[props(default)] on_decide_site: Callback<TriageState>,
     #[props(default)] on_edit_summary: Callback<()>,
     #[props(default)] on_prompt_reason: Callback<String>,
     #[props(default)] on_prompt_text: Callback<String>,
     #[props(default)] on_prompt_commit: Callback<()>,
     #[props(default)] on_prompt_cancel: Callback<()>,
     #[props(default)] on_undo: Callback<()>,
+    /// The site detail's open form, undo bar and notice (the host's `DetailCtl` makes them).
+    #[props(default)]
+    detail: DetailPanel,
+    /// Everything the reviewer does in the site detail; the host runs it (`DetailCtl::handle`).
+    #[props(default)]
+    on_detail: Callback<DetailEvent>,
 ) -> Element {
     let armed = tree_keys_armed(focus);
     let prompt_open = prompt.is_some();
@@ -307,17 +315,32 @@ pub(crate) fn TreeScreen(
                         on_prompt_cancel,
                     }
                 } else if let Some((node, row)) = focused_site {
-                    SitePane {
-                        position: site_position(&state, &node, &row),
-                        node_label: index.node(&node).map(|n| n.label.clone()).unwrap_or_default(),
-                        ticked: state.ticked.contains(&row.site_key),
-                        row,
-                        prompt: prompt.clone(),
-                        on_tick,
-                        on_decide: on_decide_site,
-                        on_prompt_reason,
-                        on_prompt_commit,
-                        on_prompt_cancel,
+                    {
+                        let node_label = index.node(&node).map(|n| n.label.clone()).unwrap_or_default();
+                        let ctx = context_for(&index, &state, &node, &row);
+                        let site_prompt = prompt.clone().filter(
+                            |p| matches!(p, TreePrompt::Site { key, .. } if *key == row.site_key),
+                        );
+                        rsx! {
+                            SiteDetailView {
+                                position: site_position(&state, &node, &row),
+                                ticked: state.ticked.contains(&row.site_key),
+                                panel: detail.clone(),
+                                ctx,
+                                row,
+                                on_event: on_detail,
+                                if let Some(p) = site_prompt {
+                                    TreePromptView {
+                                        prompt: p,
+                                        node_label,
+                                        on_reason: on_prompt_reason,
+                                        on_text: Callback::default(),
+                                        on_commit: on_prompt_commit,
+                                        on_cancel: on_prompt_cancel,
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else if !index.is_empty() {
                     p { class: "pane-empty", "Select a node or a site." }
@@ -993,125 +1016,6 @@ fn TreeUndoBar(banner: UndoBanner, on_undo: Callback<()>) -> Element {
     }
 }
 
-// ── The right pane: a site ────────────────────────────────────────────────────────────────
-
-/// The focused site, read-only: the row's own facts and its decision. The extended detail pane
-/// (edit a field, merge, split, add, the stale and moved actions) is the site detail's.
-#[component]
-fn SitePane(
-    row: SiteRow,
-    node_label: String,
-    position: String,
-    ticked: bool,
-    prompt: Option<TreePrompt>,
-    on_tick: Callback<String>,
-    on_decide: Callback<TriageState>,
-    on_prompt_reason: Callback<String>,
-    on_prompt_commit: Callback<()>,
-    on_prompt_cancel: Callback<()>,
-) -> Element {
-    let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag_of(&row));
-    let chips = marker_chips(&row);
-    let decision = decision_cell(&row);
-    let outlier = is_outlier(&row);
-    let key_tick = row.site_key.clone();
-    let site_prompt =
-        prompt.filter(|p| matches!(p, TreePrompt::Site { key, .. } if *key == row.site_key));
-    let stage2_why = row
-        .stage2
-        .as_ref()
-        .map(|s| s.why.clone())
-        .filter(|w| !w.is_empty());
-    let outlier_why = row
-        .stage2
-        .as_ref()
-        .map(|s| s.outlier_why.clone())
-        .filter(|w| !w.is_empty());
-    rsx! {
-        div { class: "node-head",
-            div { class: "site-pane-head",
-                span { class: "pane-rule", "{row.rule_id}" }
-                span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
-                for chip in chips {
-                    span { key: "{chip.class}", class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
-                }
-                span { class: "pane-pos", "{position}" }
-            }
-            div { class: "node-crumb", "{node_label}" }
-            p { class: "site-pane-line", span { class: "site-pane-label", "Headline" } "{row.headline}" }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Severity" }
-                span { class: "tree-badge tree-badge-{severity_badge(&row.severity)}", "{severity_label(&row.severity)}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Where" }
-                span { class: "site-pane-code", "{file_line(&row)}" }
-            }
-            if !row.detail.is_empty() {
-                p { class: "site-pane-line", span { class: "site-pane-label", "Detail" } "{row.detail}" }
-            }
-            if !row.fix.is_empty() {
-                p { class: "site-pane-line", span { class: "site-pane-label", "Fix" } "{row.fix}" }
-            }
-            if !row.snippet.is_empty() {
-                pre { class: "pane-snippet", "{row.snippet}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Stage 1" }
-                "{stage1_cell(&row)}"
-                if !row.stage1.reason.is_empty() { " \u{b7} {row.stage1.reason}" }
-            }
-            if let Some(why) = stage2_why {
-                p { class: "site-pane-line", span { class: "site-pane-label", "Stage 2" } "{stage2_cell(&row)} \u{b7} {why}" }
-            }
-            if let Some(why) = outlier_why {
-                p { class: "site-pane-line", span { class: "site-pane-label", "Outlier" } "{why}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Decision" }
-                span {
-                    class: match decision.tone {
-                        DecisionTone::Decided => "dec-decided",
-                        DecisionTone::Unresolved => "dec-unresolved",
-                    },
-                    "{decision.label}"
-                }
-                if decision.inherited { span { class: "dec-inherited", "inherited from its group" } }
-            }
-            if outlier {
-                label { class: "site-pane-line",
-                    input {
-                        r#type: "checkbox",
-                        checked: ticked,
-                        onchange: move |_| on_tick.call(key_tick.clone()),
-                    }
-                    " Include this outlier in the next batch decision"
-                }
-            }
-            if let Some(p) = site_prompt {
-                TreePromptView {
-                    prompt: p,
-                    node_label,
-                    on_reason: on_prompt_reason,
-                    on_text: Callback::default(),
-                    on_commit: on_prompt_commit,
-                    on_cancel: on_prompt_cancel,
-                }
-            }
-            div { class: "pane-actions",
-                for state in [TriageState::Confirmed, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
-                    button {
-                        key: "{state.label()}",
-                        class: "btn-edit-sm pane-dispose",
-                        onclick: move |_| on_decide.call(state),
-                        "{state.label()}"
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ── The host ──────────────────────────────────────────────────────────────────────────────
 
 /// A request from outside the tree to show a site (the export panel's `open`): the shell
@@ -1125,7 +1029,11 @@ pub(crate) struct ShellRefresh(pub Signal<u32>);
 
 /// The tree lane with its signals and its I/O.
 #[component]
-pub(crate) fn TreeHost() -> Element {
+pub(crate) fn TreeHost(
+    /// The commit each repo of the run was inspected at (the shell's `audited_shas`).
+    #[props(default)]
+    audited_shas: ReadSignal<BTreeMap<String, String>>,
+) -> Element {
     let api = use_context::<ReviewApi>();
     let refresh = try_use_context::<ShellRefresh>();
     let door = try_use_context::<DoorRequest>();
@@ -1218,6 +1126,40 @@ pub(crate) fn TreeHost() -> Element {
                 now_ms.set(epoch.elapsed().as_millis() as u64);
             }
         }
+    });
+
+    // The site detail: the open form, its undo bar and its writes. A write reloads the tree and
+    // the shell like any other; a closed form gives the keyboard back to the tree.
+    let detail = use_detail(
+        after_write,
+        Callback::new(move |()| super::viewer::focus_element(TREE_REGION_ID)),
+    );
+    // Another site (or a node) under the cursor: the form that was open was for the one before.
+    let cursor_now = use_memo(move || state.read().cursor.clone());
+    use_effect(move || {
+        let _ = cursor_now();
+        detail.reset();
+    });
+    // The site under the cursor and what the detail needs to know about its surroundings.
+    let cursor_site = move || -> Option<(SiteRow, camerata_ui_core::edits::DetailContext)> {
+        let st = state.peek();
+        let Some(TreeRef::Site { node, key }) = st.cursor.clone() else {
+            return None;
+        };
+        let row = st.site(&node, &key)?.clone();
+        let idx = index.peek().clone();
+        let ctx = context_for(&idx, &st, &node, &row);
+        Some((row, ctx))
+    };
+
+    // `O` and `B`: the code viewer and the stacked view, reused from the flat Queue.
+    let loaded_sites = use_memo(move || {
+        state
+            .read()
+            .loaded
+            .iter()
+            .flat_map(|(node, l)| l.rows.iter().map(move |r| (node.clone(), r.clone())))
+            .collect::<Vec<(String, SiteRow)>>()
     });
 
     let run_id = move || {
@@ -1335,6 +1277,30 @@ pub(crate) fn TreeHost() -> Element {
                 }
             });
         }
+    });
+
+    // The viewer's and the stack's doors. Their decisions are this lane's site decisions.
+    let project = try_use_context::<camerata_ui::review_io::ReviewProject>()
+        .map(|p| p.0)
+        .unwrap_or_default();
+    let bridge = use_code_bridge(
+        loaded_sites,
+        audited_shas,
+        project,
+        decide_site,
+        use_callback(move |(node, key): (String, String)| state.write().focus_site(&node, &key)),
+        TREE_REGION_ID,
+    );
+    // `O` on the site under the cursor; `B` on its sub-group, or on the sub-group the cursor is on.
+    let open_code = use_callback(move |()| {
+        if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
+            bridge.open_code.call((node, key));
+        }
+    });
+    let open_stack = use_callback(move |()| match state.peek().cursor.clone() {
+        Some(TreeRef::Site { node, key }) => bridge.open_stack.call((node, Some(key))),
+        Some(TreeRef::Node(id)) => bridge.open_stack.call((id, None)),
+        None => {}
     });
 
     // `C`, `I`, `F` or `T` on a node: read every page of the node, work out the plan, and raise
@@ -1505,6 +1471,14 @@ pub(crate) fn TreeHost() -> Element {
                 }
             }
         }
+        // While the detail waits for the letter of a field (`E` was pressed), the press is its.
+        if *focus.peek() == PaneFocus::Cursor && detail.is_picking() {
+            if let Some((row, ctx)) = cursor_site() {
+                if detail.chord(&key, &row, &ctx) {
+                    return;
+                }
+            }
+        }
         let Some(cmd) = tree_command(*focus.peek(), &key, mods, kind) else {
             return;
         };
@@ -1555,7 +1529,14 @@ pub(crate) fn TreeHost() -> Element {
                     open_summary(&idx, &id, prompt);
                 }
             }
-            TreeCommand::Site(_) | TreeCommand::OpenCode | TreeCommand::OpenStack => {}
+            TreeCommand::Detail(key) => {
+                if let Some((row, ctx)) = cursor_site() {
+                    detail.open(key, &row, &ctx);
+                }
+            }
+            TreeCommand::OpenCode => open_code.call(()),
+            TreeCommand::OpenStack => open_stack.call(()),
+            TreeCommand::Site(_) => {}
         }
     });
 
@@ -1632,12 +1613,28 @@ pub(crate) fn TreeHost() -> Element {
                     open_batch.call((id, st));
                 }
             },
-            on_decide_site: move |st: TriageState| {
-                if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
-                    if st.requires_reason() {
-                        prompt.set(Some(TreePrompt::Site { node, key, state: st, reason: String::new(), error: None }));
-                    } else {
-                        decide_site.call((node, key, st, String::new()));
+            detail: detail.panel(),
+            on_detail: move |event: DetailEvent| match event {
+                // The lane's own: a decision, the outlier tick, the viewer and the stack.
+                DetailEvent::Decide(st) => {
+                    if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
+                        if st.requires_reason() {
+                            prompt.set(Some(TreePrompt::Site { node, key, state: st, reason: String::new(), error: None }));
+                        } else {
+                            decide_site.call((node, key, st, String::new()));
+                        }
+                    }
+                }
+                DetailEvent::Tick => {
+                    if let Some((row, _)) = cursor_site() {
+                        state.write().toggle_tick(&row.site_key.clone(), &row);
+                    }
+                }
+                DetailEvent::OpenCode => open_code.call(()),
+                DetailEvent::OpenStack => open_stack.call(()),
+                other => {
+                    if let Some((row, ctx)) = cursor_site() {
+                        detail.handle(other, &row, &ctx, &run_id());
                     }
                 }
             },

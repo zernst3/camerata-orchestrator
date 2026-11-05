@@ -39,6 +39,8 @@ pub struct Keys {
     pub restored: String,
     /// A plain row.
     pub plain: String,
+    /// A deviation row (the kind the engine measured, not a defect).
+    pub deviation: String,
 }
 
 pub struct ReviewFixture {
@@ -51,6 +53,8 @@ pub struct ReviewFixture {
     pub sql_sub: String,
     /// The rule node of the SQL rows.
     pub sql_rule_node: String,
+    /// The sub-group node holding the deviation row.
+    pub deviation_sub: String,
 }
 
 fn row(rule: &str, path: &str, line: usize, severity: &str) -> Finding {
@@ -74,6 +78,11 @@ pub fn report_with(n_sql: usize) -> ScanReport {
     report.code_lines = 10_000;
     report.provenance.started_at = "2026-11-02T10:00:00Z".to_string();
     report.provenance.finished_at = "2026-11-02T10:05:00Z".to_string();
+    report.provenance.audited_refs = vec![camerata_server::onboard::AuditedRef {
+        repo: REPO.to_string(),
+        sha: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        ..camerata_server::onboard::AuditedRef::default()
+    }];
     for i in 0..n_sql {
         report.findings.push(row(
             SQL_RULE,
@@ -165,6 +174,7 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         outlier: key_of(&entry, "src/q00004.rs"),
         below_line: key_of(&entry, "src/q00005.rs"),
         escalated: key_of(&entry, "src/auth0.rs"),
+        deviation: key_of(&entry, "src/auth1.rs"),
     };
 
     // The plain row has everything a row can say about itself.
@@ -189,6 +199,20 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
                 path: "src/q00000.rs".to_string(),
                 line: 10,
             });
+        }
+    }
+
+    // One row is a deviation, so the kind edit has something to change.
+    for f in &mut entry.report.findings {
+        if f.site_key == keys.deviation {
+            f.kind = Some(camerata_api_types::audit::FindingKind::Deviation(
+                camerata_api_types::audit::DeviationKind {
+                    deviating_sites: 1,
+                    assessed_sites: Some(4),
+                    convention_option_id: Some("session-cookie".to_string()),
+                    convention_label: "Session cookie".to_string(),
+                },
+            ));
         }
     }
 
@@ -221,6 +245,13 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         .find(|n| n.level == NodeLevel::Rule && n.id.contains(SQL_RULE))
         .map(|n| n.id.clone())
         .expect("the SQL rule has a node");
+    let deviation_sub = tree
+        .nodes
+        .iter()
+        .find(|n| n.level == NodeLevel::Subgroup && n.members.contains(&keys.deviation))
+        .expect("the deviation row is in a sub-group")
+        .id
+        .clone();
     let candidate = |key: &str, reason, severity: &str, rank| EscalationCandidate {
         key: key.to_string(),
         node_id: sql_rule_node.clone(),
@@ -273,5 +304,6 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         keys,
         sql_sub,
         sql_rule_node,
+        deviation_sub,
     }
 }
