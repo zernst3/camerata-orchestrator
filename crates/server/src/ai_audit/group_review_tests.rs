@@ -294,6 +294,7 @@ fn cfg<'a>(rules: &'a [(String, String)]) -> GroupReviewConfig<'a> {
         rules,
         rank: RankSettings::default(),
         max_in_flight: 4,
+        cli_backend: false,
         job: None,
     }
 }
@@ -2564,5 +2565,84 @@ fn a_rank_of_the_wrong_kind_is_still_refused_and_a_given_rank_is_not_recorded_as
             parsed.escalations[0].rank_defaulted
         ),
         (2, false)
+    );
+}
+
+// ── The CLI backend: no tools ─────────────────────────────────────────────────────────────
+
+/// The shape of the one reply a real run got from Fable on the CLI backend: a transcript of tool
+/// calls (invented paths), not the JSON object. Nothing ran.
+fn tool_call_transcript() -> String {
+    [
+        "I'll look at the repository layout first.\n\n",
+        "<function_calls>\n<invoke name=\"Bash\">\n",
+        "<parameter name=\"command\">cd /Users/auditor/Repos && ls -d app*</parameter>\n",
+        "</invoke>\n</function_calls>",
+    ]
+    .concat()
+}
+
+#[tokio::test]
+async fn the_cli_prompts_say_no_tools_exist_and_the_api_prompts_do_not() {
+    for cli in [true, false] {
+        let mut report = report_of(&[(LAYERING, 151)]);
+        let llm = Reviewer::new(|call| {
+            if call.summary_call {
+                Ok(summary_reply("Whole rule."))
+            } else {
+                Ok(one_group(call, "Part."))
+            }
+        });
+        let rules: Vec<(String, String)> = Vec::new();
+        let config = GroupReviewConfig {
+            cli_backend: cli,
+            ..cfg(&rules)
+        };
+        review_groups(&mut report, &llm, &config, None).await;
+        let requests = llm.requests();
+        assert!(requests.len() >= 3, "chunk calls and the rule summary call");
+        for req in requests {
+            let system = req.system.clone().unwrap_or_default();
+            assert_eq!(system.contains("No tools exist"), cli, "cli={cli}");
+            // The line is added to the end of the prompt, which the stand-in and the journal
+            // still recognise by its start.
+            assert!(
+                system.starts_with(&group_review_system_prompt())
+                    || system.starts_with(&rule_summary_system_prompt())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
+    assert!(Stage2Reply::parse(&tool_call_transcript()).is_err());
+    assert!(parse_rule_summary(&tool_call_transcript()).is_err());
+
+    let mut report = report_of(&[(LAYERING, 3)]);
+    let llm = Reviewer::new(|call| {
+        if call.attempt == 1 {
+            Ok(tool_call_transcript())
+        } else {
+            Ok(one_group(call, "Layering."))
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(llm.calls().len(), 2, "refused once, asked again");
+    assert_eq!(outcome.rules_failed, 0);
+    // The second ask carries the refusal, and only the good reply reached the tree.
+    assert!(llm.requests()[1].prompt.contains("not a JSON object"));
+    let rule = node(&report, &rule_node(&report, LAYERING));
+    assert_eq!(rule.summary.as_deref(), Some("Layering."));
+
+    // A transcript on both tries is a failed part, with no reply kept for the rule.
+    let mut report = report_of(&[(LAYERING, 3)]);
+    let llm = Reviewer::new(|_| Ok(tool_call_transcript()));
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(outcome.rules_failed, 1);
+    assert_eq!(
+        node(&report, &rule_node(&report, LAYERING)).summary,
+        None,
+        "nothing from the transcript is stored as a summary"
     );
 }

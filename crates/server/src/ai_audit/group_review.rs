@@ -261,6 +261,33 @@ fn outlier_meaning(r: OutlierReason) -> &'static str {
     }
 }
 
+/// The line added to both stage 2 prompts on the CLI backend. There the model is Claude Code with
+/// every tool switched off, and one reply on a real run was a transcript of tool calls instead of
+/// the JSON object (nothing ran). It is a suffix, so the base prompt stays the prefix of the
+/// full one.
+pub(crate) const NO_TOOLS_LINE: &str = "\nNo tools exist in this conversation. You cannot read \
+    files or run commands, and a tool call you write does nothing. Your whole reply is the one \
+    JSON object described above, with no tool call, no transcript and no text before or after \
+    it.\n";
+
+/// The group reviewer's system prompt for the backend in use.
+pub(crate) fn group_review_system_prompt_for(cli_backend: bool) -> String {
+    let mut p = group_review_system_prompt();
+    if cli_backend {
+        p.push_str(NO_TOOLS_LINE);
+    }
+    p
+}
+
+/// The rule-level summary prompt for the backend in use.
+pub(crate) fn rule_summary_system_prompt_for(cli_backend: bool) -> String {
+    let mut p = rule_summary_system_prompt();
+    if cli_backend {
+        p.push_str(NO_TOOLS_LINE);
+    }
+    p
+}
+
 /// The system prompt of the rule-level summary call.
 pub(crate) fn rule_summary_system_prompt() -> String {
     String::from(
@@ -1587,6 +1614,9 @@ pub struct GroupReviewConfig<'a> {
     pub rank: RankSettings,
     /// The most calls in flight at once.
     pub max_in_flight: usize,
+    /// The model runs through the Claude Code CLI (no tools, but it can drift into agent mode):
+    /// the prompts say outright that no tools exist.
+    pub cli_backend: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
 }
@@ -1712,9 +1742,12 @@ pub async fn review_groups(
         repo_shape: cfg.repo_shape,
         repo: repo_label.clone(),
         model: cfg.model,
-        system: crate::prompt_frame::with_untrusted_clause(group_review_system_prompt(), &nonce),
+        system: crate::prompt_frame::with_untrusted_clause(
+            group_review_system_prompt_for(cfg.cli_backend),
+            &nonce,
+        ),
         rule_system: crate::prompt_frame::with_untrusted_clause(
-            rule_summary_system_prompt(),
+            rule_summary_system_prompt_for(cfg.cli_backend),
             &nonce,
         ),
         nonce,
@@ -2133,6 +2166,7 @@ pub async fn review_scan_report(
         } else {
             stage_batch::DEFAULT_MAX_IN_FLIGHT
         },
+        cli_backend,
         job,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
