@@ -71,26 +71,87 @@ pub struct GateRow {
     pub door: Door,
 }
 
-fn held_row(kind: GateRowKind, r: &HeldRow) -> GateRow {
-    GateRow {
-        kind,
-        place: format!("{}:{}", r.path, r.line),
-        rule_id: r.rule_id.clone(),
-        reason: if r.detail.is_empty() {
-            r.reason.phrase().to_string()
-        } else {
-            r.detail.clone()
-        },
-        door: if r.reason == HoldReason::EngineCheckNoWithoutCorrection {
-            Door::EngineCard { key: r.key.clone() }
-        } else {
-            Door::Site {
-                key: r.key.clone(),
-                rule_id: r.rule_id.clone(),
-                node_id: r.node_id.clone(),
-            }
-        },
+/// The words for why one row is held: the server's extra words when it gave some, else the reason.
+fn reason_words(r: &HeldRow) -> String {
+    if r.detail.is_empty() {
+        r.reason.phrase().to_string()
+    } else {
+        r.detail.clone()
     }
+}
+
+/// Where a row's `open` button goes. A row more than one check refuses goes where the check that
+/// runs first sends it: a row put back after a throw-out is decided in its node, and that one
+/// decision also clears an Engine Check hold on it, so its door is the row, not the card.
+fn door_for(rows: &[&HeldRow]) -> Door {
+    let first = rows
+        .iter()
+        .min_by_key(|r| {
+            HoldReason::ALL
+                .iter()
+                .position(|x| *x == r.reason)
+                .unwrap_or(usize::MAX)
+        })
+        .copied()
+        .unwrap_or(rows[0]);
+    if first.reason == HoldReason::EngineCheckNoWithoutCorrection {
+        Door::EngineCard {
+            key: first.key.clone(),
+        }
+    } else {
+        Door::Site {
+            key: first.key.clone(),
+            rule_id: first.rule_id.clone(),
+            node_id: first.node_id.clone(),
+        }
+    }
+}
+
+/// One line per row the gate holds. A row two checks refuse is one line that names each reason
+/// (a restored row the Engine Check also said No to), so the lines and the headline's count of
+/// rows are the same number.
+fn held_rows(gate: &ExportGateView) -> Vec<GateRow> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_key: std::collections::HashMap<&str, Vec<(&HeldRow, GateRowKind)>> =
+        std::collections::HashMap::new();
+    for (r, kind) in gate
+        .held
+        .iter()
+        .map(|r| (r, GateRowKind::Held))
+        .chain(
+            gate.merged_without_decision
+                .iter()
+                .map(|r| (r, GateRowKind::Merged)),
+        )
+    {
+        let entry = by_key.entry(r.key.as_str()).or_default();
+        if entry.is_empty() {
+            order.push(r.key.as_str());
+        }
+        entry.push((r, kind));
+    }
+    order
+        .into_iter()
+        .map(|key| {
+            let group = &by_key[key];
+            let rows: Vec<&HeldRow> = group.iter().map(|(r, _)| *r).collect();
+            let mut reasons: Vec<String> = Vec::new();
+            for r in &rows {
+                let words = reason_words(r);
+                if !reasons.contains(&words) {
+                    reasons.push(words);
+                }
+            }
+            let first = rows[0];
+            GateRow {
+                kind: group[0].1,
+                place: format!("{}:{}", first.path, first.line),
+                rule_id: first.rule_id.clone(),
+                reason: reasons.join("; "),
+                door: door_for(&rows),
+            }
+        })
+        .collect()
 }
 
 fn gap_row(g: &NodeDecisionGap) -> GateRow {
@@ -113,17 +174,12 @@ fn gap_row(g: &NodeDecisionGap) -> GateRow {
     }
 }
 
-/// Every line of the panel: the held rows, the merges with no decision, then the group decisions
-/// that miss records. One line per thing the gate refuses, none added or left out.
+/// Every line of the panel: the held rows (merges with no decision among them), then the group
+/// decisions that miss records. One line per row the gate refuses, however many checks refuse it,
+/// none added or left out.
 pub fn gate_rows(gate: &ExportGateView) -> Vec<GateRow> {
-    gate.held
-        .iter()
-        .map(|r| held_row(GateRowKind::Held, r))
-        .chain(
-            gate.merged_without_decision
-                .iter()
-                .map(|r| held_row(GateRowKind::Merged, r)),
-        )
+    held_rows(gate)
+        .into_iter()
         .chain(gate.node_decisions_missing_members.iter().map(gap_row))
         .collect()
 }
@@ -174,12 +230,17 @@ mod tests {
         let gate = &data().gate;
         assert!(gate.is_blocked(), "the base fixture is blocked");
         let rows = gate_rows(gate);
+        let distinct_rows = gate
+            .held
+            .iter()
+            .chain(&gate.merged_without_decision)
+            .map(|h| h.key.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert_eq!(
             rows.len(),
-            gate.held.len()
-                + gate.merged_without_decision.len()
-                + gate.node_decisions_missing_members.len(),
-            "one line per thing the gate refuses, none added or dropped"
+            distinct_rows + gate.node_decisions_missing_members.len(),
+            "one line per row the gate refuses (a row two checks refuse is one line), none added or dropped"
         );
         // Every held row has a door to its own place: its site in the tree, or, for a row the
         // Engine Check holds, its card in the Engine Check lane (spec section 14, step 10).
@@ -216,6 +277,75 @@ mod tests {
         if let (Some(h), Some(g)) = (last_held, first_gap) {
             assert!(h < g);
         }
+    }
+
+    /// Wave 17 soft (a): a restored row the Engine Check also holds drew two lines under a headline
+    /// that counts it once. The panel now draws one line per row, naming each reason, so the
+    /// headline and the lines count the same thing.
+    #[test]
+    fn a_row_two_checks_refuse_is_one_line_naming_both_reasons() {
+        let base = data().gate.held[0].clone();
+        let restored = HeldRow {
+            reason: HoldReason::RestoredWithoutDecision,
+            detail: String::new(),
+            ..base.clone()
+        };
+        let engine = HeldRow {
+            reason: HoldReason::EngineCheckNoWithoutCorrection,
+            detail: String::new(),
+            ..base.clone()
+        };
+        let mut other = base.clone();
+        other.key = format!("{}-other", base.key);
+        other.reason = HoldReason::EvidenceUnverified;
+        other.detail = String::new();
+        let mut gate = ExportGateView::default();
+        // The Engine Check's hold is listed before the restore's, to show the order is the gate's
+        // own and not the list's.
+        gate.held.extend([engine, restored, other]);
+        let rows = gate_rows(&gate);
+        assert_eq!(rows.len(), 2, "two rows, not three lines: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            gate.rows_needing_a_decision(),
+            "the lines and the headline count the same rows"
+        );
+        let both = &rows[0];
+        assert!(
+            both.reason.contains(HoldReason::RestoredWithoutDecision.phrase()),
+            "{}",
+            both.reason
+        );
+        assert!(
+            both.reason
+                .contains(HoldReason::EngineCheckNoWithoutCorrection.phrase()),
+            "{}",
+            both.reason
+        );
+        // A decision on the put-back row clears both holds, so the door is the row in its node.
+        assert_eq!(
+            both.door,
+            Door::Site {
+                key: base.key.clone(),
+                rule_id: base.rule_id.clone(),
+                node_id: base.node_id.clone()
+            }
+        );
+        assert!(!both.reason.contains('\u{2014}'));
+        // A merge listing and a hold on the same key are one row too.
+        let mut gate = ExportGateView::default();
+        gate.held.push(HeldRow {
+            reason: HoldReason::EvidenceUnverified,
+            detail: String::new(),
+            ..base.clone()
+        });
+        gate.merged_without_decision.push(HeldRow {
+            reason: HoldReason::MergedWithoutDecision,
+            detail: String::new(),
+            ..base
+        });
+        assert_eq!(gate_rows(&gate).len(), gate.rows_needing_a_decision());
+        assert_eq!(gate_rows(&gate).len(), 1);
     }
 
     #[test]
