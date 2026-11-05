@@ -1552,3 +1552,58 @@ fn the_command_palette_opens_from_the_review_shell_and_needed_lands_on_the_first
     stack.assert_shell_counts(&BASE);
     stack.assert_no_model_calls();
 }
+
+#[test]
+fn o_opens_real_code_and_y_copies_the_permalink_through_the_platform() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Base);
+    let site = model.site("sql-01");
+    let place = place_of(&model, "sql-01");
+    let snippet = site["snippet"].as_str().unwrap().to_string();
+    let sha = support::get_json(&format!("{}/review", stack.api))["audited_shas"]["acme/portal"]
+        .as_str()
+        .expect("the seeded inspection recorded the commit it read")
+        .to_string();
+    assert_eq!(sha.len(), 40, "{sha}");
+
+    // O on the open site: the viewer shows the real file at the inspected commit, the finding's
+    // own line among them.
+    open_site(&stack, "cat:injection", "SEC-NO-RAW-SQL-CONCAT-1", &place);
+    stack.key("o");
+    stack.wait_for("the viewer", "T.count('.cv-lines') === 1");
+    stack.wait_text(".cv-lines", &snippet);
+    let shown = stack.text(".cv-lines");
+    assert!(
+        shown.contains("src/orders/repo.rs line 41"),
+        "the lines around it are the file's: {shown}"
+    );
+
+    // Y copies the permalink: the request goes to the platform, not to the page.
+    stack.key("y");
+    stack.wait_for("the copy", "T.has('.toast-host', 'Copied the permalink.')");
+    let calls = stack.platform_calls();
+    let copies: Vec<_> = calls.iter().filter(|c| c["call"] == "copy_text").collect();
+    assert_eq!(copies.len(), 1, "{calls:?}");
+    let copied = copies[0]["text"].as_str().unwrap();
+    assert_eq!(copies[0]["taken"], true, "{calls:?}");
+    assert!(
+        copied.contains(&sha[..7]),
+        "the permalink names the inspected commit: {copied}"
+    );
+    assert!(copied.contains("src/orders/repo.rs"), "{copied}");
+    assert!(copied.contains("42"), "{copied}");
+
+    // Paste into the viewer's own search box: what was copied arrives in the field.
+    stack.key("/");
+    stack.wait_for("the search box", "T.count('.cv-search-input') === 1");
+    let first_line = copied.lines().next().unwrap();
+    stack.type_into(".cv-search-input", "", first_line);
+    assert_eq!(
+        stack.js_string("T.find('.cv-search-input').value"),
+        first_line
+    );
+
+    stack.key("Escape");
+    stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}
