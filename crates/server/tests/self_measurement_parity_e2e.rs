@@ -327,7 +327,7 @@ fn worksheet_row_counts(bytes: &[u8]) -> Vec<(String, usize)> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a valid xlsx zip");
     let names: Vec<String> = (0..zip.len())
         .filter_map(|i| {
-            let n = zip.by_index(i).ok()?.name().to_string();
+            let n = zip.by_index(i).ok()?.name().ok()?.to_string();
             n.starts_with("xl/worksheets/sheet").then_some(n)
         })
         .collect();

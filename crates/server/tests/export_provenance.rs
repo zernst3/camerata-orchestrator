@@ -281,7 +281,7 @@ fn zip_text_entries(zip_bytes: &[u8]) -> Vec<(String, String)> {
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         if let Ok(text) = String::from_utf8(bytes) {
-            out.push((entry.name().to_string(), text));
+            out.push((entry.name().unwrap().to_string(), text));
         }
     }
     out
