@@ -1891,21 +1891,27 @@ pub fn refresh_lane_totals(lane: &mut EngineCheckLane, rows: &[SiteRow]) {
             let cards: Vec<&EngineCheckCard> =
                 lane.cards.iter().filter(|c| c.stratum == stratum).collect();
             let verdicts = cards.iter().filter(|c| c.verdict.is_some()).count();
-            // As the server counts: a No that confirms a throw-out (a false-positive decision on
-            // the still thrown-out row) agrees with the engine and is not a real problem.
-            let confirms_throw_out = |c: &EngineCheckCard| match c
-                .verdict
-                .as_ref()
-                .and_then(|v| v.correction.as_ref())
-            {
-                Some(CorrectionRef::Decision(id)) => {
-                    c.site.thrown_out_reason.is_some()
-                        && c.site
-                            .decision
-                            .as_ref()
-                            .is_some_and(|d| d.id == *id && d.state == DecisionState::FalsePositive)
+            // As the server counts: a No that confirms a throw-out agrees with the engine. The
+            // row is still thrown out and either the No names a false-positive decision on it,
+            // or names nothing and the row's false positive is strictly later than the No.
+            let confirms_throw_out = |c: &EngineCheckCard| {
+                let (Some(v), Some(d)) = (c.verdict.as_ref(), c.site.decision.as_ref()) else {
+                    return false;
+                };
+                if c.site.thrown_out_reason.is_none() || d.state != DecisionState::FalsePositive {
+                    return false;
                 }
-                _ => false,
+                match &v.correction {
+                    Some(CorrectionRef::Decision(id)) => d.id == *id,
+                    Some(CorrectionRef::Edit(_)) => false,
+                    None => match (
+                        chrono::DateTime::parse_from_rfc3339(&d.decided_at),
+                        chrono::DateTime::parse_from_rfc3339(&v.at),
+                    ) {
+                        (Ok(decided), Ok(no)) => decided > no,
+                        _ => false,
+                    },
+                }
             };
             let wrong = cards
                 .iter()

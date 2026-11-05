@@ -846,3 +846,70 @@ fn a_confirmed_throw_out_is_a_verdict_and_not_a_real_problem_in_the_thrown_out_r
         "a kept row's No still counts"
     );
 }
+
+/// Wave 20 D2 residue: the detail's Confirm form posts the false-positive decision with no verdict
+/// correction. The card then reads confirmed and the hold clears (a decision after the No), so the
+/// rate must agree: an effective false positive strictly later than the No, on a row still thrown
+/// out, is the same retraction. One made before the No, or on a kept row, is not.
+#[test]
+fn a_false_positive_after_the_no_confirms_the_throw_out_without_a_named_correction() {
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdict, SampleStratum};
+
+    let mut rows: Vec<Finding> = (0..4)
+        .map(|i| row("SEC-ONE-1", &format!("src/k{i}.rs"), 10 + i, "medium"))
+        .collect();
+    rows.push(row("SEC-TWO-1", "src/kept.rs", 5, "high"));
+    let report = sealed(rows, |report| {
+        for path in ["src/t0.rs", "src/t1.rs"] {
+            let mut thrown = row("SEC-ONE-1", path, 3, "high");
+            crate::engine_discard::mark(&mut thrown, "its headline is a placeholder");
+            report.discarded.push(thrown);
+        }
+        report.attach_tree();
+    });
+    let thrown: Vec<String> = report
+        .discarded
+        .iter()
+        .map(|f| f.site_key.clone())
+        .collect();
+    let fp = |id: &str, key: &str, at: &str| {
+        let mut d = decision(id, key, DecisionState::FalsePositive, "insp-run-1");
+        d.reason = "rightly thrown out".to_string();
+        d.decided_at = at.to_string();
+        d
+    };
+    // t0: the confirmation came after the No. t1: the decision is older than the No.
+    let reviewed = apply_overlay(
+        &report,
+        &[
+            fp("dec-000001", &thrown[0], "2026-11-04T10:00:00Z"),
+            fp("dec-000002", &thrown[1], "2026-11-04T08:00:00Z"),
+        ],
+        &[],
+        &[],
+    );
+    let no = |key: &str| EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::ThrownOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        carried_from: None,
+    };
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 10;
+    stores.verdicts = vec![no(&thrown[0]), no(&thrown[1])];
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let rate = lane
+        .strata
+        .iter()
+        .find(|s| s.stratum == SampleStratum::ThrownOut)
+        .unwrap();
+    assert_eq!(
+        (rate.verdicts, rate.wrong),
+        (2, 1),
+        "the later false positive agrees with the engine; the earlier one does not"
+    );
+}

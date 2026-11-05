@@ -1012,3 +1012,38 @@ fn the_thrown_out_rate_does_not_count_a_confirmed_throw_out_as_a_real_problem() 
     let unsettled = thrown(EngineMode::ThrownOutNo);
     assert_eq!((unsettled.verdicts, unsettled.wrong), (1, 1));
 }
+
+/// Wave 20 D2 residue, mirrored from the server: with no named correction, a false positive made
+/// strictly after the No on a still thrown-out row is the same confirmation.
+#[test]
+fn an_unnamed_confirmation_after_the_no_is_not_a_real_problem_and_one_before_it_is() {
+    use super::dataset::refresh_lane_totals;
+    use camerata_api_types::review_view::SampleStratum;
+    let mut p = Params::base(SEED);
+    p.engine_mode = EngineMode::ThrownOutConfirmed;
+    let ds = build(&p);
+    let rate = |lane: &camerata_api_types::review_view::EngineCheckLane| {
+        let s = lane
+            .strata
+            .iter()
+            .find(|s| s.stratum == SampleStratum::ThrownOut)
+            .unwrap();
+        (s.verdicts, s.wrong)
+    };
+    let mut lane = ds.engine.clone();
+    let at = lane
+        .cards
+        .iter()
+        .position(|c| c.stratum == SampleStratum::ThrownOut && c.verdict.is_some())
+        .unwrap();
+    lane.cards[at].verdict.as_mut().unwrap().correction = None;
+    refresh_lane_totals(&mut lane, &ds.rows);
+    assert_eq!(rate(&lane), (1, 0), "the decision came after the No");
+    // The same decision made before the No retracts nothing.
+    let mut earlier = lane.clone();
+    earlier.cards[at].verdict.as_mut().unwrap().at = "2026-11-05T00:00:00Z".to_string();
+    earlier.cards[at].site.decision.as_mut().unwrap().decided_at =
+        "2000-01-01T00:00:00Z".to_string();
+    refresh_lane_totals(&mut earlier, &ds.rows);
+    assert_eq!(rate(&earlier), (1, 1));
+}
