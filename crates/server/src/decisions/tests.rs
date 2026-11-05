@@ -1663,7 +1663,8 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
         "the thrown-out node: {owners:?}"
     );
 
-    // A reviewer's ruling on it (the A12 restore builds on this) is stored under that key.
+    // A row the engine threw out takes only the decisions that settle it (WO16c): a ruling that
+    // says the finding is real, with the row still out of every package, is refused.
     let uri = format!("/api/projects/{pid}/decisions");
     let (status, body) = call(
         &app,
@@ -1676,6 +1677,20 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
         )))),
     )
     .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "thrown_out_decision");
+    // The throw-out confirmed right (a false positive) is stored under that key.
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &discarded.site_key,
+            DecisionState::FalsePositive,
+            "rightly thrown out",
+        )))),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let (_, body) = call(&app, "GET", &uri, None).await;
     let got: DecisionsResp = serde_json::from_value(body).unwrap();
@@ -1684,7 +1699,7 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
         .iter()
         .find(|d| d.key == discarded.site_key)
         .expect("read back");
-    assert_eq!(stored.state, DecisionState::Confirmed);
+    assert_eq!(stored.state, DecisionState::FalsePositive);
     assert!(stored.is_active());
     // The store answers the gate's question for the discarded row too.
     assert!(StoreDecisions::for_project(&state.decisions, &pid).has_decision(discarded));
