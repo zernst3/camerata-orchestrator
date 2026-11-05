@@ -686,6 +686,43 @@ impl Seeding {
             &mut budget,
             &EscalationReason::default_over_budget_set(),
         );
+        // What a real stage 2 records in the scan ledger beside the tree (`record_ledger` in the
+        // group reviewer): the export prints this block in its methodology, and it is worked out
+        // again from the tree whenever the reviewer changes the rate.
+        let mut by_reason: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut over_by_reason: std::collections::BTreeMap<String, usize> = Default::default();
+        for c in candidates.iter().filter(|c| c.escalated) {
+            *by_reason.entry(c.reason.as_str().to_string()).or_default() += 1;
+            if let Some(why) = c.over_budget_reason {
+                *over_by_reason.entry(why.as_str().to_string()).or_default() += 1;
+            }
+        }
+        let total_sites = entry.report.findings.len();
+        let block = crate::scan_ledger::EscalationBlock {
+            model: Some("seed-fixture".to_string()),
+            rate_per_kloc: settings.rate_per_kloc,
+            floor: settings.floor,
+            counted_lines: self.fixture.run.run.code_lines,
+            budget: budget.budget,
+            candidates: candidates.len(),
+            escalated: budget.escalated,
+            over_budget: budget.over_budget,
+            total_sites,
+            share_escalated: if total_sites == 0 {
+                0.0
+            } else {
+                budget.escalated as f64 / total_sites as f64
+            },
+            by_reason,
+            over_budget_by_reason: over_by_reason,
+            unplaced: Vec::new(),
+            rules_reviewed: tree
+                .nodes
+                .iter()
+                .filter(|n| n.level == NodeLevel::Rule)
+                .count(),
+            rules_failed: 0,
+        };
         tree.candidates = candidates;
         tree.budget = budget;
         tree.group_reviewed = spec.group_reviewed;
@@ -722,6 +759,7 @@ impl Seeding {
             .ok_or_else(|| SeedError::Fixture("the run has no review tree".into()))?;
         tree.sync_rows(&mut entry.report.findings);
         entry.report.tree = Some(tree);
+        entry.report.ledger.record_escalation(block);
         Ok(())
     }
 

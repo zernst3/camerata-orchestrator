@@ -343,6 +343,53 @@ async fn seed_clean_variant_releases_every_held_row() {
     assert_eq!(report["merges"].as_array().unwrap().len(), 2);
 }
 
+/// A real stage 2 records the escalation block in the scan ledger; the export prints it in its
+/// methodology. A seeded project must carry the same block, or the export of a seeded project
+/// states nothing about the line.
+#[tokio::test]
+async fn a_seeded_project_carries_the_escalation_block_in_its_ledger() {
+    for variant in [Variant::Base, Variant::Clean, Variant::Moved] {
+        let (_dir, seeded) = seed(variant).await;
+        let (state, _app) = reopen(&seeded);
+        let latest = state.inspections().latest(&seeded.project_id).unwrap();
+        let (_, reviewed) = crate::edits::routes::review_of(&state, &seeded.project_id, &latest);
+        let block = reviewed
+            .report()
+            .as_scan_report()
+            .ledger
+            .escalation()
+            .unwrap_or_else(|| panic!("{variant:?}: the ledger has no escalation block"))
+            .clone();
+        // The fixture's line: no rate, a floor of two, over ten thousand counted lines; six
+        // candidates of which four are escalated (two of them past the budget).
+        assert_eq!(block.rate_per_kloc, 0.0, "{variant:?}");
+        assert_eq!(
+            (block.floor, block.counted_lines, block.budget),
+            (2, 10_000, 2),
+            "{variant:?}"
+        );
+        assert_eq!(
+            (block.candidates, block.escalated, block.over_budget),
+            (6, 4, 2),
+            "{variant:?}"
+        );
+        assert_eq!(
+            block.total_sites,
+            reviewed.report().as_scan_report().findings.len()
+        );
+        assert_eq!(
+            block.by_reason.values().sum::<usize>(),
+            4,
+            "{variant:?}: {block:?}"
+        );
+        assert_eq!(
+            block.sentence(),
+            "Escalated 4 of a budget of 2 (2 over, all secret exposure or cross-tenant access at critical)",
+            "{variant:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn seed_moved_variant_produces_stale_records() {
     let (_dir, seeded) = seed(Variant::Moved).await;
