@@ -1413,3 +1413,54 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     );
     stack.assert_no_model_calls();
 }
+
+#[test]
+fn the_add_forms_file_picker_goes_through_the_platform_and_fills_the_path() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Base);
+    open_site(
+        &stack,
+        "cat:injection",
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        &place_of(&model, "sql-01"),
+    );
+    stack.click(".site-detail-add", "");
+    stack.wait_for("the add form", "T.count('.site-detail-add-form') === 1");
+    stack.type_into(".site-detail-add-form input", "", "acme/portal");
+    let file_field = "T.all('.site-detail-add-form input.addressee-input')[1].value";
+    assert_eq!(
+        stack.js_string(file_field),
+        "src/orders/repo.rs",
+        "the form starts on the open site's own file"
+    );
+
+    // The dialog answers a path inside a clone of the repo; the field takes the part inside it.
+    let picked = stack
+        .data
+        .path()
+        .join("clones/portal/src/reports/weekly.rs");
+    stack.script_platform(&serde_json::json!({ "paths": [picked, null] }));
+    stack.click(".site-detail-add-form .site-detail-pick-path", "");
+    stack.wait_for(
+        "the path in the field",
+        &format!("{file_field} === 'src/reports/weekly.rs'"),
+    );
+
+    // A cancelled dialog changes nothing.
+    stack.click(".site-detail-add-form .site-detail-pick-path", "");
+    stack.wait_for("the second dialog", "true");
+    let calls = loop {
+        let calls = stack.platform_calls();
+        if calls.len() == 2 {
+            break calls;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(stack.js_string(file_field), "src/reports/weekly.rs");
+    assert!(calls.iter().all(|c| c["call"] == "pick_path"), "{calls:?}");
+    assert_eq!(calls[0]["answer"], serde_json::json!(picked), "{calls:?}");
+    assert!(calls[1]["answer"].is_null(), "{calls:?}");
+
+    stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}

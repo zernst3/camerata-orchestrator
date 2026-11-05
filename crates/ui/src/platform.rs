@@ -50,6 +50,9 @@ pub trait Platform: Send + Sync {
         filter_name: &'a str,
         extensions: &'a [&'a str],
     ) -> PlatformFuture<'a, Option<PickedFile>>;
+    /// A file picker that answers the chosen path and reads nothing (for a field that holds a
+    /// path). `None` when the operator cancels.
+    fn pick_path<'a>(&'a self, title: &'a str) -> PlatformFuture<'a, Option<PathBuf>>;
     /// A save dialog that writes `content` where the operator chooses.
     fn save_file<'a>(
         &'a self,
@@ -91,6 +94,16 @@ impl Platform for DesktopPlatform {
                 name: file.file_name(),
                 bytes: file.read().await,
             })
+        })
+    }
+
+    fn pick_path<'a>(&'a self, title: &'a str) -> PlatformFuture<'a, Option<PathBuf>> {
+        Box::pin(async move {
+            rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
         })
     }
 
@@ -171,6 +184,33 @@ pub fn copy_script(text: &str) -> Option<String> {
     ))
 }
 
+/// A picked path as a file field holds it: relative to the repo's own folder. A path that is
+/// already relative is kept. An absolute one is cut after the first folder named like the repo
+/// (`acme/portal` is the folder `portal`); with no such folder it stays whole, for the reviewer to
+/// fix by hand.
+pub fn path_in_repo(picked: &std::path::Path, repo: &str) -> String {
+    let whole = picked.to_string_lossy().into_owned();
+    let folder = repo.rsplit('/').next().unwrap_or_default();
+    if !picked.is_absolute() || folder.is_empty() {
+        return whole;
+    }
+    let parts: Vec<&std::ffi::OsStr> = picked
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    match parts.iter().position(|p| p.to_string_lossy() == folder) {
+        Some(i) if i + 1 < parts.len() => parts[i + 1..]
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => whole,
+    }
+}
+
 // ── Which platform is installed ───────────────────────────────────────────────────────────
 
 static PLATFORM: OnceLock<Arc<dyn Platform>> = OnceLock::new();
@@ -203,6 +243,9 @@ pub struct Script {
     /// Answers to `pick_file`: the path of a real file to read, or `None` to cancel.
     #[serde(default)]
     pub files: VecDeque<Option<PathBuf>>,
+    /// Answers to `pick_path`: the path the operator chose, or `None` to cancel.
+    #[serde(default)]
+    pub paths: VecDeque<Option<PathBuf>>,
     /// Answers to `save_file`: the path to write to, or `None` to cancel.
     #[serde(default)]
     pub saves: VecDeque<Option<PathBuf>>,
@@ -222,6 +265,10 @@ pub enum Call {
     PickFile {
         filter_name: String,
         extensions: Vec<String>,
+        answer: Option<PathBuf>,
+    },
+    PickPath {
+        title: String,
         answer: Option<PathBuf>,
     },
     SaveFile {
@@ -265,6 +312,7 @@ impl RecordingPlatform {
         let mut inner = self.lock();
         inner.script.folders.extend(more.folders);
         inner.script.files.extend(more.files);
+        inner.script.paths.extend(more.paths);
         inner.script.saves.extend(more.saves);
         inner.script.clipboard.extend(more.clipboard);
     }
@@ -304,6 +352,16 @@ impl Platform for RecordingPlatform {
             Some(PickedFile { name, bytes })
         });
         Box::pin(std::future::ready(picked))
+    }
+
+    fn pick_path<'a>(&'a self, title: &'a str) -> PlatformFuture<'a, Option<PathBuf>> {
+        let mut inner = self.lock();
+        let answer = inner.script.paths.pop_front().flatten();
+        inner.calls.push(Call::PickPath {
+            title: title.to_string(),
+            answer: answer.clone(),
+        });
+        Box::pin(std::future::ready(answer))
     }
 
     fn save_file<'a>(
@@ -363,6 +421,7 @@ mod tests {
         platform.script(Script {
             folders: VecDeque::from([Some(PathBuf::from("/Users/auditor/clones")), None]),
             files: VecDeque::from([Some(import.clone())]),
+            paths: VecDeque::new(),
             saves: VecDeque::from([Some(save_to.clone()), None]),
             clipboard: VecDeque::from([false]),
         });
@@ -412,6 +471,54 @@ mod tests {
         assert!(matches!(
             &calls[8],
             Call::CopyText { text, taken: true } if text == "second"
+        ));
+    }
+
+    #[test]
+    fn a_picked_path_is_given_relative_to_the_repo_folder() {
+        use std::path::Path;
+        assert_eq!(
+            path_in_repo(
+                Path::new("/Users/auditor/clones/portal/src/orders/repo.rs"),
+                "acme/portal"
+            ),
+            "src/orders/repo.rs"
+        );
+        assert_eq!(
+            path_in_repo(Path::new("src/orders/repo.rs"), "acme/portal"),
+            "src/orders/repo.rs",
+            "a relative path is kept"
+        );
+        assert_eq!(
+            path_in_repo(Path::new("/Users/auditor/elsewhere/repo.rs"), "acme/portal"),
+            "/Users/auditor/elsewhere/repo.rs",
+            "no folder named like the repo: kept whole"
+        );
+        assert_eq!(
+            path_in_repo(Path::new("/Users/auditor/portal"), "acme/portal"),
+            "/Users/auditor/portal"
+        );
+        assert_eq!(
+            path_in_repo(Path::new("/a/portal/x.rs"), ""),
+            "/a/portal/x.rs"
+        );
+    }
+
+    #[test]
+    fn pick_path_answers_the_scripted_path_and_cancels_when_the_script_runs_out() {
+        let platform = RecordingPlatform::new();
+        platform.script(Script {
+            paths: VecDeque::from([Some(PathBuf::from("/Users/auditor/portal/a.rs"))]),
+            ..Script::default()
+        });
+        assert_eq!(
+            ready(platform.pick_path("Choose the file")),
+            Some(PathBuf::from("/Users/auditor/portal/a.rs"))
+        );
+        assert_eq!(ready(platform.pick_path("Choose the file")), None);
+        assert!(matches!(
+            &platform.calls()[0],
+            Call::PickPath { title, answer: Some(_) } if title == "Choose the file"
         ));
     }
 
