@@ -631,3 +631,12 @@ fn the_queues_merge_picker_says_its_pool_is_its_own_escalated_rows() {
     );
     assert_ne!(ctx.pool_none, crate::edits::POOL_NONE_TREE);
 }
+
+#[test]
+fn the_budget_banner_does_not_outlive_its_run() {
+    // The first read of the shell, or the same run read again after a write: the banner stands.
+    assert!(applied_budget_stands(None, "run-1"));
+    assert!(applied_budget_stands(Some("run-1"), "run-1"));
+    // A new run is a new queue: "103 candidates moved above the line" no longer describes it.
+    assert!(!applied_budget_stands(Some("run-1"), "run-2"));
+}

@@ -418,6 +418,14 @@ pub fn rate_changed_text(outcome: &EscalationBudgetOutcome) -> String {
     )
 }
 
+/// Whether the "Budget is now ..." banner still describes the queue. It says what a rate change
+/// did to the run that was current when it was applied; once the shell reads a different run (a
+/// new inspection), the line it counts candidates against is gone and the banner is stale. Dismiss
+/// is not the only way out. `seen_run` is the run the shell last read, `None` before the first read.
+pub fn applied_budget_stands(seen_run: Option<&str>, now_run: &str) -> bool {
+    seen_run.is_none_or(|seen| seen == now_run)
+}
+
 fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
