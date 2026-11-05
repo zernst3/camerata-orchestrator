@@ -6,7 +6,11 @@ use camerata_ui::review_source::FixtureReviewSource;
 use camerata_ui_core::queue::{layout, needed_me_write, Entry, QueueState};
 use camerata_ui_core::test_support::review_fixtures::dataset_base;
 
+use camerata_ui_core::triage::PaneFocus;
+
 use super::*;
+use crate::style::GLOBAL_CSS;
+use crate::test_harness;
 
 #[tokio::test]
 async fn lower_the_line_reveals_candidates_without_a_network_call_or_a_write() {
@@ -98,4 +102,111 @@ fn the_door_a_row_opens_is_its_site_in_the_tree() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ── The site detail in the queue (spec section 8: the right pane for a focused site, in every
+// lane) ────────────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Props)]
+struct PaneCase {
+    view: QueueView,
+    cursor: String,
+}
+
+#[component]
+fn PaneHarness(props: PaneCase) -> Element {
+    rsx! {
+        QueueScreen {
+            view: Some(props.view.clone()),
+            status: QueueStatus::Ready,
+            state: QueueState {
+                cursor: Some(props.cursor.clone()),
+                ..QueueState::default()
+            },
+            focus: PaneFocus::Cursor,
+            prompt: None,
+            undo: None,
+        }
+    }
+}
+
+/// The right pane of a queue whose cursor is on `row`, without the stylesheet.
+fn pane_of(view: &QueueView, row: &QueueRow) -> String {
+    let html = test_harness::render_props(
+        PaneHarness,
+        PaneCase {
+            view: view.clone(),
+            cursor: row.candidate.key.clone(),
+        },
+    )
+    .replace(GLOBAL_CSS, "");
+    let at = html
+        .find("review-queue-right")
+        .expect("the queue draws its right pane");
+    html[at..].to_string()
+}
+
+#[test]
+fn a_queue_row_opens_the_site_detail_with_that_sites_fields() {
+    let view = dataset_base().queue(false, 0, 100);
+    // A headline with nothing the page would escape, so it can be found as written.
+    let row = view
+        .escalated
+        .iter()
+        .find(|r| !r.site.headline.contains(['&', '<', '>', '"', '\'']))
+        .expect("an escalated row with a plain headline");
+    let pane = pane_of(&view, row);
+
+    // The same pane the tree opens: the head with the rule, the crumb, the fields, the doors.
+    assert!(pane.contains("class=\"site-detail\""), "{pane}");
+    assert!(pane.contains("site-detail-head") && pane.contains("site-detail-crumb"));
+    assert!(pane.contains("site-detail-code") && pane.contains("site-detail-stack"));
+    assert!(
+        pane.contains(&format!(">{}</span>", row.site.rule_id)),
+        "the rule id is in the head"
+    );
+    assert!(pane.contains(&row.site.headline), "the headline is a field");
+    assert!(
+        pane.contains(&file_line(&row.site)),
+        "the file and line are there"
+    );
+    assert!(
+        pane.contains("site-detail-edit"),
+        "every field carries its edit"
+    );
+    assert!(pane.contains("site-detail-merge") && pane.contains("site-detail-add"));
+    // Its position is its rank in the queue, not a place in a sub-group.
+    assert!(
+        pane.contains(&format!(
+            "rank {}",
+            thousands(row.candidate.global_rank as usize)
+        )),
+        "{pane}"
+    );
+
+    // The detail draws the four decisions once; the queue's own pane no longer draws them again.
+    assert_eq!(pane.matches("pane-dispose").count(), 4, "{pane}");
+
+    // What is the queue's own stays: why the row is here, and the doors to the tree.
+    assert!(pane.contains("Escalated for"), "{pane}");
+    assert!(pane.contains("Open in the tree"));
+    assert!(pane.contains("Go to the node"));
+}
+
+#[test]
+fn the_queues_detail_does_not_offer_a_batch_tick_the_queue_has_no_batch_for() {
+    let mut view = dataset_base().queue(false, 0, 100);
+    // The fixture has no escalated outlier, so the first row is made one.
+    view.escalated[0]
+        .site
+        .markers
+        .push(camerata_api_types::review_view::Marker::Outlier);
+    let outlier = &view.escalated[0];
+    assert!(camerata_ui_core::tree::is_outlier(&outlier.site));
+    let pane = pane_of(&view, outlier);
+    assert!(pane.contains("site-detail"), "the detail is there");
+    assert!(
+        !pane.contains("Include this outlier in the next batch decision"),
+        "{pane}"
+    );
 }

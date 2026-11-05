@@ -118,6 +118,10 @@ pub(crate) fn SiteDetailView(
     panel: DetailPanel,
     /// The outlier is ticked into the next batch decision.
     ticked: bool,
+    /// The lane has a batch decision to tick an outlier into. The tree does; the queue decides
+    /// one site at a time, so it asks for no tick.
+    #[props(default = true)]
+    batch_tick: bool,
     #[props(default)] on_event: Callback<DetailEvent>,
     /// The lane's reason prompt for a site decision, drawn above the buttons.
     children: Element,
@@ -336,7 +340,7 @@ pub(crate) fn SiteDetailView(
             if let DetailMode::Ack(draft) = mode.clone() {
                 AckForm { draft, on_event }
             }
-            if outlier {
+            if outlier && batch_tick {
                 label { class: "site-detail-line",
                     input {
                         r#type: "checkbox",

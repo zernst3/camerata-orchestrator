@@ -27,23 +27,26 @@
 
 use camerata_api_types::review_view::{EscalationBudgetOutcome, QueueRow, QueueView, SiteRow};
 use camerata_ui::review_io::ReviewApi;
+use camerata_ui_core::edits::DetailContext;
 use camerata_ui_core::queue::{
-    band_of, budget_line, counts_line, decision_text, empty_text, has_needed_me_box, keys_hint,
-    layout, needed_me_checked, needed_me_enabled, needed_me_line, needed_me_write, node_cell,
-    node_door, node_title, queue_command, queue_keys_armed, rate_changed_text, reason_cell,
-    site_door, Band, Entry, Layout, QueueCommand, QueueState, NEEDED_ME_HINT, ROWS_PER_PAGE,
+    band_of, budget_line, counts_line, decision_text, detail_context, empty_text,
+    has_needed_me_box, keys_hint, layout, needed_me_checked, needed_me_enabled, needed_me_line,
+    needed_me_write, node_cell, node_door, node_title, queue_command, queue_keys_armed,
+    rate_changed_text, reason_cell, site_door, Band, Entry, Layout, QueueCommand, QueueState,
+    NEEDED_ME_HINT, ROWS_PER_PAGE,
 };
 use camerata_ui_core::tree::batch::{decision_state_for, site_decision_request, TreeUndo};
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::shell::{lane_for_key, Lane};
 use camerata_ui_core::tree::{
-    dom_token, file_line, marker_chips, severity_badge, severity_label, stage1_cell, stage2_cell,
-    thousands, DecisionTone,
+    dom_token, file_line, severity_badge, severity_label, stage1_cell, thousands, DecisionTone,
 };
 use camerata_ui_core::triage::{FocusMove, KeyMods, PaneCommand, PaneFocus, TriageState};
 use dioxus::prelude::*;
 
 use super::review_shell::LaneControl;
+use super::site_detail::code_bridge::use_code_bridge;
+use super::site_detail::{use_detail, DetailEvent, DetailPanel, SiteDetailView};
 use super::tree::{DoorRequest, ShellRefresh, UndoBanner};
 
 /// The DOM id of the queue's focusable region. Tabbing into it arms the keys.
@@ -117,6 +120,12 @@ pub(crate) fn QueueScreen(
     #[props(default)] on_undo: Callback<()>,
     #[props(default)] on_dismiss_toast: Callback<()>,
     #[props(default)] on_retry: Callback<()>,
+    /// The site detail's open form, undo bar and notice (the detail's own state, from `use_detail`).
+    #[props(default)]
+    detail: DetailPanel,
+    /// Something the reviewer did in the site detail.
+    #[props(default)]
+    on_detail: Callback<DetailEvent>,
 ) -> Element {
     let armed = queue_keys_armed(focus);
     let prompt_open = prompt.is_some();
@@ -228,9 +237,11 @@ pub(crate) fn QueueScreen(
             div { class: "review-queue-right",
                 if let Some(row) = cursor_row {
                     QueueSide {
+                        ctx: view.as_ref().map(|v| detail_context(v, &row)).unwrap_or_default(),
                         row,
                         prompt: prompt.clone(),
-                        on_decide,
+                        detail: detail.clone(),
+                        on_detail,
                         on_needed_me,
                         on_open_site,
                         on_open_node,
@@ -531,12 +542,16 @@ fn QueueFooter(
 
 // ── The right pane ────────────────────────────────────────────────────────────────────────
 
-/// The focused row, with the four decisions, Needed me and the doors to the tree.
+/// The focused row: why it is in the queue, Needed me and the doors to the tree, then the same
+/// site detail the tree opens (the fields and their edits, the decisions, merge, add), with the
+/// queue's reason prompt in it.
 #[component]
 fn QueueSide(
     row: QueueRow,
+    ctx: DetailContext,
     prompt: Option<QueuePrompt>,
-    on_decide: Callback<TriageState>,
+    detail: DetailPanel,
+    on_detail: Callback<DetailEvent>,
     on_needed_me: Callback<String>,
     on_open_site: Callback<String>,
     on_open_node: Callback<String>,
@@ -544,10 +559,6 @@ fn QueueSide(
     on_prompt_commit: Callback<()>,
     on_prompt_cancel: Callback<()>,
 ) -> Element {
-    let site: &SiteRow = &row.site;
-    let chips = marker_chips(site);
-    let decision = camerata_ui_core::tree::decision_cell(site);
-    let stage2 = stage2_cell(site);
     let key = row.candidate.key.clone();
     let key_need = key.clone();
     let key_open = key.clone();
@@ -555,49 +566,13 @@ fn QueueSide(
     let here_prompt = prompt.filter(|p| p.key == key);
     let enabled = needed_me_enabled(&row);
     rsx! {
-        div { class: "node-head",
-            div { class: "site-pane-head",
-                span { class: "pane-rule", "{site.rule_id}" }
-                for chip in chips {
-                    span { key: "{chip.class}", class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
-                }
-                span { class: "pane-pos", "rank {thousands(row.candidate.global_rank as usize)}" }
-            }
-            div { class: "node-crumb", "{node_title(&row)}" }
-            p { class: "site-pane-line", span { class: "site-pane-label", "Headline" } "{site.headline}" }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Severity" }
-                span { class: "tree-badge tree-badge-{severity_badge(&site.severity)}", "{severity_label(&site.severity)}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Where" }
-                span { class: "site-pane-code", "{file_line(site)}" }
-            }
+        div { class: "node-head queue-why",
             p { class: "site-pane-line",
                 span { class: "site-pane-label", "Escalated for" }
                 "{reason_cell(&row)}"
             }
             if !row.candidate.why.is_empty() {
                 p { class: "site-pane-line", span { class: "site-pane-label", "Why" } "{row.candidate.why}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Stage 1" }
-                "{stage1_cell(site)}"
-                if !site.stage1.reason.is_empty() { " \u{b7} {site.stage1.reason}" }
-            }
-            if !stage2.is_empty() {
-                p { class: "site-pane-line", span { class: "site-pane-label", "Stage 2" } "{stage2}" }
-            }
-            p { class: "site-pane-line",
-                span { class: "site-pane-label", "Decision" }
-                span {
-                    class: match decision.tone {
-                        DecisionTone::Decided => "dec-decided",
-                        DecisionTone::Unresolved => "dec-unresolved",
-                    },
-                    "{decision_text(&row)}"
-                }
-                if decision.inherited { span { class: "dec-inherited", "inherited from its group" } }
             }
             if has_needed_me_box(&row) {
                 label { class: "site-pane-line", title: if enabled { "" } else { "{NEEDED_ME_HINT}" },
@@ -608,53 +583,6 @@ fn QueueSide(
                         onchange: move |_| on_needed_me.call(key_need.clone()),
                     }
                     " Needed me: I needed to see this row"
-                }
-            }
-            if let Some(p) = here_prompt {
-                div { class: "queue-reason-prompt",
-                    label { class: "rule-modal-label",
-                        "Reason for \u{201c}{p.state.label()}\u{201d} on this site (required)"
-                    }
-                    textarea {
-                        class: "addressee-input queue-reason-input",
-                        rows: "2",
-                        placeholder: "why (the export reads this)",
-                        value: "{p.reason}",
-                        onmounted: move |e| {
-                            spawn(async move {
-                                let _ = e.set_focus(true).await;
-                            });
-                        },
-                        oninput: move |e| on_prompt_reason.call(e.value()),
-                        onkeydown: move |e: KeyboardEvent| {
-                            e.stop_propagation();
-                            match e.key() {
-                                Key::Escape => on_prompt_cancel.call(()),
-                                Key::Enter if !e.modifiers().contains(Modifiers::SHIFT) => {
-                                    e.prevent_default();
-                                    on_prompt_commit.call(());
-                                }
-                                _ => {}
-                            }
-                        },
-                    }
-                    if let Some(error) = p.error {
-                        p { class: "batch-error", role: "alert", "{error}" }
-                    }
-                    div { class: "queue-prompt-actions",
-                        button { class: "btn-run queue-prompt-commit", onclick: move |_| on_prompt_commit.call(()), "Commit \u{2192}" }
-                        button { class: "btn-edit-sm queue-prompt-cancel", onclick: move |_| on_prompt_cancel.call(()), "Cancel" }
-                    }
-                }
-            }
-            div { class: "pane-actions",
-                for state in [TriageState::Confirmed, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
-                    button {
-                        key: "{state.label()}",
-                        class: "btn-edit-sm pane-dispose",
-                        onclick: move |_| on_decide.call(state),
-                        "{state.label()}"
-                    }
                 }
             }
             div { class: "pane-actions",
@@ -672,6 +600,71 @@ fn QueueSide(
                         "Go to the node"
                     }
                 }
+            }
+        }
+        SiteDetailView {
+            position: format!("rank {}", thousands(row.candidate.global_rank as usize)),
+            ticked: false,
+            batch_tick: false,
+            panel: detail,
+            ctx,
+            row: row.site.clone(),
+            on_event: on_detail,
+            if let Some(p) = here_prompt {
+                QueuePromptView {
+                    prompt: p,
+                    on_reason: on_prompt_reason,
+                    on_commit: on_prompt_commit,
+                    on_cancel: on_prompt_cancel,
+                }
+            }
+        }
+    }
+}
+
+/// The reason prompt for one site's Ignore or False positive, drawn inside the detail.
+#[component]
+fn QueuePromptView(
+    prompt: QueuePrompt,
+    on_reason: Callback<String>,
+    on_commit: Callback<()>,
+    on_cancel: Callback<()>,
+) -> Element {
+    let p = prompt;
+    rsx! {
+        div { class: "queue-reason-prompt",
+            label { class: "rule-modal-label",
+                "Reason for \u{201c}{p.state.label()}\u{201d} on this site (required)"
+            }
+            textarea {
+                class: "addressee-input queue-reason-input",
+                rows: "2",
+                placeholder: "why (the export reads this)",
+                value: "{p.reason}",
+                onmounted: move |e| {
+                    spawn(async move {
+                        let _ = e.set_focus(true).await;
+                    });
+                },
+                oninput: move |e| on_reason.call(e.value()),
+                onkeydown: move |e: KeyboardEvent| {
+                    e.stop_propagation();
+                    match e.key() {
+                        Key::Escape => on_cancel.call(()),
+                        Key::Enter if !e.modifiers().contains(Modifiers::SHIFT) => {
+                            e.prevent_default();
+                            on_commit.call(());
+                        }
+                        _ => {}
+                    }
+                },
+            }
+            if let Some(error) = p.error {
+                p { class: "batch-error", role: "alert", "{error}" }
+            }
+            div { class: "queue-prompt-actions",
+                button { class: "btn-run queue-prompt-commit", onclick: move |_| on_commit.call(()), "Commit \u{2192}" }
+                button { class: "btn-edit-sm queue-prompt-cancel", onclick: move |_| on_cancel.call(()), "Cancel" }
             }
         }
     }
@@ -719,7 +712,12 @@ pub(crate) async fn read_more_below(
 
 /// The queue lane with its signals and its I/O.
 #[component]
-pub(crate) fn QueueHost() -> Element {
+pub(crate) fn QueueHost(
+    /// The commit each repo of the run was inspected at (the shell's `audited_shas`), for the
+    /// code viewer the detail's Code button opens.
+    #[props(default)]
+    audited_shas: ReadSignal<std::collections::BTreeMap<String, String>>,
+) -> Element {
     let api = use_context::<ReviewApi>();
     let refresh = try_use_context::<ShellRefresh>();
     let door = try_use_context::<DoorRequest>();
@@ -792,6 +790,31 @@ pub(crate) fn QueueHost() -> Element {
             .unwrap_or_default()
     };
 
+    // The site detail: the open form, its undo bar and its writes. A write reads the queue and
+    // the shell again like any other; a closed form gives the keyboard back to the queue.
+    let detail = use_detail(
+        after_write,
+        Callback::new(move |()| super::viewer::focus_element(QUEUE_REGION_ID)),
+    );
+    // Another row under the cursor: the form that was open was for the one before.
+    let cursor_now = use_memo(move || state.read().cursor.clone());
+    use_effect(move || {
+        let _ = cursor_now();
+        detail.reset();
+    });
+    // The row under the cursor, with what the detail needs to know about its surroundings.
+    let cursor_site = move || -> Option<(SiteRow, DetailContext)> {
+        let key = state.peek().cursor.clone()?;
+        let current = view.peek();
+        let current = current.as_ref()?;
+        let row = current
+            .escalated
+            .iter()
+            .chain(&current.below)
+            .find(|r| r.candidate.key == key)?;
+        Some((row.site.clone(), detail_context(current, row)))
+    };
+
     let decide = use_callback({
         let api = api.clone();
         move |(key, st, reason): (String, TriageState, String)| {
@@ -839,6 +862,40 @@ pub(crate) fn QueueHost() -> Element {
             _ => decide.call((key, st, String::new())),
         }
     });
+
+    // `O` and the detail's Code button: the code viewer, reused from the flat Queue. Its
+    // decisions are this lane's site decisions. The stacked view is the tree's (it stacks a whole
+    // sub-group, and the queue holds only the escalated rows of one), so Stack goes there.
+    let loaded_sites = use_memo(move || {
+        view.read()
+            .as_ref()
+            .map(|v| {
+                v.escalated
+                    .iter()
+                    .chain(&v.below)
+                    .map(|r| {
+                        let node = r.node_path.last().map(|c| c.id.clone()).unwrap_or_default();
+                        (node, r.site.clone())
+                    })
+                    .collect::<Vec<(String, SiteRow)>>()
+            })
+            .unwrap_or_default()
+    });
+    let project = try_use_context::<camerata_ui::review_io::ReviewProject>()
+        .map(|p| p.0)
+        .unwrap_or_default();
+    let bridge = use_code_bridge(
+        loaded_sites,
+        audited_shas,
+        project,
+        use_callback(
+            move |(_node, key, st, reason): (String, String, TriageState, String)| {
+                decide.call((key, st, reason));
+            },
+        ),
+        use_callback(move |(_node, key): (String, String)| state.write().focus(&key)),
+        QUEUE_REGION_ID,
+    );
 
     let commit = use_callback(move |()| {
         let Some(p) = prompt.peek().clone() else {
@@ -1078,6 +1135,36 @@ pub(crate) fn QueueHost() -> Element {
                 }
             },
             on_retry: move |()| reload.call(()),
+            detail: detail.panel(),
+            on_detail: move |event: DetailEvent| match event {
+                // The lane's own: a decision, the code viewer and the stacked view.
+                DetailEvent::Decide(st) => decide_cursor.call(st),
+                DetailEvent::OpenCode => {
+                    if let Some(key) = state.peek().cursor.clone() {
+                        let node = loaded_sites
+                            .peek()
+                            .iter()
+                            .find(|(_, s)| s.site_key == key)
+                            .map(|(n, _)| n.clone())
+                            .unwrap_or_default();
+                        bridge.open_code.call((node, key));
+                    }
+                }
+                DetailEvent::OpenStack => {
+                    if let Some(key) = state.peek().cursor.clone() {
+                        if let Some(d) = find_row(&key).and_then(|row| node_door(&row)) {
+                            open_door.call(d);
+                        }
+                    }
+                }
+                // There is no batch in the queue to tick an outlier into.
+                DetailEvent::Tick => {}
+                other => {
+                    if let Some((row, ctx)) = cursor_site() {
+                        detail.handle(other, &row, &ctx, &run_id());
+                    }
+                }
+            },
         }
     }
 }

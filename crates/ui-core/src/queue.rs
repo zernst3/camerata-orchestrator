@@ -12,6 +12,7 @@ use camerata_api_types::review_view::{
     EscalationBudgetOutcome, NeededMeSummary, QueueRow, QueueView,
 };
 
+use crate::edits::{DetailContext, PoolSite};
 use crate::review_settings::effect_sentence;
 use crate::tree::export::Door;
 use crate::tree::thousands;
@@ -504,6 +505,48 @@ pub fn is_merge(row: &QueueRow) -> bool {
         row.site.decision.as_ref().map(|d| &d.state),
         Some(DecisionState::MergedInto(_))
     )
+}
+
+// ── The site detail's surroundings ────────────────────────────────────────────────────────
+
+/// What the site detail needs to know about a queue row's surroundings (the tree gives it the
+/// same from its index, [`crate::edits::context_for`]). The queue holds only its own rows, so
+/// the rule select, the split's sub-groups and the merge picker's pool are the rows it has
+/// loaded: narrower than the tree's, never wrong.
+pub fn detail_context(view: &QueueView, row: &QueueRow) -> DetailContext {
+    let all = || view.escalated.iter().chain(&view.below);
+    let crumbs = row.node_path.iter().map(|c| c.label.clone()).collect();
+    let mut rule_ids: Vec<String> = all().map(|r| r.site.rule_id.clone()).collect();
+    rule_ids.push(row.site.rule_id.clone());
+    rule_ids.sort();
+    rule_ids.dedup();
+    // The sub-groups under the row's rule: the node path ends category, rule, sub-group.
+    let rule_node = row
+        .node_path
+        .len()
+        .checked_sub(2)
+        .map(|i| &row.node_path[i]);
+    let own = row.node_path.last().map(|c| c.id.as_str());
+    let mut subgroups: Vec<String> = Vec::new();
+    if let Some(rule_node) = rule_node {
+        for other in all() {
+            let n = other.node_path.len();
+            if n < 2 || other.node_path[n - 2].id != rule_node.id {
+                continue;
+            }
+            let sub = &other.node_path[n - 1];
+            if Some(sub.id.as_str()) != own && !subgroups.contains(&sub.label) {
+                subgroups.push(sub.label.clone());
+            }
+        }
+    }
+    DetailContext {
+        crumbs,
+        rule_ids,
+        subgroups,
+        node_decision: None,
+        pool: all().map(|r| PoolSite::of(&r.site)).collect(),
+    }
 }
 
 // ── The door to the tree ──────────────────────────────────────────────────────────────────

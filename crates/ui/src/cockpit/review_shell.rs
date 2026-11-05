@@ -205,7 +205,7 @@ fn lane_body(
 ) -> Element {
     match active {
         Lane::Tree => rsx! { TreeHost { audited_shas } },
-        Lane::Escalations => rsx! { QueueHost {} },
+        Lane::Escalations => rsx! { QueueHost { audited_shas } },
         Lane::EngineCheck => rsx! { EngineHost {} },
         Lane::Flat => flat.clone(),
         Lane::Settings => rsx! { SettingsLane {} },

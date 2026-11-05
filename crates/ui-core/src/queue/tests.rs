@@ -572,3 +572,49 @@ fn the_empty_state_says_what_the_group_reviewer_did() {
     v.group_reviewed = false;
     assert!(empty_text(&v).ends_with("The group reviewer has not read this run."));
 }
+
+#[test]
+fn the_detail_context_of_a_queue_row_is_read_from_the_queue_it_sits_in() {
+    let v = view();
+    let row = &v.escalated[0];
+    let ctx = detail_context(&v, row);
+
+    // The crumb is the row's own node path, label by label.
+    let crumbs: Vec<&str> = row.node_path.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(ctx.crumbs, crumbs);
+    assert!(!ctx.crumbs.is_empty());
+
+    // The rule select holds every rule the queue holds, once, sorted, and the row's own.
+    let mut rules: Vec<String> = v
+        .escalated
+        .iter()
+        .chain(&v.below)
+        .map(|r| r.site.rule_id.clone())
+        .collect();
+    rules.sort();
+    rules.dedup();
+    assert_eq!(ctx.rule_ids, rules);
+    assert!(ctx.rule_ids.contains(&row.site.rule_id));
+
+    // The merge picker's pool is the sites the queue has loaded, this row among them.
+    assert_eq!(ctx.pool.len(), v.escalated.len() + v.below.len());
+    assert!(ctx.pool.iter().any(|p| p.key == row.site.site_key));
+
+    // Sub-groups to split into: the other sub-groups under the same rule the queue shows.
+    let own = row.node_path.last().map(|c| c.label.clone()).unwrap();
+    assert!(!ctx.subgroups.contains(&own), "not the row's own");
+    let rule_node = &row.node_path[row.node_path.len() - 2].id;
+    for label in &ctx.subgroups {
+        assert!(
+            v.escalated.iter().chain(&v.below).any(|r| {
+                let n = r.node_path.len();
+                n >= 2 && r.node_path[n - 2].id == *rule_node && r.node_path[n - 1].label == *label
+            }),
+            "{label} is a sub-group of the same rule in the queue"
+        );
+    }
+    let mut seen = ctx.subgroups.clone();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), ctx.subgroups.len(), "each once");
+}
