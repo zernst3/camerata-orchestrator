@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 CAMERATA_VISUAL_APPROVE_STATES="$*" \
-  cargo test -p camerata-ui --test visual visual_approve -- --ignored --nocapture
+  cargo test -p camerata-ui --features visual-baselines --test visual visual_approve -- --ignored --nocapture
 
 echo
 echo "Baseline files changed in the working tree (new, modified or removed):"

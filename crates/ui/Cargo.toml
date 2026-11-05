@@ -21,6 +21,17 @@ workspace = true
 name = "camerata-ui"
 path = "src/main.rs"
 
+# The pixel baselines (tests/visual.rs) are rendered by macOS Chrome and compared on that platform
+# only: GitHub CI (ubuntu) does not build them, the local release gate runs
+# scripts/visual-check.sh. The comparison's own unit tests (tests/visual_compare.rs) always run.
+[features]
+visual-baselines = []
+
+[[test]]
+name = "visual"
+path = "tests/visual.rs"
+required-features = ["visual-baselines"]
+
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 # `time` drives the calm Build-narrative dwell; `rt-multi-thread` lets the desktop
