@@ -26,7 +26,7 @@ fn plain_text(html: &str) -> String {
 
 #[test]
 fn every_detail_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 19, "every detail state is built");
+    assert_eq!(states().len(), 24, "every detail state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -281,4 +281,113 @@ fn detail_add_refused_shows_the_gates_reason_in_the_form() {
     assert!(html.contains("site-detail-error"));
     // What was typed is still there.
     assert!(html.contains("Second copy of the key"));
+}
+
+/// Waves 16 and 17: the possible-duplicate line, the duplicate-first merge pick, the over-budget
+/// chip and the commit in the viewer's header had no state.
+#[test]
+fn detail_possible_duplicate_shows_the_link_and_its_merge_door() {
+    let row = site_of("detail/possible-duplicate");
+    let dup = row.possible_duplicate_of.clone().expect("a duplicate link");
+    let html = plain_text(&page("detail/possible-duplicate"));
+    assert!(html.contains("Possible duplicate of"), "{html}");
+    assert!(html.contains(&dup.rule_id), "{}", dup.rule_id);
+    assert!(html.contains(&format!("{}:{}", dup.path, dup.line)));
+    assert!(html.contains("Merge this row into the possible duplicate"));
+}
+
+#[test]
+fn detail_merge_picker_lists_the_possible_duplicate_first() {
+    let row = site_of("detail/merge-picker-duplicate-first");
+    let dup = row.possible_duplicate_of.clone().expect("a duplicate link");
+    let html = plain_text(&page("detail/merge-picker-duplicate-first"));
+    let first_item = html.find("site-detail-candidate").expect("a candidate");
+    let list = &html[first_item..];
+    let note = list.find("possible duplicate").expect("the duplicate note");
+    let label = list
+        .find(&format!("{}:{}", dup.path, dup.line))
+        .expect("its label");
+    let next = list[label + 1..].find("site-detail-candidate");
+    assert!(
+        next.is_none_or(|n| label < label + 1 + n),
+        "the duplicate is the first item"
+    );
+    assert!(note < label + 400, "its note sits on that item");
+}
+
+#[test]
+fn detail_over_budget_shows_the_over_chip() {
+    let row = site_of("detail/over-budget");
+    assert!(row
+        .markers
+        .contains(&camerata_api_types::review_view::Marker::OverBudget));
+    let html = page("detail/over-budget");
+    assert!(html.contains("mark-over"), "{html}");
+}
+
+/// Wave 17: no state showed a commit in the viewer header. The page opens the viewer on a site
+/// with the commit the run inspected its repo at, and the header names its first seven characters.
+#[test]
+fn detail_viewer_commit_names_the_commit_the_run_inspected() {
+    let fx = fixture("detail/viewer-commit").unwrap();
+    let shell = fx.shell.ready().expect("a shell").clone();
+    let Body::Detail(body) = fx.body else {
+        panic!("not a detail state");
+    };
+    assert!(body.viewer);
+    let row = body.site.expect("a site");
+    let sha = shell
+        .audited_shas
+        .get(&row.repo)
+        .expect("the run recorded a commit for the repo");
+    let html = page("detail/viewer-commit");
+    assert!(
+        html.contains(&format!("@ {}", camerata_ui_core::source::short_sha(sha))),
+        "the header names the commit: {html}"
+    );
+    // A page with no viewer carries no revision.
+    assert!(!page("detail/plain").contains("cv-rev"));
+}
+
+/// Wave 16 soft: the meta grid fitted as many 230px columns as the pane had, so four items drew
+/// three and sent Sub-group to a row of its own (and cramped Category at both widths). Four items
+/// are two columns of two at every width.
+#[test]
+fn the_meta_grid_is_two_columns_so_four_items_never_leave_one_alone() {
+    let html = page("detail/plain");
+    let meta = html.find("site-detail-meta").expect("the meta grid");
+    let end = html[meta..]
+        .find("</div></div>")
+        .map_or(html.len(), |e| meta + e);
+    let items = html[meta..end]
+        .matches("class=\"site-detail-item\"")
+        .count();
+    assert_eq!(items % 2, 0, "an even number of items fills two columns");
+    assert_eq!(items, 4, "rule, kind, category and sub-group");
+    let css: String = GLOBAL_CSS.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        css.contains(
+            ".site-detail-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
+        ),
+        "two columns at every width"
+    );
+}
+
+/// Wave 19 D1: a thrown-out row offers its two real choices and none the server would refuse.
+#[test]
+fn detail_thrown_out_offers_put_it_back_and_confirm_thrown_out_only() {
+    let row = site_of("detail/thrown-out");
+    assert!(row.thrown_out_reason.is_some());
+    let html = plain_text(&page("detail/thrown-out"));
+    assert!(html.contains("Put it back into review"), "{html}");
+    assert!(html.contains("Confirm thrown out"));
+    for refused in [
+        ">Confirmed<",
+        ">Ignored<",
+        ">Tech debt<",
+        "pane-dispose",
+        "Merge into",
+    ] {
+        assert!(!html.contains(refused), "{refused}");
+    }
 }

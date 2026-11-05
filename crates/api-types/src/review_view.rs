@@ -222,6 +222,10 @@ pub struct NewSinceDecisionView {
     pub decided_at: String,
     /// How many sites the node decision covers ("12 others").
     pub covered: usize,
+    /// The group decision's state, so a lane with no tree loaded (the queue) says the same verb
+    /// the tree does ("new since you ignored this group"). Absent from an older server's reply.
+    #[serde(default)]
+    pub node_state: Option<DecisionState>,
 }
 
 /// Where a moved site was before (spec section 8: "moved, was line 212").

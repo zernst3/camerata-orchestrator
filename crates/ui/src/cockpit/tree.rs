@@ -34,8 +34,8 @@ use camerata_api_types::review_view::{SiteRow, TreeNodeView, TreeView, SITES_PAG
 use camerata_ui_core::edits::context_for;
 use camerata_ui_core::tree::batch::{
     batch_allowed, batch_blocked_reason, batch_heading, batch_plan, decision_request,
-    decision_state_for, plan_sentence, site_decision_request, stale_summary_note,
-    summary_edit_request, summary_text, BatchPlan, TreeUndo,
+    decision_state_for, plan_sentence, stale_summary_note, summary_edit_request, summary_text,
+    BatchPlan, TreeUndo,
 };
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::keys::{keys_hint, tree_command, tree_keys_armed, TreeCommand};
@@ -1247,19 +1247,47 @@ pub(crate) fn TreeHost(
     });
 
     // One site decision: apply now, or raise the reason prompt.
+    // A ruling the server would refuse on a thrown-out row (anything but a false positive) is
+    // refused in words before a prompt opens or a request is made.
+    let refuses = use_callback(
+        move |(node, key, st): (String, String, TriageState)| -> bool {
+            let row = state.peek().site(&node, &key).cloned();
+            if row
+                .as_ref()
+                .is_some_and(|r| camerata_ui_core::edits::ruling_refused(r, st))
+            {
+                toast.call((
+                    crate::toast::ToastKind::Info,
+                    camerata_ui_core::edits::THROWN_OUT_REFUSAL.to_string(),
+                ));
+                return true;
+            }
+            false
+        },
+    );
     let decide_site = use_callback({
         let api = api.clone();
         move |(node, key, st, reason): (String, String, TriageState, String)| {
-            let Some(decision) = decision_state_for(st) else {
+            if refuses.call((node.clone(), key.clone(), st)) {
                 return;
-            };
-            let req = site_decision_request(&key, decision, &reason, &run_id());
+            }
+            let row = state.peek().site(&node, &key).cloned();
+            let run = run_id();
             let api = api.clone();
             spawn(async move {
-                match api.writes.post_decision(req).await {
-                    Ok(done) => {
+                match super::site_detail::post_ruling(
+                    &*api.writes,
+                    row.as_ref(),
+                    &key,
+                    st,
+                    &reason,
+                    &run,
+                )
+                .await
+                {
+                    Ok(decision) => {
                         undo.set(Some(TreeUndo::for_site(
-                            &done.decision.id,
+                            &decision.id,
                             st,
                             epoch.elapsed().as_millis() as u64,
                         )));
@@ -1267,11 +1295,11 @@ pub(crate) fn TreeHost(
                         let _ = node;
                         after_write.call(());
                     }
-                    Err(e) => {
+                    Err(message) => {
                         if let Some(TreePrompt::Site { error, .. }) = prompt.write().as_mut() {
-                            *error = Some(e.message);
+                            *error = Some(message);
                         } else {
-                            toast.call((crate::toast::ToastKind::Error, e.message));
+                            toast.call((crate::toast::ToastKind::Error, message));
                         }
                     }
                 }
@@ -1515,6 +1543,9 @@ pub(crate) fn TreeHost(
             }
             TreeCommand::Site(PaneCommand::PromptFor(st)) => {
                 if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
+                    if refuses.call((node.clone(), key.clone(), st)) {
+                        return;
+                    }
                     prompt.set(Some(TreePrompt::Site {
                         node,
                         key,
@@ -1618,6 +1649,9 @@ pub(crate) fn TreeHost(
                 // The lane's own: a decision, the outlier tick, the viewer and the stack.
                 DetailEvent::Decide(st) => {
                     if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
+                        if refuses.call((node.clone(), key.clone(), st)) {
+                            return;
+                        }
                         if st.requires_reason() {
                             prompt.set(Some(TreePrompt::Site { node, key, state: st, reason: String::new(), error: None }));
                         } else {

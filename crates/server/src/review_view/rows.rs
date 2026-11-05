@@ -256,6 +256,10 @@ impl<'a> ReviewComposer<'a> {
                         .records
                         .get(n.decision_id.as_str())
                         .map_or(0, |d| d.applies_to.len()),
+                    node_state: self
+                        .records
+                        .get(n.decision_id.as_str())
+                        .map(|d| d.state.clone()),
                 }),
             moved_from: self.inputs.moved.get(key).cloned(),
             flagged_by: Self::flagged_by_views(f),

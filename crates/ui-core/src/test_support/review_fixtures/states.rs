@@ -6,7 +6,8 @@ use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::EscalationBudget;
 use camerata_api_types::review_view::{
-    EscalationBudgetOutcome, EscalationBudgetReq, Marker, SiteRow, TreeLevel, SITES_PAGE_SIZE,
+    EscalationBudgetOutcome, EscalationBudgetReq, HeldRow, HoldReason, Marker, SiteRow, TreeLevel,
+    SITES_PAGE_SIZE,
 };
 
 use super::dataset::{build, EngineMode, Params, ReviewDataSet};
@@ -16,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 56] = [
+pub const FIXTURE_IDS: [&str; 67] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -38,6 +39,8 @@ pub const FIXTURE_IDS: [&str; 56] = [
     "queue/line-lowered",
     "queue/rate-changed-toast",
     "queue/30k",
+    "queue/detail-form-open",
+    "queue/merge-picker-empty-pool",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -46,6 +49,9 @@ pub const FIXTURE_IDS: [&str; 56] = [
     "engine/no-corrected",
     "engine/all-verdicts",
     "engine/small-category",
+    "engine/thrown-out-held",
+    "engine/thrown-out-confirmed",
+    "engine/floor-binds",
     "detail/empty",
     "detail/plain",
     "detail/escalated",
@@ -65,6 +71,11 @@ pub const FIXTURE_IDS: [&str; 56] = [
     "detail/split-picker",
     "detail/add-form",
     "detail/add-refused",
+    "detail/possible-duplicate",
+    "detail/merge-picker-duplicate-first",
+    "detail/over-budget",
+    "detail/viewer-commit",
+    "detail/thrown-out",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",
@@ -73,6 +84,7 @@ pub const FIXTURE_IDS: [&str; 56] = [
     "settings/run-in-flight",
     "export/clear",
     "export/blocked",
+    "export/one-line-two-reasons",
 ];
 
 fn params(f: impl FnOnce(&mut Params)) -> Params {
@@ -307,6 +319,7 @@ fn detail(ds: &ReviewDataSet, site: Option<SiteRow>, form: Option<DetailForm>) -
             site,
             form,
             siblings,
+            viewer: false,
         })),
     }
 }
@@ -354,6 +367,22 @@ fn engine_body(ds: &ReviewDataSet, selected: Option<usize>, wrong_list_open: boo
             wrong_list_open,
         }),
     }
+}
+
+/// A kept row the engine also links to another as a possible duplicate, with no decision on it.
+fn has_open_duplicate(r: &SiteRow) -> bool {
+    r.possible_duplicate_of.is_some()
+        && r.decision.is_none()
+        && r.held.is_none()
+        && r.thrown_out_reason.is_none()
+}
+
+/// The thrown-out card that carries the verdict.
+fn thrown_out_card_with_verdict(ds: &ReviewDataSet) -> Option<usize> {
+    ds.engine.cards.iter().position(|c| {
+        c.stratum == camerata_api_types::review_view::SampleStratum::ThrownOut
+            && c.verdict.is_some()
+    })
 }
 
 fn card_with_wrong_verdict(ds: &ReviewDataSet) -> Option<usize> {
@@ -546,6 +575,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     queue: Loaded::Loading,
                     selected_site: None,
                     rate_toast: None,
+                    form: None,
                 }),
             }
         }
@@ -557,6 +587,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     queue: Loaded::Failed("The queue request failed with status 500.".to_string()),
                     selected_site: None,
                     rate_toast: None,
+                    form: None,
                 }),
             }
         }
@@ -584,6 +615,25 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         "queue/30k" => {
             let ds = dataset_30k();
             queue_state(&ds, ds.queue(false, 0, 100))
+        }
+
+        "queue/detail-form-open" => {
+            let ds = base();
+            let mut fx = queue_state(&ds, ds.queue(false, 0, 100));
+            if let Body::Queue(q) = &mut fx.body {
+                q.form = Some(DetailForm::Edit(EditField::Fix));
+            }
+            fx
+        }
+        "queue/merge-picker-empty-pool" => {
+            // One escalated row and nothing below the line: the queue's own pool holds no other
+            // site, so the picker says what the pool is and the remedy that works here.
+            let ds = build(&params(|p| p.candidates = 1));
+            let mut fx = queue_state(&ds, ds.queue(false, 0, 100));
+            if let Body::Queue(q) = &mut fx.body {
+                q.form = Some(DetailForm::MergePicker);
+            }
+            fx
         }
 
         // ── engine ──
@@ -622,6 +672,26 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let ds = build(&params(|p| {
                 p.sample_size = 24;
                 p.engine_mode = EngineMode::AllVerdicts;
+            }));
+            engine_body(&ds, Some(0), false)
+        }
+
+        "engine/thrown-out-held" => {
+            let ds = build(&params(|p| p.engine_mode = EngineMode::ThrownOutNo));
+            let at = thrown_out_card_with_verdict(&ds);
+            engine_body(&ds, at, false)
+        }
+        "engine/thrown-out-confirmed" => {
+            let ds = build(&params(|p| p.engine_mode = EngineMode::ThrownOutConfirmed));
+            let at = thrown_out_card_with_verdict(&ds);
+            engine_body(&ds, at, false)
+        }
+        "engine/floor-binds" => {
+            // A sample size of 6 against four categories with a floor of 3 each: the floor wins
+            // and the lane header says so.
+            let ds = build(&params(|p| {
+                p.sample_size = 6;
+                p.floor_binds = true;
             }));
             engine_body(&ds, Some(0), false)
         }
@@ -766,6 +836,41 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             detail(&ds, site, Some(DetailForm::AddRefused(msg)))
         }
 
+        "detail/possible-duplicate" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, has_open_duplicate), None)
+        }
+        "detail/merge-picker-duplicate-first" => {
+            let ds = base();
+            detail(
+                &ds,
+                first_row(&ds, has_open_duplicate),
+                Some(DetailForm::MergePicker),
+            )
+        }
+        "detail/over-budget" => {
+            let ds = base();
+            detail(
+                &ds,
+                first_row(&ds, |r| {
+                    r.markers.contains(&Marker::OverBudget) && r.decision.is_none()
+                }),
+                None,
+            )
+        }
+        "detail/thrown-out" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| r.thrown_out_reason.is_some()), None)
+        }
+        "detail/viewer-commit" => {
+            let ds = base();
+            let mut fx = detail(&ds, first_row(&ds, is_plain), None);
+            if let Body::Detail(d) = &mut fx.body {
+                d.viewer = true;
+            }
+            fx
+        }
+
         // ── settings ──
         "settings/defaults" => {
             let ds = base();
@@ -856,6 +961,32 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 }),
             }
         }
+        "export/one-line-two-reasons" => {
+            // A row the engine threw out, the reviewer put back and the Engine Check also said No
+            // to: two checks refuse it, and the panel draws it as one line naming both.
+            let ds = base();
+            let mut gate = ds.gate.clone();
+            if let Some(first) = gate.held.first().cloned() {
+                gate.held.retain(|h| h.key != first.key);
+                for reason in [
+                    HoldReason::EngineCheckNoWithoutCorrection,
+                    HoldReason::RestoredWithoutDecision,
+                ] {
+                    gate.held.insert(
+                        0,
+                        HeldRow {
+                            reason,
+                            detail: reason.phrase().to_string(),
+                            ..first.clone()
+                        },
+                    );
+                }
+            }
+            StateFixture {
+                shell: shell_of(&ds),
+                body: Body::Export(ExportBody { gate }),
+            }
+        }
         _ => return None,
     })
 }
@@ -870,6 +1001,7 @@ fn queue_state(
             queue: Loaded::Ready(queue),
             selected_site: None,
             rate_toast: None,
+            form: None,
         }),
     }
 }

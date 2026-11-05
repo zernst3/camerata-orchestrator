@@ -1159,6 +1159,129 @@ async fn an_engine_check_no_on_a_thrown_out_card_is_held_and_counted_until_it_is
     assert!(shell.export_gate.held.iter().all(|h| h.key != restored));
 }
 
+/// Wave 17 follow-up: the decisions route accepted any ruling on a row the engine threw out, so a
+/// Confirmed on a thrown-out key cleared the Engine Check's hold while the row stayed out of the
+/// package: a real problem nobody reported, with nothing left to say so. A thrown-out row takes
+/// only the two decisions that settle it: put it back, or call it a false positive (the throw-out
+/// was right), each with its reason. Anything else is refused and the hold stands.
+#[tokio::test]
+async fn a_thrown_out_row_takes_only_a_restore_or_a_false_positive() {
+    let f = review_fixture(12);
+    let lane: EngineCheckLane = get(&f, "the lane", "/review/engine-check").await;
+    let key = card_key(&lane, "src/thrown2.rs");
+    let _: EngineCheckVerdict = post_ok(
+        &f,
+        "a no",
+        &format!("/review/engine-check/{}", path_key(&key)),
+        json!({ "right": false, "wrong": "thrown_out_real_problem" }),
+    )
+    .await;
+    let held_by_it = |shell: &ReviewShellView| {
+        shell
+            .export_gate
+            .held
+            .iter()
+            .any(|h| h.key == key && h.reason == HoldReason::EngineCheckNoWithoutCorrection)
+    };
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert!(held_by_it(&shell), "the No holds the export");
+
+    for state in [
+        DecisionState::Confirmed,
+        DecisionState::Ignored,
+        DecisionState::TechDebtNow,
+        DecisionState::TechDebtLater,
+        DecisionState::MergedInto(f.keys.plain.clone()),
+    ] {
+        let (status, text) = call(
+            &f.app,
+            "POST",
+            &format!("{}/decisions", base(&f)),
+            Some(decision_at(
+                Scope::Site,
+                &key,
+                state.clone(),
+                "a reason",
+                LATER,
+            )),
+        )
+        .await;
+        assert_eq!(status, 409, "{state:?}: {text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["code"], "thrown_out_decision", "{state:?}: {text}");
+        let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+        assert!(
+            held_by_it(&shell),
+            "{state:?} was refused, so the hold stands"
+        );
+    }
+
+    // A false positive without its reason is refused by the store, as everywhere.
+    let (status, _) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &key,
+            DecisionState::FalsePositive,
+            "  ",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 422);
+
+    // The two that settle it are taken.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &key,
+            DecisionState::FalsePositive,
+            "rightly thrown out",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert!(!held_by_it(&shell), "the confirmation clears the hold");
+
+    let other = card_key(&lane, "src/thrown.rs");
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &other,
+            DecisionState::EngineRestored,
+            "a real problem",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    // Once put back it is a kept row again and takes every ruling.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &other,
+            DecisionState::Confirmed,
+            "",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+}
+
 #[tokio::test]
 async fn a_sample_size_of_zero_turns_the_lane_off() {
     let f = review_fixture(12);

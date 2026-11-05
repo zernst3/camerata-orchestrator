@@ -103,6 +103,8 @@ pub struct QueueBody {
     pub selected_site: Option<String>,
     /// The toast after the rate or floor changed.
     pub rate_toast: Option<EscalationBudgetOutcome>,
+    /// A form open in the site detail beside the table.
+    pub form: Option<DetailForm>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +133,8 @@ pub struct DetailBody {
     pub form: Option<DetailForm>,
     /// The other sites of the same sub-group, for the merge and split pickers.
     pub siblings: Vec<SiteRow>,
+    /// The code viewer is open on the site, at the commit the run inspected.
+    pub viewer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

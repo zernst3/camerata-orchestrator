@@ -1356,6 +1356,7 @@ fn the_context_names_the_crumbs_the_rules_the_other_sub_groups_and_the_loaded_si
         node_id: decided.id.clone(),
         decided_at: "2026-11-04T09:00:00Z".into(),
         covered: 3,
+        node_state: None,
     });
     let ctx = context_for(&index, &state, &sub.id, &new_row);
     assert_eq!(
@@ -1504,4 +1505,172 @@ fn the_category_select_offers_exactly_the_engines_taxonomy() {
         .filter(|v| !v.is_empty())
         .collect();
     assert_eq!(offered, camerata_api_types::edits::KNOWN_CATEGORIES);
+}
+
+// ── A row the engine threw out (wave 19 D1) ──────────────────────────────────────────────
+
+fn thrown_out() -> SiteRow {
+    let mut row = plain();
+    row.thrown_out_reason = Some("its headline is a placeholder".to_string());
+    row
+}
+
+#[test]
+fn a_thrown_out_row_refuses_every_ruling_but_a_false_positive() {
+    let row = thrown_out();
+    assert!(is_thrown_out(&row));
+    for st in [
+        TriageState::Confirmed,
+        TriageState::Ignored,
+        TriageState::TechDebt,
+    ] {
+        assert!(ruling_refused(&row, st), "{st:?}");
+        let err = ruling_request(&row, st, "a reason", "run-1").unwrap_err();
+        assert_eq!(err, THROWN_OUT_REFUSAL);
+    }
+    // The false positive is the confirmation: it is posted.
+    assert!(!ruling_refused(&row, TriageState::FalsePositive));
+    let req = ruling_request(&row, TriageState::FalsePositive, " rightly out ", "run-1").unwrap();
+    assert_eq!(req.state, DecisionState::FalsePositive);
+    assert_eq!(req.key, row.site_key);
+    assert_eq!(req.reason, "rightly out");
+    // A kept row takes every ruling.
+    let kept = plain();
+    assert!(!is_thrown_out(&kept));
+    for st in [
+        TriageState::Confirmed,
+        TriageState::Ignored,
+        TriageState::TechDebt,
+        TriageState::FalsePositive,
+    ] {
+        assert!(!ruling_refused(&kept, st), "{st:?}");
+        assert!(ruling_request(&kept, st, "r", "run-1").is_ok());
+    }
+}
+
+#[test]
+fn a_thrown_out_row_opens_only_the_put_back_and_confirm_forms() {
+    let row = thrown_out();
+    // Merge into is a ruling the server refuses on it: the form does not open.
+    let m = reduce(DetailMode::Viewing, &DetailAction::BeginMerge, &row, &ctx());
+    assert_eq!(m, DetailMode::Viewing);
+    for choice in [ThrowOutChoice::PutBack, ThrowOutChoice::Confirm] {
+        let open = reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginThrowOut(choice),
+            &row,
+            &ctx(),
+        );
+        assert!(
+            matches!(&open, DetailMode::ThrowOut(d) if d.choice == choice),
+            "{open:?}"
+        );
+        assert!(open.is_form());
+        let typed = reduce(open, &DetailAction::Reason("because".into()), &row, &ctx());
+        assert!(matches!(&typed, DetailMode::ThrowOut(d) if d.reason == "because"));
+    }
+    // A kept row has no such form, and keeps its merge.
+    let kept = plain();
+    assert_eq!(
+        reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginThrowOut(ThrowOutChoice::PutBack),
+            &kept,
+            &ctx()
+        ),
+        DetailMode::Viewing
+    );
+    assert!(matches!(
+        reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginMerge,
+            &kept,
+            &ctx()
+        ),
+        DetailMode::Merge(_)
+    ));
+}
+
+#[test]
+fn putting_back_or_confirming_needs_a_reason_and_posts_the_one_decision_each_means() {
+    let row = thrown_out();
+    for (choice, state) in [
+        (ThrowOutChoice::PutBack, DecisionState::EngineRestored),
+        (ThrowOutChoice::Confirm, DecisionState::FalsePositive),
+    ] {
+        let open = reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginThrowOut(choice),
+            &row,
+            &ctx(),
+        );
+        let err = commit(&open, &row, &ctx(), "run-1").unwrap_err();
+        assert!(err.contains("reason"), "{err}");
+        let typed = reduce(
+            open,
+            &DetailAction::Reason("a real problem".into()),
+            &row,
+            &ctx(),
+        );
+        let DetailWrite::Decision { req, done } = commit(&typed, &row, &ctx(), "run-1").unwrap()
+        else {
+            panic!("a decision");
+        };
+        assert_eq!(req.state, state);
+        assert_eq!(req.key, row.site_key);
+        assert_eq!(req.reason, "a real problem");
+        assert!(!done.is_empty());
+    }
+}
+
+#[test]
+fn a_stale_decision_on_a_thrown_out_row_offers_reapply_only_when_the_server_would_take_it() {
+    let mut row = rows()
+        .into_iter()
+        .find(|r| r.stale_decision.is_some() && r.decision.is_none())
+        .expect("a stale decision row");
+    row.thrown_out_reason = Some("a placeholder".to_string());
+    for (state, actions) in [
+        (DecisionState::Confirmed, vec![LineAction::Discard]),
+        (DecisionState::Ignored, vec![LineAction::Discard]),
+        (
+            DecisionState::FalsePositive,
+            vec![LineAction::Reapply, LineAction::Discard],
+        ),
+    ] {
+        row.stale_decision.as_mut().unwrap().state = state.clone();
+        assert_eq!(decision_line(&row, &ctx()).actions, actions, "{state:?}");
+    }
+}
+
+/// Wave 20 D1 residue: the edits route searches only the report's findings, so an edit on a
+/// thrown-out row answers `unknown_site`. The form (and the E chord) does not open on one.
+#[test]
+fn a_thrown_out_row_opens_no_edit_form() {
+    let row = thrown_out();
+    for action in [
+        DetailAction::PickField,
+        DetailAction::BeginEdit(EditField::Headline),
+        DetailAction::BeginEdit(EditField::Severity),
+        DetailAction::BeginEdit(EditField::Subgroup),
+        DetailAction::BeginSplit,
+    ] {
+        let next = reduce(DetailMode::Viewing, &action, &row, &ctx());
+        assert_eq!(next, DetailMode::Viewing, "{action:?}");
+    }
+    // A kept row keeps them.
+    let kept = plain();
+    assert!(matches!(
+        reduce(
+            DetailMode::Viewing,
+            &DetailAction::BeginEdit(EditField::Headline),
+            &kept,
+            &ctx()
+        ),
+        DetailMode::Edit(_)
+    ));
+    assert_eq!(
+        reduce(DetailMode::Viewing, &DetailAction::PickField, &kept, &ctx()),
+        DetailMode::PickField
+    );
 }

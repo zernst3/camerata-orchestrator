@@ -122,7 +122,7 @@ fn a_different_seed_gives_different_data() {
 fn fixtures_cover_every_state() {
     let unique: BTreeSet<&str> = FIXTURE_IDS.iter().copied().collect();
     assert_eq!(unique.len(), FIXTURE_IDS.len(), "no id is listed twice");
-    assert_eq!(FIXTURE_IDS.len(), 56);
+    assert_eq!(FIXTURE_IDS.len(), 67);
     for id in FIXTURE_IDS {
         assert!(fixture(id).is_some(), "no fixture for {id}");
     }
@@ -922,6 +922,12 @@ fn the_fixture_shell_names_the_inspected_commit_of_every_repo_its_rows_are_in() 
             .expect("a commit for the repo");
         assert_eq!(sha.len(), 40, "{repo}: {sha}");
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+        // The viewer's header shows the first seven characters: a gallery page must show a commit
+        // that reads as one, not a run of zeros.
+        assert!(
+            sha[..7].chars().any(|c| c != '0'),
+            "{repo}: {sha} reads as a placeholder"
+        );
     }
 }
 
@@ -956,4 +962,88 @@ fn over_budget_rows_are_the_rows_the_server_would_let_exceed_the_budget() {
             "{name}: some over-budget row is over for a critical D5 reason, not only for evidence"
         );
     }
+}
+
+/// The server's allocation lists the categories of the kept rows (`sample.unread`); the thrown-out
+/// stratum is its own line in `strata`. The fixture drew a "Thrown out by the engine" category
+/// into the allocation, which made the floor line count five categories where there are four.
+#[test]
+fn the_engine_allocation_lists_kept_categories_and_never_the_thrown_out_stratum() {
+    let ds = dataset_base();
+    assert!(ds
+        .engine
+        .cards
+        .iter()
+        .any(|c| c.stratum == camerata_api_types::review_view::SampleStratum::ThrownOut));
+    assert!(!ds.engine.allocation.is_empty());
+    assert!(ds
+        .engine
+        .allocation
+        .iter()
+        .all(|a| a.category != "Thrown out by the engine"));
+    let drawn: usize = ds.engine.allocation.iter().map(|a| a.drawn).sum();
+    let kept = ds
+        .engine
+        .cards
+        .iter()
+        .filter(|c| c.stratum == camerata_api_types::review_view::SampleStratum::Kept)
+        .count();
+    assert_eq!(drawn, kept, "the allocation covers the kept cards");
+}
+
+/// Wave 19 D2, mirrored from the server's `verdict_counts`: a thrown-out No the reviewer confirmed
+/// (a false-positive decision on the still thrown-out row) agrees with the engine and is not a
+/// real problem in the thrown-out rate; an unsettled No still is one.
+#[test]
+fn the_thrown_out_rate_does_not_count_a_confirmed_throw_out_as_a_real_problem() {
+    use camerata_api_types::review_view::SampleStratum;
+    let thrown = |mode: EngineMode| {
+        let mut p = Params::base(SEED);
+        p.engine_mode = mode;
+        let lane = build(&p).engine;
+        lane.strata
+            .into_iter()
+            .find(|s| s.stratum == SampleStratum::ThrownOut)
+            .unwrap()
+    };
+    let confirmed = thrown(EngineMode::ThrownOutConfirmed);
+    assert_eq!((confirmed.verdicts, confirmed.wrong), (1, 0));
+    assert_eq!(confirmed.rate_percent, Some(0.0));
+    let unsettled = thrown(EngineMode::ThrownOutNo);
+    assert_eq!((unsettled.verdicts, unsettled.wrong), (1, 1));
+}
+
+/// Wave 20 D2 residue, mirrored from the server: with no named correction, a false positive made
+/// strictly after the No on a still thrown-out row is the same confirmation.
+#[test]
+fn an_unnamed_confirmation_after_the_no_is_not_a_real_problem_and_one_before_it_is() {
+    use super::dataset::refresh_lane_totals;
+    use camerata_api_types::review_view::SampleStratum;
+    let mut p = Params::base(SEED);
+    p.engine_mode = EngineMode::ThrownOutConfirmed;
+    let ds = build(&p);
+    let rate = |lane: &camerata_api_types::review_view::EngineCheckLane| {
+        let s = lane
+            .strata
+            .iter()
+            .find(|s| s.stratum == SampleStratum::ThrownOut)
+            .unwrap();
+        (s.verdicts, s.wrong)
+    };
+    let mut lane = ds.engine.clone();
+    let at = lane
+        .cards
+        .iter()
+        .position(|c| c.stratum == SampleStratum::ThrownOut && c.verdict.is_some())
+        .unwrap();
+    lane.cards[at].verdict.as_mut().unwrap().correction = None;
+    refresh_lane_totals(&mut lane, &ds.rows);
+    assert_eq!(rate(&lane), (1, 0), "the decision came after the No");
+    // The same decision made before the No retracts nothing.
+    let mut earlier = lane.clone();
+    earlier.cards[at].verdict.as_mut().unwrap().at = "2026-11-05T00:00:00Z".to_string();
+    earlier.cards[at].site.decision.as_mut().unwrap().decided_at =
+        "2000-01-01T00:00:00Z".to_string();
+    refresh_lane_totals(&mut earlier, &ds.rows);
+    assert_eq!(rate(&earlier), (1, 1));
 }

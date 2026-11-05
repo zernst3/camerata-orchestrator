@@ -21,12 +21,12 @@ use camerata_api_types::review_view::{
 use camerata_ui::review_io::ReviewApi;
 use camerata_ui_core::engine_check::{
     all_verdicts_in, allocation_note, card_position, card_state, card_state_text, collapsed_text,
-    correction_lines, correction_ref, correction_request, duplicate_text, engine_command,
-    engine_keys_armed, error_digit, error_label, escalation_text, field_label, flags_text,
-    keys_hint, merge_targets, no_request, outlier_text, placed_text, question, rate_lines,
-    sample_line, stage1_text, stratum_label, verdicts_line, yes_request, CardState, Correction,
-    CorrectionKind, EngineCommand, KeyPhase, LaneState, Phase, NO_CARDS, OFF_TEXT, SEVERITIES,
-    SUBTITLE, TEXT_FIELDS,
+    confirm_offered, correction_lines, correction_ref, correction_request, duplicate_text,
+    engine_command, engine_keys_armed, error_digit, error_label, escalation_text, field_label,
+    flags_text, keys_hint, merge_targets, no_request, outlier_text, placed_text, question,
+    rate_lines, sample_line, stage1_text, stratum_label, verdicts_line, yes_request, CardState,
+    Correction, CorrectionKind, EngineCommand, KeyPhase, LaneState, Phase, NO_CARDS, OFF_TEXT,
+    SEVERITIES, SUBTITLE, TEXT_FIELDS,
 };
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::shell::{lane_for_key, Lane};
@@ -71,6 +71,7 @@ pub(crate) fn EngineScreen(
     #[props(default)] on_no: Callback<()>,
     #[props(default)] on_pick: Callback<EngineCheckError>,
     #[props(default)] on_correct: Callback<()>,
+    #[props(default)] on_confirm: Callback<()>,
     #[props(default)] on_field: Callback<EditField>,
     #[props(default)] on_value: Callback<String>,
     #[props(default)] on_reason: Callback<String>,
@@ -146,6 +147,7 @@ pub(crate) fn EngineScreen(
                         on_no,
                         on_pick,
                         on_correct,
+                        on_confirm,
                         on_field,
                         on_value,
                         on_reason,
@@ -238,6 +240,7 @@ fn EngineCardView(
     on_no: Callback<()>,
     on_pick: Callback<EngineCheckError>,
     on_correct: Callback<()>,
+    on_confirm: Callback<()>,
     on_field: Callback<EditField>,
     on_value: Callback<String>,
     on_reason: Callback<String>,
@@ -248,8 +251,14 @@ fn EngineCardView(
     let status_text = card_state_text(&card_status);
     let token = dom_token(&card.site.site_key);
     // "Correct it" is offered while a No still has nothing behind it.
-    let correctable = matches!(card_status, CardState::Held { .. } | CardState::ThrownOut);
+    let correctable = matches!(
+        card_status,
+        CardState::Held { .. } | CardState::HeldThrownOut { .. } | CardState::ThrownOut
+    );
+    // A thrown-out row has two ways out: put it back (the correction) or confirm the throw-out.
+    let confirmable = confirm_offered(&card_status);
     let corrected = matches!(card_status, CardState::Corrected { .. });
+    let confirmed = matches!(card_status, CardState::ThrownOutConfirmed { .. });
     let (state_class, state_chip) = match &card_status {
         CardState::Pending => ("engine-state pending", None),
         CardState::Yes => ("engine-state yes", Some(("mark-edited", "\u{2713} yes"))),
@@ -257,7 +266,18 @@ fn EngineCardView(
             "engine-state held",
             Some(("mark-held", "\u{1f512} held from export until corrected")),
         ),
+        CardState::HeldThrownOut { .. } => (
+            "engine-state held",
+            Some((
+                "mark-held",
+                "\u{1f512} held from export until put back or confirmed",
+            )),
+        ),
         CardState::ThrownOut => ("engine-state held", Some(("mark-held", "still thrown out"))),
+        CardState::ThrownOutConfirmed { .. } => (
+            "engine-state corrected",
+            Some(("mark-edited", "\u{2713} throw-out confirmed")),
+        ),
         CardState::Restored => (
             "engine-state held",
             Some(("mark-held", "\u{1f512} put back, held until you decide it")),
@@ -301,20 +321,23 @@ fn EngineCardView(
             }
             div { class: "engine-question",
                 span { class: "engine-q", "{q}" }
-                span { class: "engine-answers",
-                    button {
-                        class: "btn-run engine-yes",
-                        disabled: working,
-                        title: "Press Y while the card has focus",
-                        onclick: move |_| on_yes.call(()),
-                        "Yes (Y)"
-                    }
-                    button {
-                        class: "btn-edit-sm engine-no",
-                        disabled: working,
-                        title: "Press N while the card has focus",
-                        onclick: move |_| on_no.call(()),
-                        "No (N)"
+                // A settled card has nothing left to answer.
+                if !confirmed {
+                    span { class: "engine-answers",
+                        button {
+                            class: "btn-run engine-yes",
+                            disabled: working,
+                            title: "Press Y while the card has focus",
+                            onclick: move |_| on_yes.call(()),
+                            "Yes (Y)"
+                        }
+                        button {
+                            class: "btn-edit-sm engine-no",
+                            disabled: working,
+                            title: "Press N while the card has focus",
+                            onclick: move |_| on_no.call(()),
+                            "No (N)"
+                        }
                     }
                 }
             }
@@ -324,10 +347,22 @@ fn EngineCardView(
                 }
                 span { class: "engine-state-text", "{status_text}" }
                 if correctable && state.phase == Phase::Viewing {
-                    button { class: "btn-edit-sm", onclick: move |_| on_correct.call(()), "Correct it" }
+                    button {
+                        class: "btn-edit-sm engine-correct",
+                        onclick: move |_| on_correct.call(()),
+                        if thrown_out { "Put it back into review" } else { "Correct it" }
+                    }
+                }
+                if confirmable && state.phase == Phase::Viewing {
+                    button {
+                        class: "btn-edit-sm engine-confirm",
+                        title: "The engine was right to throw this row out. It stays out of the client package and the export is no longer held on its account. A reason is required.",
+                        onclick: move |_| on_confirm.call(()),
+                        "Confirm thrown out"
+                    }
                 }
             }
-            if corrected {
+            if corrected || confirmed {
                 div { class: "engine-fix-summary",
                     for line in summary_lines {
                         span { key: "{line}", class: "engine-fix-line", "{line}" }
@@ -423,6 +458,11 @@ fn EngineCardView(
             if corrected {
                 p { class: "engine-corrected-note",
                     "The corrected version is what ships. The Engine Check never appears in a client export."
+                }
+            }
+            if confirmed {
+                p { class: "engine-corrected-note",
+                    "The row stays out of the client package. The Engine Check never appears in a client export."
                 }
             }
             if thrown_out && matches!(card_status, CardState::Pending) {
@@ -571,7 +611,8 @@ fn CorrectionForm(
                     CorrectionKind::FalsePositive
                     | CorrectionKind::Escalate
                     | CorrectionKind::Deescalate
-                    | CorrectionKind::Restore => rsx! {},
+                    | CorrectionKind::Restore
+                    | CorrectionKind::ConfirmThrownOut => rsx! {},
                 }
             }
             label { class: "rule-modal-label", "{reason_label}" }
@@ -850,6 +891,9 @@ pub(crate) fn EngineHost() -> Element {
             let Some(card) = current_card() else {
                 return;
             };
+            if matches!(card_state(&card), CardState::ThrownOutConfirmed { .. }) {
+                return;
+            }
             let count = lane.peek().as_ref().map_or(0, |l| l.cards.len());
             let api = api.clone();
             ls.write().busy = true;
@@ -886,6 +930,9 @@ pub(crate) fn EngineHost() -> Element {
         let Some(card) = current_card() else {
             return;
         };
+        if matches!(card_state(&card), CardState::ThrownOutConfirmed { .. }) {
+            return;
+        }
         if card.stratum == SampleStratum::ThrownOut {
             // A No on a thrown-out finding has one answer, and puts the row back.
             pick.call(EngineCheckError::ThrownOutRealProblem);
@@ -902,6 +949,17 @@ pub(crate) fn EngineHost() -> Element {
         match card.verdict.as_ref().and_then(|v| v.wrong) {
             Some(e) => pick.call(e),
             None => ls.write().open_list(),
+        }
+    });
+
+    // "Confirm thrown out": the other way out of a thrown-out No. It asks for the reason in the
+    // same place, then records the decision that clears the hold (the row stays out).
+    let confirm = use_callback(move |()| {
+        let Some(card) = current_card() else {
+            return;
+        };
+        if confirm_offered(&card_state(&card)) {
+            ls.write().begin_confirm(&card);
         }
     });
 
@@ -1050,6 +1108,7 @@ pub(crate) fn EngineHost() -> Element {
             on_no: no,
             on_pick: pick,
             on_correct: correct,
+            on_confirm: confirm,
             on_field: move |f: EditField| {
                 let phase = ls.peek().phase.clone();
                 if let (Some(card), Phase::Correcting(c)) = (current_card(), phase) {

@@ -631,3 +631,56 @@ fn the_queues_merge_picker_says_its_pool_is_its_own_escalated_rows() {
     );
     assert_ne!(ctx.pool_none, crate::edits::POOL_NONE_TREE);
 }
+
+#[test]
+fn the_budget_banner_does_not_outlive_its_run() {
+    // The first read of the shell, or the same run read again after a write: the banner stands.
+    assert!(applied_budget_stands(None, "run-1"));
+    assert!(applied_budget_stands(Some("run-1"), "run-1"));
+    // A new run is a new queue: "103 candidates moved above the line" no longer describes it.
+    assert!(!applied_budget_stands(Some("run-1"), "run-2"));
+}
+
+/// Wave 18 soft: `node_decision` was always None in the queue, so a new-since-decision row said
+/// "decided" where the tree says the group decision's own verb.
+#[test]
+fn a_new_since_decision_row_in_the_queue_says_the_verb_the_tree_says() {
+    use camerata_api_types::decisions::DecisionState;
+    use camerata_api_types::review_view::NewSinceDecisionView;
+    let v = view();
+    let mut row = v.escalated[0].clone();
+    row.site.decision = None;
+    row.site.stale_decision = None;
+    let new_since = |state: Option<DecisionState>| NewSinceDecisionView {
+        decision_id: "dec-9".to_string(),
+        node_id: row
+            .node_path
+            .last()
+            .map(|c| c.id.clone())
+            .unwrap_or_default(),
+        decided_at: "2026-11-04T09:00:00Z".to_string(),
+        covered: 12,
+        node_state: state,
+    };
+    for (state, verb) in [
+        (DecisionState::Ignored, "you ignored this group"),
+        (DecisionState::Confirmed, "you confirmed this group"),
+        (
+            DecisionState::FalsePositive,
+            "you marked false positive this group",
+        ),
+    ] {
+        row.site.new_since_decision = Some(new_since(Some(state.clone())));
+        let ctx = detail_context(&v, &row);
+        assert_eq!(ctx.node_decision, Some(state));
+        let line = crate::edits::decision_line(&row.site, &ctx);
+        assert!(line.text.contains(verb), "{}", line.text);
+    }
+    // A reply from a server that does not say the state keeps the general word.
+    row.site.new_since_decision = Some(new_since(None));
+    let ctx = detail_context(&v, &row);
+    assert_eq!(ctx.node_decision, None);
+    assert!(crate::edits::decision_line(&row.site, &ctx)
+        .text
+        .contains("you decided this group"));
+}

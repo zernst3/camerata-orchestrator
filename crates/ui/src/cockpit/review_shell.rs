@@ -24,6 +24,7 @@ use super::review_settings::ReviewSettingsHost;
 use super::tree::{DoorRequest, ShellRefresh, TreeHost};
 use camerata_api_types::review_view::EscalationBudgetOutcome;
 use camerata_ui::review_io::ReviewApi;
+use camerata_ui_core::queue::applied_budget_stands;
 use camerata_ui_core::review_settings::effect_sentence;
 
 /// The lane signal, provided by the host so a lane can switch to another with `1` to `5`.
@@ -133,9 +134,21 @@ pub(crate) fn ReviewShellHost(
     let mut lane = use_signal(|| Lane::Tree);
     use_context_provider(|| LaneControl(lane));
     // What the Settings lane last applied, for the queue's "Budget is now ..." banner.
-    let applied = use_signal(|| Option::<EscalationBudgetOutcome>::None);
+    let mut applied = use_signal(|| Option::<EscalationBudgetOutcome>::None);
     use_context_provider(|| AppliedBudget(applied));
     let mut shell = use_signal(|| ViewStatus::<ReviewShellView>::Loading);
+    // The banner describes the run that was current when the rate changed. A different run read
+    // later is a new queue: drop it (Dismiss is not the only way out).
+    let mut seen_run = use_signal(|| Option::<String>::None);
+    use_effect(move || {
+        let Some(run) = shell.read().ready().map(|v| v.run_id.clone()) else {
+            return;
+        };
+        if !applied_budget_stands(seen_run.peek().as_deref(), &run) {
+            applied.set(None);
+        }
+        seen_run.set(Some(run));
+    });
 
     let load = use_callback({
         let api = api.clone();

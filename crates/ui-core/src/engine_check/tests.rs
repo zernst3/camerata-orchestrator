@@ -865,14 +865,132 @@ fn a_thrown_out_no_the_gate_holds_reads_as_held_and_is_counted() {
     card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
     card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
     let state = card_state(&card);
-    assert!(matches!(state, CardState::Held { .. }), "{state:?}");
-    assert!(card_state_text(&state).starts_with("No: held from export until corrected"));
+    assert!(
+        matches!(state, CardState::HeldThrownOut { .. }),
+        "{state:?}"
+    );
     assert_eq!(
         held_count(&EngineCheckLane {
             cards: vec![card],
             ..lane(EngineMode::Pending)
         }),
         1
+    );
+}
+
+/// Wave 17 soft (b): "held from export until corrected" named one way out, and a thrown-out row
+/// has two. The card names both, and offers the second as its own control.
+#[test]
+fn a_held_thrown_out_card_names_both_ways_out_and_offers_the_confirmation() {
+    let mut card = no_card(None);
+    card.stratum = SampleStratum::ThrownOut;
+    card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let state = card_state(&card);
+    let text = card_state_text(&state);
+    assert!(text.contains("Put it back into review"), "{text}");
+    assert!(text.contains("confirm it was rightly thrown out"), "{text}");
+    assert!(!text.contains("until corrected"), "{text}");
+    assert!(!text.contains("what ships"), "{text}");
+    assert!(confirm_offered(&state), "{state:?}");
+    // A carried No keeps its words about the earlier run.
+    card.verdict.as_mut().unwrap().carried_from = Some("insp-0".to_string());
+    let carried = card_state_text(&card_state(&card));
+    assert!(carried.starts_with("No from an earlier run"), "{carried}");
+    assert!(
+        carried.contains("confirm it was rightly thrown out"),
+        "{carried}"
+    );
+    // The control is for a thrown-out No nothing has settled, and for nothing else.
+    let unsettled = no_card(None);
+    assert!(!confirm_offered(&card_state(&unsettled)), "a kept row");
+    assert!(!confirm_offered(&CardState::Pending));
+    assert!(!confirm_offered(&CardState::Yes));
+    assert!(!confirm_offered(&CardState::Restored));
+    assert!(!confirm_offered(&CardState::Corrected { error: None }));
+    assert!(!confirm_offered(&CardState::ThrownOutConfirmed {
+        error: None
+    }));
+    assert!(confirm_offered(&CardState::ThrownOut));
+}
+
+#[test]
+fn confirming_the_throw_out_needs_a_reason_and_posts_a_false_positive() {
+    let mut card = no_card(None);
+    card.stratum = SampleStratum::ThrownOut;
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let mut c = Correction::confirm_throw_out(&card);
+    assert_eq!(c.kind, CorrectionKind::ConfirmThrownOut);
+    assert_eq!(c.error, EngineCheckError::ThrownOutRealProblem);
+    assert!(c.needs_reason());
+    assert_eq!(c.title(), "Confirm it was rightly thrown out");
+    let missing = correction_request(&c, &card, "insp-1").unwrap_err();
+    assert!(missing.contains("A reason is required"), "{missing}");
+    c.reason = "  ".to_string();
+    assert!(correction_request(&c, &card, "insp-1").is_err());
+    c.reason = "a copy of a row we already report".to_string();
+    let CorrectionRequest::Decision(d) = correction_request(&c, &card, "insp-1").unwrap() else {
+        panic!("a decision");
+    };
+    assert_eq!(d.state, DecisionState::FalsePositive);
+    assert_eq!(d.scope, Scope::Site);
+    assert_eq!(d.key, card.site.site_key);
+    assert_eq!(d.reason, "a copy of a row we already report");
+    // Not a put-back: the row must not return to review.
+    assert_ne!(d.state, DecisionState::EngineRestored);
+}
+
+#[test]
+fn the_confirmation_form_stores_no_new_no_when_it_is_left() {
+    let mut card = no_card(None);
+    card.stratum = SampleStratum::ThrownOut;
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let mut s = LaneState::default();
+    s.begin_confirm(&card);
+    assert!(
+        matches!(&s.phase, Phase::Correcting(c) if c.kind == CorrectionKind::ConfirmThrownOut),
+        "{:?}",
+        s.phase
+    );
+    // The No is already stored. Leaving the form changes nothing; the restore form, in contrast,
+    // stores the No it stands behind when it is left.
+    assert_eq!(s.pending_no(), None);
+    assert_eq!(s.cancel(), None);
+    assert_eq!(s.phase, Phase::Viewing);
+    s.pick(EngineCheckError::ThrownOutRealProblem, &card);
+    assert_eq!(s.pending_no(), Some(EngineCheckError::ThrownOutRealProblem));
+}
+
+#[test]
+fn a_confirmed_throw_out_reads_as_confirmed_and_never_as_what_ships() {
+    let mut card = no_card(Some(CorrectionRef::Decision("dec-1".to_string())));
+    card.stratum = SampleStratum::ThrownOut;
+    card.site.thrown_out_reason = Some("a placeholder rule id".to_string());
+    card.verdict.as_mut().unwrap().wrong = Some(EngineCheckError::ThrownOutRealProblem);
+    let state = card_state(&card);
+    assert!(
+        matches!(state, CardState::ThrownOutConfirmed { .. }),
+        "{state:?}"
+    );
+    let text = card_state_text(&state);
+    assert!(text.contains("throw-out confirmed"), "{text}");
+    assert!(text.contains("stays out of the client package"), "{text}");
+    assert!(!text.contains("what ships"), "{text}");
+    assert_eq!(
+        held_count(&EngineCheckLane {
+            cards: vec![card.clone()],
+            ..lane(EngineMode::Pending)
+        }),
+        0,
+        "nothing holds the export on its account"
+    );
+    // The same correction on a row that was put back (it has lost its throw-out mark) is the
+    // row's ruling, and what ships.
+    card.site.thrown_out_reason = None;
+    assert!(
+        matches!(card_state(&card), CardState::Corrected { .. }),
+        "{:?}",
+        card_state(&card)
     );
 }
 

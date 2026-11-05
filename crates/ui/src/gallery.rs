@@ -108,6 +108,8 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "line-lowered",
             "rate-changed-toast",
             "30k",
+            "detail-form-open",
+            "merge-picker-empty-pool",
         ],
     ),
     (
@@ -122,6 +124,9 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "no-corrected",
             "all-verdicts",
             "small-category",
+            "thrown-out-held",
+            "thrown-out-confirmed",
+            "floor-binds",
         ],
     ),
     (
@@ -147,6 +152,11 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "split-picker",
             "add-form",
             "add-refused",
+            "possible-duplicate",
+            "merge-picker-duplicate-first",
+            "over-budget",
+            "viewer-commit",
+            "thrown-out",
         ],
     ),
     (
@@ -161,7 +171,11 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "run-in-flight",
         ],
     ),
-    ("export", "WO10", &["clear", "blocked"]),
+    (
+        "export",
+        "WO10",
+        &["clear", "blocked", "one-line-two-reasons"],
+    ),
 ];
 
 /// A state id and the function that renders its page.

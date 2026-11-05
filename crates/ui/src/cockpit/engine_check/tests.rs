@@ -6,6 +6,7 @@ use camerata_ui::review_io::{RecordingWrites, Written};
 use camerata_ui::review_source::FixtureReviewSource;
 use camerata_ui_core::engine_check::{Correction, CorrectionKind, SEVERITIES};
 use camerata_ui_core::test_support::review_fixtures::dataset_base;
+use camerata_ui_core::triage::PaneFocus;
 
 use super::*;
 
@@ -121,6 +122,110 @@ async fn a_thrown_out_no_puts_the_row_back_and_names_the_restore() {
         panic!("{:?}", log[0]);
     };
     assert_eq!(d.state, DecisionState::EngineRestored);
+}
+
+/// Confirming the throw-out posts a false positive on the thrown-out row (never a put-back) and
+/// then the verdict that names it, so the gate's hold clears and the row stays out.
+#[tokio::test]
+async fn confirming_a_throw_out_posts_a_false_positive_then_the_verdict_naming_it() {
+    let writes = RecordingWrites::default();
+    let mut c = card();
+    c.stratum = SampleStratum::ThrownOut;
+    let mut f = Correction::confirm_throw_out(&c);
+    assert_eq!(f.kind, CorrectionKind::ConfirmThrownOut);
+    f.reason = "a copy of a row the report already carries".to_string();
+    commit_correction(&writes, &f, &c, "insp-1").await.unwrap();
+    let log = writes.log.borrow();
+    assert_eq!(log.len(), 2);
+    let Written::Decision(d) = &log[0] else {
+        panic!("{:?}", log[0]);
+    };
+    assert_eq!(d.state, DecisionState::FalsePositive);
+    assert_eq!(d.key, c.site.site_key);
+    let Written::EngineVerdict(key, req) = &log[1] else {
+        panic!("{:?}", log[1]);
+    };
+    assert_eq!(key, &c.site.site_key);
+    assert!(!req.right);
+    assert_eq!(req.wrong, Some(EngineCheckError::ThrownOutRealProblem));
+    assert!(matches!(req.correction, Some(CorrectionRef::Decision(_))));
+}
+
+#[tokio::test]
+async fn confirming_a_throw_out_without_a_reason_writes_nothing() {
+    let writes = RecordingWrites::default();
+    let mut c = card();
+    c.stratum = SampleStratum::ThrownOut;
+    let f = Correction::confirm_throw_out(&c);
+    let err = commit_correction(&writes, &f, &c, "insp-1")
+        .await
+        .unwrap_err();
+    assert!(err.contains("A reason is required"), "{err}");
+    assert!(writes.log.borrow().is_empty(), "no decision, no verdict");
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct FormCase {
+    lane: EngineCheckLane,
+    state: LaneState,
+}
+
+fn form_page(case: FormCase) -> Element {
+    rsx! {
+        EngineScreen {
+            lane: Some(case.lane),
+            status: EngineStatus::Ready,
+            state: case.state,
+            focus: PaneFocus::Cursor,
+        }
+    }
+}
+
+/// The control opens the confirmation in place with a required reason, and leaving it stores
+/// nothing: the No it stands behind is already stored.
+#[test]
+fn the_confirm_form_asks_for_a_reason_and_names_what_it_does() {
+    let mut lane = dataset_base().engine;
+    let at = lane
+        .cards
+        .iter()
+        .position(|c| c.stratum == SampleStratum::ThrownOut)
+        .expect("a thrown-out card");
+    {
+        let card = &mut lane.cards[at];
+        card.site.held =
+            Some(camerata_api_types::review_view::HoldReason::EngineCheckNoWithoutCorrection);
+        card.verdict = Some(camerata_api_types::review_view::EngineCheckVerdict {
+            key: card.site.site_key.clone(),
+            run_id: lane.run_id.clone(),
+            right: false,
+            wrong: Some(EngineCheckError::ThrownOutRealProblem),
+            correction: None,
+            by: "architect".to_string(),
+            at: "2026-11-04T09:00:00Z".to_string(),
+            carried_from: None,
+        });
+    }
+    let mut state = LaneState::default();
+    state.go(at, lane.cards.len());
+    let closed = crate::test_harness::render_fragment(
+        form_page,
+        FormCase {
+            lane: lane.clone(),
+            state: state.clone(),
+        },
+    );
+    assert!(closed.contains("Confirm thrown out"), "{closed}");
+    assert!(!closed.contains("engine-correction"), "no form until asked");
+    state.begin_confirm(&lane.cards[at]);
+    let open = crate::test_harness::render_fragment(form_page, FormCase { lane, state });
+    assert!(open.contains("Confirm it was rightly thrown out"), "{open}");
+    assert!(open.contains("Why (required"), "the reason is required");
+    assert!(open.contains("Commit the correction"));
+    assert!(
+        !open.contains("Confirm thrown out"),
+        "the button gives way to the form"
+    );
 }
 
 #[tokio::test]
