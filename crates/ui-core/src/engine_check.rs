@@ -81,12 +81,19 @@ pub enum CardState {
         error: Option<EngineCheckError>,
         carried_from: Option<String>,
     },
+    /// A No on a thrown-out row the gate holds: the row is in no package either way, but the
+    /// export waits until the reviewer puts it back or confirms the throw-out was right. The card
+    /// offers both ways out.
+    HeldThrownOut { carried_from: Option<String> },
     /// A No on a thrown-out row that nothing has acted on, when the gate's hold is not on the card
     /// (the server holds such a row, so a card it has read reads [`CardState::Held`]): the row is
     /// still thrown out.
     ThrownOut,
     /// A thrown-out row the reviewer put back: it is back in review and held until it is decided.
     Restored,
+    /// A No on a thrown-out row, and a decision confirms the throw-out was right: the row stays
+    /// out of the client package and nothing holds the export on its account.
+    ThrownOutConfirmed { error: Option<EngineCheckError> },
     /// A No, and a correction or a later decision or edit stands behind it.
     Corrected { error: Option<EngineCheckError> },
 }
@@ -124,20 +131,50 @@ pub fn card_state(card: &EngineCheckCard) -> CardState {
         None => CardState::Pending,
         Some(v) if v.right => CardState::Yes,
         Some(v) => {
-            let held = |error| CardState::Held {
-                error,
-                carried_from: v.carried_from.clone(),
+            let thrown_out = card.stratum == SampleStratum::ThrownOut;
+            let held = |error| {
+                if thrown_out {
+                    CardState::HeldThrownOut {
+                        carried_from: v.carried_from.clone(),
+                    }
+                } else {
+                    CardState::Held {
+                        error,
+                        carried_from: v.carried_from.clone(),
+                    }
+                }
             };
             match card.site.held {
                 Some(HoldReason::EngineCheckNoWithoutCorrection) => held(v.wrong),
                 Some(HoldReason::RestoredWithoutDecision) => CardState::Restored,
-                _ if corrected_since(card, v) => CardState::Corrected { error: v.wrong },
-                _ if card.stratum == SampleStratum::ThrownOut => CardState::ThrownOut,
+                // A decision stands behind the No. On a row that is still thrown out it confirms
+                // the throw-out; on a row that was put back it is the ruling the row ships under.
+                _ if corrected_since(card, v) => {
+                    if thrown_out && card.site.thrown_out_reason.is_some() {
+                        CardState::ThrownOutConfirmed { error: v.wrong }
+                    } else {
+                        CardState::Corrected { error: v.wrong }
+                    }
+                }
+                _ if thrown_out => CardState::ThrownOut,
                 _ => held(v.wrong),
             }
         }
     }
 }
+
+/// Whether the card offers "Confirm thrown out": a No on a thrown-out row that nothing has
+/// settled. The other way out, putting it back, is the correction the card already offers.
+pub fn confirm_offered(state: &CardState) -> bool {
+    matches!(
+        state,
+        CardState::HeldThrownOut { .. } | CardState::ThrownOut
+    )
+}
+
+/// What a thrown-out card the gate holds says: it is held, and there are two ways out.
+const HELD_THROWN_OUT: &str =
+    "held from export. Put it back into review, or confirm it was rightly thrown out";
 
 /// The line a card states its state in.
 pub fn card_state_text(state: &CardState) -> String {
@@ -155,7 +192,17 @@ pub fn card_state_text(state: &CardState) -> String {
             carried_from: None,
             error,
         } => with_error("No: held from export until corrected", *error),
-        CardState::ThrownOut => "No: still thrown out, put it back to correct".to_string(),
+        CardState::HeldThrownOut {
+            carried_from: Some(_),
+        } => format!("No from an earlier run, still unsettled: {HELD_THROWN_OUT}"),
+        CardState::HeldThrownOut { carried_from: None } => format!("No: {HELD_THROWN_OUT}"),
+        CardState::ThrownOut => {
+            "No: still thrown out, put it back to correct, or confirm it was rightly thrown out"
+                .to_string()
+        }
+        CardState::ThrownOutConfirmed { .. } => {
+            "No, throw-out confirmed: the row stays out of the client package".to_string()
+        }
         CardState::Restored => "No: put back into review, held until you decide it".to_string(),
         CardState::Corrected { error } => {
             with_error("No, corrected: the corrected version is what ships", *error)
@@ -232,7 +279,12 @@ pub fn answered(card: &EngineCheckCard) -> bool {
 pub fn held_count(lane: &EngineCheckLane) -> usize {
     lane.cards
         .iter()
-        .filter(|c| matches!(card_state(c), CardState::Held { .. }))
+        .filter(|c| {
+            matches!(
+                card_state(c),
+                CardState::Held { .. } | CardState::HeldThrownOut { .. }
+            )
+        })
         .count()
 }
 
@@ -545,6 +597,9 @@ pub enum CorrectionKind {
     Summary,
     /// Put back a row the engine threw out (reason).
     Restore,
+    /// Confirm the throw-out was right (reason): the row stays out of the client package and the
+    /// Engine Check's hold on it clears.
+    ConfirmThrownOut,
 }
 
 /// The correction a choice opens.
@@ -598,7 +653,8 @@ impl Correction {
             CorrectionKind::FalsePositive
             | CorrectionKind::Escalate
             | CorrectionKind::Deescalate
-            | CorrectionKind::Restore => String::new(),
+            | CorrectionKind::Restore
+            | CorrectionKind::ConfirmThrownOut => String::new(),
         };
         Self {
             error,
@@ -606,6 +662,20 @@ impl Correction {
             field,
             value,
             reason: String::new(),
+        }
+    }
+
+    /// The form that confirms a thrown-out row was rightly thrown out. The No it stands behind is
+    /// the one the card already holds (or the thrown-out No when it holds none).
+    pub fn confirm_throw_out(card: &EngineCheckCard) -> Self {
+        let error = card
+            .verdict
+            .as_ref()
+            .and_then(|v| v.wrong)
+            .unwrap_or(EngineCheckError::ThrownOutRealProblem);
+        Self {
+            kind: CorrectionKind::ConfirmThrownOut,
+            ..Self::start(error, card)
         }
     }
 
@@ -630,6 +700,7 @@ impl Correction {
             CorrectionKind::Text => "Edit its wording",
             CorrectionKind::Summary => "Edit the group summary",
             CorrectionKind::Restore => "Put it back into review",
+            CorrectionKind::ConfirmThrownOut => "Confirm it was rightly thrown out",
         }
     }
 
@@ -724,6 +795,12 @@ pub fn correction_request(
         CorrectionKind::Restore => {
             need_reason("put back a finding the engine threw out")?;
             Ok(decision(DecisionState::EngineRestored, None, reason))
+        }
+        // The throw-out was right: the finding is not a real issue, so it is a false positive.
+        // It settles the Engine Check's hold and leaves the row where it is, out of the package.
+        CorrectionKind::ConfirmThrownOut => {
+            need_reason("confirm the engine was right to throw this row out")?;
+            Ok(decision(DecisionState::FalsePositive, None, reason))
         }
         CorrectionKind::Severity => {
             if !SEVERITIES.contains(&value) {
@@ -923,9 +1000,16 @@ impl LaneState {
     /// card (Esc, Next, Prev) stores it with no correction, which holds the row from export.
     pub fn pending_no(&self) -> Option<EngineCheckError> {
         match &self.phase {
-            Phase::Correcting(c) => Some(c.error),
+            // The confirmation is for a No that is already stored; leaving it adds nothing.
+            Phase::Correcting(c) if c.kind != CorrectionKind::ConfirmThrownOut => Some(c.error),
             _ => None,
         }
+    }
+
+    /// "Confirm thrown out": open the confirmation for `card`.
+    pub fn begin_confirm(&mut self, card: &EngineCheckCard) {
+        self.phase = Phase::Correcting(Correction::confirm_throw_out(card));
+        self.error = None;
     }
 
     /// Go to card `to` (clamped to the lane). The flow starts again on the new card.
