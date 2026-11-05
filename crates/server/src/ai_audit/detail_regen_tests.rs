@@ -3238,3 +3238,454 @@ mod batch_route {
         assert!(out[0].detail.contains("finding at line 9"));
     }
 }
+
+// ── WO7c: a live batch is settled finding by finding on resume ───────────────────────────────────
+
+/// A batch that was live when the process stopped is read by each member's site key. The resumed
+/// run need not build the batch the first one did: the rows reach the findings they were written
+/// for, a finding already done stays done, and a row for a finding no longer in the run is told
+/// to the operator, never written into another finding.
+mod resume_by_member {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ai_audit::loop_batch::LoopBatch;
+    use crate::ai_audit::stage_batch::StageRoute;
+    use crate::checkpoint::{with_run_checkpoints, AbsorbedLine, BatchMember, StageCheckpoint};
+
+    const BATCH: StageRoute<'static> = StageRoute {
+        batch: true,
+        job: None,
+    };
+
+    fn at(line: usize) -> Finding {
+        Finding {
+            line,
+            snippet: format!("{SNIPPET} // site {line}"),
+            ..finding(&format!("{TITLE} {line}{HEADLINE_SEP}{SHORT}"))
+        }
+    }
+
+    async fn run(
+        dir: &std::path::Path,
+        llm: &dyn LlmPort,
+        findings: Vec<Finding>,
+        meter: Option<&UsageMeter>,
+    ) -> (Vec<Finding>, Vec<FailedPass>) {
+        with_run_checkpoints(
+            Some(dir.to_path_buf()),
+            super::super::detail_regen::regenerate_full_details_in(
+                llm,
+                REPO,
+                findings,
+                &files(),
+                &selected(),
+                &nonce(),
+                None,
+                meter,
+                BATCH,
+            ),
+        )
+        .await
+    }
+
+    /// The first process: its one batch of lines 9, 49 and 89 goes out and its results cannot be
+    /// fetched, so it is saved unsettled.
+    async fn first_process_with_a_live_batch(
+        dir: &std::path::Path,
+    ) -> (Arc<LoopBatch>, Arc<RoleLlm>) {
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let (_, failed) = run(dir, &seam, vec![at(9), at(49), at(89)], None).await;
+        assert_eq!(api.submit_calls(), 1);
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_0")),
+            "the failed part names the live batch: {failed:?}"
+        );
+        assert!(stub.prompts(Role::Regen).is_empty(), "nothing was fetched");
+        (api, stub)
+    }
+
+    fn details(rows: &[Finding]) -> Vec<String> {
+        rows.iter().map(|f| f.detail.clone()).collect()
+    }
+
+    fn wrote(f: &Finding, line: usize) -> bool {
+        f.detail.contains(&format!("(finding at line {line})"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_batch_reaches_its_findings_whatever_batch_the_resumed_round_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        // The resumed run lists a new finding first (so every index moves) and line 9, which
+        // another reply already wrote, so the round it builds is not the first process's batch.
+        let second = vec![at(29), at(9), at(49), at(89)];
+        let keys = crate::inspections::site_keys_of(&second);
+        let elsewhere = format!(
+            r#"{{"details":[{{"id":"abcdef","path":"{HANDLER}","line":9,"detail":"{}"}}]}}"#,
+            full_for(9)
+        );
+        StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"))
+            .record_absorbed(&AbsorbedLine {
+                key: "r1:elsewhere".to_string(),
+                model: "stub".to_string(),
+                backend: "api".to_string(),
+                cost_usd: Some(0.01),
+                input_tokens: Some(1_000),
+                output_tokens: Some(100),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                text: elsewhere,
+                members: vec![BatchMember {
+                    key: keys[1].clone(),
+                    line: 9,
+                    tag: "abcdef".to_string(),
+                    round: "r1".to_string(),
+                }],
+                batch_id: None,
+            })
+            .unwrap();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, second, Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([29, 9, 49, 89]) {
+            assert!(
+                wrote(row, line),
+                "line {line} has its own explanation: {row:?}"
+            );
+            for other in [9, 29, 49, 89].into_iter().filter(|l| *l != line) {
+                assert!(
+                    !wrote(row, other),
+                    "line {line} carries the explanation of line {other}"
+                );
+            }
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding was submitted; the held members were not sent again"
+        );
+        let prompts = api.submitted_prompts();
+        assert_eq!(prompts.len(), 2, "the first batch and the new finding's");
+        for held in [9, 49, 89] {
+            assert!(
+                !prompts[1].contains(&format!("{HANDLER}:{held}\n")),
+                "line {held} was sent again: {}",
+                prompts[1]
+            );
+        }
+        assert!(prompts[1].contains(&format!("{HANDLER}:29\n")));
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            2,
+            "the held batch was fetched once, the new batch once"
+        );
+        let notes = meter.notes();
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.contains("no longer") || n.contains("wasted")),
+            "nothing was wasted: {notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_returned_row_for_a_finding_no_longer_in_the_run_is_disclosed_and_absorbed_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+
+        let meter = UsageMeter::default();
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(9), at(49)], Some(&meter)).await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(wrote(&out[0], 9) && wrote(&out[1], 49), "{out:?}");
+        assert!(
+            !out.iter().any(|f| wrote(f, 89)),
+            "the entry for the finding that is gone was written into another finding"
+        );
+        assert_eq!(api.submit_calls(), 1, "nothing was submitted again");
+        let notes = meter.notes();
+        assert!(
+            notes.iter().any(|n| n.contains("no longer in this run")),
+            "the wasted share is on the ledger: {notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_site_key_that_now_names_a_finding_on_another_line_is_not_written_into() {
+        // Findings of one rule and one snippet in one file are told apart by their order alone,
+        // so a finding added above shifts every key below it. The row for the old second
+        // finding must not land in the finding that now holds that key.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let same = |line: usize| finding(&format!("{TITLE} {line}{HEADLINE_SEP}{SHORT}"));
+        let same_at = |line: usize| Finding { line, ..same(line) };
+        let (_, failed) = run(
+            dir.path(),
+            &seam,
+            vec![same_at(9), same_at(49), same_at(89)],
+            None,
+        )
+        .await;
+        assert!(failed.iter().any(|f| f.reason.contains("msgbatch_0")));
+        api.heal();
+
+        let meter = UsageMeter::default();
+        let (out, failed) = run(
+            dir.path(),
+            &seam,
+            vec![same_at(9), same_at(29), same_at(49), same_at(89)],
+            Some(&meter),
+        )
+        .await;
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([9, 29, 49, 89]) {
+            assert!(
+                wrote(row, line),
+                "line {line} carries another's text: {row:?}"
+            );
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "the findings whose keys moved were asked again, not given another's reply"
+        );
+        assert!(
+            meter
+                .notes()
+                .iter()
+                .any(|n| n.contains("no longer in this run")),
+            "{:?}",
+            meter.notes()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_that_still_cannot_be_fetched_keeps_its_findings_held_and_is_not_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, _stub) = first_process_with_a_live_batch(dir.path()).await;
+        // Still unreachable: the resumed run lists a new finding too.
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(29), at(9), at(49), at(89)], None).await;
+
+        assert!(wrote(&out[0], 29), "the new finding was asked: {out:?}");
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "only the new finding went out; the held ones were not sent again"
+        );
+        let prompts = api.submitted_prompts();
+        assert!(
+            !prompts[1].contains(&format!("{HANDLER}:49\n")),
+            "a held finding was sent again"
+        );
+        let part = failed
+            .iter()
+            .find(|f| f.reason.contains("msgbatch_0"))
+            .expect("the failed part names the live batch");
+        assert!(
+            part.reason.contains("not submitted again"),
+            "{}",
+            part.reason
+        );
+        assert!(
+            out[1..]
+                .iter()
+                .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)),
+            "the held findings are marked incomplete, never dropped"
+        );
+    }
+
+    /// Every process names its rounds `r0..`, so a resumed round 0 can build the batch an
+    /// earlier process already sent under the same key. Process 1 had its round-0 reply turned
+    /// down whole; process 2 builds the same key again and stops with that batch live. Process 3
+    /// must fetch process 2's batch once, pay for it on the ledger and write the details, not
+    /// take the row for the stored reply of process 1.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_batch_under_a_key_an_earlier_process_used_is_read_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        // Process 1: its round-0 batch came back as prose and was turned down whole.
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let mut records = cp.batches();
+        assert_eq!(records.len(), 1);
+        let key = records[0].items.values().next().unwrap().clone();
+        let members: Vec<BatchMember> = records[0].members.values().flatten().cloned().collect();
+        records[0].settled = true;
+        cp.save_batches(&records).unwrap();
+        cp.record_absorbed(&AbsorbedLine {
+            key: key.clone(),
+            model: "stub".to_string(),
+            backend: "api".to_string(),
+            cost_usd: Some(0.01),
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            text: "I could not write these.".to_string(),
+            members,
+            batch_id: None,
+        })
+        .unwrap();
+
+        // Process 2: replays that reply (all three findings stay open), builds round 0 again
+        // under the same key, and stops with the batch live.
+        api.heal();
+        api.fail_next_fetch();
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (_, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert_eq!(api.submit_calls(), 2, "process 2 asked the findings again");
+        assert!(
+            failed.iter().any(|f| f.reason.contains("msgbatch_1")),
+            "{failed:?}"
+        );
+        let again = cp.batches();
+        assert_eq!(again.iter().filter(|r| !r.settled).count(), 1, "{again:?}");
+        assert_eq!(
+            again
+                .iter()
+                .find(|r| !r.settled)
+                .unwrap()
+                .items
+                .values()
+                .next(),
+            Some(&key),
+            "process 2's batch carries the key process 1 used"
+        );
+
+        // Process 3: the connection is back.
+        api.heal();
+        let meter = UsageMeter::default();
+        let (out, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        for (row, line) in out.iter().zip([9, 49, 89]) {
+            assert!(wrote(row, line), "line {line} was not written: {row:?}");
+        }
+        assert_eq!(
+            api.submit_calls(),
+            2,
+            "process 2's batch was read, not sent a third time"
+        );
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            1,
+            "the live batch was fetched once"
+        );
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            2_000,
+            "process 1's stored reply and the paid reply of process 2's batch are both on the ledger"
+        );
+    }
+
+    /// A batch settled the ordinary way records each reply it absorbed with the id of the batch
+    /// it came from, so a resume can tell a row it already took from a reply another process
+    /// stored under the same key.
+    #[tokio::test(start_paused = true)]
+    async fn lines_written_by_a_settled_batch_carry_the_batch_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let (out, failed) = run(dir.path(), &seam, vec![at(9), at(49), at(89)], None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(out.len(), 3);
+
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let records = cp.batches();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert!(records[0].settled);
+        let lines: Vec<_> = cp
+            .absorbed_in_order()
+            .into_iter()
+            .filter(|l| !l.members.is_empty())
+            .collect();
+        assert!(!lines.is_empty(), "the batch's reply was recorded");
+        for line in &lines {
+            assert_eq!(line.batch_id, Some(records[0].batch_id.clone()), "{line:?}");
+        }
+    }
+
+    /// The process dies after it recorded a reply and before it marked the batch settled. The
+    /// next process replays the stored reply and polls the still-unsettled batch; it must not
+    /// read the same row a second time, or the ledger carries one reply twice.
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_still_unsettled_after_its_reply_was_recorded_is_not_paid_for_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = Arc::new(RoleLlm::new("{}", Regen::Writes));
+        let api = LoopBatch::new(stub.clone());
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (first, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        let fetched_before = stub.prompts(Role::Regen).len();
+
+        // The kill: the lines are on disk, the batch record still says unsettled.
+        let cp = StageCheckpoint::new(dir.path(), &format!("detail_{REPO}"));
+        let mut records = cp.batches();
+        assert_eq!(records.len(), 1);
+        records[0].settled = false;
+        cp.save_batches(&records).unwrap();
+
+        let meter = UsageMeter::default();
+        let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        // The unsettled batch is fetched, never submitted again.
+        assert_eq!(api.submit_calls(), 1);
+        assert_eq!(details(&again), details(&first));
+        assert_eq!(
+            stub.prompts(Role::Regen).len() - fetched_before,
+            1,
+            "the unsettled batch was fetched once"
+        );
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            1_000,
+            "one reply's tokens, not the same row read and paid for twice"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_row_read_on_one_resume_is_not_read_or_paid_for_again_on_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (api, stub) = first_process_with_a_live_batch(dir.path()).await;
+        api.heal();
+        let seam = api.seam();
+        let findings = || vec![at(9), at(49), at(89)];
+        let (first, failed) = run(dir.path(), &seam, findings(), None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        let fetched = stub.prompts(Role::Regen).len();
+
+        // Another restart: the reply is stored, so nothing is fetched or submitted and the
+        // explanations are on the rows with their usage on the ledger.
+        let meter = UsageMeter::default();
+        let (again, failed) = run(dir.path(), &seam, findings(), Some(&meter)).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(api.submit_calls(), 1);
+        assert_eq!(
+            stub.prompts(Role::Regen).len(),
+            fetched,
+            "nothing fetched again"
+        );
+        assert_eq!(details(&again), details(&first));
+        assert_eq!(
+            meter.snapshot().input_tokens,
+            1_000,
+            "the usage is not zero"
+        );
+    }
+}

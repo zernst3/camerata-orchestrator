@@ -209,6 +209,8 @@ fn the_decision_cell_is_not_cut_by_the_stylesheet_and_has_the_room_for_its_word(
         "{cell}"
     );
     assert!(rule(".dec-inherited").contains("display: block"));
+    // Stage 1 values read whole at 1440 ("Y medium", not "Y medi..."; wave 14 nit 2).
+    assert!(rule(".site-row .col-s1 { white-space: normal").contains("normal"));
 
     let html = page("tree/markers");
     let widths: Vec<u32> = html
@@ -227,7 +229,7 @@ fn the_decision_cell_is_not_cut_by_the_stylesheet_and_has_the_room_for_its_word(
         widths[1] >= 9 && widths[5] >= 9,
         "Severity and Stage 1 headers fit: {widths:?}"
     );
-    assert!(widths[4] >= 12, "Headline takes the remainder: {widths:?}");
+    assert!(widths[4] >= 14, "Headline takes the remainder: {widths:?}");
     assert_eq!(widths.iter().sum::<u32>(), 100, "{widths:?}");
 }
 

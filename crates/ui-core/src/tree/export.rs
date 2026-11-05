@@ -4,8 +4,9 @@
 //! derives from the gate's own refusal functions, and adds nothing of its own. Each row has a door
 //! to the thing it names.
 
-use camerata_api_types::review_view::{ExportGateView, HeldRow, NodeDecisionGap};
+use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
+use super::shell::Lane;
 use super::thousands;
 
 /// Where a row's `open` button goes.
@@ -21,6 +22,20 @@ pub enum Door {
     },
     /// Open this node in the tree lane.
     Node { id: String },
+    /// Focus this site's card in the Engine Check lane (spec section 14, step 10). The row is
+    /// held on the Engine Check's account, so its card is where it is corrected.
+    EngineCard { key: String },
+}
+
+impl Door {
+    /// The lane the door opens in. The shell switches to it and that lane's host takes the
+    /// request; the tree takes none that is not its own.
+    pub fn lane(&self) -> Lane {
+        match self {
+            Self::Site { .. } | Self::Node { .. } => Lane::Tree,
+            Self::EngineCard { .. } => Lane::EngineCheck,
+        }
+    }
 }
 
 /// What kind of line a row is.
@@ -66,10 +81,14 @@ fn held_row(kind: GateRowKind, r: &HeldRow) -> GateRow {
         } else {
             r.detail.clone()
         },
-        door: Door::Site {
-            key: r.key.clone(),
-            rule_id: r.rule_id.clone(),
-            node_id: r.node_id.clone(),
+        door: if r.reason == HoldReason::EngineCheckNoWithoutCorrection {
+            Door::EngineCard { key: r.key.clone() }
+        } else {
+            Door::Site {
+                key: r.key.clone(),
+                rule_id: r.rule_id.clone(),
+                node_id: r.node_id.clone(),
+            }
         },
     }
 }
@@ -162,18 +181,21 @@ mod tests {
                 + gate.node_decisions_missing_members.len(),
             "one line per thing the gate refuses, none added or dropped"
         );
-        // Every held row has a door to its own site.
+        // Every held row has a door to its own place: its site in the tree, or, for a row the
+        // Engine Check holds, its card in the Engine Check lane (spec section 14, step 10).
         for h in gate.held.iter().chain(&gate.merged_without_decision) {
+            let wanted = if h.reason == HoldReason::EngineCheckNoWithoutCorrection {
+                Door::EngineCard { key: h.key.clone() }
+            } else {
+                Door::Site {
+                    key: h.key.clone(),
+                    rule_id: h.rule_id.clone(),
+                    node_id: h.node_id.clone(),
+                }
+            };
             let row = rows
                 .iter()
-                .find(|r| {
-                    r.door
-                        == Door::Site {
-                            key: h.key.clone(),
-                            rule_id: h.rule_id.clone(),
-                            node_id: h.node_id.clone(),
-                        }
-                })
+                .find(|r| r.door == wanted)
                 .unwrap_or_else(|| panic!("no line with a door to {}", h.path));
             assert_eq!(row.place, format!("{}:{}", h.path, h.line));
             assert_eq!(row.rule_id, h.rule_id);

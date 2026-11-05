@@ -708,3 +708,130 @@ async fn confirmed_by_client_is_false_until_the_client_ack_route_is_called() {
 fn none() -> crate::engine_check::EngineCheckEvidence {
     crate::engine_check::EngineCheckEvidence::NotRecorded
 }
+
+// ── Needed me (WO11a) ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn needed_me_changes_the_flag_in_place_and_keeps_the_ruling_and_the_clients_ack() {
+    let store = DecisionStore::new();
+    let ignored = store
+        .record_site(
+            "p",
+            &req("k1", DecisionState::Ignored, "defense in depth"),
+            ctx("i"),
+        )
+        .unwrap();
+    store
+        .ack_client("p", &ignored.id, ack("cto@acme.test", "accepted"))
+        .unwrap();
+    assert_eq!(store.active("p")[0].needed_me, None);
+
+    let marked = store.set_needed_me("p", &ignored.id, true).unwrap();
+    assert_eq!(marked.needed_me, Some(true));
+    assert_eq!(store.list("p").len(), 1, "no second record is written");
+    let kept = &store.active("p")[0];
+    assert_eq!(kept.needed_me, Some(true));
+    assert_eq!(kept.state, DecisionState::Ignored);
+    assert_eq!(kept.reason, "defense in depth");
+    assert_eq!(kept.decided_at, ignored.decided_at);
+    assert!(
+        kept.confirmed_by_client.is_some(),
+        "the client's acknowledgement stays"
+    );
+    assert_eq!(
+        store
+            .set_needed_me("p", &ignored.id, false)
+            .unwrap()
+            .needed_me,
+        Some(false)
+    );
+
+    // A group decision has no such flag; an unknown or revoked record is refused.
+    let (node, _) = store
+        .record_node(
+            "p",
+            "rule:SEC-1",
+            &["a".to_string()],
+            &node_req("rule:SEC-1", DecisionState::Confirmed, "same pattern"),
+            ctx("i"),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.set_needed_me("p", &node.id, true),
+        Err(DecisionStoreError::NeededMeNeedsSite(_))
+    ));
+    assert!(matches!(
+        store.set_needed_me("p", "dec-missing", true),
+        Err(DecisionStoreError::NotFound(_))
+    ));
+    store.revoke("p", &ignored.id, NOW).unwrap();
+    assert!(matches!(
+        store.set_needed_me("p", &ignored.id, true),
+        Err(DecisionStoreError::AlreadyRevoked(_))
+    ));
+}
+
+#[tokio::test]
+async fn the_needed_me_route_answers_the_updated_record_and_refuses_what_it_cannot_change() {
+    let (state, app, pid) = app_with_project();
+    let entry = state
+        .inspections
+        .append(InspectionEntry::from_report(
+            &pid,
+            report_of(vec![row("SEC-1", "src/a.rs", 10, "let a = secret_a();")]),
+            InspectionKind::Full,
+        ))
+        .unwrap();
+    let key = entry.report.findings[0].site_key.clone();
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions"),
+        Some(to_json(&PostDecisionsReq::Decide(req(
+            &key,
+            DecisionState::Confirmed,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let decided: DecisionRecorded = serde_json::from_value(body).unwrap();
+    let uri = format!(
+        "/api/projects/{pid}/decisions/{}/needed-me",
+        decided.decision.id
+    );
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(serde_json::json!({"needed_me": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated: Decision = serde_json::from_value(body).unwrap();
+    assert_eq!(updated.id, decided.decision.id);
+    assert_eq!(updated.needed_me, Some(true));
+    assert_eq!(state.decisions.list(&pid)[0].needed_me, Some(true));
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/projects/{pid}/decisions/dec-missing/needed-me"),
+        Some(serde_json::json!({"needed_me": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(serde_json::json!({"needed_me": "yes"})),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "a body that is not a flag is refused"
+    );
+}

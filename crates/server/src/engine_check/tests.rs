@@ -167,6 +167,7 @@ fn verdict(
         correction,
         by: "zach".to_string(),
         at: at.to_string(),
+        carried_from: None,
     }
 }
 
@@ -432,4 +433,91 @@ fn the_store_survives_a_restart_and_moves_a_damaged_file_aside() {
     );
     assert!(path.with_extension("json.corrupt").exists());
     assert!(!path.exists());
+}
+
+// ── a carried No says which run it came from (WO11a) ───────────────────────────────────────
+
+#[test]
+fn a_carried_no_says_which_run_it_came_from_and_the_runs_own_verdicts_do_not() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let earlier = [on_run(verdict("a", false, t0, None), "insp-0")];
+    let carried = carry_forward(&earlier, RUN, |v| Some(v.key.clone()));
+    assert_eq!(carried.len(), 1);
+    assert_eq!(
+        carried[0].carried_from.as_deref(),
+        Some("insp-0"),
+        "the lane needs to tell a carried No from a fresh one"
+    );
+    assert_eq!(carried[0].run_id, RUN, "it still stands for this run");
+
+    // A verdict given on this run is its own, never marked.
+    let own = [
+        on_run(verdict("a", false, t0, None), "insp-0"),
+        verdict("a", false, "2026-11-04T09:05:00Z", None),
+    ];
+    let carried = carry_forward(&own, RUN, |v| Some(v.key.clone()));
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].carried_from, None);
+}
+
+#[test]
+fn the_verdicts_in_force_give_the_lane_an_earlier_runs_no_marked_as_carried() {
+    use crate::inspections::{InspectionEntry, InspectionKind, InspectionStore};
+
+    let inspections = InspectionStore::new();
+    let first = inspections
+        .append(InspectionEntry::from_report(
+            "p1",
+            report(&[("authorization", 4)], 0),
+            InspectionKind::Full,
+        ))
+        .unwrap();
+    let second = inspections
+        .append(InspectionEntry::from_report(
+            "p1",
+            report(&[("authorization", 4)], 0),
+            InspectionKind::Full,
+        ))
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    // The store derives the keys itself; the same rows give the same keys on both runs.
+    let (no_key, yes_key) = (
+        first.report.findings[0].site_key.clone(),
+        first.report.findings[1].site_key.clone(),
+    );
+    assert_eq!(no_key, second.report.findings[0].site_key);
+
+    let store = EngineCheckStore::new().with_inspections(inspections);
+    let req = |right: bool| EngineCheckVerdictReq {
+        right,
+        wrong: (!right).then_some(EngineCheckError::NotARealIssue),
+        correction: None,
+        by: "zach".to_string(),
+    };
+    store
+        .record(
+            "p1",
+            &no_key,
+            &req(false),
+            &first.id,
+            "2026-11-04T09:00:00Z",
+        )
+        .unwrap();
+    store
+        .record(
+            "p1",
+            &yes_key,
+            &req(true),
+            &first.id,
+            "2026-11-04T09:00:01Z",
+        )
+        .unwrap();
+
+    let in_force = store.verdicts_in_force("p1", &second.id);
+    assert_eq!(in_force.len(), 1, "only the No is carried: {in_force:?}");
+    assert_eq!(in_force[0].key, no_key);
+    assert_eq!(in_force[0].run_id, second.id);
+    assert_eq!(in_force[0].carried_from.as_deref(), Some(first.id.as_str()));
+    // The run's own list (what the lane used to read) holds nothing for the second run.
+    assert!(store.latest_for_run("p1", &second.id).is_empty());
 }

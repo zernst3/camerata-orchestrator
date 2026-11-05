@@ -93,6 +93,8 @@ pub enum DecisionStoreError {
     AckNeedsIgnored(String),
     #[error("a client acknowledgement names who acknowledged it")]
     AckNeedsWho,
+    #[error("\"needed me\" is a flag on one site's decision, and {0} is a group decision")]
+    NeededMeNeedsSite(String),
     #[error("decision {0} was already acknowledged by the client")]
     AlreadyAcknowledged(String),
     #[error(
@@ -117,6 +119,7 @@ impl DecisionStoreError {
             Self::AlreadyRevoked(_) => "already_revoked",
             Self::AckNeedsIgnored(_) => "ack_needs_ignored",
             Self::AckNeedsWho => "ack_needs_who",
+            Self::NeededMeNeedsSite(_) => "needed_me_needs_site",
             Self::AlreadyAcknowledged(_) => "already_acknowledged",
             Self::Corrupt => "store_corrupt",
             Self::Persist(_) => "persist_failed",
@@ -487,6 +490,33 @@ impl DecisionStore {
                 Some(d) => Ok((d, also)),
                 None => Err(DecisionStoreError::NotFound(decision_id.to_string())),
             }
+        })
+    }
+
+    /// Set whether the reviewer needed to see an escalated site, on the decision record itself
+    /// (spec section 6). Only the flag changes: the ruling, its reason and time, and a client's
+    /// acknowledgement stay as they were, which re-posting the decision would not keep. A group
+    /// decision has no such flag, and a revoked record is not changed.
+    pub fn set_needed_me(
+        &self,
+        project_id: &str,
+        decision_id: &str,
+        needed_me: bool,
+    ) -> Result<Decision, DecisionStoreError> {
+        self.mutate(project_id, |pd| {
+            let Some(target) = pd.decisions.iter_mut().find(|d| d.id == decision_id) else {
+                return Err(DecisionStoreError::NotFound(decision_id.to_string()));
+            };
+            if target.revoked_at.is_some() {
+                return Err(DecisionStoreError::AlreadyRevoked(decision_id.to_string()));
+            }
+            if target.is_node_record() {
+                return Err(DecisionStoreError::NeededMeNeedsSite(
+                    decision_id.to_string(),
+                ));
+            }
+            target.needed_me = Some(needed_me);
+            Ok(target.clone())
         })
     }
 

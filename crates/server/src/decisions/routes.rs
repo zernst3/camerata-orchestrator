@@ -5,6 +5,8 @@
 //! - `POST /api/projects/:id/decisions`: one new decision (site or node scope), or the one-time
 //!   migration of the UI draft's dispositions (`migrated_from_draft: true`).
 //! - `POST /api/projects/:id/decisions/:decision_id/revoke`.
+//! - `POST /api/projects/:id/decisions/:decision_id/needed-me`: the "Needed me" flag on an
+//!   escalated site's decision (review UI spec section 6).
 //!
 //! Request and response types are in `camerata_api_types::decisions`, shared with the UI.
 
@@ -45,7 +47,8 @@ fn store_refusal(e: &DecisionStoreError) -> Response {
         | DecisionStoreError::KeyRequired
         | DecisionStoreError::MergeTargetInvalid
         | DecisionStoreError::NodeMerge
-        | DecisionStoreError::AckNeedsWho => StatusCode::UNPROCESSABLE_ENTITY,
+        | DecisionStoreError::AckNeedsWho
+        | DecisionStoreError::NeededMeNeedsSite(_) => StatusCode::UNPROCESSABLE_ENTITY,
         DecisionStoreError::UnknownNode(_) | DecisionStoreError::NotFound(_) => {
             StatusCode::NOT_FOUND
         }
@@ -389,6 +392,28 @@ pub(crate) async fn revoke_decision(
             revoked_at: when,
         })
         .into_response(),
+        Err(e) => store_refusal(&e),
+    }
+}
+
+/// `POST /api/projects/:id/decisions/:decision_id/needed-me`: set the "Needed me" flag on one
+/// site's decision, in place. Answers the updated record.
+pub(crate) async fn set_needed_me(
+    State(state): State<AppState>,
+    Path((id, decision_id)): Path<(String, String)>,
+    Json(req): Json<camerata_api_types::decisions::NeededMeReq>,
+) -> Response {
+    if state.projects.get(&id).is_none() {
+        return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
+    }
+    match state
+        .decisions
+        .set_needed_me(&id, &decision_id, req.needed_me)
+    {
+        Ok(decision) => Json(decision).into_response(),
         Err(e) => store_refusal(&e),
     }
 }

@@ -391,11 +391,28 @@ fn a_cursor_names_a_row_and_survives_a_round_trip() {
 #[test]
 fn engine_check_rates_carry_their_margin_and_small_categories_say_indicative() {
     let (rate, margin) = super::lane::rate_and_margin_for_tests(4, 31);
-    assert_eq!((rate, margin), (Some(12.9), Some(11.8)));
+    assert_eq!((rate, margin), (Some(12.9), Some(11.9)));
     assert_eq!(super::lane::rate_and_margin_for_tests(0, 0), (None, None));
+}
+
+/// A14: the margin is the Wilson interval's half-width, not the Wald one. Wald is 0 at a rate of 0
+/// or 100 percent, which reads as certainty from one verdict; Wilson stays honest there.
+#[test]
+fn engine_check_margins_do_not_collapse_to_zero_at_the_ends() {
+    let (rate, margin) = super::lane::rate_and_margin_for_tests(1, 1);
+    assert_eq!(rate, Some(100.0));
+    assert_eq!(margin, Some(39.7), "one verdict is not certainty");
     assert_eq!(
         super::lane::rate_and_margin_for_tests(0, 10),
-        (Some(0.0), Some(0.0))
+        (Some(0.0), Some(13.9))
+    );
+    assert_eq!(
+        super::lane::rate_and_margin_for_tests(10, 10),
+        (Some(100.0), Some(13.9))
+    );
+    assert_eq!(
+        super::lane::rate_and_margin_for_tests(2, 6),
+        (Some(33.3), Some(30.2))
     );
 }
 
@@ -661,5 +678,58 @@ fn the_shell_carries_the_commit_each_repo_was_inspected_at() {
             .collect::<Vec<_>>(),
         vec![("acme/app", "0123456789abcdef0123456789abcdef01234567")],
         "a repo with no recorded commit is left out"
+    );
+}
+
+// ── a carried No on the lane (WO11a) ───────────────────────────────────────────────────────
+
+#[test]
+fn a_carried_no_shows_on_its_card_as_carried_and_does_not_count_in_this_runs_rate() {
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdict};
+
+    let rows: Vec<Finding> = (0..6)
+        .map(|i| row("SEC-ONE-1", &format!("src/a{i}.rs"), 10 + i, "medium"))
+        .collect();
+    let report = sealed(rows, |_| {});
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 6;
+    let keys: Vec<String> = report.findings.iter().map(|f| f.site_key.clone()).collect();
+    let verdict = |key: &str, right: bool, carried: Option<&str>| EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: RUN.to_string(),
+        right,
+        wrong: (!right).then_some(EngineCheckError::NotARealIssue),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        carried_from: carried.map(str::to_string),
+    };
+    stores.verdicts = vec![
+        verdict(&keys[0], true, None),
+        verdict(&keys[1], false, Some("insp-0")),
+    ];
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let card = |key: &str| {
+        lane.cards
+            .iter()
+            .find(|c| c.site.site_key == key)
+            .and_then(|c| c.verdict.clone())
+    };
+    assert_eq!(
+        card(&keys[1]).and_then(|v| v.carried_from).as_deref(),
+        Some("insp-0"),
+        "the card carries the earlier run's No"
+    );
+    assert_eq!(card(&keys[0]).and_then(|v| v.carried_from), None);
+    let kept = lane
+        .strata
+        .iter()
+        .find(|s| s.stratum == camerata_api_types::review_view::SampleStratum::Kept)
+        .unwrap();
+    assert_eq!(
+        (kept.verdicts, kept.wrong),
+        (1, 0),
+        "an earlier run's No is not an answer on this run, so it is not in this run's rate"
     );
 }

@@ -22,7 +22,9 @@ use dioxus::prelude::*;
 use crate::test_harness;
 
 mod detail_states;
+mod engine_states;
 mod export_states;
+mod queue_states;
 mod shell_states;
 mod tree_states;
 
@@ -171,6 +173,8 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     let mut all = Vec::new();
     all.extend(shell_states::states());
     all.extend(tree_states::states());
+    all.extend(queue_states::states());
+    all.extend(engine_states::states());
     all.extend(detail_states::states());
     all.extend(export_states::states());
     all.extend(settings_states::states());

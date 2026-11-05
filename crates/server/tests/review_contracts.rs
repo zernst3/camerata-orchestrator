@@ -13,7 +13,8 @@ use camerata_api_types::review::{re_mark, EscalationBudget, EscalationReason, Ou
 use camerata_api_types::review_view::{
     EngineCheckError, EngineCheckLane, EngineCheckVerdict, EscalationBudgetOutcome,
     EscalationBudgetReq, ExportGateView, HoldReason, Marker, QueueView, ReviewSettingsView,
-    ReviewShellView, ReviewViewError, SampleSizeReq, SampleSizeResp, SitesPage, TreeView,
+    ReviewShellView, ReviewViewError, SampleSizeReq, SampleSizeResp, SampleStratum, SitesPage,
+    TreeView,
 };
 use review::{call, path_key, review_fixture, ReviewFixture};
 use serde::de::DeserializeOwned;
@@ -1027,6 +1028,135 @@ async fn an_engine_check_no_holds_the_row_until_it_is_corrected() {
     )
     .await;
     assert_eq!((status, err.code.as_str()), (404, "not_in_sample"));
+}
+
+/// The key of the lane's card for the row at `path`.
+fn card_key(lane: &EngineCheckLane, path: &str) -> String {
+    lane.cards
+        .iter()
+        .find(|c| c.site.path == path)
+        .unwrap_or_else(|| panic!("no card for {path}"))
+        .site
+        .site_key
+        .clone()
+}
+
+#[tokio::test]
+async fn an_engine_check_no_on_a_thrown_out_card_is_held_and_counted_until_it_is_settled() {
+    let f = review_fixture(12);
+    let lane: EngineCheckLane = get(&f, "the lane", "/review/engine-check").await;
+    let kept = card_key(&lane, "src/thrown2.rs");
+    let restored = card_key(&lane, "src/thrown.rs");
+    assert!(lane
+        .cards
+        .iter()
+        .filter(|c| c.site.site_key == kept || c.site.site_key == restored)
+        .all(|c| c.stratum == SampleStratum::ThrownOut && c.site.held.is_none()));
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    let (held_before, total_before) = (shell.counts.held, shell.counts.total);
+
+    // A No on a thrown-out card: held, listed in the export panel and counted.
+    for key in [&kept, &restored] {
+        let _: EngineCheckVerdict = post_ok(
+            &f,
+            "a no",
+            &format!("/review/engine-check/{}", path_key(key)),
+            json!({ "right": false, "wrong": "thrown_out_real_problem" }),
+        )
+        .await;
+    }
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert_eq!(shell.counts.held, held_before + 2);
+    for key in [&kept, &restored] {
+        assert!(shell
+            .export_gate
+            .held
+            .iter()
+            .any(|h| &h.key == key && h.reason == HoldReason::EngineCheckNoWithoutCorrection));
+    }
+    let lane: EngineCheckLane = get(&f, "the lane", "/review/engine-check").await;
+    let card = lane.cards.iter().find(|c| c.site.site_key == kept).unwrap();
+    assert_eq!(
+        card.site.held,
+        Some(HoldReason::EngineCheckNoWithoutCorrection)
+    );
+
+    // A correction that confirms the throw-out was right clears the hold; the row stays out.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &kept,
+            DecisionState::FalsePositive,
+            "rightly thrown out",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert_eq!(shell.counts.held, held_before + 1);
+    assert_eq!(shell.counts.total, total_before, "the row stays thrown out");
+    assert!(shell.export_gate.held.iter().all(|h| h.key != kept));
+
+    // Putting the other back puts it in review, held as a restore until it is decided.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &restored,
+            DecisionState::EngineRestored,
+            "a real problem",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert_eq!(shell.counts.total, total_before + 1, "the row is back");
+    assert_eq!(
+        shell.counts.held,
+        held_before + 1,
+        "one row, counted once, though two checks refuse it"
+    );
+    let reasons: Vec<HoldReason> = shell
+        .export_gate
+        .held
+        .iter()
+        .filter(|h| h.key == restored)
+        .map(|h| h.reason)
+        .collect();
+    assert!(
+        reasons.contains(&HoldReason::RestoredWithoutDecision),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&HoldReason::EngineCheckNoWithoutCorrection),
+        "a restore is not a ruling, so the No still stands: {reasons:?}"
+    );
+
+    // Decided, nothing is held on its account any more.
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("{}/decisions", base(&f)),
+        Some(decision_at(
+            Scope::Site,
+            &restored,
+            DecisionState::Confirmed,
+            "",
+            LATER,
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let shell: ReviewShellView = get(&f, "the shell", "/review").await;
+    assert_eq!(shell.counts.held, held_before);
+    assert!(shell.export_gate.held.iter().all(|h| h.key != restored));
 }
 
 #[tokio::test]

@@ -18,6 +18,8 @@ use camerata_ui_core::tree::shell::{
 use camerata_ui_core::tree::ViewStatus;
 use dioxus::prelude::*;
 
+use super::engine_check::EngineHost;
+use super::queue::{AppliedBudget, QueueHost};
 use super::review_settings::ReviewSettingsHost;
 use super::tree::{DoorRequest, ShellRefresh, TreeHost};
 use camerata_api_types::review_view::EscalationBudgetOutcome;
@@ -130,6 +132,9 @@ pub(crate) fn ReviewShellHost(
     let door = try_use_context::<DoorRequest>();
     let mut lane = use_signal(|| Lane::Tree);
     use_context_provider(|| LaneControl(lane));
+    // What the Settings lane last applied, for the queue's "Budget is now ..." banner.
+    let applied = use_signal(|| Option::<EscalationBudgetOutcome>::None);
+    use_context_provider(|| AppliedBudget(applied));
     let mut shell = use_signal(|| ViewStatus::<ReviewShellView>::Loading);
 
     let load = use_callback({
@@ -154,10 +159,11 @@ pub(crate) fn ReviewShellHost(
         load.call(());
     });
 
-    // A door from the export panel switches to the tree.
+    // A door from the export panel switches to the lane that owns what it opens: the tree for a
+    // site or a node, the Engine Check lane for a held card. That lane's host takes the request.
     use_effect(move || {
-        if door.is_some_and(|d| d.0.read().is_some()) {
-            lane.set(Lane::Tree);
+        if let Some(wanted) = door.and_then(|d| d.0.read().clone()) {
+            lane.set(wanted.lane());
         }
     });
 
@@ -191,7 +197,7 @@ pub(crate) fn ReviewShellHost(
     }
 }
 
-/// The lane that is showing. The Tree, the Flat view and Settings are built; the others say so.
+/// The lane that is showing.
 fn lane_body(
     active: Lane,
     flat: &Element,
@@ -199,13 +205,10 @@ fn lane_body(
 ) -> Element {
     match active {
         Lane::Tree => rsx! { TreeHost { audited_shas } },
+        Lane::Escalations => rsx! { QueueHost {} },
+        Lane::EngineCheck => rsx! { EngineHost {} },
         Lane::Flat => flat.clone(),
         Lane::Settings => rsx! { SettingsLane {} },
-        other => rsx! {
-            p { class: "pane-empty",
-                "The {other.label()} lane is not built yet. The Tree, the Flat view and Settings are."
-            }
-        },
     }
 }
 
@@ -222,6 +225,7 @@ pub(crate) fn applied_message(outcome: &EscalationBudgetOutcome) -> String {
 fn SettingsLane() -> Element {
     let api = use_context::<ReviewApi>();
     let mut refresh = use_context::<ShellRefresh>().0;
+    let applied = try_use_context::<AppliedBudget>();
     let toasts = try_use_context::<Signal<Vec<crate::toast::Toast>>>();
     // The app-scope in-flight job id (the scan panel's); a job running locks the lane.
     let run_in_flight =
@@ -234,6 +238,9 @@ fn SettingsLane() -> Element {
             run_in_flight,
             models,
             on_applied: move |outcome: EscalationBudgetOutcome| {
+                if let Some(mut applied) = applied {
+                    applied.0.set(Some(outcome.clone()));
+                }
                 if let Some(toasts) = toasts {
                     crate::toast::push_toast(
                         toasts,
@@ -292,11 +299,13 @@ mod tests {
     }
 
     #[test]
-    fn the_lanes_still_to_come_say_so_and_the_flat_view_is_handed_in() {
-        for lane in [Lane::Escalations, Lane::EngineCheck] {
-            let html = lane_html(lane);
-            assert!(html.contains("is not built yet"), "{html}");
-            assert!(html.contains(lane.label()), "{html}");
+    fn the_escalations_and_engine_check_lanes_mount_their_hosts_and_the_flat_view_is_handed_in() {
+        let queue = lane_html(Lane::Escalations);
+        assert!(queue.contains("Loading the escalations"), "{queue}");
+        let engine = lane_html(Lane::EngineCheck);
+        assert!(engine.contains("Loading the Engine Check"), "{engine}");
+        for html in [&queue, &engine] {
+            assert!(!html.contains("not built yet"), "{html}");
         }
         assert!(lane_html(Lane::Flat).contains("the flat view"));
     }

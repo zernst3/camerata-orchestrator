@@ -757,6 +757,20 @@ async fn a_write_side_that_predates_the_detail_refuses_in_words() {
         fn set_stage_model<'a>(&'a self, _: &'a str, _: &'a str) -> SourceFuture<'a, ()> {
             unreachable!()
         }
+        fn post_engine_verdict<'a>(
+            &'a self,
+            _: &'a str,
+            _: EngineCheckVerdictReq,
+        ) -> SourceFuture<'a, camerata_api_types::review_view::EngineCheckVerdict> {
+            unreachable!()
+        }
+        fn set_needed_me<'a>(
+            &'a self,
+            _: &'a str,
+            _: bool,
+        ) -> SourceFuture<'a, camerata_api_types::decisions::Decision> {
+            unreachable!()
+        }
     }
     let err = Old.discard_edit("e").await.unwrap_err();
     assert!(
@@ -781,4 +795,98 @@ async fn the_fixture_source_serves_a_window_and_answers_the_detail_writes() {
     );
     fixture.discard_edit("edit-000001").await.unwrap();
     assert!(fixture.calls().contains(&"discard_edit".to_string()));
+}
+
+// ── The queue's and the Engine Check lane's writes (WO11a) ─────────────────────────────────
+
+#[tokio::test]
+async fn a_verdict_posts_to_the_engine_check_route_with_the_key_as_one_encoded_segment() {
+    use camerata_api_types::review_view::{CorrectionRef, EngineCheckError, EngineCheckVerdict};
+
+    let server = MockServer::start().await;
+    // A real key: repo, path, fingerprint and ordinal split by NUL, with slashes in it.
+    let key = "acme/app\0src/a.rs\0f1\x001";
+    let encoded = camerata_ui_core::engine_check::path_segment(key);
+    let req = EngineCheckVerdictReq {
+        right: false,
+        wrong: Some(EngineCheckError::WrongSeverity),
+        correction: Some(CorrectionRef::Edit("edit-000003".to_string())),
+        by: String::new(),
+    };
+    let stored = EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: "insp-1".to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::WrongSeverity),
+        correction: Some(CorrectionRef::Edit("edit-000003".to_string())),
+        by: "reviewer".to_string(),
+        at: "2026-11-04T09:00:00Z".to_string(),
+        carried_from: None,
+    };
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/projects/p1/review/engine-check/{encoded}"
+        )))
+        .and(body_json(serde_json::json!({
+            "right": false,
+            "wrong": "wrong_severity",
+            "correction": {"edit": "edit-000003"},
+            "by": "",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&stored))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let got = http(&server).post_engine_verdict(key, req).await.unwrap();
+    assert_eq!(got, stored);
+}
+
+#[tokio::test]
+async fn needed_me_posts_the_flag_to_the_decisions_needed_me_route() {
+    let server = MockServer::start().await;
+    let decision = RecordingWrites::default()
+        .set_needed_me("dec-000009", true)
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/decisions/dec-000009/needed-me"))
+        .and(body_json(serde_json::json!({"needed_me": true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&decision))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let got = http(&server)
+        .set_needed_me("dec-000009", true)
+        .await
+        .unwrap();
+    assert_eq!(got.needed_me, Some(true));
+    assert_eq!(got.id, "dec-000009");
+}
+
+#[tokio::test]
+async fn the_recording_writes_log_a_verdict_and_a_needed_me_and_refuse_when_told_to() {
+    let writes = RecordingWrites::default();
+    let verdict = writes
+        .post_engine_verdict(
+            "k1",
+            crate::review_io::EngineCheckVerdictReq {
+                right: true,
+                wrong: None,
+                correction: None,
+                by: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(verdict.right && verdict.key == "k1" && verdict.carried_from.is_none());
+    writes.set_needed_me("dec-1", false).await.unwrap();
+    {
+        let log = writes.log.borrow();
+        assert!(matches!(&log[0], Written::EngineVerdict(k, r) if k == "k1" && r.right));
+        assert_eq!(log[1], Written::NeededMe("dec-1".to_string(), false));
+    }
+    *writes.refuse.borrow_mut() = Some("The server said no.".to_string());
+    let err = writes.set_needed_me("dec-1", true).await.unwrap_err();
+    assert_eq!(err.message, "The server said no.");
+    assert_eq!(writes.log.borrow().len(), 2, "a refusal writes nothing");
 }

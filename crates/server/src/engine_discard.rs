@@ -4,9 +4,14 @@
 //! Every engine path that used to drop a row on a judgment now calls [`mark`] instead and keeps
 //! the row. Marked rows are split from the rows that ship ([`split_discarded`]) and stored in
 //! `ScanReport::discarded`, so every exporter, which reads `ScanReport::findings`, leaves them
-//! out by default, and nothing downstream (the merges, the fix stage, the evidence check, the
-//! release gate) ever sees them. They are NOT held: a discarded row never blocks an export. The
-//! scan ledger counts them by reason ([`crate::scan_ledger::ScanLedger::record_discarded`]) and
+//! out by default, and nothing downstream (the merges, the fix stage, the evidence check) ever
+//! sees them. A thrown-out row is not held for a ruling of its own, and it never ships. The
+//! release gate reads them for two things only, and each can stop an export: a row the reviewer puts back is
+//! held as a restore until it is decided, and a row the Engine Check said No to ("the engine
+//! threw out a real problem") holds the export until the reviewer puts it back or records a
+//! correction that confirms the throw-out was right
+//! ([`crate::release_gate::engine_check::uncorrected_no_thrown_out`], design A10 item 2). The scan
+//! ledger counts them by reason ([`crate::scan_ledger::ScanLedger::record_discarded`]) and
 //! the sealed report reconciles that tally against the rows.
 //!
 //! The mark is a capture on the row ([`ENGINE_DISCARDED_CAPTURE`], whose value is the reason in

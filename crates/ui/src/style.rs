@@ -1510,7 +1510,7 @@ html, body {
   display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
 }
 .uow-field-label {
-  font-size: 11.5px; font-weight: 600; color: var(--ink-soft); min-width: 76px;
+  font-size: 11.5px; font-weight: 600; color: var(--ink-soft);;
 }
 /* Segmented control for the 3-state dev-status selector. A genuinely distinct pattern
    (one control, mutually-exclusive options), but aligned to the shared button system:
@@ -7076,6 +7076,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-row .col-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .site-row .col-headline { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-row .col-s1, .site-row .col-s2 { white-space: nowrap; color: var(--ink-soft); }
+/* Stage 1 reads whole ("Y medium" wraps rather than clipping to "Y medi..."). */
+.site-row .col-s1 { white-space: normal; }
 .site-row .col-s2 { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 /* Markers wrap onto a second line rather than clip: a cut chip ("new si...") reads as a different marker. */
 .site-table td.col-markers { white-space: normal; overflow: visible; }
@@ -7104,6 +7106,127 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 @keyframes tree-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .tree-keys { margin-top: 8px; }
+
+/* ── The escalation queue (review UI spec section 6) ───────────────────────────────────────── */
+.review-queue-lane { display: flex; align-items: flex-start; gap: 12px; width: 100%; }
+.review-queue-left { flex: 0 0 64%; min-width: 0; box-sizing: border-box; }
+.review-queue-right {
+  flex: 1 1 0; min-width: 0; position: sticky; top: 8px; max-height: calc(100vh - 120px);
+  overflow-y: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); font-size: 12.5px; line-height: 1.5; box-sizing: border-box;
+}
+.review-queue-right:empty { display: none; }
+@media (max-width: 1100px) {
+  .review-queue-lane { flex-direction: column; }
+  .review-queue-left, .review-queue-right { flex: 1 1 auto; width: 100%; }
+  .review-queue-right { position: static; max-height: none; }
+}
+.review-queue-head { margin: 0 0 8px; }
+.review-queue-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.review-queue-budget { color: var(--ink-soft); font-size: 12.5px; }
+.review-queue-counts, .review-queue-needed { margin: 3px 0; font-size: 12.5px; color: var(--ink-soft); }
+.review-queue-needed { color: var(--ink-faint); }
+.review-queue-toast {
+  display: flex; align-items: center; gap: 10px; margin: 6px 0 10px; padding: 8px 10px;
+  border: 1px solid var(--accent); border-radius: 4px; background: var(--accent-wash);
+}
+.review-queue-toast-msg { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--ink); }
+.review-queue-below { margin-top: 4px; }
+.queue-region { outline: none; }
+.queue-region:focus, .queue-region:focus-within { outline: 2px solid #4a90e2; outline-offset: 2px; border-radius: 3px; }
+.queue-table .col-rank { text-align: right; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.queue-table td.col-reason { white-space: normal; overflow-wrap: anywhere; }
+.queue-table td.col-node { white-space: nowrap; }
+.queue-table th.col-need { letter-spacing: 0; }
+/* Stage 1 wraps rather than clips ("Y medi..." reads as a different value); the Stage 2 why gives
+   up the room instead, ellipsized at a width, its full text in the cell's title. */
+.queue-table .site-row .col-s1, .queue-table td.col-s1 { white-space: normal; }
+.queue-table td.col-why {
+  color: var(--ink-soft); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+}
+.queue-table .col-need { text-align: center; }
+.queue-table th.col-need { text-align: center; }
+.queue-node-link { color: var(--ink); text-decoration: underline dotted; }
+.queue-row.row-over td:first-child { box-shadow: inset 0 -2px 0 var(--danger-color); }
+.queue-row.row-candidate { opacity: .9; }
+.queue-line td {
+  padding: 5px 8px; text-align: center; background: var(--accent-wash); color: var(--accent);
+  border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent);
+  font-size: 11.5px; font-weight: 800; letter-spacing: .03em;
+}
+.queue-over-band td {
+  padding: 4px 8px; font-size: 11.5px; color: var(--ink-soft); background: rgba(220, 38, 38, 0.06);
+  border-bottom: 1px dashed var(--danger-color); white-space: normal; overflow-wrap: anywhere;
+}
+.queue-below-heading td {
+  padding: 5px 8px; text-align: center; font-size: 11.5px; font-weight: 700; color: var(--accent);
+  border-top: 1px dashed var(--accent); border-bottom: 1px solid var(--line); background: transparent;
+}
+
+/* ── The Engine Check lane (review UI spec section 7) ──────────────────────────────────────── */
+.engine-lane { width: 100%; }
+.engine-head { margin: 0 0 8px; }
+.engine-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.engine-sub { color: var(--ink-faint); font-size: 12px; }
+.engine-sample, .engine-alloc, .engine-rates { margin: 3px 0; font-size: 12.5px; color: var(--ink-soft); }
+.engine-note { color: var(--ink-faint); }
+.engine-cat { cursor: help; margin-right: 6px; }
+.engine-progress { font-weight: 700; color: var(--ink); }
+.engine-done { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
+.engine-done-msg { font-size: 12.5px; color: var(--good); font-weight: 700; }
+.engine-off { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.engine-region { outline: none; }
+.engine-region:focus, .engine-region:focus-within { outline: 2px solid #4a90e2; outline-offset: 2px; border-radius: 3px; }
+.engine-card { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.engine-card-nav { display: flex; align-items: center; gap: 10px; }
+.engine-card-pos { font-weight: 700; font-size: 13px; color: var(--ink); }
+.engine-card-keys { margin-left: auto; display: flex; gap: 6px; }
+.engine-question {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--accent-wash);
+}
+.engine-q { font-weight: 700; font-size: 14px; color: var(--ink); }
+.engine-answers { display: flex; gap: 8px; }
+.engine-state {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 4px; font-size: 12.5px; color: var(--ink-soft);
+}
+.engine-state.held { border-color: var(--danger-color); background: rgba(220, 38, 38, 0.08); color: var(--ink); }
+.engine-state.yes, .engine-state.corrected { border-color: var(--good); }
+.engine-state-text { flex: 1 1 auto; min-width: 0; }
+.engine-fix-summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 5px 10px;
+  border-left: 3px solid var(--good); font-size: 12.5px; color: var(--ink);
+}
+.engine-fix-line { min-width: 0; overflow-wrap: anywhere; }
+.engine-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 1100px) { .engine-panels { grid-template-columns: 1fr; } }
+.engine-panel {
+  min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); font-size: 12.5px; line-height: 1.5; box-sizing: border-box;
+}
+.engine-panel-head {
+  margin: 0 0 6px; font-size: 10.5px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.engine-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.engine-headline { margin: 4px 0; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
+.engine-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; }
+.engine-facts dt { color: var(--ink-faint); }
+.engine-facts dd { margin: 0; overflow-wrap: anywhere; }
+.engine-quote { color: var(--ink-soft); }
+.engine-wrong { padding: 8px 12px; border: 1px solid var(--accent); border-radius: 4px; background: var(--surface); }
+.engine-wrong-list { list-style: none; margin: 4px 0 8px; padding: 0; display: grid; gap: 2px; }
+.engine-wrong-item { border-radius: 4px; }
+.engine-wrong-item.highlighted { background: rgba(74, 144, 226, 0.12); box-shadow: inset 0 0 0 2px #4a90e2; }
+.engine-wrong-btn {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 5px 8px;
+  background: none; border: none; color: var(--ink); font-size: 13px; cursor: pointer;
+}
+.engine-wrong-digit { width: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 800; color: var(--accent); }
+.engine-correction { display: flex; flex-direction: column; gap: 6px; }
+.engine-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-soft); }
+.engine-corrected-note { margin: 0; font-size: 12px; color: var(--ink-faint); }
 
 .node-head { display: flex; flex-direction: column; gap: 6px; }
 .node-crumb { font-size: 11px; color: var(--ink-faint); overflow-wrap: anywhere; }

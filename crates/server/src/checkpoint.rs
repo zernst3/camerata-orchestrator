@@ -171,6 +171,35 @@ pub struct AbsorbedLine {
     /// from nothing without paying for the item again.
     #[serde(default)]
     pub text: String,
+    /// The findings the reply was about, for a stage whose item is one call about several
+    /// findings. A resume settles the reply finding by finding (see [`BatchMember`]), so it does
+    /// not depend on the next run building the same call. Empty for a stage whose item is one
+    /// thing (stage 1's site), which a resume matches by `key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<BatchMember>,
+    /// The provider batch this line was read from when a resume read a live batch's row (set
+    /// only there). Every process names its rounds `r0..`, so the key alone does not say which
+    /// batch a reply came from; a resume skips a live row only when this batch has already been
+    /// read under this key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+}
+
+/// One finding a call asked about: which finding, and how the reply names it. A resume reads a
+/// returned reply by these, not by the call's own key, so a batch that was live when the process
+/// stopped reaches its findings whatever batches the resumed run would build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchMember {
+    /// The finding's site key: what identifies it from one run of the audit to the next.
+    pub key: String,
+    /// The line the finding was at when it was asked. A site key tells apart two findings of the
+    /// same rule and snippet in one file only by their order, so a key that now names a finding
+    /// at another line is a different finding: a reply is never written into it.
+    pub line: usize,
+    /// The id the call gave the finding, which the reply's entry for it carries.
+    pub tag: String,
+    /// The round (or second try) the finding was asked in.
+    pub round: String,
 }
 
 /// One batch the stage submitted.
@@ -182,6 +211,11 @@ pub struct BatchRecord {
     pub ttl: String,
     /// The batch's `custom_id` for each item, mapped to the item's key.
     pub items: BTreeMap<String, String>,
+    /// For a stage whose items are calls about several findings: the findings each item (by
+    /// `custom_id`) asked about. When present, a resume settles the batch's rows by these, never
+    /// by the item key. Empty for a stage whose items are single things.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub members: BTreeMap<String, Vec<BatchMember>>,
     /// True once every row of the batch has been absorbed or recorded as failed. A batch that has
     /// not settled is polled again on resume, never submitted again.
     #[serde(default)]
@@ -248,6 +282,27 @@ impl StageCheckpoint {
             }
         }
         by_key.into_values().collect()
+    }
+
+    /// Every absorbed item in the order it was recorded (a later line for the same key replaces
+    /// an earlier one and takes its place, except a reply read finding by finding, which is kept:
+    /// every process names its rounds from `r0`, so two processes can record different replies
+    /// under one key). A reply read finding by finding depends on the order the earlier process
+    /// read them in: a finding a first reply left out is written by a later one.
+    pub fn absorbed_in_order(&self) -> Vec<AbsorbedLine> {
+        let Ok(text) = std::fs::read_to_string(&self.absorbed) else {
+            return Vec::new();
+        };
+        let mut lines: Vec<AbsorbedLine> = Vec::new();
+        for line in text.lines() {
+            if let Ok(parsed) = serde_json::from_str::<AbsorbedLine>(line) {
+                if parsed.members.is_empty() {
+                    lines.retain(|l| l.key != parsed.key);
+                }
+                lines.push(parsed);
+            }
+        }
+        lines
     }
 
     /// Append one absorbed item.
@@ -440,6 +495,8 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             text: text.to_string(),
+            members: Vec::new(),
+            batch_id: None,
         }
     }
 
@@ -465,6 +522,75 @@ mod tests {
     }
 
     #[test]
+    fn absorbed_in_order_keeps_recording_order_and_the_members_of_each_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "detail");
+        let mut first = line("r1:b", "first");
+        first.members = vec![BatchMember {
+            key: "site-1".to_string(),
+            line: 7,
+            tag: "aaaaaa".to_string(),
+            round: "r1".to_string(),
+        }];
+        cp.record_absorbed(&first).unwrap();
+        cp.record_absorbed(&line("r0:a", "zero")).unwrap();
+        cp.record_absorbed(&line("r1:b", "again")).unwrap();
+        let keys: Vec<String> = cp.absorbed_in_order().into_iter().map(|l| l.key).collect();
+        assert_eq!(
+            keys,
+            ["r0:a", "r1:b"],
+            "a later line takes the place of an earlier one"
+        );
+        // The members survive the file; a line written without them reads back with none.
+        cp.record_absorbed(&first).unwrap();
+        let back = cp.absorbed_in_order();
+        assert_eq!(back.len(), 3);
+        assert_eq!(back.last().unwrap().members, first.members);
+        assert!(back[0].members.is_empty());
+    }
+
+    #[test]
+    fn replies_of_two_processes_under_one_round_key_are_both_kept_in_order() {
+        // Every process names its rounds from r0, so two processes can record a reply for the
+        // same key about the same findings. Both are real replies a resume must read in order.
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "detail");
+        let member = BatchMember {
+            key: "site-1".to_string(),
+            line: 7,
+            tag: "aaaaaa".to_string(),
+            round: "r0".to_string(),
+        };
+        for text in ["process one", "process two"] {
+            let mut l = line("r0:a", text);
+            l.members = vec![member.clone()];
+            cp.record_absorbed(&l).unwrap();
+        }
+        let texts: Vec<String> = cp.absorbed_in_order().into_iter().map(|l| l.text).collect();
+        assert_eq!(texts, ["process one", "process two"]);
+    }
+
+    #[test]
+    fn a_checkpoint_line_written_before_members_and_batch_ids_existed_still_loads() {
+        let old = concat!(
+            r#"{"key":"site-1","model":"m","backend":"api","cost_usd":0.5,"input_tokens":10,"#,
+            r#""output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"#,
+            r#""text":"reply"}"#,
+            "\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        std::fs::write(dir.path().join("calibration.jsonl"), old).unwrap();
+        let got = cp.absorbed_in_order();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].key, "site-1");
+        assert_eq!(got[0].text, "reply");
+        assert!(got[0].members.is_empty());
+        assert_eq!(got[0].batch_id, None);
+        assert_eq!(cp.absorbed().len(), 1);
+    }
+
+    #[test]
     fn stage_checkpoints_are_named_per_stage_and_the_batch_list_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let a = StageCheckpoint::new(dir.path(), "calibration");
@@ -477,6 +603,7 @@ mod tests {
             batch_id: "msgbatch_1".to_string(),
             ttl: "1h".to_string(),
             items: BTreeMap::from([("s1".to_string(), "site-1".to_string())]),
+            members: BTreeMap::new(),
             settled: false,
             nonce: Some("n1".to_string()),
         };

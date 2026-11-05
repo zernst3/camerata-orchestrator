@@ -3438,11 +3438,13 @@ fn DocsView() -> Element {
 }
 
 mod decision_cards;
+pub(crate) mod engine_check;
 pub(crate) mod export_gate;
 mod freshness;
 pub mod live_run;
 mod palette;
 mod pane_context;
+pub(crate) mod queue;
 mod remediation;
 mod review;
 mod review_findings;

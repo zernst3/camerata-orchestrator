@@ -64,24 +64,7 @@ const SPEC_STATES: &[&str] = &[
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a
 /// screen deletes its lines here in the same commit that registers the real renderer.
-const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[
-    ("queue/empty", "WO11"),
-    ("queue/loading", "WO11"),
-    ("queue/error", "WO11"),
-    ("queue/at-budget", "WO11"),
-    ("queue/over-budget", "WO11"),
-    ("queue/line-lowered", "WO11"),
-    ("queue/rate-changed-toast", "WO11"),
-    ("queue/30k", "WO11"),
-    ("engine/lane-off", "WO11"),
-    ("engine/loading", "WO11"),
-    ("engine/card-pending", "WO11"),
-    ("engine/no-list-open", "WO11"),
-    ("engine/no-pending-correction", "WO11"),
-    ("engine/no-corrected", "WO11"),
-    ("engine/all-verdicts", "WO11"),
-    ("engine/small-category", "WO11"),
-];
+const EXPECTED_PLACEHOLDERS: &[(&str, &str)] = &[];
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("camerata-gallery-{}-{name}", std::process::id()));
@@ -125,17 +108,18 @@ fn placeholders_are_listed_with_their_owner() {
     assert_eq!(listed, expected);
 }
 
+/// No screen is a placeholder any more, so the page that names what is not built is pinned on a
+/// made-up state: the page stays right for the next screen that is added before it is built.
 #[test]
 fn a_placeholder_page_says_what_is_not_built_and_who_owns_it() {
-    let state = registry()
-        .into_iter()
-        .find(|s| s.id() == "queue/30k")
-        .expect("queue/30k is registered");
+    let state = GalleryState {
+        screen: "x",
+        state: "y",
+        kind: StateKind::Placeholder { owner: "WOn" },
+    };
+    assert!(state.is_placeholder());
     let html = state.render();
-    assert!(
-        html.contains("not built: queue/30k, owned by WO11"),
-        "{html}"
-    );
+    assert!(html.contains("not built: x/y, owned by WOn"), "{html}");
 }
 
 #[test]

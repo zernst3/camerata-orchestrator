@@ -248,7 +248,11 @@ pub(crate) fn assemble_package(
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
-        engine_check_no_without_correction: engine_check::problems(&report.findings, reviewed),
+        engine_check_no_without_correction: engine_check::problems(
+            &report.findings,
+            &report.discarded,
+            reviewed,
+        ),
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         internal: options.internal,
     })
