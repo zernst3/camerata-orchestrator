@@ -439,7 +439,7 @@ mod tests {
         let mut r = plain(n);
         r.decision = Some(DecisionView {
             id: format!("dec-{n}"),
-            state: DecisionState::MergedInto("repo\0other.ts\0fp\00".to_string()),
+            state: DecisionState::MergedInto("repo\0other.ts\0fp\x000".to_string()),
             reason: "the same problem".to_string(),
             scope: Scope::Site,
             inherited_from: None,
