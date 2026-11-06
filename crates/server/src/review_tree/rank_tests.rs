@@ -582,3 +582,104 @@ fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason()
     );
     assert!(!of(&y.site_key).escalated, "the other site is past a budget of one");
 }
+
+// ---- R-2: severity first, then reason rank, then the group reviewer's priority --------------
+
+#[test]
+fn a_medium_or_low_unauthenticated_reach_never_takes_a_slot_ahead_of_a_high_severe_row() {
+    let mut rows = Vec::new();
+    for n in 0..3 {
+        rows.push(row_at(RULE_C, &format!("app/public{n}.ts"), 3, "medium"));
+    }
+    rows.push(row_at(RULE_C, "app/public3.ts", 3, "low"));
+    rows.push(row_at(RULE_B, "lib/secret.ts", 4, "high"));
+    rows.push(row_at(RULE_A, "lib/wipe.ts", 5, "high"));
+    rows.push(row_at(RULE_A, "lib/tenant.ts", 6, "high"));
+    let (mut tree, rows) = tree_of_rows(rows);
+    for n in 0..4 {
+        let f = row_of(&rows, RULE_C, &format!("app/public{n}.ts")).clone();
+        rule_node_of(&mut tree, &f).escalations.push(esc(
+            &f,
+            EscalationReason::UnauthenticatedReach,
+            n as u32 + 1,
+        ));
+    }
+    for (rule, path, reason) in [
+        (RULE_B, "lib/secret.ts", EscalationReason::SecretExposure),
+        (RULE_A, "lib/wipe.ts", EscalationReason::DataLoss),
+        (RULE_A, "lib/tenant.ts", EscalationReason::CrossTenant),
+    ] {
+        let f = row_of(&rows, rule, path).clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, reason, 9));
+    }
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(3));
+    let path_of = |key: &str| {
+        rows.iter()
+            .find(|f| f.site_key == key)
+            .unwrap()
+            .path
+            .clone()
+    };
+    let above: std::collections::BTreeSet<String> = ranked
+        .candidates
+        .iter()
+        .filter(|c| c.escalated)
+        .map(|c| path_of(&c.key))
+        .collect();
+    assert_eq!(
+        above,
+        ["lib/secret.ts", "lib/wipe.ts", "lib/tenant.ts"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "the three high severe rows fill the budget; the medium and low reach rows wait"
+    );
+    // Inside one severity the reason rank decides.
+    let order: Vec<EscalationReason> = ranked.candidates.iter().take(3).map(|c| c.reason).collect();
+    assert_eq!(
+        order,
+        vec![
+            EscalationReason::SecretExposure,
+            EscalationReason::DataLoss,
+            EscalationReason::CrossTenant
+        ]
+    );
+}
+
+#[test]
+fn severity_decides_before_reason_and_the_reviewers_priority_decides_last() {
+    let rows = vec![
+        row_at(RULE_A, "a.ts", 1, "high"),
+        row_at(RULE_A, "b.ts", 1, "critical"),
+        row_at(RULE_A, "c.ts", 1, "high"),
+        row_at(RULE_A, "d.ts", 1, "high"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let put = |tree: &mut ReviewTree, path: &str, reason, rank| {
+        let f = row_of(&rows, RULE_A, path).clone();
+        rule_node_of(tree, &f).escalations.push(esc(&f, reason, rank));
+    };
+    put(&mut tree, "a.ts", EscalationReason::UnauthenticatedReach, 1);
+    put(&mut tree, "b.ts", EscalationReason::RuleMisfit, 4);
+    put(&mut tree, "c.ts", EscalationReason::CrossTenant, 3);
+    put(&mut tree, "d.ts", EscalationReason::CrossTenant, 2);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    let paths: Vec<&str> = ranked
+        .candidates
+        .iter()
+        .map(|c| {
+            rows.iter()
+                .find(|f| f.site_key == c.key)
+                .unwrap()
+                .path
+                .as_str()
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["b.ts", "a.ts", "d.ts", "c.ts"],
+        "critical first, then high by reason rank, then by the reviewer's own rank"
+    );
+}

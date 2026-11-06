@@ -263,9 +263,10 @@ impl RankedSite {
 ///    and lifts a `needs_more_code` escalation of such a row to it.
 /// 3. Rows at one site (the same repo, path and line) share one slot whatever their rules (R-1):
 ///    the site takes its highest severity and its best reason, and every row keeps its own reason.
-/// 4. The sites are sorted by reason rank, then interleaved across nodes inside one reason rank
-///    (rank 1 of every node before rank 2 of any, severity first inside a round), so one noisy
-///    rule cannot take the whole budget (D6). The same candidates always give the same list.
+/// 4. The sites are sorted by severity (critical first), then by reason rank (R-2: a low row with
+///    a top reason never outranks a high row), then interleaved across nodes inside one severity
+///    and reason (rank 1 of every node before rank 2 of any), so one noisy rule cannot take the
+///    whole budget (D6). The same candidates always give the same list.
 /// 5. The first `budget` slots are escalated; past it only the D5 reasons at their severity and
 ///    `evidence_unverified` are, each recording why. The rest stay, in order, below the line.
 pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSettings) -> Ranked {
@@ -337,12 +338,12 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
     }
     let sites: Vec<RankedSite> = by_site.into_values().map(RankedSite::new).collect();
 
-    // Reason rank, then node, each node's list sorted by severity and its own rank.
+    // Severity, then reason rank (R-2), then node; each node's list sorted by its own rank.
     let sev = |s: &str| std::cmp::Reverse(crate::ai_audit::severity_rank(s));
-    let mut by_reason: BTreeMap<u8, BTreeMap<String, Vec<RankedSite>>> = BTreeMap::new();
+    let mut by_reason: BTreeMap<_, BTreeMap<String, Vec<RankedSite>>> = BTreeMap::new();
     for site in sites {
         by_reason
-            .entry(site.reason_rank)
+            .entry((sev(&site.severity), site.reason_rank))
             .or_default()
             .entry(site.node_id.clone())
             .or_default()
@@ -354,11 +355,8 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             .into_iter()
             .map(|(node, mut items)| {
                 items.sort_by(|a, b| {
-                    (sev(&a.severity), rank_sort_key(a.stage2_rank), &a.key).cmp(&(
-                        sev(&b.severity),
-                        rank_sort_key(b.stage2_rank),
-                        &b.key,
-                    ))
+                    (rank_sort_key(a.stage2_rank), &a.key)
+                        .cmp(&(rank_sort_key(b.stage2_rank), &b.key))
                 });
                 (node, items.into())
             })
@@ -372,18 +370,11 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 break;
             }
             round.sort_by(|a, b| {
-                (
-                    sev(&a.severity),
-                    rank_sort_key(a.stage2_rank),
-                    &a.node_id,
-                    &a.key,
-                )
-                    .cmp(&(
-                        sev(&b.severity),
-                        rank_sort_key(b.stage2_rank),
-                        &b.node_id,
-                        &b.key,
-                    ))
+                (rank_sort_key(a.stage2_rank), &a.node_id, &a.key).cmp(&(
+                    rank_sort_key(b.stage2_rank),
+                    &b.node_id,
+                    &b.key,
+                ))
             });
             ordered.extend(round);
         }
