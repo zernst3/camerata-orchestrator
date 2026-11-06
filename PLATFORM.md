@@ -317,6 +317,7 @@ graph TD
     agent --> api_types
     agent --> core
     agent --> liveness
+    agent --> secrets
     agent --> worktracker
     app_core --> api_types
     app_core --> checks
@@ -360,7 +361,9 @@ graph TD
     gateway --> secrets
     intake --> api_types
     intake --> core
+    intake --> secrets
     llm --> api_types
+    llm --> secrets
     mcp --> api_types
     mcp --> client
     orchestrator --> gateway
