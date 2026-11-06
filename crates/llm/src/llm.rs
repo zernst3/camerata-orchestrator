@@ -153,6 +153,9 @@ pub(crate) fn nul_safe(s: &str) -> String {
 /// Build the `claude -p` command for one completion (everything except the spawn), so the exact
 /// argument list is testable without a `claude` binary.
 fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::process::Command {
+    // The model-input chokepoint: the prompt and the system prompt go out redacted.
+    let req = crate::model_input::guarded(req);
+    let req = &*req;
     let mut cmd = tokio::process::Command::new("claude");
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
@@ -2444,6 +2447,9 @@ fn request_max_tokens(req: &LlmRequest, model: &str) -> u32 {
 /// Kept separate from the HTTP call so the exact request shape is unit-testable without a
 /// network.
 fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
+    // The model-input chokepoint: the prompt and the system prompt go out redacted.
+    let req = crate::model_input::guarded(req);
+    let req = &*req;
     let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     let mut body = serde_json::json!({
         "model": model,
@@ -2470,6 +2476,9 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
 /// an accurate count, not caching (caching has no effect on this endpoint). Kept separate
 /// from the HTTP call so the body-shape logic is unit-testable without a network call.
 fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
+    // The model-input chokepoint: the count is asked over the redacted request.
+    let req = crate::model_input::guarded(req);
+    let req = &*req;
     let user_content = cached_user_content(
         &req.prompt,
         &req.cache_breakpoints,
@@ -2531,6 +2540,9 @@ pub fn build_batch_item(
     model: &str,
     cache_ttl: CacheTtl,
 ) -> BatchItem {
+    // The model-input chokepoint: the item carries the redacted prompt and system prompt.
+    let req = crate::model_input::guarded(req);
+    let req = &*req;
     let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     // Run the SAME conformer `complete_api` uses on the equivalent body, then lift what it
     // added (`output_config`) onto the typed params. The typed struct has no field for any
@@ -2553,6 +2565,15 @@ pub fn build_batch_item(
             temperature: req.temperature_for(model),
         },
     }
+}
+
+/// The body of a batch upload: the items, as the Batches API takes them.
+fn batch_submit_body(items: &[BatchItem]) -> serde_json::Value {
+    let mut body = serde_json::json!({ "requests": items });
+    // The model-input chokepoint for the upload itself: an item built by hand, not through
+    // `build_batch_item`, is redacted here. A body that held no secret is unchanged.
+    crate::model_input::redact_json_for_model(&mut body);
+    body
 }
 
 /// Result of submitting a message batch.
@@ -2643,7 +2664,7 @@ impl Llm {
                 items.len()
             );
         }
-        let body = serde_json::json!({ "requests": items });
+        let body = batch_submit_body(&items);
         // The API refuses a body over its size limit; say so here, before the upload, instead of
         // after it. The callers split by bytes first (`ai_audit::batch_mode::plan_sub_batches`),
         // so this is the backstop that makes an oversized submission impossible.
@@ -3255,6 +3276,9 @@ fn build_openrouter_chat_body(
     session_id: &str,
     provider_constraint: Option<serde_json::Value>,
 ) -> serde_json::Value {
+    // The model-input chokepoint: the prompt and the system prompt go out redacted.
+    let req = crate::model_input::guarded(req);
+    let req = &*req;
     // The system message gets a `cache_control` breakpoint so Anthropic-compatible
     // models behind OpenRouter cache the static prefix once and serve it cheaply on
     // subsequent calls within the same session.
@@ -3504,6 +3528,10 @@ pub async fn call_with_fallback(
 
 #[cfg(test)]
 mod temperature_tests;
+
+// The model-input chokepoint: every wire builder redacts what it is about to send.
+#[cfg(test)]
+mod model_input_tests;
 
 // The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
 #[cfg(test)]

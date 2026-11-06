@@ -64,11 +64,13 @@ pub struct ProjectContextResponse {
     /// [`without_internal_review_data`], which removes it. Keep it that way for any new use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_json: Option<serde_json::Value>,
-    /// A compact, queryable summary of the active scan results — severity/status totals,
-    /// by-rule breakdown, and a capped finding list. Populated from the onboarding draft
-    /// when a scan has been run. The snippet field is NEVER included to avoid leaking
-    /// credential-shaped values into the context. Present when a scan report is found in
-    /// the draft; absent when no scan has been run yet.
+    /// The scan results as the review screen shows them. With an inspection recorded this is the
+    /// SEALED report with the reviewer's overlay applied ([`crate::chat_review_context`]): every
+    /// held row with why it is held, the junk marks, the groups and stage 2 verdicts, the
+    /// evidence and the code at the cited lines, and the ledger, within a fixed size. Before any
+    /// inspection exists it is the scan in memory (sealed here) or the draft's rows (through the
+    /// seal's secret safety net), rendered by [`render_scan_results_for_chat`], which leaves the
+    /// snippet out. Absent when no scan has been run yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan_results_section: Option<String>,
     /// A compact, queryable summary of the rules the user has selected in the onboarding
@@ -271,8 +273,11 @@ pub(crate) fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Opti
         .and_then(|s| s.get("findings"))
         .or_else(|| draft.get("audit").and_then(|a| a.get("findings")))?;
 
-    let findings: Vec<crate::onboard::Finding> =
+    let mut findings: Vec<crate::onboard::Finding> =
         serde_json::from_value(findings_val.clone()).ok()?;
+    // The draft's rows never went through the seal: apply its secret safety net before they are
+    // rendered for a model.
+    crate::onboard::redact::redact_findings(&mut findings);
 
     if findings.is_empty() {
         return None;
@@ -474,6 +479,42 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
     Some(out)
 }
 
+/// The scan part of the chat context: the row count, the one-line summary and the section.
+///
+/// The SEALED report decides. With an inspection recorded, all three come from the review
+/// screen's own report ([`crate::chat_review_context`]): the sealed rows with their holds and
+/// junk marks, the groups and stage 2 verdicts, the evidence and the code at the cited lines, and
+/// the ledger. Before any inspection exists the chat falls back to what the cockpit has: the
+/// scan in memory, SEALED here so its secrets are redacted and its junk marked (the seal's safety
+/// net), and the draft the architect is working in, whose rows go through the same redaction.
+async fn scan_context(
+    state: &AppState,
+    project_id: &str,
+    draft: Option<&serde_json::Value>,
+) -> (Option<usize>, Option<String>, Option<String>) {
+    if let Some(review) = crate::chat_review_context::review_context_of(state, project_id).await {
+        return (
+            Some(review.total),
+            Some(review.findings_summary).filter(|s| !s.is_empty()),
+            Some(review.section).filter(|s| !s.is_empty()),
+        );
+    }
+    let (finding_count, findings_summary) = draft
+        .and_then(extract_findings_from_draft)
+        .map(|(n, s)| (Some(n), Some(s)))
+        .unwrap_or((None, None));
+    let scan_results_section = draft.and_then(extract_scan_results_from_draft).or_else(|| {
+        state
+            .get_last_scan(project_id)
+            .map(|r| {
+                let sealed = r.seal();
+                render_scan_results_for_chat(&sealed.findings, &sealed.coverage_notes)
+            })
+            .filter(|s| !s.is_empty())
+    });
+    (finding_count, findings_summary, scan_results_section)
+}
+
 /// `GET /api/projects/active/context` — the grounding payload for the project-aware chat
 /// mode. No AI call; purely a read of the active project's current state (draft + ruleset).
 ///
@@ -511,20 +552,8 @@ pub(crate) async fn active_project_context(
         } else {
             Some(ruleset_summary)
         };
-        let (finding_count, findings_summary) = draft
-            .as_ref()
-            .and_then(extract_findings_from_draft)
-            .map(|(n, s)| (Some(n), Some(s)))
-            .unwrap_or((None, None));
-        let scan_results_section = draft
-            .as_ref()
-            .and_then(extract_scan_results_from_draft)
-            .or_else(|| {
-                state
-                    .get_last_scan(&project.id)
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
-            });
+        let (finding_count, findings_summary, scan_results_section) =
+            scan_context(&state, &project.id, draft.as_ref()).await;
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
@@ -544,20 +573,8 @@ pub(crate) async fn active_project_context(
     } else if draft.is_some() {
         // Pre-onboard with a saved draft: the architect is mid-onboarding. Surface the draft
         // as-is so the chat can help interpret the in-progress onboarding state.
-        let (finding_count, findings_summary) = draft
-            .as_ref()
-            .and_then(extract_findings_from_draft)
-            .map(|(n, s)| (Some(n), Some(s)))
-            .unwrap_or((None, None));
-        let scan_results_section = draft
-            .as_ref()
-            .and_then(extract_scan_results_from_draft)
-            .or_else(|| {
-                state
-                    .get_last_scan(&project.id)
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
-            });
+        let (finding_count, findings_summary, scan_results_section) =
+            scan_context(&state, &project.id, draft.as_ref()).await;
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
@@ -581,10 +598,8 @@ pub(crate) async fn active_project_context(
         // Blank: project exists but no draft and no onboarded repos.
         // Still check last_scan — a scan may have completed without a draft being
         // round-tripped back (timing race: this is the exact bug being fixed).
-        let scan_results_section = state
-            .get_last_scan(&project.id)
-            .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-            .filter(|s| !s.is_empty());
+        let (finding_count, findings_summary, scan_results_section) =
+            scan_context(&state, &project.id, None).await;
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
@@ -593,8 +608,8 @@ pub(crate) async fn active_project_context(
             repos: project.repos.clone(),
             onboarded: Vec::new(),
             ruleset_summary: None,
-            finding_count: None,
-            findings_summary: None,
+            finding_count,
+            findings_summary,
             scan_results_section,
             selected_rules_section: None, // Blank: no draft, so no selections yet.
             draft_json: None,

@@ -157,7 +157,8 @@ impl GenericCliDriver {
     pub fn build_args(&self, _role: &Role, task: &str) -> Vec<String> {
         let mut args = self.base_args.clone();
         args.push(self.task_flag.clone());
-        args.push(task.to_string());
+        // The model-input chokepoint (`camerata_secrets::model_input`): the task is model input.
+        args.push(camerata_secrets::model_input::redact_for_model(task).into_owned());
         args
     }
 
@@ -281,6 +282,24 @@ mod tests {
             .position(|a| a == "--prompt")
             .expect("--prompt flag must be present");
         assert_eq!(args[prompt_idx + 1], "do a thing");
+    }
+
+    /// The task a generic CLI agent is handed is model input too: no raw secret reaches its argv.
+    #[test]
+    fn the_task_handed_to_a_generic_agent_carries_no_raw_secret() {
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+        let driver = GenericCliDriver::new("llm", "-p", &[]);
+        let task = format!("Rotate {} everywhere it is used.", planted.text);
+        let args = driver.build_args(&role(), &task);
+        assert!(
+            !args.iter().any(|a| a.contains(&planted.value)),
+            "a secret value reached the agent argv"
+        );
+        assert!(
+            args.last().is_some_and(|a| a.starts_with("Rotate ")),
+            "{args:?}"
+        );
     }
 
     #[test]

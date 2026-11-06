@@ -857,10 +857,50 @@ fn twin_published_supabase_password_requirements_values() {
     }
 }
 
+/// The published digest keys on the value AND the identifier it is documented under: Supabase's
+/// `password_requirements` enum is readable under that setting's name and nowhere else. The same
+/// words assigned to any other password-named identifier are a password.
 #[test]
-fn supabase_enum_value_is_not_a_pass_for_other_password_identifiers() {
-    // The exemption is the exact published digest only: the same words under another identifier
-    // are still a flagged password, and so is any change to the value.
+fn a_published_enum_value_is_readable_only_under_its_own_identifier() {
+    let value = ["lower_upper_", "letters_digits"].concat();
+    // Under its own name (alone, in a table, exported, in prose): readable.
+    for line in [
+        format!("password_requirements = \"{value}\""),
+        format!("auth.password_requirements = \"{value}\""),
+        format!("  password_requirements: \"{value}\""),
+        format!("`password_requirements = \"{value}\"`"),
+    ] {
+        assert!(detect_secrets(&line).is_empty(), "flagged: {line}");
+    }
+    // Under another identifier, the same value is a flagged password.
+    for line in [
+        format!("db_password = \"{value}\""),
+        format!("password = \"{value}\""),
+        format!("admin_password: \"{value}\""),
+        // A longer name that merely ends in the documented one is another identifier.
+        format!("my_password_requirements = \"{value}\""),
+        format!("password_requirements_backup = \"{value}\""),
+    ] {
+        assert_eq!(detect_secrets(&line).len(), 1, "not flagged: {line}");
+    }
+}
+
+/// A key a vendor publishes as itself (no identifier of its own) stays readable under any name.
+#[test]
+fn a_published_key_with_no_identifier_stays_readable_under_any_name() {
+    let key = crate::fixtures::stripe_docs_test_key();
+    for line in [
+        format!("STRIPE_SECRET_KEY={key}"),
+        format!("const apiSecret = \"{key}\";"),
+        format!("password = \"{key}\""),
+    ] {
+        assert!(detect_secrets(&line).is_empty(), "flagged: {line}");
+    }
+}
+
+#[test]
+fn changing_the_published_value_makes_it_a_password_again() {
+    // The exemption is the exact published digest: any change to the value is a flagged password.
     let changed = ["lower_upper_", "letters_digits1"].concat();
     let random = body(26, ACCOUNT_ALPHABET, 91);
     let cases = [

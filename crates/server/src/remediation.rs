@@ -5,7 +5,9 @@
 //! ([`crate::remediation_plan`]); this module is everything around it:
 //!
 //! - which findings are work at all ([`eligible_findings`]: Confirmed only, TechDebt when the
-//!   operator ticks it; false positives, ignored and unresolved findings never become work);
+//!   operator ticks it; false positives, ignored and unresolved findings never become work), over
+//!   the SEALED report the reviewer works from, without the rows held for a ruling (a held row is
+//!   counted as unresolved);
 //! - the two routes, `POST /api/projects/:id/remediation/plan` (a preview that creates nothing)
 //!   and `POST /api/projects/:id/remediation/create` (one native unit per planned group, each
 //!   carrying a [`FindingsSource`] back to every finding it closes);
@@ -346,11 +348,23 @@ async fn compute(
             .into_response());
     };
 
-    let (eligible, skipped) = eligible_findings(
-        &entry.report.findings,
-        &req.dispositions,
-        req.include_tech_debt,
-    );
+    // The work is the report the reviewer works from, not the rows as they were stored: the
+    // SEALED report with the project's restores and the reviewer's overlay applied (the value the
+    // review screen and every export read), minus the rows held for a ruling nobody has made
+    // (junk, unverified evidence, restored with no decision, merged with no decision). A row the
+    // seal throws out is not a row; a row the reviewer put back is.
+    let (_, reviewed) = crate::edits::routes::review_of(state, &project.id, &entry);
+    let awaiting = crate::release_gate::holds::hold_set(&reviewed).awaiting_a_ruling;
+    let (held, sound): (Vec<Finding>, Vec<Finding>) = reviewed
+        .report()
+        .findings
+        .iter()
+        .cloned()
+        .partition(|f| awaiting.contains(&f.site_key));
+    let (eligible, mut skipped) =
+        eligible_findings(&sound, &req.dispositions, req.include_tech_debt);
+    // A held row waits for a ruling, like a row with no disposition.
+    skipped.unresolved += held.len();
     let mut rule_ids = BTreeSet::new();
     for f in &eligible {
         rule_ids.insert(f.rule_id.clone());

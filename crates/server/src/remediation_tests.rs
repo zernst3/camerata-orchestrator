@@ -617,3 +617,188 @@ async fn the_units_list_badges_a_unit_made_from_findings() {
         .expect("listed");
     assert_eq!(row["source_kind"], "findings");
 }
+
+// ── The work is the SEALED report minus the rows held for a ruling ──────────────────────────────
+//
+// The plan used to read the inspection's stored rows as they were before the seal. The seal is the
+// point the row set is final (it throws out rows that are not findings, marks junk, and puts back
+// what the reviewer restored), and the review screen and every export read the sealed report. A
+// restored row therefore never became work, and a row the seal throws out or marks junk could.
+
+/// A row the model wrote text for: the seal reads the text.
+fn model_row(path: &str, line: usize, detail: &str) -> Finding {
+    Finding {
+        detail: detail.to_string(),
+        ..finding("AI-NOTE", path, line, "db.query(q)")
+    }
+}
+
+/// A state whose one inspection holds `findings` and, apart from them, the rows an earlier step
+/// threw out (`discarded`, marked as the engine marks them).
+fn seeded_with_discarded(findings: &[Finding], thrown: Vec<Finding>) -> (AppState, String) {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("P", vec!["acme/api".to_string()])
+        .expect("project");
+    let mut report = ScanReport::gated(&["acme/api".to_string()]);
+    report.gated = false;
+    report.findings = findings.to_vec();
+    report.discarded = thrown
+        .into_iter()
+        .map(|mut f| {
+            crate::engine_discard::mark(&mut f, "the model said discard");
+            f
+        })
+        .collect();
+    state
+        .inspections
+        .append(InspectionEntry::from_report(
+            &project.id,
+            report,
+            InspectionKind::Full,
+        ))
+        .expect("inspection appended");
+    (state, project.id)
+}
+
+fn decide(
+    state: &AppState,
+    project_id: &str,
+    key: &str,
+    decision: crate::decisions::NewDecisionReq,
+) {
+    let _ = key;
+    state
+        .decisions
+        .record_site(
+            project_id,
+            &decision,
+            crate::decisions::DecisionCtx {
+                run_id: "insp-1",
+                engine_version: "0.0.0-test",
+                now: "2026-11-04T09:00:00Z",
+            },
+        )
+        .expect("decision recorded");
+}
+
+fn site_decision(
+    key: &str,
+    state: camerata_api_types::decisions::DecisionState,
+    reason: &str,
+) -> crate::decisions::NewDecisionReq {
+    crate::decisions::NewDecisionReq {
+        scope: camerata_api_types::decisions::Scope::Site,
+        key: key.to_string(),
+        state,
+        reason: reason.to_string(),
+        decided_by: "zach".to_string(),
+        needed_me: None,
+        sample_verdict: None,
+        except: Vec::new(),
+        run_id: String::new(),
+        decided_at: String::new(),
+    }
+}
+
+async fn plan_of(
+    state: &AppState,
+    project_id: &str,
+    dispositions: serde_json::Value,
+) -> serde_json::Value {
+    let app = router(state.clone());
+    let (status, body) = send(
+        &app,
+        &format!("/api/projects/{project_id}/remediation/plan"),
+        serde_json::json!({ "dispositions": dispositions }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn a_row_the_reviewer_restored_and_ruled_on_becomes_a_unit_of_work() {
+    use camerata_api_types::decisions::DecisionState;
+    let kept = finding(SQL, "src/db.rs", 42, "query(\"select \" + id)");
+    let thrown = model_row(
+        "src/note.rs",
+        4,
+        "A title \u{2014} The handler trusts the caller.",
+    );
+    let (state, project_id) = seeded_with_discarded(std::slice::from_ref(&kept), vec![thrown]);
+    let stored = state.inspections.latest(&project_id).expect("inspection");
+    let key = finding_key(&stored.report.discarded[0]);
+
+    // Before the reviewer acts, the thrown-out row is not work: it is not a row of the report.
+    let both = |dispositions: &[&Finding]| {
+        let mut map: HashMap<String, serde_json::Value> = dispositions
+            .iter()
+            .map(|f| (finding_key(f), serde_json::json!({ "state": "Confirmed" })))
+            .collect();
+        map.insert(key.clone(), serde_json::json!({ "state": "Confirmed" }));
+        serde_json::to_value(map).unwrap()
+    };
+    let body = plan_of(&state, &project_id, both(&[&kept])).await;
+    let files: Vec<String> = body["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|u| u["findings"].as_array().unwrap().iter())
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(files, ["src/db.rs"], "{body}");
+
+    // The reviewer puts the row back and rules on it: it is in the sealed report and not held.
+    decide(
+        &state,
+        &project_id,
+        &key,
+        site_decision(&key, DecisionState::EngineRestored, "a real problem"),
+    );
+    decide(
+        &state,
+        &project_id,
+        &key,
+        site_decision(&key, DecisionState::Confirmed, ""),
+    );
+    let body = plan_of(&state, &project_id, both(&[&kept])).await;
+    let mut files: Vec<String> = body["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|u| u["findings"].as_array().unwrap().iter())
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["src/db.rs", "src/note.rs"], "{body}");
+}
+
+#[tokio::test]
+async fn a_junk_marked_row_and_a_row_the_seal_throws_out_are_not_work() {
+    let good = finding(SQL, "src/db.rs", 42, "query(\"select \" + id)");
+    let junk = model_row(
+        "src/junk.rs",
+        8,
+        "Service role key \u{2014} I cannot determine this.",
+    );
+    let seal_throws_out = model_row("src/note.rs", 4, "A title \u{2014} Discard this finding.");
+    let all = vec![good.clone(), junk.clone(), seal_throws_out.clone()];
+    let (state, project_id, _) = seeded(&all);
+
+    // The curator confirmed every row, as the triage screen would.
+    let body = plan_of(&state, &project_id, confirmed(&all)).await;
+    let files: Vec<String> = body["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|u| u["findings"].as_array().unwrap().iter())
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(files, ["src/db.rs"], "only the sound row is work: {body}");
+    assert_eq!(
+        body["skipped"]["unresolved"], 1,
+        "the junk row waits for a ruling and is counted as such: {body}"
+    );
+}

@@ -451,7 +451,9 @@ impl ClaudeCliDriver {
         }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
-            task.to_string(),
+            // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a
+            // model carries a raw secret, the task of a governed agent included.
+            camerata_secrets::model_input::redact_for_model(task).into_owned(),
             "--strict-mcp-config".to_string(),
             "--mcp-config".to_string(),
             self.mcp_config_path.clone(),
@@ -581,6 +583,29 @@ mod tests {
             .as_std()
             .get_envs()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
+    }
+
+    /// Nothing sent to a model contains a raw secret, the agent a CLI starts included: the task
+    /// is handed to `claude -p` as an argument, so it is redacted on its way into the argv.
+    #[test]
+    fn the_task_handed_to_claude_carries_no_raw_secret() {
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json");
+        let task = format!(
+            "Fix the bug. The env file says {}. Then add a test.",
+            planted.text
+        );
+        let args = driver.build_args(&role(), &task);
+        assert!(
+            !args.iter().any(|a| a.contains(&planted.value)),
+            "a secret value reached the claude argv"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a.contains("Fix the bug.") && a.contains("Then add a test.")),
+            "the task itself still goes: {args:?}"
+        );
     }
 
     #[test]

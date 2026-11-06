@@ -54,7 +54,9 @@ impl Scripted {
             return Ok(response("no json at all", 0.01));
         }
         Ok(response(
-            &serde_json::json!({ "echo": req.prompt }).to_string(),
+            // An echo that is also a stage 1 verdict (`real`), so a calibration request gets a reply
+            // its own parser accepts.
+            &serde_json::json!({ "echo": req.prompt, "real": "yes" }).to_string(),
             0.05,
         ))
     }
@@ -1485,6 +1487,597 @@ async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo
             good.1.load(Ordering::SeqCst),
             before,
             "the rule groups that were read are not paid for again"
+        );
+    })
+    .await;
+}
+
+// ── The model-input chokepoint and the run store ──────────────────────────────────────────────
+
+/// An inspection request as the stages build it: its files already went through
+/// `files_for_model`, so the secret appears in its redacted form. Everything the key is made of
+/// is set (system prompt, breakpoints, effort, schema).
+fn saved_run_shape() -> LlmRequest {
+    LlmRequest::new(
+        "Repository: acme/api\nREPO MAP\nsrc/billing.rs\n<<<UNTRUSTED t \"src/billing.rs\">>>\n\
+         1: const KEY = \"sk_live_\u{2026}FtVR (77 chars)\";\n<<<END t>>>\nASK: review the file above.",
+    )
+    .with_system("You are a conformance auditor. Credential values appear as prefix\u{2026}tail.")
+    .with_model("claude-sonnet-5-5")
+    .with_max_tokens(8192)
+    .with_cache_breakpoints([20, 60])
+    .with_effort("high")
+    .with_response_schema(serde_json::json!({ "type": "object" }))
+}
+
+/// SALVAGE CRITICAL. The key a saved run filed a reply under was the digest of the request as the
+/// stage built it. The chokepoint leaves a request that is already redacted exactly as it was, so
+/// the digest of that shape is the digest it always had: the value below was produced by
+/// `request_key` BEFORE the chokepoint existed. If this changes, every saved run stops replaying.
+#[test]
+fn the_key_of_an_already_redacted_request_is_the_key_it_always_had() {
+    assert_eq!(
+        super::journal::request_key(&saved_run_shape()),
+        "373ffb48ade0259251473ae32dd953c0360f259093f63b1cb32b8b3d1098ca47"
+    );
+}
+
+/// Records the request it was handed.
+struct Recording(std::sync::Mutex<Vec<LlmRequest>>);
+
+#[async_trait::async_trait]
+impl LlmPort for Recording {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.0.lock().unwrap().push(req);
+        Ok(response(r#"{"ok":true}"#, 0.05))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The key names what the model receives. A request that still carries a secret (a stage that
+/// forgot to redact) is named by the digest of its redacted form, the same digest the
+/// already-redacted request has, so the two are one request to the store.
+#[test]
+fn the_key_is_computed_over_the_request_after_the_chokepoint() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+    let raw = LlmRequest::new(format!("Repository: acme/api\nkey: {}\nASK", planted.text))
+        .with_system(format!("sys {}", planted.text))
+        .with_model("claude-sonnet-5-5");
+    // Redacted upstream, as a stage that does it right builds the request.
+    let by_hand = LlmRequest::new(camerata_secrets::redact_str(&raw.prompt).into_owned())
+        .with_system(camerata_secrets::redact_str(raw.system.as_deref().unwrap_or("")).into_owned())
+        .with_model("claude-sonnet-5-5");
+    assert_ne!(raw.prompt, by_hand.prompt, "the fixture really is a secret");
+    assert_eq!(
+        super::journal::request_key(&raw),
+        super::journal::request_key(&by_hand),
+        "the key is the digest of what is sent"
+    );
+}
+
+/// The journal hands the model seam the redacted request and files the reply under its key, so a
+/// resume that asks the same question (with or without the secret in it) replays and pays nothing.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_journal_sends_the_redacted_request_and_a_resume_replays_it() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let _on =
+            camerata_test_env::EnvGuard::remove(crate::feature_flags::MODEL_PROMPT_REDACTION_ENV);
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+        let raw = || {
+            LlmRequest::new(format!("Repository: acme/api\nenv: {}\nASK", planted.text))
+                .with_model("claude-sonnet-5-5")
+        };
+        let model = Recording(Default::default());
+        JournalLlm::new(&model, store.clone())
+            .complete(raw())
+            .await
+            .unwrap();
+        {
+            let sent = model.0.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(
+                !sent[0].prompt.contains(&planted.value),
+                "the model seam received a raw secret"
+            );
+        }
+        let key = super::journal::request_key(&raw());
+        assert!(
+            store
+                .dir()
+                .join("calls")
+                .join(format!("{key}.json"))
+                .exists(),
+            "the reply is filed under the key of what was sent"
+        );
+
+        let store = reopen(store);
+        JournalLlm::new(&model, store)
+            .complete(raw())
+            .await
+            .unwrap();
+        assert_eq!(
+            model.0.lock().unwrap().len(),
+            1,
+            "the resume replays: no second call"
+        );
+    })
+    .await;
+}
+
+// ── A refused reply is read again on a resume (Z-2: a paid reply is never paid for twice because a
+// parser was wrong) ──────────────────────────────────────────────────────────────────────────────
+
+/// A stage 2 reply whose one escalation has no `rank`: the parser before ecc043b4 refused it (and
+/// the run stored it as unusable); the parser now reads it.
+const NO_RANK_STAGE2_REPLY: &str = r#"{"summary":"s","subgroups":[{"label":"a","cause":"b","summary":"c","members":[0,1]}],"outliers":[],"escalations":[{"index":1,"reason":"rule_misfit","why":"the rule does not fit this site"}],"disagreements":[]}"#;
+
+/// What a CLI model says when it tries to use a tool instead of answering: no JSON in it.
+const TOOL_TRANSCRIPT_REPLY: &str =
+    "I will read the files first.\n<tool_use name=\"Read\">{\"path\":\"src/a.rs\"}</tool_use>";
+
+/// Store `text` as the reply to `req` the way the journal stores one that came back unusable, in
+/// the run `store`'s own folder: what a run made before a parser fix left behind.
+fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: bool) -> String {
+    use super::journal::{request_key, CallEntry, CallFile, EntryStatus, StoredResponse};
+    let key = request_key(req);
+    let (kind, repo, files) = super::journal::classify(req);
+    let mut entries = std::collections::BTreeMap::new();
+    entries.insert(
+        0,
+        CallEntry {
+            attempt: 1,
+            status: EntryStatus::Unusable,
+            at: "2026-11-05T16:00:00Z".to_string(),
+            response: Some(StoredResponse {
+                text: text.to_string(),
+                model: "stub".to_string(),
+                backend: "cli".to_string(),
+                cost_usd: Some(0.2),
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated,
+            }),
+            error: None,
+            class: None,
+            cost_usd: 0.2,
+            reason: Some(
+                "the reply is not a group reviewer reply that fits the closed schema".to_string(),
+            ),
+            output_path: None,
+        },
+    );
+    let file = CallFile {
+        key: key.clone(),
+        kind,
+        repo,
+        files,
+        entries,
+    };
+    let dir = store.dir().join("calls");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_atomic(
+        &dir.join(format!("{key}.json")),
+        &serde_json::to_vec(&file).unwrap(),
+    )
+    .unwrap();
+    key
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_stage2_reply_the_current_parser_accepts_resumes_with_zero_calls() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let req = stage2_request("Repository: acme/api\nno rank");
+        store_unusable(&store, &req, NO_RANK_STAGE2_REPLY, false);
+        let store = reopen(store);
+
+        // The run's own estimate no longer counts it as a call to send again.
+        let estimate = super::journal::estimate_remaining(store.dir(), &store.record());
+        assert_eq!(estimate.calls_to_send_again, 0, "{estimate:?}");
+        assert_eq!(estimate.calls_stored, 1, "{estimate:?}");
+
+        let model = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        let replayed = JournalLlm::new(&model, store.clone())
+            .complete(req)
+            .await
+            .unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            0,
+            "the paid reply is read again, not paid for again"
+        );
+        assert_eq!(replayed.text, NO_RANK_STAGE2_REPLY);
+        assert_eq!(
+            replayed.cost_usd,
+            Some(0.0),
+            "a replay costs this attempt nothing"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_tool_transcript_a_cut_off_reply_and_a_refused_one_are_still_asked_again() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let transcript = stage2_request("Repository: acme/api\ntranscript");
+        let cut_off = stage2_request("Repository: acme/api\ncut off");
+        let refused = stage2_request("Repository: acme/api\nrefused");
+        store_unusable(&store, &transcript, TOOL_TRANSCRIPT_REPLY, false);
+        // JSON that would parse, but the model was cut off: never a complete reply.
+        store_unusable(&store, &cut_off, NO_RANK_STAGE2_REPLY, true);
+        // A field the closed schema does not have: the current parser refuses it too.
+        store_unusable(
+            &store,
+            &refused,
+            r#"{"summary":"s","subgroups":[],"outliers":[],"escalations":[],"disagreements":[],"confidence":"high"}"#,
+            false,
+        );
+        let store = reopen(store);
+
+        let estimate = super::journal::estimate_remaining(store.dir(), &store.record());
+        assert_eq!(estimate.calls_to_send_again, 3, "{estimate:?}");
+
+        let model = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store.clone());
+        for req in [transcript, cut_off, refused] {
+            journal.complete(req).await.unwrap();
+        }
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            3,
+            "a reply the current parser still refuses is called again"
+        );
+    })
+    .await;
+}
+
+/// A reply that is replayed is a good one from then on: the run's accounting says so (a later
+/// failed pass sets it aside like any good reply, and the counts agree with the estimate).
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_replayed_refused_reply_is_stored_as_a_good_one() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let req = stage2_request("Repository: acme/api\nno rank");
+        let key = store_unusable(&store, &req, NO_RANK_STAGE2_REPLY, false);
+        let store = reopen(store);
+        let model = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        JournalLlm::new(&model, store.clone())
+            .complete(req)
+            .await
+            .unwrap();
+        let on_disk: super::journal::CallFile = serde_json::from_slice(
+            &std::fs::read(store.dir().join("calls").join(format!("{key}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            on_disk.entries[&0].status,
+            super::journal::EntryStatus::Done
+        );
+        assert!(
+            on_disk.entries[&0].reason.is_none(),
+            "{:?}",
+            on_disk.entries[&0].reason
+        );
+    })
+    .await;
+}
+
+/// Every other stage that reads a reply decides usability the same way (a JSON object that
+/// parses, not cut off), so a stored unusable reply that parses now is replayed there too.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_unusable_scan_reply_that_parses_now_is_replayed_and_one_with_no_json_is_not() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let scan = |what: &str| {
+            LlmRequest::new(format!("Repository: acme/api\n{what}"))
+                .with_system(crate::ai_audit::audit_system_prompt_with(false))
+        };
+        let parses = scan("parses");
+        let none = scan("none");
+        store_unusable(
+            &store,
+            &parses,
+            r#"{"findings":[],"proposed_rules":[],"needs_files":[]}"#,
+            false,
+        );
+        store_unusable(&store, &none, "no json at all", false);
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store);
+        journal.complete(parses).await.unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            0,
+            "the reply that parses is replayed"
+        );
+        journal.complete(none).await.unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            1,
+            "the reply with no JSON is asked again"
+        );
+    })
+    .await;
+}
+
+// ── The files of a run are written whole or not at all ──────────────────────────────────────────
+
+/// Two writes to one path never share a temporary file: a shared name lets two writers (two
+/// threads of this process) interleave their bytes in it, and the rename then publishes a record
+/// neither of them wrote.
+#[test]
+fn every_atomic_write_has_its_own_temporary_file_in_the_same_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("run.json");
+    let a = temp_path_for(&target);
+    let b = temp_path_for(&target);
+    assert_ne!(a, b, "two writes, two temporary files");
+    assert_eq!(
+        a.parent(),
+        target.parent(),
+        "same folder, so the rename is atomic"
+    );
+    assert_eq!(b.parent(), target.parent());
+}
+
+/// Eight threads write different whole records to one path, over and over, while a reader reads
+/// it. Every read, and the end state, is one writer's whole record.
+#[test]
+fn concurrent_writers_never_publish_a_mixed_or_cut_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = std::sync::Arc::new(dir.path().join("call.json"));
+    write_atomic(&target, &vec![b'0'; 300_000]).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (target, stop) = (target.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut bad = 0usize;
+            while !stop.load(Ordering::SeqCst) {
+                if let Ok(bytes) = std::fs::read(&*target) {
+                    let first = bytes.first().copied();
+                    if bytes.len() != 300_000 || bytes.iter().any(|b| Some(*b) != first) {
+                        bad += 1;
+                    }
+                }
+            }
+            bad
+        })
+    };
+    let writers: Vec<_> = (0..8u8)
+        .map(|n| {
+            let target = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    write_atomic(&target, &vec![b'a' + n; 300_000]).unwrap();
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    stop.store(true, Ordering::SeqCst);
+    let bad = reader.join().unwrap();
+    assert_eq!(bad, 0, "a reader saw a mixed or cut record");
+    let end = std::fs::read(&*target).unwrap();
+    assert_eq!(end.len(), 300_000);
+    assert!(
+        end.iter().all(|b| *b == end[0]),
+        "the end state is one writer's record"
+    );
+}
+
+/// A crash between the temporary file and the rename leaves a cut temporary file beside the
+/// record. The record is still the old whole one, and nothing that lists the folder takes the
+/// temporary file for a record.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_cut_temporary_file_is_never_read_as_a_record() {
+    use super::journal::{request_key, CallFile};
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let req = ask("a question");
+    let key = request_key(&req);
+    let dir = store.dir().join("calls");
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = CallFile {
+        key: key.clone(),
+        kind: PartKind::Other,
+        repo: String::new(),
+        files: Vec::new(),
+        entries: Default::default(),
+    };
+    write_atomic(
+        &dir.join(format!("{key}.json")),
+        &serde_json::to_vec(&good).unwrap(),
+    )
+    .unwrap();
+    // The crash: a temporary file cut in the middle of its JSON, in the folder.
+    let cut = temp_path_for(&dir.join(format!("{key}.json")));
+    std::fs::write(
+        &cut,
+        br#"{"key":"zz","kind":"other","entries":{"0":{"attempt":1,"sta"#,
+    )
+    .unwrap();
+
+    let again = reopen(store);
+    let listed: Vec<CallFile> = std::fs::read_dir(again.dir().join("calls"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).ok())
+        .collect();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].key, key);
+    let estimate = super::journal::estimate_remaining(again.dir(), &again.record());
+    assert_eq!(
+        estimate.calls_stored + estimate.calls_to_send_again,
+        0,
+        "{estimate:?}"
+    );
+}
+
+// ── A refused reply is replayed only if the kind's OWN parser accepts it ───────────────────────
+
+/// A tool-call transcript that happens to hold a JSON object (the tool's input). It is a JSON
+/// object that parses, and it is not a reply of any stage.
+const TRANSCRIPT_WITH_OBJECT: &str =
+    "I will read the file first.\n<tool_use name=\"Read\">{\"path\":\"src/a.rs\"}</tool_use>\nThen I will answer.";
+
+/// A refusal that quotes an object.
+const REFUSAL_WITH_OBJECT: &str =
+    "I cannot help with that. The request {\"findings\": \"none\"} is not something I can answer.";
+
+fn kind_request(kind: &str, what: &str) -> LlmRequest {
+    let base = LlmRequest::new(format!("Repository: acme/api\n{what}"));
+    match kind {
+        "scan" => base.with_system(crate::ai_audit::audit_system_prompt_with(false)),
+        "calibration" => base.with_system(crate::ai_audit::verify_system_prompt()),
+        "alternatives" => base.with_system(crate::ai_audit::alternatives_system_prompt()),
+        _ => base,
+    }
+}
+
+/// What each kind's own parser accepts (the shape its stage asks for).
+fn accepted_reply(kind: &str) -> &'static str {
+    match kind {
+        "scan" => r#"{"findings":[],"proposed_rules":[],"needs_files":[]}"#,
+        "calibration" => r#"{"severity":"medium","real":"yes","reason":"checked","effort":"low"}"#,
+        "alternatives" => r#"{"recommendations":[]}"#,
+        _ => r#"{"anything":true}"#,
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_transcript_or_refusal_holding_an_object_is_called_again_for_every_kind() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let mut asked = Vec::new();
+        for kind in ["scan", "calibration", "alternatives", "other"] {
+            for (i, text) in [TRANSCRIPT_WITH_OBJECT, REFUSAL_WITH_OBJECT]
+                .into_iter()
+                .enumerate()
+            {
+                let req = kind_request(kind, &format!("{kind} {i}"));
+                store_unusable(&store, &req, text, false);
+                asked.push(req);
+            }
+        }
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store);
+        for req in asked.iter().cloned() {
+            journal.complete(req).await.unwrap();
+        }
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            asked.len(),
+            "no transcript or refusal is replayed as a reply"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_reply_the_kinds_own_parser_accepts_is_replayed_with_zero_calls() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let mut asked = Vec::new();
+        // "other" has no parser a resume can run (the clone judge and the deep lenses each read
+        // their own shape, and the request that would say which is not stored): it is never
+        // replayed from Unusable, so it is not in this list.
+        for kind in ["scan", "calibration", "alternatives"] {
+            let req = kind_request(kind, kind);
+            store_unusable(&store, &req, accepted_reply(kind), false);
+            asked.push(req);
+        }
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store);
+        for req in asked {
+            journal.complete(req).await.unwrap();
+        }
+        assert_eq!(model.1.load(Ordering::SeqCst), 0, "zero calls");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_unusable_reply_of_the_other_kind_is_never_replayed() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let req = kind_request("other", "judge");
+        store_unusable(&store, &req, accepted_reply("other"), false);
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        JournalLlm::new(&model, store).complete(req).await.unwrap();
+        assert_eq!(model.1.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+/// The fresh classification uses the same parsers: a transcript with an object in it is stored
+/// as unusable when it comes back, not as a good reply.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_fresh_transcript_holding_an_object_is_stored_unusable() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Fixed(TRANSCRIPT_WITH_OBJECT.to_string(), AtomicUsize::new(0));
+        let req = kind_request("scan", "fresh");
+        JournalLlm::new(&model, store.clone())
+            .complete(req.clone())
+            .await
+            .unwrap();
+        let store = reopen(store);
+        JournalLlm::new(&model, store).complete(req).await.unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            2,
+            "asked again, not replayed"
         );
     })
     .await;

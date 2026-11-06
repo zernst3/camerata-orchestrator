@@ -793,6 +793,7 @@ dependencies = [
  "camerata-api-types",
  "camerata-core",
  "camerata-liveness",
+ "camerata-secrets",
  "camerata-worktracker",
  "chrono",
  "serde",
@@ -967,6 +968,7 @@ dependencies = [
  "async-trait",
  "camerata-api-types",
  "camerata-core",
+ "camerata-secrets",
  "camerata-test-env",
  "serde",
  "serde_json",
@@ -997,6 +999,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-api-types",
+ "camerata-secrets",
  "camerata-test-env",
  "keyring",
  "reqwest",
@@ -1117,6 +1120,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
 ]
 
 [[package]]

@@ -532,6 +532,11 @@ pub struct ScanLedger {
     /// sites no sub-group named. `None` until the group reviewer has run.
     #[serde(default)]
     escalation: Option<EscalationBlock>,
+    /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
+    /// escalation block. `None` until the group reviewer has run, and for a ledger written
+    /// before the record existed.
+    #[serde(default)]
+    group_review: Option<GroupReviewCounts>,
     /// Per-stage token and cost telemetry for the scan (operator-only; see
     /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
     /// renders it. `None` for a scan that made no model call or a ledger written before this
@@ -871,6 +876,23 @@ pub struct FileCapHit {
     /// recorded, which is read as the production limit.
     #[serde(default)]
     pub limit: usize,
+}
+
+/// What the group reviewer was asked, in the terms the pre-flight estimate is made in, recorded
+/// with the run so the estimate can be refitted from saved runs
+/// (`camerata_ui_core::scan::GROUP_REVIEW_SATURATION_K`). Set by [`ScanLedger::record_escalation`]
+/// from the ledger's own stages and rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupReviewCounts {
+    /// The sites stage 1 calibrated: what the estimate's site count predicts.
+    pub stage1_sites: usize,
+    /// The sites stage 2 read (stage 1's, plus the rows the merge, the previews and the evidence
+    /// check added).
+    pub sites: usize,
+    /// The rule groups stage 2 was asked about: the ones it read and the ones it could not.
+    pub groups: usize,
+    /// The rules that ran, the ceiling on the groups.
+    pub rules_in_play: usize,
 }
 
 /// A10: how many rows the engine threw out and kept, by reason (`engine_discard`). Every one of
@@ -1402,7 +1424,25 @@ impl ScanLedger {
 
     /// Record the escalation formula's outcome for the run, replacing an earlier one.
     pub fn record_escalation(&mut self, block: EscalationBlock) {
+        let rows_in = |stage: &str| -> usize {
+            self.stages
+                .iter()
+                .filter(|s| s.stage == stage)
+                .map(|s| s.rows_in)
+                .sum()
+        };
+        self.group_review = Some(GroupReviewCounts {
+            stage1_sites: rows_in("ai-calibration"),
+            sites: rows_in(crate::ai_audit::group_review::STAGE_SAMPLE_NAME),
+            groups: block.rules_reviewed + block.rules_failed,
+            rules_in_play: self.merged_rules().values().filter(|r| r.ran).count(),
+        });
         self.escalation = Some(block);
+    }
+
+    /// The sites and groups of the run, once the group reviewer has run.
+    pub fn group_review_counts(&self) -> Option<&GroupReviewCounts> {
+        self.group_review.as_ref()
     }
 
     /// The escalation formula's outcome, once the group reviewer has run.
@@ -3936,5 +3976,48 @@ mod tests {
                 .and_then(|e| e.coverage_note.as_deref()),
             Some(CONFIG_GATED_NOTE)
         );
+    }
+    /// The run's sites and groups are recorded with the escalation block, in the terms the
+    /// pre-flight estimate is made in, so the estimate can be refitted from saved runs.
+    #[test]
+    fn the_group_review_counts_of_a_run_are_recorded_with_its_escalation_block() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule("acme/api", "SEC-A-1", RuleTier::Semantic, true, None, 5, 3);
+        ledger.record_rule("acme/api", "SEC-B-1", RuleTier::Semantic, true, None, 5, 0);
+        ledger.record_rule(
+            "acme/api",
+            "SEC-C-1",
+            RuleTier::Semantic,
+            false,
+            Some("off".to_string()),
+            0,
+            0,
+        );
+        ledger.record_stage("ai-calibration", 3, 3, StageAccounting::default());
+        ledger.record_stage("ai-group-review", 5, 5, StageAccounting::default());
+        assert!(
+            ledger.group_review_counts().is_none(),
+            "nothing before stage 2 ran"
+        );
+        ledger.record_escalation(EscalationBlock {
+            total_sites: 5,
+            rules_reviewed: 1,
+            rules_failed: 1,
+            ..EscalationBlock::default()
+        });
+        let counts = ledger
+            .group_review_counts()
+            .expect("recorded with the block");
+        assert_eq!(counts.stage1_sites, 3, "what stage 1 calibrated");
+        assert_eq!(counts.sites, 5, "what stage 2 read");
+        assert_eq!(
+            counts.groups, 2,
+            "rule groups read, and the one that failed"
+        );
+        assert_eq!(counts.rules_in_play, 2, "rules that ran");
+        // It survives the file.
+        let back: ScanLedger =
+            serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
+        assert_eq!(back.group_review_counts(), ledger.group_review_counts());
     }
 }

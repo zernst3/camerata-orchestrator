@@ -54,6 +54,10 @@ pub struct HoldSet {
     /// reviewer recorded, an evidence or junk row they ruled on): the reasons in
     /// [`crate::decisions::held_keys`], read from the sealed report.
     pub kept_out_of_a_batch: std::collections::HashSet<String>,
+    /// Why each row in [`Self::awaiting_a_ruling`] is held, by site key, in the gate's order: the
+    /// reason and the gate's detail for it (empty when it has none). A row two checks refuse has
+    /// both. The chat assistant reads this to answer "why is this held".
+    pub reasons: std::collections::BTreeMap<String, Vec<(HoldReason, String)>>,
 }
 
 /// The hold sets for `reviewed`. Nothing here is a rule of its own: the gate's rows come from
@@ -78,9 +82,18 @@ pub fn hold_set(reviewed: &ReviewedReport) -> HoldSet {
         reviewed.engine_check(),
     ));
     kept_out_of_a_batch.extend(awaiting_a_ruling.iter().cloned());
+    let mut reasons: std::collections::BTreeMap<String, Vec<(HoldReason, String)>> =
+        std::collections::BTreeMap::new();
+    for held in gate.held.iter().chain(&gate.merged_without_decision) {
+        let for_row = reasons.entry(held.key.clone()).or_default();
+        if !for_row.iter().any(|(r, _)| *r == held.reason) {
+            for_row.push((held.reason, held.detail.clone()));
+        }
+    }
     HoldSet {
         awaiting_a_ruling,
         kept_out_of_a_batch,
+        reasons,
     }
 }
 

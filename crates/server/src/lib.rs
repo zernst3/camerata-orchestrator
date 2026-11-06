@@ -36,6 +36,7 @@ pub mod api_agent_driver;
 pub mod app_dirs;
 pub mod arm;
 pub mod auto_fire;
+mod chat_review_context;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
@@ -4617,6 +4618,9 @@ mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod model_input_chat_tests;
 
 #[cfg(test)]
 mod site_key_paths_tests;

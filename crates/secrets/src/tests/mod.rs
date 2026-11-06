@@ -5,6 +5,7 @@ mod detection;
 mod detector_edges;
 mod firebase_spans;
 mod json_walk;
+mod model_input;
 mod redaction;
 mod rules;
 mod source_hygiene;
