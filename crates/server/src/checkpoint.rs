@@ -312,6 +312,11 @@ impl StageCheckpoint {
         }
         let mut json = serde_json::to_string(line).map_err(std::io::Error::other)?;
         json.push('\n');
+        // A crash can leave the last line cut short, with no newline. Start on a line of our own,
+        // or the new record is glued to the cut one and the pair reads as one broken line.
+        if file_ends_mid_line(&self.absorbed) {
+            json.insert(0, '\n');
+        }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -335,9 +340,7 @@ impl StageCheckpoint {
             std::fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_string_pretty(batches).map_err(std::io::Error::other)?;
-        let tmp = self.batches.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &self.batches)
+        crate::run_store::write_atomic(&self.batches, json.as_bytes())
     }
 
     /// Every submission intent still on file: the ones written before a `submit` and not yet
@@ -355,10 +358,24 @@ impl StageCheckpoint {
             std::fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_string_pretty(intents).map_err(std::io::Error::other)?;
-        let tmp = self.intents.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &self.intents)
+        crate::run_store::write_atomic(&self.intents, json.as_bytes())
     }
+}
+
+/// Whether the file at `path` has bytes and its last byte is not a newline (an append was cut short).
+fn file_ends_mid_line(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.seek(SeekFrom::End(0)) else {
+        return false;
+    };
+    if len == 0 || file.seek(SeekFrom::End(-1)).is_err() {
+        return false;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).is_ok() && last[0] != b'\n'
 }
 
 /// A fresh random token for one submission (see [`SubmitIntent::nonce`]).
@@ -635,6 +652,62 @@ mod tests {
         cp.save_intents(&[]).unwrap();
         assert!(cp.intents().is_empty());
         assert_ne!(new_submit_nonce(), new_submit_nonce());
+    }
+
+    /// A crash that cuts an appended line short leaves a line with no newline. The next record
+    /// must not be glued to it (the two would read as one broken line and BOTH be lost): it
+    /// starts on its own line, the cut line is skipped, and the new record reads back.
+    #[test]
+    fn a_record_appended_after_a_torn_line_is_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        cp.record_absorbed(&line("site-1", "first")).unwrap();
+        let path = dir.path().join("calibration.jsonl");
+        let mut torn = std::fs::read(&path).unwrap();
+        torn.extend_from_slice(br#"{"key":"site-2","model":"m","backe"#);
+        std::fs::write(&path, torn).unwrap();
+
+        cp.record_absorbed(&line("site-3", "third")).unwrap();
+
+        let keys: Vec<String> = cp.absorbed().into_iter().map(|l| l.key).collect();
+        assert_eq!(
+            keys,
+            ["site-1", "site-3"],
+            "the cut line is skipped, the new one read"
+        );
+    }
+
+    /// The batch and intent lists are written whole or not at all: a half-written list is never
+    /// what a reader sees, and no temp file is left beside them.
+    #[test]
+    fn the_batch_list_is_written_through_the_atomic_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = StageCheckpoint::new(dir.path(), "calibration");
+        let record = BatchRecord {
+            batch_id: "msgbatch_1".to_string(),
+            ttl: "1h".to_string(),
+            items: BTreeMap::new(),
+            members: BTreeMap::new(),
+            settled: false,
+            nonce: None,
+        };
+        cp.save_batches(std::slice::from_ref(&record)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("calibration.batches.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "a run's files are private to the user");
+        }
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

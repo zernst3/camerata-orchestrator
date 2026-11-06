@@ -341,14 +341,48 @@ pub fn classify(req: &LlmRequest) -> (PartKind, String, Vec<String>) {
 /// ([`EntryStatus::Unusable`]) is replayed, because the stage's next round splits the batch and
 /// that smaller request was stored under its own key; asking the cut-off request again would pay
 /// twice for a reply that will be cut off again. (A last round of one finding has no smaller
-/// round to split to; that case still replays.) Every other stage (scan, calibration,
-/// alternatives) asks an unusable reply again. A failed call has no reply to replay.
+/// round to split to; that case still replays.) A failed call has no reply to replay.
+///
+/// Every other stage asks an unusable reply again ONLY IF the current parser still refuses it
+/// ([`entry_replays`]): "unusable" was decided by the parser of the run that stored it, and a
+/// paid reply is never paid for twice because a parser was wrong.
 pub(crate) fn replays_on_resume(status: EntryStatus, kind: PartKind) -> bool {
     match status {
         EntryStatus::Done => true,
         EntryStatus::Unusable => matches!(kind, PartKind::Fix | PartKind::Detail),
         EntryStatus::Rejected | EntryStatus::Failed => false,
     }
+}
+
+/// Whether the stored `entry` of a call over a `kind` stage is answered from the store on a
+/// resume: [`replays_on_resume`], and for a stored unusable reply of a stage that does not replay
+/// those, whether the CURRENT parser accepts the stored text ([`reply_is_good`]: finished, a JSON
+/// object that parses, and for the group reviewer its closed schema).
+///
+/// Why. A reply is stored as unusable when the parser of the run that made the call refused it,
+/// and the call was paid for. When the parser is later fixed (a missing escalation rank is read
+/// as unranked, ecc043b4) the stored text is a good reply, and asking again would pay twice for
+/// it. Re-reading it is free. A reply the current parser still refuses (a tool-call transcript,
+/// a reply cut off at the output limit, a field the schema does not have) is asked again.
+///
+/// Every kind that can be stored unusable and what this does for it:
+/// - scan, calibration, alternatives, other (the clone judge, the deep tier): the reply is
+///   usable when it is finished and holds a JSON object that parses; re-read with that rule.
+/// - group review: also the closed schema ([`Stage2Reply::parse`] or [`parse_rule_summary`]).
+/// - fix, detail: replayed whatever the parser says (see [`replays_on_resume`]); their own
+///   stage reads a replayed reply entry by entry and re-asks only what it cannot read.
+/// - tools, merge, export: no model call is stored under them.
+///
+/// [`Stage2Reply::parse`]: crate::ai_audit::group_review::Stage2Reply::parse
+pub(crate) fn entry_replays(entry: &CallEntry, kind: PartKind) -> bool {
+    if replays_on_resume(entry.status, kind) {
+        return true;
+    }
+    entry.status == EntryStatus::Unusable
+        && entry
+            .response
+            .as_ref()
+            .is_some_and(|stored| reply_is_good(kind, &stored.replayed()))
 }
 
 /// True when a reply is one a resume may return again: finished, with a JSON object that parses.
@@ -415,21 +449,32 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
         });
         // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
         let file_kind = file.kind;
-        let good = file
-            .entries
-            .values()
-            .filter(|e| replays_on_resume(e.status, file_kind))
-            .filter_map(|e| e.response.as_ref())
-            .nth(idx);
         let good_slot = file
             .entries
             .iter()
-            .filter(|(_, e)| replays_on_resume(e.status, file_kind) && e.response.is_some())
+            .filter(|(_, e)| entry_replays(e, file_kind) && e.response.is_some())
             .map(|(slot, _)| *slot)
             .nth(idx);
+        let good = good_slot.and_then(|slot| {
+            // A refused reply the current parser accepts is a good reply from here on: stored as
+            // one, so the run's accounting (a later set-aside, the counts) agrees with the replay.
+            let entry = file.entries.get_mut(&slot)?;
+            if entry.status == EntryStatus::Unusable && !replays_on_resume(entry.status, file_kind)
+            {
+                entry.status = EntryStatus::Done;
+                entry.reason = None;
+                if let Ok(bytes) = serde_json::to_vec(&*file) {
+                    let _ = write_atomic(&call_path(&dir, &key), &bytes);
+                }
+            }
+            file.entries
+                .get(&slot)?
+                .response
+                .as_ref()
+                .map(StoredResponse::replayed)
+        });
         match good {
-            Some(stored) => {
-                let replay = stored.replayed();
+            Some(replay) => {
                 if let Some(slot) = good_slot {
                     st.last_served.insert(key.clone(), slot);
                 }
@@ -1000,7 +1045,7 @@ pub(crate) fn count_calls(store: &RunStore) {
                     p.kind == file.kind
                         && (p.repo == file.repo || (file.repo.is_empty() && single_repo))
                 }) {
-                    if replays_on_resume(entry.status, file.kind) {
+                    if entry_replays(entry, file.kind) {
                         part.calls_done += 1;
                     } else {
                         part.calls_not_done += 1;
@@ -1023,7 +1068,7 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
             .filter_map(|e| read_json::<CallFile>(&e.path()))
         {
             for entry in file.entries.values() {
-                if replays_on_resume(entry.status, file.kind) {
+                if entry_replays(entry, file.kind) {
                     stored += 1;
                     spent += entry.cost_usd;
                 } else {

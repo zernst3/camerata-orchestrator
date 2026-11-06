@@ -406,15 +406,28 @@ pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The temporary file one write to `path` goes through: beside `path` (so the rename stays inside
+/// one folder and is atomic).
+///
+/// The name carries the process id AND a counter: two writers of one process (two threads, a
+/// quarantine pass and a fresh call) writing the same record must not share a temporary file, or
+/// their bytes interleave in it and the rename publishes a record neither wrote.
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// Write `bytes` to `path` so a reader (or a crash) sees the old file or the new one, whole.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(
-        ".{}.tmp-{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        std::process::id()
-    ));
+    let tmp = temp_path_for(path);
     {
         let mut file = std::fs::File::create(&tmp)?;
         #[cfg(unix)]
