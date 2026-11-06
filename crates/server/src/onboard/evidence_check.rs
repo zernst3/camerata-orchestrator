@@ -64,15 +64,20 @@ pub enum Exempt {
     /// A dependency advisory: its snippet is `package@version`, which is read from a lockfile by
     /// a tool, not quoted by a model.
     DependencyAdvisory,
+    /// A row from an outside tool whose snippet is the tool's own message (the scan has no code
+    /// line to quote for a SARIF result, so the message stands in). The tool located the row;
+    /// its message is a description that is not expected to occur in the file.
+    ToolMessage,
 }
 
 impl Exempt {
     /// Every exempt kind.
-    pub const ALL: [Exempt; 4] = [
+    pub const ALL: [Exempt; 5] = [
         Exempt::NoSnippet,
         Exempt::NoCitedLine,
         Exempt::Informational,
         Exempt::DependencyAdvisory,
+        Exempt::ToolMessage,
     ];
 
     /// A short name for the kind, for logs and tests.
@@ -82,6 +87,7 @@ impl Exempt {
             Exempt::NoCitedLine => "no cited line",
             Exempt::Informational => "convention summary or not-assessed row",
             Exempt::DependencyAdvisory => "dependency advisory",
+            Exempt::ToolMessage => "tool message in place of a quote",
         }
     }
 }
@@ -100,10 +106,21 @@ pub fn exemption(f: &Finding) -> Option<Exempt> {
     if f.snippet.trim().is_empty() {
         return Some(Exempt::NoSnippet);
     }
+    if snippet_is_tool_message(f) {
+        return Some(Exempt::ToolMessage);
+    }
     if f.line == 0 {
         return Some(Exempt::NoCitedLine);
     }
     None
+}
+
+/// Whether `f` is a row of an outside tool whose snippet is the tool's message: the scan builds a
+/// preview row's explanation from the message, then quotes the head of the same message as the
+/// snippet, so the snippet is a prefix of the detail. A snippet the tool really quoted from the
+/// file is not a prefix of its explanation, and is held to the file like any other.
+fn snippet_is_tool_message(f: &Finding) -> bool {
+    f.preview && f.preview_tool.is_some() && f.detail.trim_start().starts_with(f.snippet.trim())
 }
 
 /// Whitespace-normalised: every run of whitespace is one space, ends trimmed.

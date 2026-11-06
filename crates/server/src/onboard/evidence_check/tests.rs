@@ -161,13 +161,21 @@ fn every_exempt_kind_is_left_alone_and_none_is_counted_as_checked() {
     }));
     let mut dependency = row(3, "lodash@4.17.20");
     dependency.rule_id = crate::dep_audit::DEP_AUDIT_RULE_ID.to_string();
-    let originals = vec![no_snippet, no_line, convention, not_assessed, dependency];
+    let tool_message = sarif_rows("Possible open redirect: no allowlist check.").remove(0);
+    let originals = vec![
+        no_snippet,
+        no_line,
+        convention,
+        not_assessed,
+        dependency,
+        tool_message,
+    ];
     let mut rows = originals.clone();
     let counts = verify_evidence(&mut rows, &files(), None);
     assert_eq!(rows, originals, "an exempt row is not touched");
-    assert_eq!(counts.exempt, 5);
+    assert_eq!(counts.exempt, 6);
     assert_eq!(counts.checked, 0);
-    // The five rows hit the four kinds in the one list.
+    // The six rows hit every kind in the one list.
     let kinds: Vec<Exempt> = originals.iter().filter_map(exemption).collect();
     for kind in Exempt::ALL {
         assert!(kinds.contains(&kind), "{}", kind.label());
@@ -454,4 +462,58 @@ fn every_absorbed_site_is_checked_or_exempt_and_the_two_add_up() {
     ledger.record_evidence_check(counts);
     assert_eq!(ledger.evidence_check().site_exempt, 12);
     assert_eq!(ledger.evidence_check().sites_seen(), total_sites * 2);
+}
+
+// ---- a tool's message is not a quotation ----------------------------------------------------
+
+/// A preview row as the scan builds it from a tool's SARIF: the snippet is the tool's message.
+fn sarif_rows(message: &str) -> Vec<Finding> {
+    let sarif = serde_json::json!({"runs": [{"results": [{
+        "ruleId": "camerata.security.taint-open-redirect-js",
+        "level": "error",
+        "message": {"text": message},
+        "locations": [{"physicalLocation": {
+            "artifactLocation": {"uri": "src/app.ts"},
+            "region": {"startLine": 6}
+        }}]
+    }]}]});
+    crate::scan_tools::parse_sarif(
+        "acme/api",
+        crate::scan_tools::ScanTool::Semgrep,
+        &sarif.to_string(),
+    )
+    .expect("the SARIF parses")
+}
+
+/// The shape from lumen: semgrep's taint rules say what they found in prose that never appears in
+/// the file, and every such row was escalated as unverified evidence. The tool gave the row its
+/// line; its message is a description, not code the row quotes.
+#[test]
+fn a_preview_row_whose_snippet_is_the_tools_message_is_not_held_for_unverified_evidence() {
+    let mut rows = sarif_rows(
+        "Possible open redirect: a redirect target this function did not construct itself is \
+         handed to a redirect response with no allowlist check.",
+    );
+    assert_eq!(
+        exemption(&rows[0]),
+        Some(Exempt::ToolMessage),
+        "{:?}",
+        rows[0].snippet
+    );
+    let counts = verify_evidence(&mut rows, &files(), None);
+    assert!(!marked(&rows[0]), "{:?}", rows[0].captures);
+    assert_eq!((counts.exempt, counts.unverified), (1, 0));
+}
+
+/// A tool row that does quote code is still held to the file: the exemption is for a snippet that
+/// IS the message, not for every preview row.
+#[test]
+fn a_preview_row_that_quotes_code_that_is_not_there_is_still_held() {
+    let mut quoted = row(6, "db.execute(buildQuery(untrusted))");
+    quoted.preview = true;
+    quoted.preview_tool = Some("eslint".to_string());
+    assert_eq!(exemption(&quoted), None);
+    let mut rows = vec![quoted];
+    verify_evidence(&mut rows, &files(), None);
+    assert!(marked(&rows[0]));
 }
