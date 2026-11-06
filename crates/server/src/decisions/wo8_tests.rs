@@ -338,7 +338,7 @@ async fn a_no_on_a_thrown_out_finding_restores_and_holds_it() {
 // ── one hold list ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn held_keys_is_the_only_hold_list() {
+async fn hold_set_is_the_only_hold_list() {
     // One rule node with a plain row and a row for each reason a row is held.
     let plain = row("SEC-1", "src/plain.rs", 1, "let p = plain();");
     let mut unverified = row("SEC-1", "src/unverified.rs", 2, "let u = unverified();");
