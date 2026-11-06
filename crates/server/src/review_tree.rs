@@ -204,9 +204,48 @@ struct RawEscalation {
     /// The row is of a convention rule, not a security rule.
     convention: bool,
     stage2_rank: u32,
+    /// The row's own severity.
     severity: String,
+    /// The group reviewer's severity for the row, when it disagreed (capped for a convention row).
+    stage2_severity: Option<String>,
     why: String,
     site: (String, String, usize),
+}
+
+impl RawEscalation {
+    /// The severity the row is ordered by: the higher of its own and the reviewer's.
+    fn ordering_severity(&self) -> &str {
+        match &self.stage2_severity {
+            Some(s2)
+                if crate::ai_audit::severity_rank(s2)
+                    > crate::ai_audit::severity_rank(&self.severity) =>
+            {
+                s2
+            }
+            _ => &self.severity,
+        }
+    }
+}
+
+/// The group reviewer's own severity for `row`, from its recorded disagreement with stage 1 (R-4).
+/// A convention rule's row is never rated critical by it, the cap stage 1 has: the value is held
+/// at high, so the back door the stage 1 hold closed stays closed.
+fn stage2_severity_of(row: &Finding) -> Option<String> {
+    let mine = row
+        .review
+        .stage2_disagreement
+        .iter()
+        .find(|d| d.field == camerata_api_types::review::DisagreementField::Severity)?
+        .mine
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(mine.as_str(), "critical" | "high" | "medium" | "low") {
+        return None;
+    }
+    if mine == "critical" && crate::ai_audit::is_convention_rule_row(row) {
+        return Some("high".to_string());
+    }
+    Some(mine)
 }
 
 /// One site (repo, path and line) with every escalated row at it: one slot of the budget (R-1).
@@ -236,7 +275,7 @@ impl RankedSite {
         });
         let severity = members
             .iter()
-            .map(|m| m.severity.as_str())
+            .map(RawEscalation::ordering_severity)
             .max_by_key(|s| crate::ai_audit::severity_rank(s))
             .unwrap_or_default()
             .to_string();
@@ -296,6 +335,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                         convention: crate::ai_audit::is_convention_rule_row(row),
                         stage2_rank: e.rank,
                         severity: row.severity.clone(),
+                        stage2_severity: stage2_severity_of(row),
                         why: e.why.clone(),
                         site: site_of(row),
                     },
@@ -325,6 +365,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                         convention: false,
                         stage2_rank: 0,
                         severity: f.severity.clone(),
+                        stage2_severity: stage2_severity_of(f),
                         why: "The quoted evidence was not found in the scanned file, so the \
                               release gate needs a decision on this site."
                             .to_string(),
@@ -411,7 +452,8 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 key: r.key,
                 node_id: r.node_id,
                 reason: r.reason,
-                severity: site.severity.clone(),
+                severity: r.severity,
+                stage2_severity: r.stage2_severity,
                 stage2_rank: r.stage2_rank,
                 global_rank: candidates.len() as u32 + 1,
                 slot: slot as u32 + 1,

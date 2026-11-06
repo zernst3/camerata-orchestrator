@@ -578,9 +578,10 @@ fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason()
     let of = |key: &str| ranked.candidates.iter().find(|c| c.key == key).unwrap();
     assert_eq!(
         of(&a.site_key).severity,
-        "critical",
-        "the low row carries its site's highest severity"
+        "low",
+        "each row keeps its own severity; the site is ordered by its highest"
     );
+    assert_eq!(of(&b.site_key).severity, "critical");
     assert_eq!(
         of(&a.site_key).reason,
         EscalationReason::UnauthenticatedReach
@@ -853,5 +854,113 @@ fn a_lone_convention_rule_row_keeps_the_reviewers_security_reason() {
     assert_eq!(
         c.over_budget_reason,
         Some(EscalationReason::AuthorizationBypass)
+    );
+}
+
+// ---- R-4: the reviewer's higher severity orders a row; the row keeps its own ----------------
+
+fn disagree_on_severity(f: &mut Finding, stage1: &str, mine: &str) {
+    f.review
+        .stage2_disagreement
+        .push(camerata_api_types::review::Stage2Disagreement {
+            field: camerata_api_types::review::DisagreementField::Severity,
+            stage1: stage1.to_string(),
+            mine: mine.to_string(),
+            why: "the reviewer reads it higher".to_string(),
+        });
+}
+
+/// Lumen's 0007_storage.sql:6 shape: stage 1 medium, the reviewer said high. Beside a medium row
+/// of the same reason that the reviewer ranked first, it now goes first, and its own severity
+/// is still medium.
+#[test]
+fn a_row_the_reviewer_rates_higher_is_ordered_by_that_and_keeps_its_own_severity() {
+    let mut rows = vec![
+        row_at(RULE_A, "supabase/migrations/0007_storage.sql", 6, "medium"),
+        row_at(RULE_A, "app/other.ts", 3, "medium"),
+    ];
+    disagree_on_severity(&mut rows[0], "medium", "high");
+    let (mut tree, rows) = tree_of_rows(rows);
+    let storage = row_of(&rows, RULE_A, "supabase/migrations/0007_storage.sql").clone();
+    let other = row_of(&rows, RULE_A, "app/other.ts").clone();
+    rule_node_of(&mut tree, &storage).escalations.push(esc(
+        &storage,
+        EscalationReason::CrossTenant,
+        2,
+    ));
+    rule_node_of(&mut tree, &other)
+        .escalations
+        .push(esc(&other, EscalationReason::CrossTenant, 1));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(1));
+    let first = &ranked.candidates[0];
+    assert_eq!(
+        first.key, storage.site_key,
+        "the reviewer's high goes first"
+    );
+    assert!(first.escalated);
+    assert_eq!(first.severity, "medium", "the row keeps its own severity");
+    assert_eq!(first.stage2_severity.as_deref(), Some("high"));
+    assert!(!ranked.candidates[1].escalated);
+    // And the stored candidates re-mark the same way: the reviewer's high is eligible to pass
+    // the budget as cross-tenant access at high.
+    let mut again = ranked.candidates.clone();
+    let mut budget = ranked.budget;
+    budget.floor = 0;
+    camerata_api_types::review::re_mark(
+        &mut again,
+        &mut budget,
+        &EscalationReason::default_over_budget_set(),
+    );
+    assert!(again[0].escalated, "{:?}", again[0]);
+    assert_eq!(
+        again[0].over_budget_reason,
+        Some(EscalationReason::CrossTenant)
+    );
+    assert!(!again[1].escalated);
+}
+
+/// The reviewer's value for a convention rule's row cannot be critical: the same cap stage 1 has.
+#[test]
+fn the_reviewers_severity_for_a_convention_rules_row_is_capped_below_critical() {
+    let convention = "ARCH-SERVER-COMPUTED-AMOUNT-1";
+    let mut rows = vec![row_at(convention, "app/api/checkout/route.ts", 50, "low")];
+    disagree_on_severity(&mut rows[0], "low", "critical");
+    let (mut tree, rows) = tree_of_rows(rows);
+    let only = rows[0].clone();
+    rule_node_of(&mut tree, &only)
+        .escalations
+        .push(esc(&only, EscalationReason::RuleMisfit, 1));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    assert_eq!(
+        ranked.candidates[0].stage2_severity.as_deref(),
+        Some("high")
+    );
+    assert_eq!(ranked.candidates[0].severity, "low");
+}
+
+/// The candidate keeps its row's own severity, so a low row of a severe reason does not take
+/// its site over budget on a sibling's high.
+#[test]
+fn a_low_row_does_not_borrow_its_siblings_severity_to_pass_the_budget() {
+    let rows = vec![
+        row_at(RULE_A, "supabase/functions/hook.ts", 46, "low"),
+        row_at(RULE_B, "supabase/functions/hook.ts", 46, "high"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let low = row_of(&rows, RULE_A, "supabase/functions/hook.ts").clone();
+    let high = row_of(&rows, RULE_B, "supabase/functions/hook.ts").clone();
+    rule_node_of(&mut tree, &low)
+        .escalations
+        .push(esc(&low, EscalationReason::DataLoss, 1));
+    rule_node_of(&mut tree, &high)
+        .escalations
+        .push(esc(&high, EscalationReason::RuleMisfit, 1));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    let of = |key: &str| ranked.candidates.iter().find(|c| c.key == key).unwrap();
+    assert_eq!(of(&low.site_key).severity, "low");
+    assert!(
+        !of(&low.site_key).escalated,
+        "a low data-loss row is not data loss at high: {:?}",
+        ranked.candidates
     );
 }

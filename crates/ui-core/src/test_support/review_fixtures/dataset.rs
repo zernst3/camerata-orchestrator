@@ -1023,6 +1023,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
             severity: rows[i].severity.clone(),
             stage2_rank: *slot,
             global_rank,
+            stage2_severity: None,
             slot: 0,
             escalated,
             over_budget_reason: over,

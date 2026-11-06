@@ -259,6 +259,7 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         severity: severity.to_string(),
         stage2_rank: rank,
         global_rank: rank,
+        stage2_severity: None,
         slot: 0,
         escalated: false,
         over_budget_reason: None,

@@ -325,8 +325,13 @@ pub struct EscalationCandidate {
     /// The node the site was reviewed under (a rule node).
     pub node_id: String,
     pub reason: EscalationReason,
-    /// The site's severity when it was ranked.
+    /// The row's own severity (stage 1's, as the row shows it) when it was ranked.
     pub severity: String,
+    /// The group reviewer's severity for the row when it disagreed with stage 1 (capped by the
+    /// convention-rule rule). It orders the candidate and decides over-budget eligibility, and
+    /// is shown as the disagreement; it never replaces the row's displayed or exported severity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage2_severity: Option<String>,
     /// The group reviewer's own rank inside its node (1 is first).
     pub stage2_rank: u32,
     /// The position over every node, 1-based; the order [`re_mark`] reads the line in.
@@ -343,7 +348,26 @@ pub struct EscalationCandidate {
     pub why: String,
 }
 
+/// 3 critical, 2 high, 1 medium, 0 anything else.
+fn severity_weight(severity: &str) -> u8 {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => 3,
+        "high" => 2,
+        "medium" => 1,
+        _ => 0,
+    }
+}
+
 impl EscalationCandidate {
+    /// The severity this candidate is ordered and budgeted by: the higher of the row's own and
+    /// the group reviewer's (R-4). The displayed severity is never this value.
+    pub fn ordering_severity(&self) -> &str {
+        match &self.stage2_severity {
+            Some(s2) if severity_weight(s2) > severity_weight(&self.severity) => s2,
+            _ => &self.severity,
+        }
+    }
+
     /// Where this candidate stands against the line.
     pub fn state(&self) -> EscalationState {
         if self.escalated {
@@ -409,7 +433,7 @@ pub fn re_mark(
             let allowed_by = members
                 .iter()
                 .map(|&m| &candidates[m])
-                .find(|c| c.reason.may_exceed_budget(&c.severity, allowed))
+                .find(|c| c.reason.may_exceed_budget(c.ordering_severity(), allowed))
                 .map(|c| c.reason);
             (allowed_by.is_some(), allowed_by)
         };
@@ -608,6 +632,7 @@ mod tests {
             node_id: "rule:R".to_string(),
             reason,
             severity: severity.to_string(),
+            stage2_severity: None,
             stage2_rank: 1,
             global_rank: rank,
             slot: 0,
@@ -731,6 +756,7 @@ mod tests {
             node_id: String::new(),
             reason,
             severity: "low".to_string(),
+            stage2_severity: None,
             stage2_rank: 1,
             global_rank: 1,
             slot: 0,

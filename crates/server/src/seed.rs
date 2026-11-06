@@ -773,6 +773,7 @@ impl Seeding {
                 severity: c.severity.clone(),
                 stage2_rank: *rank,
                 global_rank: u32::try_from(i + 1).unwrap_or(u32::MAX),
+                stage2_severity: None,
                 slot: 0,
                 escalated: false,
                 over_budget_reason: None,
