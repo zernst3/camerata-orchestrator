@@ -54,7 +54,9 @@ impl Scripted {
             return Ok(response("no json at all", 0.01));
         }
         Ok(response(
-            &serde_json::json!({ "echo": req.prompt }).to_string(),
+            // An echo that is also a stage 1 verdict (`real`), so a calibration request gets a reply
+            // its own parser accepts.
+            &serde_json::json!({ "echo": req.prompt, "real": "yes" }).to_string(),
             0.05,
         ))
     }
@@ -1945,4 +1947,138 @@ fn a_cut_temporary_file_is_never_read_as_a_record() {
         0,
         "{estimate:?}"
     );
+}
+
+// ── A refused reply is replayed only if the kind's OWN parser accepts it ───────────────────────
+
+/// A tool-call transcript that happens to hold a JSON object (the tool's input). It is a JSON
+/// object that parses, and it is not a reply of any stage.
+const TRANSCRIPT_WITH_OBJECT: &str =
+    "I will read the file first.\n<tool_use name=\"Read\">{\"path\":\"src/a.rs\"}</tool_use>\nThen I will answer.";
+
+/// A refusal that quotes an object.
+const REFUSAL_WITH_OBJECT: &str =
+    "I cannot help with that. The request {\"findings\": \"none\"} is not something I can answer.";
+
+fn kind_request(kind: &str, what: &str) -> LlmRequest {
+    let base = LlmRequest::new(format!("Repository: acme/api\n{what}"));
+    match kind {
+        "scan" => base.with_system(crate::ai_audit::audit_system_prompt_with(false)),
+        "calibration" => base.with_system(crate::ai_audit::verify_system_prompt()),
+        "alternatives" => base.with_system(crate::ai_audit::alternatives_system_prompt()),
+        _ => base,
+    }
+}
+
+/// What each kind's own parser accepts (the shape its stage asks for).
+fn accepted_reply(kind: &str) -> &'static str {
+    match kind {
+        "scan" => r#"{"findings":[],"proposed_rules":[],"needs_files":[]}"#,
+        "calibration" => r#"{"severity":"medium","real":"yes","reason":"checked","effort":"low"}"#,
+        "alternatives" => r#"{"recommendations":[]}"#,
+        _ => r#"{"anything":true}"#,
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_transcript_or_refusal_holding_an_object_is_called_again_for_every_kind() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let mut asked = Vec::new();
+        for kind in ["scan", "calibration", "alternatives", "other"] {
+            for (i, text) in [TRANSCRIPT_WITH_OBJECT, REFUSAL_WITH_OBJECT]
+                .into_iter()
+                .enumerate()
+            {
+                let req = kind_request(kind, &format!("{kind} {i}"));
+                store_unusable(&store, &req, text, false);
+                asked.push(req);
+            }
+        }
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store);
+        for req in asked.iter().cloned() {
+            journal.complete(req).await.unwrap();
+        }
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            asked.len(),
+            "no transcript or refusal is replayed as a reply"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_reply_the_kinds_own_parser_accepts_is_replayed_with_zero_calls() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let mut asked = Vec::new();
+        // "other" has no parser a resume can run (the clone judge and the deep lenses each read
+        // their own shape, and the request that would say which is not stored): it is never
+        // replayed from Unusable, so it is not in this list.
+        for kind in ["scan", "calibration", "alternatives"] {
+            let req = kind_request(kind, kind);
+            store_unusable(&store, &req, accepted_reply(kind), false);
+            asked.push(req);
+        }
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store);
+        for req in asked {
+            journal.complete(req).await.unwrap();
+        }
+        assert_eq!(model.1.load(Ordering::SeqCst), 0, "zero calls");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_stored_unusable_reply_of_the_other_kind_is_never_replayed() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let req = kind_request("other", "judge");
+        store_unusable(&store, &req, accepted_reply("other"), false);
+        let store = reopen(store);
+        let model = Fixed("{}".to_string(), AtomicUsize::new(0));
+        JournalLlm::new(&model, store).complete(req).await.unwrap();
+        assert_eq!(model.1.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+/// The fresh classification uses the same parsers: a transcript with an object in it is stored
+/// as unusable when it comes back, not as a good reply.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_fresh_transcript_holding_an_object_is_stored_unusable() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Fixed(TRANSCRIPT_WITH_OBJECT.to_string(), AtomicUsize::new(0));
+        let req = kind_request("scan", "fresh");
+        JournalLlm::new(&model, store.clone())
+            .complete(req.clone())
+            .await
+            .unwrap();
+        let store = reopen(store);
+        JournalLlm::new(&model, store).complete(req).await.unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            2,
+            "asked again, not replayed"
+        );
+    })
+    .await;
 }

@@ -325,12 +325,12 @@ mod stage_batch_tests;
 pub use batch_mode::{
     resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
 };
-pub(crate) use calibration::mentions_exploit_precondition;
 use calibration::*;
 pub use calibration::{
     apply_verdicts, outlier_reasons_of, stage1_of, verify_findings, verify_system_prompt, Real,
     Stage1Record, OUTLIER_REASONS_CAPTURE, STAGE1_CAPTURE,
 };
+pub(crate) use calibration::{is_verdict_reply, mentions_exploit_precondition};
 
 #[cfg(test)]
 mod redaction_tests;

@@ -564,6 +564,15 @@ pub(crate) fn normalize_requested_path(raw: &str) -> String {
 /// ONCE as a smaller batch; a rule still unanswered then gets no entry (it keeps its default
 /// directive) and the second value of the result is the plain-words reason the caller records
 /// as a pass, naming those rules. `None` when every rule was decided.
+/// Whether `raw` is a recommendations reply: a JSON object holding the `recommendations` array
+/// [`parse_alternative_recommendations`] reads. The run store decides a stored reply is usable
+/// with this; a transcript that merely quotes some object is not.
+pub(crate) fn is_recommendations_reply(raw: &str) -> bool {
+    extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .is_some_and(|v| v["recommendations"].is_array())
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn recommend_alternatives(

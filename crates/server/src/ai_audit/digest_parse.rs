@@ -651,6 +651,15 @@ pub(super) fn parse_model_line(v: &serde_json::Value) -> usize {
     digits.parse().unwrap_or(0)
 }
 
+/// Whether `raw` is a scan reply: a JSON object holding the `findings` array [`parse_ai_findings`]
+/// reads. A transcript or a refusal that merely quotes some object is not (the run store decides
+/// a stored reply is usable with this).
+pub(crate) fn is_scan_reply(raw: &str) -> bool {
+    extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .is_some_and(|v| v["findings"].is_array())
+}
+
 /// Parse a model audit response into Findings + ProposedRules in the scan's shapes.
 /// Robust: malformed output yields empty vecs rather than erroring the whole scan.
 pub fn parse_ai_findings(

@@ -582,6 +582,15 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
     f
 }
 
+/// Whether `raw` is a stage 1 reply: a verdict object that answers `real` (a site's own call), or
+/// a `verdicts` array ([`apply_verdicts`]). The run store decides a stored reply is usable with
+/// this; a transcript that merely quotes some object is not.
+pub(crate) fn is_verdict_reply(raw: &str) -> bool {
+    extract_json_object(raw)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .is_some_and(|v| v["verdicts"].is_array() || Stage1Verdict::from_value(&v).is_some())
+}
+
 /// Apply stage 1 verdicts, addressed by `index`, to `findings`: `{"verdicts":[{"index":0,
 /// "severity":..,"real":..,"effort":..,"category":..,"reason":..}]}`. Each verdict goes through
 /// [`apply_verdict`]. NEVER drops a finding: one with no verdict, or whose verdict does not say

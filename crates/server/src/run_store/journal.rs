@@ -378,7 +378,11 @@ pub(crate) fn entry_replays(entry: &CallEntry, kind: PartKind) -> bool {
     if replays_on_resume(entry.status, kind) {
         return true;
     }
+    // `Other` (the clone judge, the deep lenses) has no parser a resume can run: the request that
+    // would say which shape the reply should have is not stored. An unusable `Other` reply is
+    // always asked again.
     entry.status == EntryStatus::Unusable
+        && kind != PartKind::Other
         && entry
             .response
             .as_ref()
@@ -394,12 +398,24 @@ fn reply_is_good(kind: PartKind, resp: &LlmResponse) -> bool {
     let parses = !resp.truncated
         && crate::ai_audit::extract_json_object(&resp.text)
             .is_some_and(|json| serde_json::from_str::<serde_json::Value>(json).is_ok());
-    if kind == PartKind::GroupReview {
-        return parses
-            && (crate::ai_audit::group_review::Stage2Reply::parse(&resp.text).is_ok()
-                || crate::ai_audit::group_review::parse_rule_summary(&resp.text).is_ok());
+    if !parses {
+        return false;
     }
-    parses
+    // Each stage's OWN parser decides, never "some JSON object parses": a tool-call transcript or
+    // a refusal that quotes an object is a JSON object that parses and a reply of no stage.
+    match kind {
+        PartKind::GroupReview => {
+            crate::ai_audit::group_review::Stage2Reply::parse(&resp.text).is_ok()
+                || crate::ai_audit::group_review::parse_rule_summary(&resp.text).is_ok()
+        }
+        PartKind::Scan => crate::ai_audit::is_scan_reply(&resp.text),
+        PartKind::Calibration => crate::ai_audit::is_verdict_reply(&resp.text),
+        PartKind::Alternatives => crate::ai_audit::is_recommendations_reply(&resp.text),
+        // Fix and detail read their replies entry by entry; the other calls (the clone judge, the
+        // deep lenses) each read their own shape. Finished and holding an object is all that can
+        // be said of them here.
+        _ => true,
+    }
 }
 
 // ── The call seam ────────────────────────────────────────────────────────────────────────────
