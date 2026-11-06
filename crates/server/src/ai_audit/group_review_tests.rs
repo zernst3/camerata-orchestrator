@@ -294,6 +294,7 @@ fn cfg<'a>(rules: &'a [(String, String)]) -> GroupReviewConfig<'a> {
         rules,
         rank: RankSettings::default(),
         max_in_flight: 4,
+        cli_backend: false,
         job: None,
     }
 }
@@ -2378,4 +2379,270 @@ async fn resume_re_asks_only_the_failed_group_review_chunks() {
     );
     // The SQL group's reply was applied from the checkpoint: its sites carry its sub-group.
     assert!(subgroups_of(&report, &rule_node(&report, SQL)).len() == 1);
+}
+
+// ── Output-side redaction of everything the reviewer writes ───────────────────────────────
+
+/// The config sentence the reviewer wrote on a real run: it quotes a documented Supabase setting
+/// value, which is not a secret and must stay as written.
+fn password_policy_sentence() -> String {
+    format!(
+        "Set `minimum_password_length = 8` and `password_requirements = \"{}\"` or stronger.",
+        ["lower_upper_", "letters_digits"].concat()
+    )
+}
+
+fn secret_hits(value: &serde_json::Value) -> usize {
+    camerata_secrets::find_secret_hits_in_json(value).len()
+}
+
+#[tokio::test]
+async fn a_secret_the_reviewer_echoes_ships_redacted_in_every_string_it_wrote() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+    let leak = planted.value.clone();
+    let sentence = password_policy_sentence();
+    let mut report = report_of(&[(SQL, 4)]);
+    let llm = Reviewer::new({
+        let leak = leak.clone();
+        let sentence = sentence.clone();
+        move |call| {
+            Ok(serde_json::json!({
+                "summary": format!("{sentence} The key {leak} is committed."),
+                "subgroups": [{
+                    "label": format!("Key {leak}"),
+                    "cause": format!("Cause {leak}"),
+                    "summary": format!("Sub-group {leak}. {sentence}"),
+                    "members": call.indices,
+                }],
+                "outliers": [{"index": 1, "reason": "different_object", "why": format!("Why {leak}")}],
+                "escalations": [{"index": 2, "reason": "rule_misfit", "rank": 1, "why": format!("Esc {leak}")}],
+                "disagreements": [{
+                    "index": 3, "field": "real", "stage1": "yes", "mine": "no",
+                    "why": format!("Dis {leak}")
+                }],
+            })
+            .to_string())
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(outcome.rules_reviewed, 1);
+
+    let tree_json = serde_json::to_value(tree(&report)).unwrap();
+    let rows_json = serde_json::to_value(
+        report
+            .findings
+            .iter()
+            .map(|f| &f.review)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    for (what, json) in [("tree", &tree_json), ("rows", &rows_json)] {
+        let text = json.to_string();
+        assert!(!text.contains(&leak), "the {what} carries the planted key");
+        assert_eq!(secret_hits(json), 0, "the gate would refuse the {what}");
+    }
+    // The redaction is the same one the other stages use, and the documented setting value is
+    // left exactly as the reviewer wrote it.
+    let rule = node(&report, &rule_node(&report, SQL));
+    let summary = rule.summary.as_deref().unwrap();
+    assert!(summary.contains(&sentence), "{summary}");
+    assert!(summary.contains("sb_secret_\u{2026}"), "{summary}");
+    let sub = &subgroups_of(&report, &rule.id)[0];
+    assert!(sub.label.contains("sb_secret_\u{2026}"));
+    assert!(sub.cause.as_deref().unwrap().contains("sb_secret_\u{2026}"));
+    assert!(sub.summary.as_deref().unwrap().contains(&sentence));
+    assert!(rule.escalations[0].why.contains("sb_secret_\u{2026}"));
+}
+
+#[tokio::test]
+async fn the_rule_level_summary_call_is_redacted_too() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+    let leak = planted.value.clone();
+    let mut report = report_of(&[(SQL, 151)]);
+    let llm = Reviewer::new({
+        let leak = leak.clone();
+        move |call| {
+            if call.summary_call {
+                Ok(summary_reply(&format!("Rule level {leak}.")))
+            } else {
+                Ok(one_group(call, "Part."))
+            }
+        }
+    });
+    run(&mut report, &llm).await;
+    let json = serde_json::to_value(tree(&report)).unwrap();
+    assert!(!json.to_string().contains(&leak));
+    assert_eq!(secret_hits(&json), 0);
+    let rule = node(&report, &rule_node(&report, SQL));
+    assert!(rule
+        .summary
+        .as_deref()
+        .unwrap()
+        .contains("sb_secret_\u{2026}"));
+}
+
+// ── A reply that leaves `rank` out ────────────────────────────────────────────────────────
+
+/// The reply shape a real run produced for ARCH-STRICT-LAYERING-1: every escalation complete
+/// except for the `rank`.
+fn reply_without_rank(call: &Call, escalated: &[usize]) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(&one_group(call, "Layering.")).unwrap();
+    v["escalations"] = serde_json::Value::Array(
+        escalated
+            .iter()
+            .map(|i| serde_json::json!({"index": i, "reason": "rule_misfit", "why": "Odd one."}))
+            .collect(),
+    );
+    v.to_string()
+}
+
+#[tokio::test]
+async fn an_escalation_without_a_rank_is_kept_unranked_and_recorded_not_refused() {
+    let mut report = report_of(&[(LAYERING, 4)]);
+    let llm = Reviewer::new(|call| {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&reply_without_rank(call, &[1, 2])).unwrap();
+        // Site 3 comes back fully ranked, so the order between the two kinds is observable.
+        v["escalations"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(
+                {"index": 3, "reason": "rule_misfit", "rank": 1, "why": "Worst."}
+            ));
+        Ok(v.to_string())
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(llm.calls().len(), 1, "no second call for a missing rank");
+    assert_eq!(outcome.rules_reviewed, 1);
+    assert_eq!(outcome.rules_failed, 0);
+    assert_eq!(outcome.ranks_defaulted.len(), 2);
+
+    // The ranked escalation comes first; the two with no rank follow in the engine's order.
+    let rule = node(&report, &rule_node(&report, LAYERING));
+    let by_key: BTreeMap<&str, u32> = rule
+        .escalations
+        .iter()
+        .map(|e| (e.key.as_str(), e.rank))
+        .collect();
+    let rows = sites_of(&report, LAYERING);
+    assert_eq!(by_key[rows[3].site_key.as_str()], 1);
+    assert_eq!(by_key[rows[1].site_key.as_str()], 0);
+    assert_eq!(by_key[rows[2].site_key.as_str()], 0);
+    let order: Vec<&str> = tree(&report)
+        .candidates
+        .iter()
+        .map(|c| c.key.as_str())
+        .collect();
+    assert_eq!(order[0], rows[3].site_key);
+
+    // Never silent: the ledger names the sites.
+    let notes = report.ledger.runner_notes().join("\n");
+    assert!(notes.contains("without a rank"), "{notes}");
+    assert!(notes.contains(&rows[1].site_key), "{notes}");
+    assert!(notes.contains(&rows[2].site_key), "{notes}");
+}
+
+#[test]
+fn a_rank_of_the_wrong_kind_is_still_refused_and_a_given_rank_is_not_recorded_as_defaulted() {
+    let bad = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "rule_misfit", "rank": "first", "why": "w"}],
+    })
+    .to_string();
+    let why = Stage2Reply::parse(&bad).unwrap_err();
+    assert!(why.contains("rank is not a whole number"), "{why}");
+    let ok = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "rule_misfit", "rank": 2, "why": "w"}],
+    })
+    .to_string();
+    let parsed = Stage2Reply::parse(&ok).unwrap();
+    assert_eq!(
+        (
+            parsed.escalations[0].rank,
+            parsed.escalations[0].rank_defaulted
+        ),
+        (2, false)
+    );
+}
+
+// ── The CLI backend: no tools ─────────────────────────────────────────────────────────────
+
+/// The shape of the one reply a real run got from Fable on the CLI backend: a transcript of tool
+/// calls (invented paths), not the JSON object. Nothing ran.
+fn tool_call_transcript() -> String {
+    [
+        "I'll look at the repository layout first.\n\n",
+        "<function_calls>\n<invoke name=\"Bash\">\n",
+        "<parameter name=\"command\">cd /Users/auditor/Repos && ls -d app*</parameter>\n",
+        "</invoke>\n</function_calls>",
+    ]
+    .concat()
+}
+
+#[tokio::test]
+async fn the_cli_prompts_say_no_tools_exist_and_the_api_prompts_do_not() {
+    for cli in [true, false] {
+        let mut report = report_of(&[(LAYERING, 151)]);
+        let llm = Reviewer::new(|call| {
+            if call.summary_call {
+                Ok(summary_reply("Whole rule."))
+            } else {
+                Ok(one_group(call, "Part."))
+            }
+        });
+        let rules: Vec<(String, String)> = Vec::new();
+        let config = GroupReviewConfig {
+            cli_backend: cli,
+            ..cfg(&rules)
+        };
+        review_groups(&mut report, &llm, &config, None).await;
+        let requests = llm.requests();
+        assert!(requests.len() >= 3, "chunk calls and the rule summary call");
+        for req in requests {
+            let system = req.system.clone().unwrap_or_default();
+            assert_eq!(system.contains("No tools exist"), cli, "cli={cli}");
+            // The line is added to the end of the prompt, which the stand-in and the journal
+            // still recognise by its start.
+            assert!(
+                system.starts_with(&group_review_system_prompt())
+                    || system.starts_with(&rule_summary_system_prompt())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
+    assert!(Stage2Reply::parse(&tool_call_transcript()).is_err());
+    assert!(parse_rule_summary(&tool_call_transcript()).is_err());
+
+    let mut report = report_of(&[(LAYERING, 3)]);
+    let llm = Reviewer::new(|call| {
+        if call.attempt == 1 {
+            Ok(tool_call_transcript())
+        } else {
+            Ok(one_group(call, "Layering."))
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(llm.calls().len(), 2, "refused once, asked again");
+    assert_eq!(outcome.rules_failed, 0);
+    // The second ask carries the refusal, and only the good reply reached the tree.
+    assert!(llm.requests()[1].prompt.contains("not a JSON object"));
+    let rule = node(&report, &rule_node(&report, LAYERING));
+    assert_eq!(rule.summary.as_deref(), Some("Layering."));
+
+    // A transcript on both tries is a failed part, with no reply kept for the rule.
+    let mut report = report_of(&[(LAYERING, 3)]);
+    let llm = Reviewer::new(|_| Ok(tool_call_transcript()));
+    let outcome = run(&mut report, &llm).await;
+    assert_eq!(outcome.rules_failed, 1);
+    assert_eq!(
+        node(&report, &rule_node(&report, LAYERING)).summary,
+        None,
+        "nothing from the transcript is stored as a summary"
+    );
 }

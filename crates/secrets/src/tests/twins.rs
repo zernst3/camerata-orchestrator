@@ -831,3 +831,45 @@ fn twin_key_value_inside_the_init_call_with_a_sibling_stays_readable() {
         "initializeApp({{ key: \"{key}\", projectId: \"x\" }});"
     ));
 }
+
+#[test]
+fn twin_published_supabase_password_requirements_values() {
+    // Supabase's documented `password_requirements` values of 24 or more characters read as a
+    // named secret literal (the identifier contains `password`), but they are config enums.
+    let values = [
+        ["lower_upper_", "letters_digits"].concat(),
+        ["lower_upper_", "letters_digits_symbols"].concat(),
+    ];
+    for value in values {
+        let line = format!("password_requirements = \"{value}\"");
+        assert_eq!(
+            assert_twin(&line, SecretShape::NamedSecretLiteral),
+            Twin::PublishedExampleKey,
+            "{value}"
+        );
+        // The sentence shape the group reviewer writes: backticked code in prose.
+        let sentence = format!(
+            "Fix is two lines in config.toml (`minimum_password_length = 8`, \
+             `password_requirements = \"{value}\"` or stronger) pushed with `supabase config push`."
+        );
+        assert!(detect_secrets(&sentence).is_empty(), "{sentence}");
+        assert_eq!(redact(&sentence).text, sentence);
+    }
+}
+
+#[test]
+fn supabase_enum_value_is_not_a_pass_for_other_password_identifiers() {
+    // The exemption is the exact published digest only: the same words under another identifier
+    // are still a flagged password, and so is any change to the value.
+    let changed = ["lower_upper_", "letters_digits1"].concat();
+    let random = body(26, ACCOUNT_ALPHABET, 91);
+    let cases = [
+        format!("db_password = \"{changed}\""),
+        format!("password_requirements = \"{changed}\""),
+        format!("password_requirements = \"{random}\""),
+        ["password = \"correct", "-horse-battery-staple\""].concat(),
+    ];
+    for text in cases {
+        assert_eq!(detect_secrets(&text).len(), 1, "not flagged: {text}");
+    }
+}

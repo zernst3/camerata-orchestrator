@@ -20,6 +20,18 @@ pub const PUBLISHED_EXAMPLES: &[(&str, &str)] = &[
         "8b5130ead464e35d5743246136340bfe7e022bfaf8bb42ff07000e2acc5994ee",
         "https://learn.microsoft.com/azure/storage/common/storage-use-emulator",
     ),
+    (
+        // Supabase's documented `password_requirements` setting value, a config enum that reads
+        // as a password on a `password`-named identifier. The shorter documented values are under
+        // the length floor of the named-literal shape, so only these two need an entry.
+        "cfaccf9994dab33b04e075b70022663f8f9a298d8728c7cfb9364617cfd9f078",
+        "https://supabase.com/docs/guides/local-development/cli/config#auth.password_requirements",
+    ),
+    (
+        // The strongest documented `password_requirements` value (the same setting).
+        "cf8b615a70ffe8bb3a5f975aa39ad9e74ac720a16e332bd3fff4351fd930b20b",
+        "https://supabase.com/docs/guides/local-development/cli/config#auth.password_requirements",
+    ),
     // AWS's two documented example access key ids contain the word EXAMPLE, so the T1
     // placeholder rule already keeps them readable; no digest is needed.
 ];

@@ -261,6 +261,33 @@ fn outlier_meaning(r: OutlierReason) -> &'static str {
     }
 }
 
+/// The line added to both stage 2 prompts on the CLI backend. There the model is Claude Code with
+/// every tool switched off, and one reply on a real run was a transcript of tool calls instead of
+/// the JSON object (nothing ran). It is a suffix, so the base prompt stays the prefix of the
+/// full one.
+pub(crate) const NO_TOOLS_LINE: &str = "\nNo tools exist in this conversation. You cannot read \
+    files or run commands, and a tool call you write does nothing. Your whole reply is the one \
+    JSON object described above, with no tool call, no transcript and no text before or after \
+    it.\n";
+
+/// The group reviewer's system prompt for the backend in use.
+pub(crate) fn group_review_system_prompt_for(cli_backend: bool) -> String {
+    let mut p = group_review_system_prompt();
+    if cli_backend {
+        p.push_str(NO_TOOLS_LINE);
+    }
+    p
+}
+
+/// The rule-level summary prompt for the backend in use.
+pub(crate) fn rule_summary_system_prompt_for(cli_backend: bool) -> String {
+    let mut p = rule_summary_system_prompt();
+    if cli_backend {
+        p.push_str(NO_TOOLS_LINE);
+    }
+    p
+}
+
 /// The system prompt of the rule-level summary call.
 pub(crate) fn rule_summary_system_prompt() -> String {
     String::from(
@@ -307,7 +334,12 @@ pub struct ReplyOutlier {
 pub struct ReplyEscalation {
     pub index: usize,
     pub reason: EscalationReason,
+    /// The order within the group, 1 first. 0 when the reply left it out (see `rank_defaulted`):
+    /// the tree sorts rank 0 after every ranked escalation and keeps the engine's order among
+    /// them.
     pub rank: u32,
+    /// The reply gave no `rank`; the engine's order stands and the ledger says so.
+    pub rank_defaulted: bool,
     pub why: String,
 }
 
@@ -328,17 +360,27 @@ fn exact_object<'v>(
     allowed: &[&str],
     at: &str,
 ) -> Result<&'v Obj, String> {
+    object_with(value, allowed, &[], at)
+}
+
+/// `value` as an object whose fields are `required` plus any of `optional`.
+fn object_with<'v>(
+    value: &'v serde_json::Value,
+    required: &[&str],
+    optional: &[&str],
+    at: &str,
+) -> Result<&'v Obj, String> {
     let obj = value
         .as_object()
         .ok_or_else(|| format!("{at} is not an object"))?;
     for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
             return Err(format!(
                 "{at} has a field the schema does not have: `{key}`"
             ));
         }
     }
-    for key in allowed {
+    for key in required {
         if !obj.contains_key(*key) {
             return Err(format!("{at} is missing the field `{key}`"));
         }
@@ -351,6 +393,14 @@ fn text_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| format!("{at}.{key} is not a string"))
+}
+
+/// A text field the reviewer wrote for the client to read, redacted on the way in. Every parse
+/// of a reply (a live one, a stored one a resume replays) goes through here, so no summary,
+/// label, cause or reason reaches the tree or a row with a secret in it. The same detector the
+/// release gate runs does the redacting, so what ships passes the gate.
+fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
+    text_of(obj, key, at).map(|text| camerata_secrets::redact_str(&text).into_owned())
 }
 
 fn index_of(obj: &Obj, key: &str, at: &str) -> Result<usize, String> {
@@ -388,7 +438,7 @@ impl Stage2Reply {
             ],
             "the reply",
         )?;
-        let summary = text_of(top, "summary", "the reply")?;
+        let summary = prose_of(top, "summary", "the reply")?;
 
         let mut subgroups = Vec::new();
         for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
@@ -404,9 +454,9 @@ impl Stage2Reply {
                 })
                 .collect::<Result<Vec<usize>, String>>()?;
             subgroups.push(ReplySubgroup {
-                label: text_of(o, "label", &at)?,
-                cause: text_of(o, "cause", &at)?,
-                summary: text_of(o, "summary", &at)?,
+                label: prose_of(o, "label", &at)?,
+                cause: prose_of(o, "cause", &at)?,
+                summary: prose_of(o, "summary", &at)?,
                 members,
             });
         }
@@ -421,27 +471,35 @@ impl Stage2Reply {
             outliers.push(ReplyOutlier {
                 index: index_of(o, "index", &at)?,
                 reason,
-                why: text_of(o, "why", &at)?,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
         let mut escalations = Vec::new();
         for (i, v) in array_of(top, "escalations")?.iter().enumerate() {
             let at = format!("escalations[{i}]");
-            let o = exact_object(v, &["index", "reason", "rank", "why"], &at)?;
+            // A reply that leaves `rank` out is read, not refused: the rank only orders the
+            // escalations of one group, and a refusal costs a whole call (4 of 90 on a real run).
+            let o = object_with(v, &["index", "reason", "why"], &["rank"], &at)?;
             let reason_name = text_of(o, "reason", &at)?;
             let reason = EscalationReason::parse(&reason_name).ok_or_else(|| {
                 format!("{at}.reason `{reason_name}` is not on the escalation list")
             })?;
-            let rank = o["rank"]
-                .as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| format!("{at}.rank is not a whole number"))?;
+            let (rank, rank_defaulted) = match o.get("rank") {
+                None | Some(serde_json::Value::Null) => (0, true),
+                Some(v) => (
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| format!("{at}.rank is not a whole number"))?,
+                    false,
+                ),
+            };
             escalations.push(ReplyEscalation {
                 index: index_of(o, "index", &at)?,
                 reason,
                 rank,
-                why: text_of(o, "why", &at)?,
+                rank_defaulted,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
@@ -467,9 +525,9 @@ impl Stage2Reply {
             disagreements.push(ReplyDisagreement {
                 index: index_of(o, "index", &at)?,
                 field,
-                stage1: text_of(o, "stage1", &at)?,
+                stage1: prose_of(o, "stage1", &at)?,
                 mine,
-                why: text_of(o, "why", &at)?,
+                why: prose_of(o, "why", &at)?,
             });
         }
 
@@ -489,7 +547,7 @@ pub(crate) fn parse_rule_summary(raw: &str) -> Result<String, String> {
         .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
         .ok_or_else(|| "the reply is not a JSON object".to_string())?;
     let o = exact_object(&json, &["summary"], "the reply")?;
-    text_of(o, "summary", "the reply")
+    prose_of(o, "summary", "the reply")
 }
 
 // ── Chunks ─────────────────────────────────────────────────────────────────────────────────
@@ -1078,6 +1136,8 @@ const UNPLACED_CAUSE: &str =
 struct RuleApplied {
     unplaced: Vec<String>,
     stray_indexes: usize,
+    /// Site keys whose escalation came back without a `rank`.
+    ranks_defaulted: Vec<String>,
 }
 
 /// One chunk's reply, with the indexes the chunk was asked about.
@@ -1261,13 +1321,23 @@ fn apply_rule(
                 applied.stray_indexes += 1;
                 continue;
             }
-            // One reason per site: the highest-ranked one the reply gave.
+            if e.rank_defaulted {
+                let key = work.members[e.index].key.clone();
+                if !applied.ranks_defaulted.contains(&key) {
+                    applied.ranks_defaulted.push(key);
+                }
+            }
+            // One reason per site: the highest-ranked one the reply gave. Rank 0 (none given)
+            // sorts after every ranked one, as the tree does.
+            let order = |reason: EscalationReason, rank: u32| {
+                (reason.rank(), if rank == 0 { u32::MAX } else { rank })
+            };
             if !seen_escalation.insert(e.index) {
                 if let Some(have) = escalations
                     .iter_mut()
                     .find(|x| x.key == work.members[e.index].key)
                 {
-                    if (e.reason.rank(), e.rank) < (have.reason.rank(), have.rank) {
+                    if order(e.reason, e.rank) < order(have.reason, have.rank) {
                         have.reason = e.reason;
                         have.rank = e.rank;
                         have.why.clone_from(&e.why);
@@ -1544,6 +1614,9 @@ pub struct GroupReviewConfig<'a> {
     pub rank: RankSettings,
     /// The most calls in flight at once.
     pub max_in_flight: usize,
+    /// The model runs through the Claude Code CLI (no tools, but it can drift into agent mode):
+    /// the prompts say outright that no tools exist.
+    pub cli_backend: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
 }
@@ -1559,6 +1632,9 @@ pub struct GroupReviewOutcome {
     pub unplaced: Vec<String>,
     /// Indexes a reply named that are not members of what it was asked about.
     pub stray_indexes: usize,
+    /// The site keys whose escalation came back with no `rank`: they keep the engine's order and
+    /// sort after every ranked escalation. Also recorded as an operator note in the ledger.
+    pub ranks_defaulted: Vec<String>,
     /// `(node id, bytes of the user prompt)` of every call planned, rule-level summary calls
     /// included.
     pub prompt_bytes: Vec<(String, usize)>,
@@ -1666,9 +1742,12 @@ pub async fn review_groups(
         repo_shape: cfg.repo_shape,
         repo: repo_label.clone(),
         model: cfg.model,
-        system: crate::prompt_frame::with_untrusted_clause(group_review_system_prompt(), &nonce),
+        system: crate::prompt_frame::with_untrusted_clause(
+            group_review_system_prompt_for(cfg.cli_backend),
+            &nonce,
+        ),
         rule_system: crate::prompt_frame::with_untrusted_clause(
-            rule_summary_system_prompt(),
+            rule_summary_system_prompt_for(cfg.cli_backend),
             &nonce,
         ),
         nonce,
@@ -1822,6 +1901,7 @@ pub async fn review_groups(
         );
         outcome.unplaced.extend(applied.unplaced);
         outcome.stray_indexes += applied.stray_indexes;
+        outcome.ranks_defaulted.extend(applied.ranks_defaulted);
         if failed_reasons.contains_key(&wi) {
             outcome.rules_failed += 1;
         } else {
@@ -1911,6 +1991,15 @@ pub async fn review_groups(
     report.tree = Some(rebuilt);
 
     record_ledger(report, cfg, &outcome, sites);
+    if !outcome.ranks_defaulted.is_empty() {
+        // Never silent: the operator is told which escalations had no rank from the reviewer.
+        report.ledger.record_runner_notes(vec![format!(
+            "group review: {} escalation(s) came back without a rank and were kept, not refused. \
+             They sort after every ranked escalation in the engine's order: {}",
+            outcome.ranks_defaulted.len(),
+            outcome.ranks_defaulted.join(", ")
+        )]);
+    }
     outcome
 }
 
@@ -2077,6 +2166,7 @@ pub async fn review_scan_report(
         } else {
             stage_batch::DEFAULT_MAX_IN_FLIGHT
         },
+        cli_backend,
         job,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
