@@ -383,8 +383,8 @@ fn with_commas(n: u64) -> String {
 
 /// The floors the README states. Raise them when the code grows past a rounder number; the test
 /// fails when the code is smaller than the claim, never when it is larger.
-const TESTS_FLOOR: u64 = 10_000;
-const LINES_FLOOR: u64 = 500_000;
+const TESTS_FLOOR: u64 = 11_000;
+const LINES_FLOOR: u64 = 650_000;
 
 #[test]
 fn req_readme_size_claims_are_floors_the_code_meets() {
