@@ -201,6 +201,8 @@ struct RawEscalation {
     node_id: String,
     key: String,
     reason: EscalationReason,
+    /// The row is of a convention rule, not a security rule.
+    convention: bool,
     stage2_rank: u32,
     severity: String,
     why: String,
@@ -280,17 +282,8 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             let Some(row) = by_key.get(e.key.as_str()) else {
                 continue;
             };
-            // A row of a convention rule carries no security reason: what the reviewer saw
-            // near it is a row of its own rule, and this one is a misfit of the rule it was
-            // flagged under.
-            let reason =
-                if e.reason.is_security_flaw() && crate::ai_audit::is_convention_rule_row(row) {
-                    EscalationReason::RuleMisfit
-                } else {
-                    e.reason
-                };
             let better = raw.get(&e.key).is_none_or(|have| {
-                (reason.rank(), rank_sort_key(e.rank))
+                (e.reason.rank(), rank_sort_key(e.rank))
                     < (have.reason.rank(), rank_sort_key(have.stage2_rank))
             });
             if better {
@@ -299,7 +292,8 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                     RawEscalation {
                         node_id: node.id.clone(),
                         key: e.key.clone(),
-                        reason,
+                        reason: e.reason,
+                        convention: crate::ai_audit::is_convention_rule_row(row),
                         stage2_rank: e.rank,
                         severity: row.severity.clone(),
                         why: e.why.clone(),
@@ -328,6 +322,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                         node_id: f.group_path.get(1).cloned().unwrap_or_default(),
                         key: f.site_key.clone(),
                         reason: EscalationReason::EvidenceUnverified,
+                        convention: false,
                         stage2_rank: 0,
                         severity: f.severity.clone(),
                         why: "The quoted evidence was not found in the scanned file, so the \
@@ -345,7 +340,27 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
     for r in raw.into_values() {
         by_site.entry(r.site.clone()).or_default().push(r);
     }
-    let sites: Vec<RankedSite> = by_site.into_values().map(RankedSite::new).collect();
+    let sites: Vec<RankedSite> = by_site
+        .into_values()
+        .map(|mut members| {
+            // A row of a convention rule beside a row of a security rule at the same site that
+            // carries a security reason is a misfit of its own rule: the defect the reviewer saw
+            // is the other row (R-1's duplicate case). A convention row alone at its site keeps
+            // the reviewer's reason: nothing says a row of the defect's own rule exists.
+            if members
+                .iter()
+                .any(|m| !m.convention && m.reason.is_security_flaw())
+            {
+                for m in members
+                    .iter_mut()
+                    .filter(|m| m.convention && m.reason.is_security_flaw())
+                {
+                    m.reason = EscalationReason::RuleMisfit;
+                }
+            }
+            RankedSite::new(members)
+        })
+        .collect();
 
     // Severity, then reason rank (R-2), then node; each node's list sorted by its own rank.
     let sev = |s: &str| std::cmp::Reverse(crate::ai_audit::severity_rank(s));

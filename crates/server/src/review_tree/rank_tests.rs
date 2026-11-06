@@ -790,13 +790,14 @@ fn a_high_secret_data_loss_or_cross_tenant_row_goes_over_budget_and_a_high_reach
 // ---- a convention rule's row never carries a security reason ------------------------------
 
 #[test]
-fn a_security_reason_on_a_convention_rules_row_is_read_as_a_rule_misfit() {
+fn a_security_reason_on_a_convention_rules_row_is_read_as_a_rule_misfit_beside_a_security_row() {
     // The shape from lumen: the group reviewer gave a non-null-assertion row the secret
-    // exposure of the hardcoded key a line away, and at critical the row passed the budget.
+    // exposure of the hardcoded key at the same site, and at critical the row passed the
+    // budget. The key is a row of its own rule at that site, so the style row is a misfit.
     let convention = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1";
     let rows = vec![
         row_at(convention, "scripts/backfill.ts", 5, "critical"),
-        row_at(RULE_B, "scripts/backfill.ts", 3, "critical"),
+        row_at(RULE_B, "scripts/backfill.ts", 5, "critical"),
     ];
     let (mut tree, rows) = tree_of_rows(rows);
     let style = row_of(&rows, convention, "scripts/backfill.ts").clone();
@@ -818,11 +819,39 @@ fn a_security_reason_on_a_convention_rules_row_is_read_as_a_rule_misfit() {
         EscalationReason::RuleMisfit,
         "a convention rule's row carries no security reason"
     );
-    assert_eq!(of(&style.site_key).over_budget_reason, None);
+    assert_eq!(
+        of(&style.site_key).slot,
+        of(&secret.site_key).slot,
+        "the two rows share the site's one slot"
+    );
     assert_eq!(
         of(&secret.site_key).reason,
         EscalationReason::SecretExposure,
         "the security rule's own row keeps it"
     );
     assert!(of(&secret.site_key).escalated);
+}
+
+/// The reviewer's security reason survives on a convention rule's row that is the only row at its
+/// site: the security rule list is words, and nothing says a row of the defect's own rule exists.
+#[test]
+fn a_lone_convention_rule_row_keeps_the_reviewers_security_reason() {
+    let convention = "ARCH-SERVER-COMPUTED-AMOUNT-1";
+    let rows = vec![row_at(convention, "app/api/checkout/route.ts", 50, "high")];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let only = rows[0].clone();
+    rule_node_of(&mut tree, &only).escalations.push(esc(
+        &only,
+        EscalationReason::AuthorizationBypass,
+        1,
+    ));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    assert_eq!(ranked.candidates.len(), 1);
+    let c = &ranked.candidates[0];
+    assert_eq!(c.reason, EscalationReason::AuthorizationBypass);
+    assert!(c.escalated, "a real flaw stays above the line: {c:?}");
+    assert_eq!(
+        c.over_budget_reason,
+        Some(EscalationReason::AuthorizationBypass)
+    );
 }
