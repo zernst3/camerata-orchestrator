@@ -189,6 +189,15 @@ pub(crate) fn finding_class(f: &Finding) -> FindingClass {
     FindingClass::Hygiene
 }
 
+/// Whether `f` is a row of a corpus rule that is a convention and not a security concern: a rule
+/// id the corpus names (not an invented `AI-` one, whose message is its whole account of what it
+/// found) that is neither a security rule nor categorised as a security family. A row of such a
+/// rule is never raised to critical by a verdict and never carries a security escalation reason:
+/// a defect near it is a row of its own rule.
+pub(crate) fn is_convention_rule_row(f: &Finding) -> bool {
+    !f.rule_id.starts_with("AI-") && finding_class(f) == FindingClass::Hygiene
+}
+
 /// Rank for `finding_class`: Security strictly outranks Hygiene.
 pub(crate) fn class_rank(c: FindingClass) -> u8 {
     match c {

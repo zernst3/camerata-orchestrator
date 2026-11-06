@@ -786,3 +786,43 @@ fn a_high_secret_data_loss_or_cross_tenant_row_goes_over_budget_and_a_high_reach
         "unauthenticated reach still needs critical to pass the budget"
     );
 }
+
+// ---- a convention rule's row never carries a security reason ------------------------------
+
+#[test]
+fn a_security_reason_on_a_convention_rules_row_is_read_as_a_rule_misfit() {
+    // The shape from lumen: the group reviewer gave a non-null-assertion row the secret
+    // exposure of the hardcoded key a line away, and at critical the row passed the budget.
+    let convention = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1";
+    let rows = vec![
+        row_at(convention, "scripts/backfill.ts", 5, "critical"),
+        row_at(RULE_B, "scripts/backfill.ts", 3, "critical"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let style = row_of(&rows, convention, "scripts/backfill.ts").clone();
+    let secret = row_of(&rows, RULE_B, "scripts/backfill.ts").clone();
+    rule_node_of(&mut tree, &style).escalations.push(esc(
+        &style,
+        EscalationReason::SecretExposure,
+        1,
+    ));
+    rule_node_of(&mut tree, &secret).escalations.push(esc(
+        &secret,
+        EscalationReason::SecretExposure,
+        1,
+    ));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    let of = |key: &str| ranked.candidates.iter().find(|c| c.key == key).unwrap();
+    assert_eq!(
+        of(&style.site_key).reason,
+        EscalationReason::RuleMisfit,
+        "a convention rule's row carries no security reason"
+    );
+    assert_eq!(of(&style.site_key).over_budget_reason, None);
+    assert_eq!(
+        of(&secret.site_key).reason,
+        EscalationReason::SecretExposure,
+        "the security rule's own row keeps it"
+    );
+    assert!(of(&secret.site_key).escalated);
+}

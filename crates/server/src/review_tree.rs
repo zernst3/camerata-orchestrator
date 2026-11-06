@@ -280,8 +280,17 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             let Some(row) = by_key.get(e.key.as_str()) else {
                 continue;
             };
+            // A row of a convention rule carries no security reason: what the reviewer saw
+            // near it is a row of its own rule, and this one is a misfit of the rule it was
+            // flagged under.
+            let reason =
+                if e.reason.is_security_flaw() && crate::ai_audit::is_convention_rule_row(row) {
+                    EscalationReason::RuleMisfit
+                } else {
+                    e.reason
+                };
             let better = raw.get(&e.key).is_none_or(|have| {
-                (e.reason.rank(), rank_sort_key(e.rank))
+                (reason.rank(), rank_sort_key(e.rank))
                     < (have.reason.rank(), rank_sort_key(have.stage2_rank))
             });
             if better {
@@ -290,7 +299,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                     RawEscalation {
                         node_id: node.id.clone(),
                         key: e.key.clone(),
-                        reason: e.reason,
+                        reason,
                         stage2_rank: e.rank,
                         severity: row.severity.clone(),
                         why: e.why.clone(),

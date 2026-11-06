@@ -108,6 +108,20 @@ impl EscalationReason {
         )
     }
 
+    /// The reasons that say a security flaw is at the site, which a row of a convention rule
+    /// (style, layering, error shape) never carries: the group reviewer's view of a defect near
+    /// the row is a row of that defect's own rule.
+    pub fn is_security_flaw(self) -> bool {
+        matches!(
+            self,
+            Self::UnauthenticatedReach
+                | Self::SecretExposure
+                | Self::CrossTenant
+                | Self::AuthorizationBypass
+                | Self::Injection
+        )
+    }
+
     /// The reasons that go past the budget at high severity as well as critical (R-3): the
     /// flaws that cost a client most when they are missed. Unauthenticated reach is not among
     /// them: the group reviewer gives it to anything a logged-out caller touches, and a high one
