@@ -1289,6 +1289,11 @@ fn a_real_unauthenticated_bump_is_still_caught_for_a_security_rule_a_category_an
     }
     // A convention rule whose row was categorised as authorization by calibration is a security
     // row, and the bump applies.
-    let f = finding_with_category("ARCH-STRUCTURED-ERRORS-1", "medium", detail, "authorization");
+    let f = finding_with_category(
+        "ARCH-STRUCTURED-ERRORS-1",
+        "medium",
+        detail,
+        "authorization",
+    );
     assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
 }
