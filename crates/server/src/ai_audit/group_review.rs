@@ -195,7 +195,8 @@ pub fn group_review_system_prompt() -> String {
          - escalations: the sites he must look at himself, each with one reason from the \
          escalation list, a rank (1 is the one to see first in this group) and a one-line why. \
          Escalate sparingly: the architect has a limited number of minutes, and a list of \
-         everything is a list of nothing. One reason per site.\n\
+         everything is a list of nothing; but never hold back a real flaw that fits one of the \
+         first six reasons below. One reason per site.\n\
          - disagreements: where you disagree with the per-site reviewer. `field` is `severity` \
          (critical, high, medium or low) or `real` (yes, no or unclear); `stage1` is the \
          per-site reviewer's value and `mine` is yours. Say why.\n\n\
@@ -218,6 +219,12 @@ fn escalation_meaning(r: EscalationReason) -> &'static str {
         EscalationReason::SecretExposure => "a secret or a credential is exposed",
         EscalationReason::DataLoss => "the flaw can destroy or corrupt data",
         EscalationReason::CrossTenant => "one customer's data can be reached by another customer",
+        EscalationReason::AuthorizationBypass => {
+            "a caller can act without the right ownership or role check"
+        }
+        EscalationReason::Injection => {
+            "input reaches an interpreter (SQL, shell, template, stored XSS)"
+        }
         EscalationReason::ConflictingVerdicts => {
             "you and the per-site reviewer disagree on whether it is real, or by two or more \
              severity levels (a disagreement you record escalates the site by this reason \

@@ -557,7 +557,7 @@ fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason()
     let rows = vec![
         row_at(RULE_A, "app/x.ts", 5, "low"),
         row_at(RULE_B, "app/x.ts", 5, "critical"),
-        row_at(RULE_A, "app/y.ts", 9, "high"),
+        row_at(RULE_A, "app/y.ts", 9, "medium"),
     ];
     let (mut tree, rows) = tree_of_rows(rows);
     let a = row_of(&rows, RULE_A, "app/x.ts").clone();
@@ -696,5 +696,93 @@ fn severity_decides_before_reason_and_the_reviewers_priority_decides_last() {
         paths,
         vec!["b.ts", "a.ts", "d.ts", "c.ts"],
         "critical first, then high by reason rank, then by the reviewer's own rank"
+    );
+}
+
+// ---- R-3: authorization_bypass and injection join the severe set ---------------------------
+
+#[test]
+fn a_high_stored_xss_row_and_a_high_authorization_bypass_row_land_above_the_line() {
+    let rows = vec![
+        row_at(RULE_A, "components/CommentBody.tsx", 7, "high"),
+        row_at(RULE_B, "app/instructor/actions.ts", 14, "high"),
+        row_at(RULE_C, "lib/config.ts", 2, "medium"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    for (rule, path, reason) in [
+        (
+            RULE_A,
+            "components/CommentBody.tsx",
+            EscalationReason::Injection,
+        ),
+        (
+            RULE_B,
+            "app/instructor/actions.ts",
+            EscalationReason::AuthorizationBypass,
+        ),
+        (RULE_C, "lib/config.ts", EscalationReason::RuleMisfit),
+    ] {
+        let f = row_of(&rows, rule, path).clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, reason, 1));
+    }
+    // A budget of zero: only the over-budget valve can put a row above the line.
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    assert_eq!(ranked.candidates.len(), 3, "every one is a candidate");
+    let of = |path: &str| {
+        ranked
+            .candidates
+            .iter()
+            .find(|c| rows.iter().any(|f| f.site_key == c.key && f.path == path))
+            .unwrap()
+    };
+    let xss = of("components/CommentBody.tsx");
+    assert!(xss.escalated, "{xss:?}");
+    assert_eq!(xss.over_budget_reason, Some(EscalationReason::Injection));
+    let authz = of("app/instructor/actions.ts");
+    assert!(authz.escalated, "{authz:?}");
+    assert_eq!(
+        authz.over_budget_reason,
+        Some(EscalationReason::AuthorizationBypass)
+    );
+    assert!(!of("lib/config.ts").escalated, "a medium misfit waits");
+}
+
+#[test]
+fn a_high_secret_data_loss_or_cross_tenant_row_goes_over_budget_and_a_high_reach_row_does_not() {
+    let rows = vec![
+        row_at(RULE_A, "a.sql", 1, "high"),
+        row_at(RULE_A, "b.sql", 1, "high"),
+        row_at(RULE_A, "c.sql", 1, "high"),
+        row_at(RULE_A, "d.ts", 1, "high"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    for (path, reason) in [
+        ("a.sql", EscalationReason::SecretExposure),
+        ("b.sql", EscalationReason::DataLoss),
+        ("c.sql", EscalationReason::CrossTenant),
+        ("d.ts", EscalationReason::UnauthenticatedReach),
+    ] {
+        let f = row_of(&rows, RULE_A, path).clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, reason, 1));
+    }
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(0));
+    let escalated_reasons: Vec<EscalationReason> = ranked
+        .candidates
+        .iter()
+        .filter(|c| c.escalated)
+        .map(|c| c.reason)
+        .collect();
+    assert_eq!(
+        escalated_reasons,
+        vec![
+            EscalationReason::SecretExposure,
+            EscalationReason::DataLoss,
+            EscalationReason::CrossTenant
+        ],
+        "unauthenticated reach still needs critical to pass the budget"
     );
 }

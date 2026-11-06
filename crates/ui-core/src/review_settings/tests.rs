@@ -636,6 +636,8 @@ fn reasons_are_labelled_as_the_spec_words_them() {
             "secret exposure",
             "data loss",
             "cross tenant",
+            "authorization bypass",
+            "injection",
             "evidence unverified"
         ]
     );

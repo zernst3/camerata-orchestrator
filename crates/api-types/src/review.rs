@@ -21,6 +21,12 @@ pub enum EscalationReason {
     SecretExposure,
     DataLoss,
     CrossTenant,
+    /// A caller can do what the code never lets them do: a missing or wrong ownership or role
+    /// check, a trusted client-supplied identity (R-3).
+    AuthorizationBypass,
+    /// Input reaches an interpreter: SQL, a shell, a template, markup that runs (stored XSS)
+    /// (R-3).
+    Injection,
     ConflictingVerdicts,
     LikelyFalseAlarmAtHighSeverity,
     OutlierInGroup,
@@ -31,11 +37,13 @@ pub enum EscalationReason {
 
 impl EscalationReason {
     /// Every reason, in priority order.
-    pub const ALL: [EscalationReason; 10] = [
+    pub const ALL: [EscalationReason; 12] = [
         Self::UnauthenticatedReach,
         Self::SecretExposure,
         Self::DataLoss,
         Self::CrossTenant,
+        Self::AuthorizationBypass,
+        Self::Injection,
         Self::ConflictingVerdicts,
         Self::LikelyFalseAlarmAtHighSeverity,
         Self::OutlierInGroup,
@@ -51,6 +59,8 @@ impl EscalationReason {
             Self::SecretExposure => "secret_exposure",
             Self::DataLoss => "data_loss",
             Self::CrossTenant => "cross_tenant",
+            Self::AuthorizationBypass => "authorization_bypass",
+            Self::Injection => "injection",
             Self::ConflictingVerdicts => "conflicting_verdicts",
             Self::LikelyFalseAlarmAtHighSeverity => "likely_false_alarm_at_high_severity",
             Self::OutlierInGroup => "outlier_in_group",
@@ -72,6 +82,8 @@ impl EscalationReason {
             Self::SecretExposure => "secret exposure",
             Self::DataLoss => "data loss",
             Self::CrossTenant => "cross-tenant access",
+            Self::AuthorizationBypass => "authorization bypass",
+            Self::Injection => "injection",
             Self::ConflictingVerdicts => "conflicting verdicts",
             Self::LikelyFalseAlarmAtHighSeverity => "a likely false alarm at high severity",
             Self::OutlierInGroup => "an outlier in its group",
@@ -96,27 +108,50 @@ impl EscalationReason {
         )
     }
 
-    /// The reasons that may exceed the budget by default (D5): the four severe-reach reasons
-    /// (at critical severity) and `evidence_unverified`, because the release gate refuses that
-    /// row without a decision anyway.
+    /// The reasons that go past the budget at high severity as well as critical (R-3): the
+    /// flaws that cost a client most when they are missed. Unauthenticated reach is not among
+    /// them: the group reviewer gives it to anything a logged-out caller touches, and a high one
+    /// still has to win a slot.
+    pub fn is_severe_at_high(self) -> bool {
+        matches!(
+            self,
+            Self::SecretExposure
+                | Self::DataLoss
+                | Self::CrossTenant
+                | Self::AuthorizationBypass
+                | Self::Injection
+        )
+    }
+
+    /// The reasons that may exceed the budget by default (D5, R-3): the severe reasons (unauthenticated
+    /// reach at critical severity; secret exposure, data loss, cross-tenant access,
+    /// authorization bypass and injection at critical or high) and `evidence_unverified`,
+    /// because the release gate refuses that row without a decision anyway.
     pub fn default_over_budget_set() -> Vec<EscalationReason> {
         vec![
             Self::UnauthenticatedReach,
             Self::SecretExposure,
             Self::DataLoss,
             Self::CrossTenant,
+            Self::AuthorizationBypass,
+            Self::Injection,
             Self::EvidenceUnverified,
         ]
     }
 
     /// Whether a candidate with this reason and severity may go over the budget under the
-    /// project's `allowed` set: the reason must be in the set and the severity critical.
+    /// project's `allowed` set: the reason must be in the set and the severity critical, or high
+    /// for the reasons of [`Self::is_severe_at_high`].
     /// `evidence_unverified` is always allowed, at any severity, whatever the stored set says: the
     /// release gate refuses that row without a decision, and a project file written before the
     /// settings route refused such a set can still hold one.
     pub fn may_exceed_budget(self, severity: &str, allowed: &[EscalationReason]) -> bool {
-        self == Self::EvidenceUnverified
-            || (allowed.contains(&self) && severity.eq_ignore_ascii_case("critical"))
+        if self == Self::EvidenceUnverified {
+            return true;
+        }
+        let severe_enough = severity.eq_ignore_ascii_case("critical")
+            || (self.is_severe_at_high() && severity.eq_ignore_ascii_case("high"));
+        allowed.contains(&self) && severe_enough
     }
 }
 
@@ -585,7 +620,7 @@ mod tests {
 
     #[test]
     fn the_reason_list_is_closed_and_ranked() {
-        assert_eq!(EscalationReason::ALL.len(), 10);
+        assert_eq!(EscalationReason::ALL.len(), 12);
         for (i, r) in EscalationReason::ALL.iter().enumerate() {
             assert_eq!(r.rank() as usize, i);
             assert_eq!(EscalationReason::parse(r.as_str()), Some(*r));
@@ -597,6 +632,23 @@ mod tests {
         assert_eq!(EscalationReason::parse("because_i_said_so"), None);
         assert!(
             EscalationReason::UnauthenticatedReach.rank() < EscalationReason::NeedsMoreCode.rank()
+        );
+        // R-3: the two severe reasons added to the list sit with the severe ones, ahead of the
+        // reasons about the reviewers and the rule.
+        for added in [
+            EscalationReason::AuthorizationBypass,
+            EscalationReason::Injection,
+        ] {
+            assert!(added.rank() > EscalationReason::CrossTenant.rank());
+            assert!(added.rank() < EscalationReason::ConflictingVerdicts.rank());
+        }
+        assert_eq!(
+            EscalationReason::parse("authorization_bypass"),
+            Some(EscalationReason::AuthorizationBypass)
+        );
+        assert_eq!(
+            EscalationReason::parse("injection"),
+            Some(EscalationReason::Injection)
         );
     }
 
@@ -617,10 +669,26 @@ mod tests {
     }
 
     #[test]
-    fn only_the_d5_reasons_at_critical_and_unverified_evidence_may_exceed_the_budget() {
+    fn only_the_severe_reasons_and_unverified_evidence_may_exceed_the_budget() {
         let set = EscalationReason::default_over_budget_set();
-        assert!(EscalationReason::SecretExposure.may_exceed_budget("critical", &set));
-        assert!(!EscalationReason::SecretExposure.may_exceed_budget("high", &set));
+        // R-3: secret exposure, data loss, cross-tenant access, authorization bypass and
+        // injection go past the budget at high as well as critical.
+        for reason in [
+            EscalationReason::SecretExposure,
+            EscalationReason::DataLoss,
+            EscalationReason::CrossTenant,
+            EscalationReason::AuthorizationBypass,
+            EscalationReason::Injection,
+        ] {
+            assert!(reason.may_exceed_budget("critical", &set), "{reason:?}");
+            assert!(reason.may_exceed_budget("high", &set), "{reason:?}");
+            assert!(!reason.may_exceed_budget("medium", &set), "{reason:?}");
+            assert!(!reason.may_exceed_budget("critical", &[]), "{reason:?}");
+        }
+        // Unauthenticated reach stays at critical: the group reviewer gives it to anything a
+        // logged-out caller touches.
+        assert!(EscalationReason::UnauthenticatedReach.may_exceed_budget("critical", &set));
+        assert!(!EscalationReason::UnauthenticatedReach.may_exceed_budget("high", &set));
         assert!(EscalationReason::EvidenceUnverified.may_exceed_budget("low", &set));
         assert!(!EscalationReason::ConflictingVerdicts.may_exceed_budget("critical", &set));
         // A project can narrow the set.
@@ -635,8 +703,12 @@ mod tests {
         for stored in [vec![], vec![EscalationReason::SecretExposure]] {
             assert!(EscalationReason::EvidenceUnverified.may_exceed_budget("low", &stored));
             assert!(
-                !EscalationReason::SecretExposure.may_exceed_budget("high", &stored),
-                "the other reasons still obey the set and critical severity"
+                !EscalationReason::SecretExposure.may_exceed_budget("medium", &stored),
+                "the other reasons still obey the set and their severity"
+            );
+            assert!(
+                !EscalationReason::SecretExposure.may_exceed_budget("critical", &[]),
+                "and a set that leaves a reason out keeps it inside the budget"
             );
         }
         let mut line = EscalationBudget::compute(1.0, 1, 1000);

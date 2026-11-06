@@ -274,7 +274,10 @@ pub struct ReviewSettings {
     pub escalation_floor: usize,
     /// The reasons that may go past the budget (the severe-reach four at critical severity, and
     /// `evidence_unverified`, by default).
-    #[serde(default = "default_over_budget_reasons")]
+    #[serde(
+        default = "default_over_budget_reasons",
+        deserialize_with = "deserialize_over_budget_reasons"
+    )]
     pub over_budget_reasons: Vec<crate::review::EscalationReason>,
     /// The group reviewer's model. Empty means not set: the run uses [`STAGE2_DEFAULT_MODEL`].
     /// Set only here or by the `--group-review-model` flag, never by the environment.
@@ -309,6 +312,33 @@ fn default_escalation_floor() -> usize {
 
 fn default_over_budget_reasons() -> Vec<crate::review::EscalationReason> {
     crate::review::EscalationReason::default_over_budget_set()
+}
+
+/// The over-budget set as stored. R-3 added `authorization_bypass` and `injection` to the
+/// default set; a project that saved the previous default (the five reasons it held) loads with
+/// the new one. Any other set is the architect's own choice and is kept as written.
+fn deserialize_over_budget_reasons<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crate::review::EscalationReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::review::EscalationReason as R;
+    let stored = Vec::<R>::deserialize(deserializer)?;
+    let previous_default = [
+        R::UnauthenticatedReach,
+        R::SecretExposure,
+        R::DataLoss,
+        R::CrossTenant,
+        R::EvidenceUnverified,
+    ];
+    let is_previous_default = stored.len() == previous_default.len()
+        && previous_default.iter().all(|r| stored.contains(r));
+    Ok(if is_previous_default {
+        R::default_over_budget_set()
+    } else {
+        stored
+    })
 }
 
 impl Default for ReviewSettings {
@@ -352,6 +382,28 @@ mod review_settings_tests {
         assert_eq!(s.escalation_floor, 5);
         assert_eq!(s.group_review_model, "claude-opus-5-5");
         assert!((s.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// R-3 added two reasons to the default set. A project that saved the old default (the five
+    /// reasons) keeps what it chose in spirit: it loads with the new default. A set the architect
+    /// changed is never touched.
+    #[test]
+    fn a_project_that_saved_the_old_default_set_loads_the_new_default() {
+        let old = r#"{"over_budget_reasons":["unauthenticated_reach","secret_exposure","data_loss","cross_tenant","evidence_unverified"]}"#;
+        let s: ReviewSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            s.over_budget_reasons,
+            EscalationReason::default_over_budget_set()
+        );
+        let narrowed = r#"{"over_budget_reasons":["secret_exposure","evidence_unverified"]}"#;
+        let s: ReviewSettings = serde_json::from_str(narrowed).unwrap();
+        assert_eq!(
+            s.over_budget_reasons,
+            vec![
+                EscalationReason::SecretExposure,
+                EscalationReason::EvidenceUnverified
+            ]
+        );
     }
 
     #[test]
