@@ -243,24 +243,13 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             }
             let members = tree.batch_members(node_id);
             // Held rows are never covered by a batch: the gate needs a ruling on them by name,
-            // and an inherited record would hide that nobody looked (spec U3). Every row the
-            // release gate would refuse counts, read from the sealed report the gate reads (the
-            // junk mark and the engine's own merges only exist there), and so does a row the
-            // reviewer merged: a merge is never overwritten by a batch.
+            // and an inherited record would hide that nobody looked (spec U3). The one hold
+            // function reads the sealed report the gate reads (the junk mark and the engine's own
+            // merges only exist there), and a row the reviewer merged stays out too: a merge is
+            // never overwritten by a batch.
             let mut with_held = req.clone();
             let (_, reviewed) = crate::edits::routes::review_of(state, id, &latest);
-            let mut held = super::held_keys(
-                &latest.report.findings,
-                &state.decisions.active(id),
-                reviewed.engine_check(),
-            );
-            let gate = crate::release_gate::holds::gate_holds(&reviewed);
-            held.extend(
-                gate.held
-                    .iter()
-                    .chain(&gate.merged_without_decision)
-                    .map(|h| h.key.clone()),
-            );
+            let held = crate::release_gate::holds::hold_set(&reviewed).kept_out_of_a_batch;
             with_held.except.extend(
                 members
                     .iter()

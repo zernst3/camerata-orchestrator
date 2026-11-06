@@ -765,6 +765,78 @@ async fn seeded_project_export_is_blocked_by_exactly_the_seeded_held_rows() {
     }
 }
 
+/// One hold set (WO16d F1): the shell's held count, `/reviewed-report`'s `held`, the export
+/// panel and the release gate's refusals are the same rows. The engine-merged row with no
+/// decision behind it (sql-10) and the junk row (sql-12) exist only on the sealed report, so a
+/// screen that read the raw report's hold list showed fewer rows than the gate refused; a merge
+/// the reviewer already ruled on is not held at all (it has its ruling).
+#[tokio::test]
+async fn the_shell_the_reviewed_report_the_panel_and_the_gate_hold_the_same_rows() {
+    for variant in [Variant::Base, Variant::Moved, Variant::Clean] {
+        let (_dir, seeded) = seed(variant).await;
+        let (state, app) = reopen(&seeded);
+        let shell: ReviewShellView = get(&app, &seeded, "the shell", "review").await;
+        let panel: ExportGateView =
+            get(&app, &seeded, "the export gate", "review/export-gate").await;
+        let report: Value = get(&app, &seeded, "the reviewed report", "reviewed-report").await;
+
+        // The reviewed report's held keys, as (path, line) through its own rows.
+        let places: std::collections::HashMap<String, (String, usize)> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["site_key"].as_str().unwrap().to_string(),
+                    (
+                        f["path"].as_str().unwrap().to_string(),
+                        f["line"].as_u64().unwrap() as usize,
+                    ),
+                )
+            })
+            .collect();
+        let mut on_report: Vec<(String, usize)> = report["held"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| {
+                places
+                    .get(k.as_str().unwrap())
+                    .unwrap_or_else(|| panic!("{variant:?}: held key {k} is not a row"))
+                    .clone()
+            })
+            .collect();
+        on_report.sort();
+        let mut on_panel: Vec<(String, usize)> = view_rows(&panel)
+            .into_iter()
+            .map(|(_, path, line)| (path, line))
+            .collect();
+        on_panel.sort();
+        assert_eq!(
+            on_report, on_panel,
+            "{variant:?}: /reviewed-report and the panel"
+        );
+        assert_eq!(
+            shell.counts.held,
+            on_report.len(),
+            "{variant:?}: the shell's count and /reviewed-report"
+        );
+
+        let latest = state.inspections().latest(&seeded.project_id).unwrap();
+        let (_, reviewed) = crate::edits::routes::review_of(&state, &seeded.project_id, &latest);
+        let mut refused: Vec<(String, usize)> = gate_refusals(&reviewed)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, path, line)| (path, line))
+            .collect();
+        refused.sort();
+        assert_eq!(
+            on_report, refused,
+            "{variant:?}: /reviewed-report and the gate"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_uncorrected_engine_check_no_is_still_refused_after_a_rerun() {
     // The No was given on the first run; the rerun (the moved variant) has the same site under
@@ -819,6 +891,35 @@ fn source_files() -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk(&root, &root, &mut out);
     out
+}
+
+/// There is one hold function (WO16d F1). Production code asks `hold_set` which rows are held;
+/// the raw reasons (`held_keys`) are read only by it, and the gate's rows (`gate_holds`) only by
+/// it and by the review view, which builds the export panel and the shell's count from the same
+/// rows. A new reader that rebuilds its own list from either fails here.
+#[test]
+fn nothing_but_the_one_hold_function_reads_the_raw_hold_reasons() {
+    for (file, text) in source_files() {
+        for (name, allowed) in [
+            ("held_keys(", &["decisions.rs", "release_gate/holds.rs"][..]),
+            (
+                "gate_holds(",
+                &["release_gate/holds.rs", "review_view.rs"][..],
+            ),
+        ] {
+            if allowed.contains(&file.as_str()) {
+                continue;
+            }
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                assert!(
+                    code.starts_with("//") || !code.contains(name),
+                    "{file}:{}: calls {name} directly; ask release_gate::holds::hold_set instead",
+                    n + 1
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

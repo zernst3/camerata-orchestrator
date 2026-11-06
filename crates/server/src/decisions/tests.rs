@@ -1711,10 +1711,9 @@ async fn a_decision_for_a_discarded_rows_key_is_stored_and_read_back() {
 async fn a_node_decision_over_a_group_with_a_junk_row_leaves_that_row_unresolved_and_excluded() {
     let (state, app, pid) = app_with_project();
     let mut rows = three_rows();
-    rows[1].captures.insert(
-        crate::junk_finding::JUNK_CONTENT_CAPTURE.to_string(),
-        "placeholder headline".to_string(),
-    );
+    // Real junk text (a refusal): the seal marks it, and the one hold function reads the sealed
+    // report, so a mark planted on the raw row alone would not count.
+    rows[1].detail = "A title \u{2014} I cannot say.".to_string();
     let entry = state
         .inspections
         .append(entry_of(&pid, rows, "2026-11-02T10:00:00Z"))

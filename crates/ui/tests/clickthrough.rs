@@ -692,6 +692,96 @@ fn workbook_text(zip_bytes: &[u8]) -> String {
     text
 }
 
+/// The rows of the workbook's Sites sheet in the export zip, each as its cells by column
+/// (A is index 0): the sheet is found by its name in `xl/workbook.xml`, and a shared-string cell
+/// is read through `xl/sharedStrings.xml`, so a test can say which column a value landed in.
+fn sites_sheet_rows(zip_bytes: &[u8]) -> Vec<Vec<String>> {
+    use std::io::Read;
+    let mut outer = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("a zip");
+    let name = zip_names(&outer)
+        .into_iter()
+        .find(|n| n.ends_with(".xlsx"))
+        .expect("the export holds a workbook");
+    let mut book = Vec::new();
+    outer
+        .by_name(&name)
+        .expect("the workbook")
+        .read_to_end(&mut book)
+        .expect("readable");
+    let mut inner = zip::ZipArchive::new(std::io::Cursor::new(book)).expect("an xlsx is a zip");
+    let mut part = |name: &str| {
+        let mut text = String::new();
+        inner
+            .by_name(name)
+            .unwrap_or_else(|e| panic!("the workbook has no {name}: {e}"))
+            .read_to_string(&mut text)
+            .expect("xml text");
+        text
+    };
+    let book_xml = part("xl/workbook.xml");
+    let names: Vec<&str> = book_xml
+        .split("<sheet name=\"")
+        .skip(1)
+        .map(|c| &c[..c.find('"').expect("a quoted sheet name")])
+        .collect();
+    let at = names
+        .iter()
+        .position(|n| *n == "Sites")
+        .unwrap_or_else(|| panic!("no Sites sheet in {names:?}"));
+    let sheet = part(&format!("xl/worksheets/sheet{}.xml", at + 1));
+    let unescape = |s: &str| {
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+    };
+    let pool: Vec<String> = part("xl/sharedStrings.xml")
+        .split("<si>")
+        .skip(1)
+        .filter_map(|si| {
+            let start = si.find('>')? + 1;
+            let end = si[start..].find("</t>")? + start;
+            Some(unescape(&si[start..end]))
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for row in sheet.split("<row ").skip(1) {
+        let row = &row[..row.find("</row>").unwrap_or(row.len())];
+        let mut cells: Vec<String> = Vec::new();
+        for cell in row.split("<c ").skip(1) {
+            let head = &cell[..cell.find('>').expect("a cell tag")];
+            let column = head
+                .split("r=\"")
+                .nth(1)
+                .expect("a cell reference")
+                .chars()
+                .take_while(char::is_ascii_alphabetic)
+                .fold(0usize, |n, c| n * 26 + (c as usize - 'A' as usize + 1))
+                - 1;
+            let value = cell
+                .split("<v>")
+                .nth(1)
+                .and_then(|v| v.split("</v>").next())
+                .filter(|_| !head.ends_with('/'))
+                .map(|v| {
+                    if head.contains("t=\"s\"") {
+                        pool[v.parse::<usize>().expect("a shared-string index")].clone()
+                    } else {
+                        v.to_string()
+                    }
+                })
+                .unwrap_or_default();
+            if cells.len() <= column {
+                cells.resize(column + 1, String::new());
+            }
+            cells[column] = value;
+        }
+        rows.push(cells);
+    }
+    rows
+}
+
 #[test]
 fn edit_a_headline_and_the_workbook_export_carries_it() {
     let model = Model::load();
@@ -1411,6 +1501,25 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         row["severity"], "high",
         "the edit made on card 1 ships: {row}"
     );
+    // The workbook's Sites sheet carries it too: the row for that path and line, its Severity
+    // column (G) reading High (spec section 14 step 12).
+    let sites = sites_sheet_rows(&zip_bytes);
+    let on_sites: Vec<&Vec<String>> = sites
+        .iter()
+        .filter(|r| {
+            r.get(3).map(String::as_str) == Some(path) && r.get(4).map(String::as_str) == Some(line)
+        })
+        .collect();
+    assert!(
+        !on_sites.is_empty(),
+        "{first} is not on the Sites sheet: {sites:?}"
+    );
+    assert!(
+        on_sites
+            .iter()
+            .all(|r| r.get(6).map(String::as_str) == Some("High")),
+        "the Sites sheet's row for {first} does not carry the edited severity: {on_sites:?}"
+    );
     stack.assert_no_model_calls();
 }
 
@@ -1605,5 +1714,46 @@ fn o_opens_real_code_and_y_copies_the_permalink_through_the_platform() {
 
     stack.key("Escape");
     stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}
+
+/// WO16b made every desktop page-script copy try the clipboard bridge first. In a page with no
+/// bridge (this one), the bridge script must say it did not take the text, and the page-script
+/// copy that follows must select the text in a textarea and ask the webview to copy it: the
+/// `execCommand` path that puts it on the system clipboard in the desktop webview. The order of
+/// the two is pinned in `platform::tests`.
+#[test]
+fn a_copy_without_the_clipboard_bridge_selects_the_text_and_asks_the_webview_to_copy() {
+    use camerata_ui::platform::{bridge_copy_script, copy_script};
+    let stack = Stack::open(Seed::Clean);
+    let text = "acme/app@abc1234:src/a.rs:3\nhttps://x/y#L3";
+    assert!(
+        !stack.js_bool("typeof window.__camerataClipboardBridgeSend === 'function'"),
+        "this page has no clipboard bridge"
+    );
+    let bridge = bridge_copy_script(text).expect("encodes");
+    assert_eq!(
+        stack.js(&format!("(function () {{ {bridge} }})()")),
+        Value::Bool(false),
+        "with no bridge, the bridge script does not claim the copy"
+    );
+    // Watch what the page-script copy asks of the webview.
+    stack.js(
+        "(() => { window.__asked = null; document.execCommand = (command) => { \
+         const a = document.activeElement; \
+         window.__asked = { command, value: a && a.value, \
+           selected: a && a.value.substring(a.selectionStart, a.selectionEnd) }; \
+         return true; }; return true; })()",
+    );
+    let copy = copy_script(text).expect("encodes");
+    assert_eq!(
+        stack.js(&format!("(function () {{ {copy} }})()")),
+        Value::Bool(true),
+        "the page-script copy reports the copy"
+    );
+    let asked: Value = serde_json::from_str(&stack.js_string("JSON.stringify(window.__asked)"))
+        .expect("the spy recorded the call");
+    assert_eq!(asked["command"], "copy", "{asked}");
+    assert_eq!(asked["selected"], text, "the text was selected: {asked}");
     stack.assert_no_model_calls();
 }
