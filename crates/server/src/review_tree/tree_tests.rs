@@ -1289,3 +1289,67 @@ fn the_same_structural_rule_in_two_repos_stays_separate_per_repo() {
     let repos: BTreeSet<&str> = p.rows.iter().map(|f| f.repo.as_str()).collect();
     assert_eq!(repos.len(), 2, "both repos keep rows");
 }
+
+// ---- a collapse keeps what stage 1 said about the sources ---------------------------------
+
+#[test]
+fn the_survivor_of_a_collapse_carries_the_stage_1_verdict_of_a_collapsed_row() {
+    use crate::ai_audit::{outlier_reasons_of, stage1_of, OUTLIER_REASONS_CAPTURE, STAGE1_CAPTURE};
+    // The floor's deterministic row wins the survivor slot over the model row (tier 3 over 2),
+    // but stage 1 rated only the model row. The survivor must not read as "not rated".
+    let deterministic = row(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        "db/migrations/0005_rpc.sql",
+        2,
+        "create function enrollment_summary(course uuid) security definer",
+    );
+    let mut model = ai_row(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        Some("injection"),
+        "db/migrations/0005_rpc.sql",
+        2,
+        "create function enrollment_summary(course uuid) security definer",
+    );
+    model.captures.insert(
+        STAGE1_CAPTURE.to_string(),
+        serde_json::json!({"real": "yes", "reason": "definer with no caller test"}).to_string(),
+    );
+    model.captures.insert(
+        OUTLIER_REASONS_CAPTURE.to_string(),
+        "severity_raise_held".to_string(),
+    );
+    let out = collapse(vec![model, deterministic]);
+    assert_eq!(out.rows.len(), 1);
+    let survivor = &out.rows[0];
+    assert!(
+        survivor.confidence.is_none(),
+        "the deterministic row is the survivor: {survivor:?}"
+    );
+    let stage1 = stage1_of(survivor).expect("stage 1's verdict reaches the survivor");
+    assert_eq!(stage1.real.as_str(), "yes");
+    assert_eq!(stage1.reason, "definer with no caller test");
+    assert_eq!(outlier_reasons_of(survivor).len(), 1);
+}
+
+#[test]
+fn a_survivor_that_stage_1_rated_keeps_its_own_verdict() {
+    use crate::ai_audit::{stage1_of, STAGE1_CAPTURE};
+    let verdict = |real: &str| serde_json::json!({"real": real, "reason": "r"}).to_string();
+    let mut deterministic = row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "query(a)");
+    deterministic
+        .captures
+        .insert(STAGE1_CAPTURE.to_string(), verdict("no"));
+    let mut model = ai_row(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        Some("injection"),
+        "src/a.rs",
+        10,
+        "query(a)",
+    );
+    model
+        .captures
+        .insert(STAGE1_CAPTURE.to_string(), verdict("yes"));
+    let out = collapse(vec![model, deterministic]);
+    assert_eq!(out.rows.len(), 1);
+    assert_eq!(stage1_of(&out.rows[0]).unwrap().real.as_str(), "no");
+}
