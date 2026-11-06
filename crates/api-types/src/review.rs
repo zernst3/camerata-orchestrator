@@ -731,7 +731,10 @@ mod tests {
             .map(|c| c.key.as_str())
             .collect();
         assert_eq!(escalated, vec!["a", "b", "c"]);
-        assert_eq!((budget.budget, budget.escalated, budget.candidates), (2, 2, 3));
+        assert_eq!(
+            (budget.budget, budget.escalated, budget.candidates),
+            (2, 2, 3)
+        );
         assert_eq!(budget.over_budget, 0);
         // Move the data-loss row into slot 3 at critical: the whole slot goes over the budget,
         // every row of it marked.

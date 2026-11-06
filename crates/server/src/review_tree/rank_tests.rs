@@ -493,7 +493,12 @@ fn rows_of_different_rules_at_one_site_take_one_slot() {
     let mut rows = Vec::new();
     for s in 0..3 {
         for rule in [RULE_A, RULE_B, RULE_C] {
-            rows.push(row_at(rule, &format!("app/api/site{s}/route.ts"), 8, "high"));
+            rows.push(row_at(
+                rule,
+                &format!("app/api/site{s}/route.ts"),
+                8,
+                "high",
+            ));
         }
     }
     for n in 0..6 {
@@ -558,9 +563,11 @@ fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason()
     let a = row_of(&rows, RULE_A, "app/x.ts").clone();
     let b = row_of(&rows, RULE_B, "app/x.ts").clone();
     let y = row_of(&rows, RULE_A, "app/y.ts").clone();
-    rule_node_of(&mut tree, &a)
-        .escalations
-        .push(esc(&a, EscalationReason::UnauthenticatedReach, 2));
+    rule_node_of(&mut tree, &a).escalations.push(esc(
+        &a,
+        EscalationReason::UnauthenticatedReach,
+        2,
+    ));
     rule_node_of(&mut tree, &b)
         .escalations
         .push(esc(&b, EscalationReason::SecretExposure, 1));
@@ -574,13 +581,19 @@ fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason()
         "critical",
         "the low row carries its site's highest severity"
     );
-    assert_eq!(of(&a.site_key).reason, EscalationReason::UnauthenticatedReach);
+    assert_eq!(
+        of(&a.site_key).reason,
+        EscalationReason::UnauthenticatedReach
+    );
     assert_eq!(of(&b.site_key).reason, EscalationReason::SecretExposure);
     assert!(
         of(&a.site_key).escalated && of(&b.site_key).escalated,
         "the whole site is inside the one slot"
     );
-    assert!(!of(&y.site_key).escalated, "the other site is past a budget of one");
+    assert!(
+        !of(&y.site_key).escalated,
+        "the other site is past a budget of one"
+    );
 }
 
 // ---- R-2: severity first, then reason rank, then the group reviewer's priority --------------
@@ -659,7 +672,9 @@ fn severity_decides_before_reason_and_the_reviewers_priority_decides_last() {
     let (mut tree, rows) = tree_of_rows(rows);
     let put = |tree: &mut ReviewTree, path: &str, reason, rank| {
         let f = row_of(&rows, RULE_A, path).clone();
-        rule_node_of(tree, &f).escalations.push(esc(&f, reason, rank));
+        rule_node_of(tree, &f)
+            .escalations
+            .push(esc(&f, reason, rank));
     };
     put(&mut tree, "a.ts", EscalationReason::UnauthenticatedReach, 1);
     put(&mut tree, "b.ts", EscalationReason::RuleMisfit, 4);
