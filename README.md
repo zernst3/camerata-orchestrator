@@ -4,21 +4,27 @@
 
 Camerata is a governed engineering platform for working on code with AI. It is built on one library of written, versioned rules, and two products use it: the **Codebase Inspection**, which reads a codebase against the rules and reports what it finds, and the **governed development console**, where AI agents change code only through a deterministic gate that enforces the same rules.
 
-The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what Camerata checks. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation). [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
+The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so every check Camerata makes is readable in plain text. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation). [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
 ## The Codebase Inspection
 
-Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide. What a client gets:
+Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide. A group reviewer then reads each rule's findings together, splits them into sub-groups (one kind of violation with one cause) and ranks the sites that most need a person's eyes above an escalation line. What a client gets:
 
 - **Findings in five kinds, not a yes/no:** a defect, a deviation from the convention the codebase itself follows, a convention it follows well, a place where no convention exists and a rule that could not be assessed. Each names its rule and the standard behind it, and carries a rough range of hours to fix.
-- **A PDF summary, an Excel workbook and `findings.json`** in one ZIP marked "Confidential, prepared for" the client. A release gate scans every file first and refuses the export if one secret survives.
+- **A report a person has reviewed.** The reviewer works through a tree of rule groups and sub-groups, an escalation queue that orders sites by severity with one slot per site and a code viewer at every cited line. Every decision is recorded, a row the engine is unsure of is held until someone rules on it, and a chat assistant answers questions about any finding from the same view of the report. A review timer records the hours spent for the reviewer's own planning; it never reaches the client.
+- **A complete client package in one ZIP**, marked "Confidential, prepared for" the client and pinned to the exact commit inspected:
+  - a **PDF report** for decision makers: executive summary, category scorecard, a severity by effort matrix, the curated findings with citations and recommended fixes, what is healthy, a dependency snapshot and the methodology, stated plainly as an assessment and not a certification;
+  - an **Excel workbook** for the engineers: a remediation plan in the order to fix, every site, the group tree, the decision record, every finding with a sheet per category, dependencies, coverage (every rule checked, found or not), false positives with the reason each was excluded and what the engine threw out;
+  - **`findings.json`, `decisions.json` and CSV and JSON copies of every dataset**, including a `tickets.csv` with one ticket per sub-group ready to import into Jira, Linear or GitHub Issues, plus a manifest and a README.
+
+  Before anything is written, a release gate runs more than a dozen checks: no secret survives in any file, every dataset agrees with every other, every held row has a decision and the report's claims match the scan's own ledger. One failure refuses the export.
 - **Several repositories as one project.** Every finding names its repo, each service's conventions are read separately and a **Patterns across services** section shows where services differ. It is an observation, never a finding.
-- **Run to completion.** A call that fails on network or server trouble is retried, an outage stops the run cleanly and a client export is never written with a part that failed or did not run. Every inspection is saved part by part, so after any interruption **Run what remains** (or `camerata inspect --resume`) sends only the work that is left.
+- **Run to completion.** A call that fails on network or server trouble is retried, an outage stops the run cleanly and a client export is never written with a part that failed or did not run. Every inspection is saved part by part, so after any interruption **Run what remains** (or `camerata inspect --resume`) sends only the work that is left. Every model reply is kept, including one the engine turned down, so after a parser fix a resume reuses any reply the fixed parser accepts instead of paying for it again.
 - **Accuracy checks on the client-facing text.** The explanation and the fix written for each finding are checked against the code, and a name the code does not contain is turned down.
 - **Runtime end-of-life and vulnerability checks** on the runtime a repository declares, beyond the lockfile audit.
-- **Cost you control.** An estimate is printed first, the spend limit is off unless you set one, models come from project settings or command-line flags only (defaults: Sonnet 5.5, Haiku 5.5 and Opus 5.5) and every token-saving measure can be switched off for a run.
+- **Cost under the operator's control.** An estimate is printed before any model call, a spend limit stops a run at the amount set, models come from project settings or command-line flags only (defaults: Sonnet 5.5 for the scan, Opus 5.5 for calibration, Fable 5.1 for the group reviewer and Haiku 5.5 for fixes) and every token-saving measure can be switched off for a run.
 
-**The honest boundary.** What this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself. [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves your machine and how to delete what stays.
+**The honest boundary.** This repository shows the engine's behavior on fixture repositories with planted defects and the test suite that pins it. It makes no claim, and holds no published measurement, of how precise or complete the AI pass is on a large real-world codebase; results at that scale stay unproven until they are measured. Every client report is reviewed by a person before it is delivered. [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves the operator's machine during an inspection and how to delete what stays.
 
 ## The governed development console
 
@@ -78,19 +84,21 @@ The full graph of all 30 workspace members is in [`PLATFORM.md`](PLATFORM.md#the
 
 ## By the numbers
 
-I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In roughly four and a half months:
+I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In under five months:
 
 | | |
 |---|---|
-| Rust | over 500,000 lines of Rust across 29 crates and one maintainer tool, including tests |
-| Tests | 10,000+ automated tests; roughly half the lines are test code |
+| Rust | over 650,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Tests | 11,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
 | Rule library | 443 rules across 22 domains |
-| Commits | 2,400+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
+| Commits | 2,800+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
-The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Client secrets are redacted before any code reaches a model, and the release gate checks every export.
+The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
 
-## Try it
+## How it runs
+
+Camerata is not distributed; these are the maintainer's commands, listed to show how the pieces fit.
 
 ```
 cargo run -p camerata-ui                    # the cockpit (a Dioxus desktop app): Onboard repos, then Governed Development
@@ -98,17 +106,17 @@ cargo run -p camerata -- acceptance         # the gate denies planted violations
 cargo run -p camerata -- count <PATH>       # size a repository the way an inspection counts it, no model
 ```
 
-A real inspection costs model tokens and needs an Anthropic key (saved in the app, or in `ANTHROPIC_API_KEY`). Use `--max-cost-usd` to cap the spend:
+A real inspection costs model tokens and needs an Anthropic key (saved in the app, or in `ANTHROPIC_API_KEY`); `--max-cost-usd` caps the spend:
 
 ```
 cargo run -p camerata -- inspect --repo <PATH> --client "<CLIENT NAME>" --export <OUT.zip>
 ```
 
-To see a report without spending anything, `cargo test -p camerata-server --test generate_sample_report -- --ignored` builds one from a hand-built fixture (not a scan of real code) into `sample-report/` and needs Typst 0.15 on your `PATH`. More commands are in [`PLATFORM.md`](PLATFORM.md#try-it-runnable-demos).
+A sample report costs nothing: `cargo test -p camerata-server --test generate_sample_report -- --ignored` builds one from a hand-built fixture (not a scan of real code) into `sample-report/` and needs Typst 0.15 on the `PATH`. More commands are in [`PLATFORM.md`](PLATFORM.md#try-it-runnable-demos).
 
 ## Status
 
-The Codebase Inspection and brownfield onboarding are built and run end to end on fixture repositories, and the gate is proven standalone against a real agent. **The V1 accuracy and efficiency tests are still pending:** how precise and complete the AI pass is on large real-world codebases, and what each token-saving measure does to cost and to findings, have not been measured. The governed development console is wired end to end and unit-tested, but a live model doing multi-step work through the gate has not been run yet. The consumer app-builder, the architect surface for Jira, Azure DevOps and GitHub boards and the standing maintenance agent are earlier still. [`PLATFORM.md`](PLATFORM.md#status) separates what is proven from what is staged.
+The Codebase Inspection and brownfield onboarding are built and run end to end on fixture repositories, and the gate is proven standalone against a real agent. **V1 accuracy testing has started, on fixture repositories with planted defects and decoys, graded blind against answer keys the engine never sees.** How precise and complete the AI pass is on large real-world codebases, and what each token-saving measure does to cost and to findings, have not been measured yet. The governed development console is wired end to end and unit-tested, but a live model doing multi-step work through the gate has not been run yet. The consumer app-builder, the architect surface for Jira, Azure DevOps and GitHub boards and the standing maintenance agent are earlier still. [`PLATFORM.md`](PLATFORM.md#status) separates what is proven from what is staged.
 
 ## Where to read next
 
@@ -119,7 +127,7 @@ The Codebase Inspection and brownfield onboarding are built and run end to end o
 | [`docs/TECHNICAL.md`](docs/TECHNICAL.md) | How it works inside: the gate, the scan pipeline, agent grounding, persistence |
 | [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | The high-level map of the whole system in one sitting |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The all-Rust stack, top to bottom |
-| [`DATA_HANDLING.md`](DATA_HANDLING.md) | What leaves your machine during an inspection and how to delete what stays |
+| [`DATA_HANDLING.md`](DATA_HANDLING.md) | What leaves the operator's machine during an inspection and how to delete what stays |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
 | [`docs/decisions/`](docs/decisions/) | The design-decision records |
 | [`docs/VISION.md`](docs/VISION.md) | The north star and where the architecture leads |

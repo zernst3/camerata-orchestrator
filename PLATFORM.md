@@ -34,9 +34,11 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
  CAMERATA: WHAT'S REAL vs STAGED
  ════════════════════════════════════════════════════════════════════════════
 
- REAL: runs today, you can reproduce it
+ REAL: runs today, reproducible from this repository
     ▸ CODEBASE INSPECTION: a deterministic scan plus an AI pass, calibrated and
-      de-duplicated, exported as a PDF, a workbook and findings.json. Runs from
+      de-duplicated, grouped and ranked by a group reviewer, reviewed by a person,
+      exported as a PDF, a workbook, findings.json, decisions.json, CSV and JSON
+      datasets and import-ready tickets. Runs from
       the app or headless with `camerata inspect`. The most hardened part.
     ▸ GOVERNANCE GATE: deny-before-execute blocks a real `claude -p` agent's
       forbidden write before it touches disk. Fail-closed, provider-neutral,
@@ -61,7 +63,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 30-member Rust workspace (29 crates and one maintainer tool) · 10,000+
+    ▸ 30-member Rust workspace (29 crates and one maintainer tool) · 11,000+
       tests · governs its OWN source in CI.
     ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio)
       and `camerata` (the CLI) as a real HTTP adapter all drive the same BFF surface
@@ -93,7 +95,7 @@ Point Camerata at one or more existing repositories (in the desktop app, or one 
 - **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy, ruff, eslint, semgrep and osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports and the like), with severity and authority calibration, cross-rule dedup and snippet-to-line resolution.
 - **Alternative recommendation, built into that same audit:** for every rule that carries more than one adopted alternative, the audit also picks the option it judges best fitting for this codebase (with reasoning you can inspect) and assesses the codebase against that option, not against every option at once. There is one hard exception, and it is load-bearing: if the option the repo actually follows is the one the rule itself names as its own degenerate or absent form (`violates = true` on that option), the rule's directive is **not** rewritten to match, and a finding is emitted instead. Without that guard, a codebase that is consistently incorrect reads as compliant, which is the single worst failure this engine has had. A rule with no default does not block you from proceeding: it is a hint that the audit will pick for you. Disagree with any recommendation and you can override it and rescan just the rules you changed, then accept the final selections into the ruleset.
 
-The honest boundary: what this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself.
+The honest boundary: this repository shows the engine's behavior on fixture repositories with planted defects and the test suite that pins it. It makes no claim, and holds no published measurement, of how precise or complete the AI pass is on a large real-world codebase; results at that scale stay unproven until they are measured. Every client report is reviewed by a person before it is delivered.
 
 ### What a finding IS: five kinds, not a yes/no
 
@@ -118,7 +120,10 @@ cargo run -p camerata -- count <PATH>       # no model, no network: files and li
                                             # the number the inspection is priced on
 cargo run -p camerata -- inspect --repo <PATH> --client "<CLIENT NAME>" --export <OUT.zip>
                                             # prints an estimate first; the ZIP holds the PDF
-                                            # summary, findings.xlsx, findings.json and README.txt.
+                                            # report, findings.xlsx, findings.json,
+                                            # decisions.json, csv/ and json/ datasets
+                                            # (csv/tickets.csv for Jira, Linear or GitHub),
+                                            # manifest.json and README.txt.
                                             # Also writes <PATH>/.camerata-scan-ledger.json.
                                             # Needs an Anthropic key (saved in the app, or in
                                             # ANTHROPIC_API_KEY). Add --max-cost-usd to cap spend.
@@ -143,7 +148,7 @@ Each item is short here. The detail is in [`docs/USER_GUIDE.md`](docs/USER_GUIDE
 - **Several repositories as one project.** `camerata inspect` takes `--repo` more than once (each with a `--repo-name`) and the desktop app takes several repos in a project. It is one scan, one report and one cache. Every finding names its repo, so two services that both have a `src/index.ts` stay apart, and each service's own conventions are read separately. A read-only **Patterns across services** section shows where services follow different conventions for the same rule. It is an observation, never a finding.
 - **Run to completion.** A client report never contains a part that failed or did not run. A call that fails on network or server trouble (a dropped connection, a timeout, a 429, a 5xx) is retried. A reply that is cut off or malformed is not simply sent again: the part changes the request or fails visibly. Three transport failures in a row (or one login or billing failure) stop the run cleanly, and every part not yet sent is recorded as not run. A client export is written only when every part is complete; otherwise it is refused and the run stays open. A failure report and a failure panel for the operator list each failed part and why. They are never part of the client deliverable.
 - **Saved runs and resume.** Every inspection is saved part by part. After an outage, a failed part or an interruption (a crash, a closed laptop), `camerata inspect --resume <RUN-ID|latest>` or the app's **Run what remains** sends only the model calls that were not stored as good. A resume refuses, in plain words, when the repository, the models, the rules or the Camerata version no longer match the saved run.
-- **The spend limit.** There is no limit on a real run unless you set one (`--max-cost-usd`, or the app's spend limit field). The inspection prints an estimate first. Once a limit is set the run stops between passes when actual spend reaches it and says which parts did not run. The output cap on each model call is only a guard against a runaway reply: it is sized from the work and does not stop a run.
+- **The spend limit.** There is no limit on a real run unless the operator sets one (`--max-cost-usd`, or the app's spend limit field). The inspection prints an estimate first. Once a limit is set the run stops between passes when actual spend reaches it and says which parts did not run. The output cap on each model call is only a guard against a runaway reply: it is sized from the work and does not stop a run.
 - **Model choice.** A model comes from the project's settings in the app or from `--model`, `--calibration-model`, `--fix-model` and `--clone-judge-model` on the command line and from nowhere else (no environment variable picks one). The built-in defaults are Claude Sonnet 5.5 for the audit and calibration, Claude Haiku 5.5 for the fix wording and the duplicate-code judge and Claude Opus 5.5 as the strongest tier of the model profiles.
 - **Token-efficiency switches.** Every saving the product applies is on by default and can be switched off for one run with `--efficiency NAME=off`, to find out whether it caused a change. A run prints which were on. The names and what each does are in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) (token efficiency, §6a).
 - **Runtime end-of-life and vulnerability checks.** Beyond the lockfile audit, the runtime a repository declares (a Docker base image, `.nvmrc`, a manifest field) is checked against endoflife.date and the National Vulnerability Database. A release line past its end of life is a high finding. A version that is a range or a moving tag is never guessed: Coverage lists it as not checked.
@@ -208,10 +213,10 @@ These surfaces are built to varying depth and labeled in [Status](#status). They
 
 A compiling, tested, all-Rust workspace, not a design folder.
 
-**Verified at runtime (you can reproduce it):**
+**Verified at runtime (reproducible from this repository):**
 
-- A **30-member workspace** (29 crates and one maintainer tool, `tools/corpus-verifier`) with **10,000+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
-- **The Codebase Inspection, end to end on fixture repositories:** per-repo detection and rule proposal, the two-tier audit with calibration and dedup, multi-repo projects, saved runs and resume, plus the PDF, workbook and `findings.json` export behind a release gate that refuses a deliverable carrying a secret (and an export that is refused while any part is unfinished).
+- A **30-member workspace** (29 crates and one maintainer tool, `tools/corpus-verifier`) with **11,000+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
+- **The Codebase Inspection, end to end on fixture repositories:** per-repo detection and rule proposal, the two-tier audit with calibration and dedup, multi-repo projects, saved runs and resume (a fixed parser reuses saved replies instead of re-paying them), the group reviewer and the person's review with its decision record, plus the client package (PDF, workbook, `findings.json`, `decisions.json`, CSV and JSON datasets, import-ready tickets) behind a release gate that refuses a deliverable carrying a secret, a held row without a decision or datasets that disagree (and an export that is refused while any part is unfinished).
 - **Brownfield onboarding, end to end** on fixture repos: the triage tables, Process emitting baseline waivers and GitHub issues and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata live-demo`, with the gateway's verdict and jail tests covered by `cargo test`.
 - **The governed development console:** issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant and the deterministic gate self-check, wired and unit-tested in-app.
@@ -245,7 +250,7 @@ cargo run -p camerata -- maintenance-demo   # the standing ops agent (recommenda
 cargo run -p camerata -- deploy-demo        # the draft→publish gate, a local deploy and the Azure az-CLI plan
 ```
 
-These start a real `claude -p` agent, so they need the Claude Code CLI installed and signed in, and they use your subscription:
+These start a real `claude -p` agent, so they need the Claude Code CLI installed and signed in, and they draw on the operator's subscription:
 
 ```
 cargo run -p camerata -- live-demo          # the gate denies a real claude -p agent's forbidden write

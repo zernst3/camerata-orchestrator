@@ -53,7 +53,7 @@ The opt-in development loop is the exception. It is off for a client engagement 
 
 ## What is removed before code is sent
 
-Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a finding still points at the right line. The shapes cover:
+Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a finding still points at the right line. This covers every prompt Camerata builds, the chat assistant's included: all of them pass one redaction point, and a test fails if any code sends a model request around it. The one exception is a Development-console agent that edits client code, which reads the files itself, secrets included, because changing that code (fixing a leaked secret among it) is its job. The shapes cover:
 
 - API keys and tokens (Supabase, Stripe, AWS, Azure storage, GitHub, Slack, Google, Anthropic, OpenAI, SendGrid, Twilio, Shopify, Mailgun, npm, Mapbox and Discord)
 - private keys
@@ -63,6 +63,7 @@ Before any code reaches a model, every value that matches a known credential sha
 - string literals assigned to variables named like secrets
 
 <!-- crates/secrets/src/shapes.rs: SecretShape labels; crates/secrets/src/redact.rs -->
+<!-- crates/secrets/src/model_input.rs (re-exported as camerata_llm::model_input): the one redaction point; guard test crates/llm/tests/model_input_guard.rs; exception recorded in docs/design/2026-10-23_secret-redaction-and-release-gate.md section 5.5 -->
 <!-- crates/server/src/onboard/redact.rs: files_for_model (same paths, same line count, every secret value redacted) -->
 
 This applies to every inspection step that sends code: the scan pass, calibration, alternative recommendations, fix suggestions, the optional deep tier and the duplicated-logic judge.
