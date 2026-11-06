@@ -819,6 +819,10 @@ impl Seeding {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_reasons: EscalationReason::default_over_budget_set()
+                .iter()
+                .map(|r| r.as_str().to_string())
+                .collect(),
             unplaced: Vec::new(),
             rules_reviewed: tree
                 .nodes

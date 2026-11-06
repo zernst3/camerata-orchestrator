@@ -1122,6 +1122,14 @@ async fn ledger_states_budget_escalated_and_over_budget() {
     assert!(report.ledger.escalation().is_some(), "the escalation block");
     let block = report.ledger.escalation().unwrap();
     assert_eq!(block.budget, 5);
+    // The set that was in force is on record, in priority order.
+    assert_eq!(
+        block.over_budget_reasons,
+        EscalationReason::default_over_budget_set()
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(block.counted_lines, 3_000);
     assert_eq!(block.candidates, 24);
     // The 12 critical secrets are escalated (5 inside the budget, 7 past it); the layering

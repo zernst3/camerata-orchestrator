@@ -62,6 +62,15 @@ impl ProjectStore {
             .ok()
             .and_then(|s| serde_json::from_str::<State>(&s).ok())
             .unwrap_or_default();
+        // A project that saved the previous default over-budget set (five reasons) loads the new
+        // default (seven): say so once, and the run's ledger records the set in force.
+        if camerata_api_types::project::take_over_budget_set_upgrade_notice() {
+            tracing::warn!(
+                "a project's saved over-budget reasons were the previous default and were \
+                 upgraded to the current default (authorization bypass and injection added); \
+                 each run's ledger records the set it used"
+            );
+        }
         // ISOLATION (A7): validate the persisted active pointer. A dangling `active` id
         // (project deleted out-of-band, hand-edited file, partial write) would otherwise
         // make `active()` fall through to `projects.first()`, silently grounding the chat

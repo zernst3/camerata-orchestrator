@@ -616,6 +616,10 @@ pub struct EscalationBlock {
     /// The escalated sites past the budget, by the reason that allowed it.
     #[serde(default)]
     pub over_budget_by_reason: BTreeMap<String, usize>,
+    /// The reasons that were allowed past the budget in this run (wire names, in priority order):
+    /// the project's effective set, so a set the engine upgraded on load is on record.
+    #[serde(default)]
+    pub over_budget_reasons: Vec<String>,
     /// Sites the group reviewer's sub-groups did not name; they sit in the rule's `unplaced`
     /// sub-group, and are listed by site key.
     #[serde(default)]
@@ -679,6 +683,7 @@ impl EscalationBlock {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_reasons: self.over_budget_reasons.clone(),
             unplaced: self
                 .unplaced
                 .iter()

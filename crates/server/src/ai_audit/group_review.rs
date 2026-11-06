@@ -1967,6 +1967,12 @@ fn record_ledger(
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_reasons: cfg
+                .rank
+                .over_budget_reasons
+                .iter()
+                .map(|r| r.as_str().to_string())
+                .collect(),
             unplaced: outcome.unplaced.clone(),
             rules_reviewed: outcome.rules_reviewed,
             rules_failed: outcome.rules_failed,

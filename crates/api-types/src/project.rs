@@ -314,6 +314,15 @@ fn default_over_budget_reasons() -> Vec<crate::review::EscalationReason> {
     crate::review::EscalationReason::default_over_budget_set()
 }
 
+static OVER_BUDGET_SET_UPGRADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a stored over-budget set was upgraded from the previous default since the last call.
+/// True once per upgrade (the flag is cleared by the call), so the loader can log it once.
+pub fn take_over_budget_set_upgrade_notice() -> bool {
+    OVER_BUDGET_SET_UPGRADED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The over-budget set as stored. R-3 added `authorization_bypass` and `injection` to the
 /// default set; a project that saved the previous default (the five reasons it held) loads with
 /// the new one. Any other set is the architect's own choice and is kept as written.
@@ -335,6 +344,7 @@ where
     let is_previous_default = stored.len() == previous_default.len()
         && previous_default.iter().all(|r| stored.contains(r));
     Ok(if is_previous_default {
+        OVER_BUDGET_SET_UPGRADED.store(true, std::sync::atomic::Ordering::SeqCst);
         R::default_over_budget_set()
     } else {
         stored
@@ -395,6 +405,11 @@ mod review_settings_tests {
             s.over_budget_reasons,
             EscalationReason::default_over_budget_set()
         );
+        assert!(
+            take_over_budget_set_upgrade_notice(),
+            "the upgrade leaves a notice for the loader to log"
+        );
+        assert!(!take_over_budget_set_upgrade_notice(), "once");
         let narrowed = r#"{"over_budget_reasons":["secret_exposure","evidence_unverified"]}"#;
         let s: ReviewSettings = serde_json::from_str(narrowed).unwrap();
         assert_eq!(
