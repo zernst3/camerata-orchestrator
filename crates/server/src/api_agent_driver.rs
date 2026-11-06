@@ -708,6 +708,71 @@ fn get_policy_and_registry_from_completer(
     Ok((or.policy_for_agent(), or.registry_for_agent()))
 }
 
+/// The conversation as a model may see it: the system prompt and every message (user turns,
+/// assistant turns with their tool calls, tool results) with each secret value replaced by its
+/// redacted form. This direct-HTTP path does not pass the transports in `camerata-llm`, so it
+/// passes the same chokepoint (`camerata_llm::model_input`) here, in both body builders. Text
+/// that holds no secret is unchanged.
+fn redact_conversation(system: Option<&str>, messages: &[Value]) -> (Option<String>, Vec<Value>) {
+    let system = system.map(|s| camerata_llm::model_input::redact_for_model(s).into_owned());
+    let mut messages = messages.to_vec();
+    for message in &mut messages {
+        camerata_llm::model_input::redact_json_for_model(message);
+    }
+    (system, messages)
+}
+
+/// The OpenRouter chat-completions body for one turn of the agentic loop (pure, no HTTP): an
+/// optional system message with a cache breakpoint, the conversation so far (assistant turns,
+/// tool calls and tool results included), the tool schemas and the provider constraint.
+///
+/// Every text in `system` and `messages` is model input, so it passes the model-input chokepoint
+/// (`camerata_llm::model_input`) on its way in: no raw secret is sent, whatever an earlier tool
+/// result or assistant turn carried.
+fn build_openrouter_agent_body(
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+    session_id: &str,
+    provider_constraint: Option<Value>,
+) -> Value {
+    let (system, messages) = redact_conversation(system, messages);
+    let (system, messages) = (system.as_deref(), messages.as_slice());
+    // Build the full messages array with an optional system message prepended.
+    // The system message gets a `cache_control` breakpoint so Anthropic-compatible
+    // models routed via OpenRouter cache the static system prefix once per session.
+    let mut full_messages: Vec<Value> = Vec::new();
+    if let Some(sys) = system {
+        full_messages.push(serde_json::json!({
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": sys,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }],
+        }));
+    }
+    full_messages.extend_from_slice(messages);
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": full_messages,
+        "max_tokens": 8192,
+        // Sticky routing: same backend slot across all turns so the KV cache stays warm.
+        "session_id": session_id,
+    });
+    if !tool_schemas.is_empty() {
+        body["tools"] = Value::Array(tool_schemas.to_vec());
+        // "auto" = model decides whether to call a tool or respond with text.
+        body["tool_choice"] = serde_json::json!("auto");
+    }
+    if let Some(constraint) = provider_constraint {
+        body["provider"] = constraint;
+    }
+    body
+}
+
 /// POST directly to OpenRouter's `/api/v1/chat/completions` with tool schemas included.
 ///
 /// `session_id` enables sticky routing + KV-cache warmth from request #1.
@@ -744,37 +809,14 @@ async fn call_openrouter_with_tools(
                 anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
             })?;
 
-    // Build the full messages array with an optional system message prepended.
-    // The system message gets a `cache_control` breakpoint so Anthropic-compatible
-    // models routed via OpenRouter cache the static system prefix once per session.
-    let mut full_messages: Vec<Value> = Vec::new();
-    if let Some(sys) = system {
-        full_messages.push(serde_json::json!({
-            "role": "system",
-            "content": [{
-                "type": "text",
-                "text": sys,
-                "cache_control": {"type": "ephemeral", "ttl": "1h"}
-            }],
-        }));
-    }
-    full_messages.extend_from_slice(messages);
-
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": full_messages,
-        "max_tokens": 8192,
-        // Sticky routing: same backend slot across all turns so the KV cache stays warm.
-        "session_id": session_id,
-    });
-    if !tool_schemas.is_empty() {
-        body["tools"] = Value::Array(tool_schemas.to_vec());
-        // "auto" = model decides whether to call a tool or respond with text.
-        body["tool_choice"] = serde_json::json!("auto");
-    }
-    if let Some(constraint) = provider_constraint {
-        body["provider"] = constraint;
-    }
+    let body = build_openrouter_agent_body(
+        model,
+        system,
+        messages,
+        tool_schemas,
+        session_id,
+        provider_constraint,
+    );
 
     let mut builder = reqwest::Client::new()
         .post("https://openrouter.ai/api/v1/chat/completions")
@@ -921,6 +963,8 @@ fn build_anthropic_request_body(
     messages: &[Value],
     tool_schemas: &[Value],
 ) -> (Value, bool) {
+    let (system, messages) = redact_conversation(system, messages);
+    let (system, messages) = (system.as_deref(), messages.as_slice());
     // Place the Layer-2 grounding breakpoint on the FIRST user message when it carries a
     // grounding block. Every other message is passed through untouched.
     let mut use_caching = false;
@@ -4980,3 +5024,6 @@ mod tests {
         assert!(result.contains("DENIED"), "got: {result}");
     }
 }
+
+#[cfg(test)]
+mod model_input_tests;

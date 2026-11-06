@@ -16,6 +16,7 @@ mod detect;
 mod firebase;
 pub mod fixtures;
 mod json;
+pub mod model_input;
 pub mod published;
 mod redact;
 mod shapes;

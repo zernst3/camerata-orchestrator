@@ -12,6 +12,8 @@ workspace = true
 camerata-core = { path = "../core" }
 # The one `claude` subprocess env policy (scrubs ANTHROPIC_API_KEY); a pure leaf crate.
 camerata-api-types = { path = "../api-types" }
+# The one gate every text bound for a model passes through (a leaf crate).
+camerata-secrets = { path = "../secrets" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

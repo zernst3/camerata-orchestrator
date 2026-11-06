@@ -211,8 +211,15 @@ fn call_path(dir: &Path, key: &str) -> std::path::PathBuf {
 
 // ── Naming a request ─────────────────────────────────────────────────────────────────────────
 
-/// The digest that names `req`.
+/// The digest that names `req`, computed over the request AFTER the model-input chokepoint
+/// (`camerata_llm::model_input::guarded`): the key names what the model is sent. A request that
+/// is already redacted (every inspection prompt is) passes the chokepoint unchanged, so its key
+/// is the one a saved run filed its reply under before the chokepoint existed; a request that
+/// still carried a secret is named by its redacted form, the same as if it had been redacted
+/// upstream.
 pub fn request_key(req: &LlmRequest) -> String {
+    let req = camerata_llm::model_input::guarded(req);
+    let req = &*req;
     let mut h = Sha256::new();
     let mut part = |label: &str, bytes: &[u8]| {
         h.update(label.as_bytes());
@@ -608,6 +615,8 @@ impl<'a> JournalLlm<'a> {
 impl LlmPort for JournalLlm<'_> {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         require_seed(&self.store)?;
+        // The seam names the request it hands on, so the model sees what the key names.
+        let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
             Planned::Fresh(call) => {
@@ -624,6 +633,7 @@ impl LlmPort for JournalLlm<'_> {
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
         require_seed(&self.store)?;
+        let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => {
                 on_delta(&resp.text);
@@ -658,6 +668,7 @@ struct JournalRealtime {
 impl LlmPort for JournalRealtime {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         require_seed(&self.store)?;
+        let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
             Planned::Fresh(call) => {
@@ -674,6 +685,7 @@ impl LlmPort for JournalRealtime {
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
         require_seed(&self.store)?;
+        let req = camerata_llm::model_input::guarded_owned(req);
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => {
                 on_delta(&resp.text);

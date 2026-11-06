@@ -1489,3 +1489,130 @@ async fn one_failed_rule_group_does_not_set_aside_every_stage2_reply_of_the_repo
     })
     .await;
 }
+
+// ── The model-input chokepoint and the run store ──────────────────────────────────────────────
+
+/// An inspection request as the stages build it: its files already went through
+/// `files_for_model`, so the secret appears in its redacted form. Everything the key is made of
+/// is set (system prompt, breakpoints, effort, schema).
+fn saved_run_shape() -> LlmRequest {
+    LlmRequest::new(
+        "Repository: acme/api\nREPO MAP\nsrc/billing.rs\n<<<UNTRUSTED t \"src/billing.rs\">>>\n\
+         1: const KEY = \"sk_live_\u{2026}FtVR (77 chars)\";\n<<<END t>>>\nASK: review the file above.",
+    )
+    .with_system("You are a conformance auditor. Credential values appear as prefix\u{2026}tail.")
+    .with_model("claude-sonnet-5-5")
+    .with_max_tokens(8192)
+    .with_cache_breakpoints([20, 60])
+    .with_effort("high")
+    .with_response_schema(serde_json::json!({ "type": "object" }))
+}
+
+/// SALVAGE CRITICAL. The key a saved run filed a reply under was the digest of the request as the
+/// stage built it. The chokepoint leaves a request that is already redacted exactly as it was, so
+/// the digest of that shape is the digest it always had: the value below was produced by
+/// `request_key` BEFORE the chokepoint existed. If this changes, every saved run stops replaying.
+#[test]
+fn the_key_of_an_already_redacted_request_is_the_key_it_always_had() {
+    assert_eq!(
+        super::journal::request_key(&saved_run_shape()),
+        "373ffb48ade0259251473ae32dd953c0360f259093f63b1cb32b8b3d1098ca47"
+    );
+}
+
+/// Records the request it was handed.
+struct Recording(std::sync::Mutex<Vec<LlmRequest>>);
+
+#[async_trait::async_trait]
+impl LlmPort for Recording {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.0.lock().unwrap().push(req);
+        Ok(response(r#"{"ok":true}"#, 0.05))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The key names what the model receives. A request that still carries a secret (a stage that
+/// forgot to redact) is named by the digest of its redacted form, the same digest the
+/// already-redacted request has, so the two are one request to the store.
+#[test]
+fn the_key_is_computed_over_the_request_after_the_chokepoint() {
+    let planted =
+        camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+    let raw = LlmRequest::new(format!("Repository: acme/api\nkey: {}\nASK", planted.text))
+        .with_system(format!("sys {}", planted.text))
+        .with_model("claude-sonnet-5-5");
+    // Redacted upstream, as a stage that does it right builds the request.
+    let by_hand = LlmRequest::new(camerata_secrets::redact_str(&raw.prompt).into_owned())
+        .with_system(camerata_secrets::redact_str(raw.system.as_deref().unwrap_or("")).into_owned())
+        .with_model("claude-sonnet-5-5");
+    assert_ne!(raw.prompt, by_hand.prompt, "the fixture really is a secret");
+    assert_eq!(
+        super::journal::request_key(&raw),
+        super::journal::request_key(&by_hand),
+        "the key is the digest of what is sent"
+    );
+}
+
+/// The journal hands the model seam the redacted request and files the reply under its key, so a
+/// resume that asks the same question (with or without the secret in it) replays and pays nothing.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_journal_sends_the_redacted_request_and_a_resume_replays_it() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let _on =
+            camerata_test_env::EnvGuard::remove(crate::feature_flags::MODEL_PROMPT_REDACTION_ENV);
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::SupabaseSecretKey);
+        let raw = || {
+            LlmRequest::new(format!("Repository: acme/api\nenv: {}\nASK", planted.text))
+                .with_model("claude-sonnet-5-5")
+        };
+        let model = Recording(Default::default());
+        JournalLlm::new(&model, store.clone())
+            .complete(raw())
+            .await
+            .unwrap();
+        {
+            let sent = model.0.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(
+                !sent[0].prompt.contains(&planted.value),
+                "the model seam received a raw secret"
+            );
+        }
+        let key = super::journal::request_key(&raw());
+        assert!(
+            store
+                .dir()
+                .join("calls")
+                .join(format!("{key}.json"))
+                .exists(),
+            "the reply is filed under the key of what was sent"
+        );
+
+        let store = reopen(store);
+        JournalLlm::new(&model, store)
+            .complete(raw())
+            .await
+            .unwrap();
+        assert_eq!(
+            model.0.lock().unwrap().len(),
+            1,
+            "the resume replays: no second call"
+        );
+    })
+    .await;
+}

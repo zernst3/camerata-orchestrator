@@ -320,6 +320,43 @@ impl Default for ClaudeRefinementReviewer {
 }
 
 impl ClaudeRefinementReviewer {
+    /// The `claude -p` command for one review call (everything except the spawn), so the exact
+    /// argument list is testable without a `claude` binary.
+    fn build_command(&self, prompt: &str) -> tokio::process::Command {
+        // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
+        // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
+        // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
+        // real codebase while reviewing, not just the inlined digest. No write path is added
+        // (no write/exec tool is offered).
+        let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
+        // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
+        // carries a raw secret, and the prompt reaches `claude -p` as an argument.
+        cmd.arg("-p")
+            .arg(camerata_secrets::model_input::redact_for_model(prompt).as_ref())
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--allowedTools")
+            .arg(crate::engine::READ_ONLY_TOOLS.join(" "))
+            .arg("--dangerously-skip-permissions")
+            .arg("--output-format")
+            .arg("json")
+            .kill_on_drop(true);
+        if let Some(dir) = &self.repo_dir {
+            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
+            // — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        cmd
+    }
+
     /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from a per-project config or the server's `/api/models` catalog).
@@ -483,35 +520,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
         let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
-        // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
-        // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
-        // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
-        // real codebase while reviewing, not just the inlined digest. No write path is added
-        // (no write/exec tool is offered).
-        let mut cmd = tokio::process::Command::new("claude");
-        // The subscription CLI must never inherit an API key from the parent's `.env`.
-        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--model")
-            .arg(&self.model)
-            .arg("--allowedTools")
-            .arg(crate::engine::READ_ONLY_TOOLS.join(" "))
-            .arg("--dangerously-skip-permissions")
-            .arg("--output-format")
-            .arg("json")
-            .kill_on_drop(true);
-        if let Some(dir) = &self.repo_dir {
-            cmd.current_dir(dir).arg("--add-dir").arg(dir);
-            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
-            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
-            // — no write tool is offered. Skip any that duplicate the cwd.
-            for extra in &self.extra_repo_dirs {
-                if extra != dir {
-                    cmd.arg("--add-dir").arg(extra);
-                }
-            }
-        }
+        let mut cmd = self.build_command(&prompt);
         let out = cmd.output().await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {
             return Err(ReviewError::NonZeroExit {
@@ -675,6 +684,29 @@ mod tests {
 
     fn form_with_owner() -> IntakeForm {
         IntakeForm::sample_app()
+    }
+
+    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
+    /// argument, so it is redacted on its way into the argv.
+    #[test]
+    fn the_prompt_handed_to_claude_carries_no_raw_secret() {
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+        let cmd = ClaudeRefinementReviewer::new()
+            .build_command(&format!("Review this. The config says {}.", planted.text));
+        let argv: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|a| a.contains(&planted.value)),
+            "a secret value reached the claude argv"
+        );
+        assert!(
+            argv.iter().any(|a| a.starts_with("Review this.")),
+            "{argv:?}"
+        );
     }
 
     #[test]

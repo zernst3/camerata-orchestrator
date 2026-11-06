@@ -21,6 +21,8 @@ workspace = true
 # Pure-serde wire DTOs (Phase A): `LlmResponse`, the credential wire shapes + name
 # consts + `CredentialError`, the registry wire shapes, and `DEFAULT_MODEL`.
 camerata-api-types = { path = "../api-types" }
+# The one secret detector + redactor; `model_input` routes every request through it.
+camerata-secrets = { path = "../secrets" }
 tokio = { workspace = true, features = ["time", "io-util", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
