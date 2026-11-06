@@ -1857,6 +1857,22 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     assert!(llm.calls().is_empty());
 }
 
+/// On the CLI backend the stage 2 system prompt is the same prompt plus the no-tools line
+/// (`NO_TOOLS_LINE` on the base branch, about 260 characters, a suffix). The estimate has to
+/// cover that variant too. The line is not on this branch, so its length is an upper bound here.
+#[test]
+fn the_estimate_covers_the_cli_backends_longer_system_prompt() {
+    use camerata_ui_core::scan::GROUP_REVIEW_SYSTEM_TOKENS;
+    const NO_TOOLS_LINE_CHARS_UPPER_BOUND: usize = 300;
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let system = crate::prompt_frame::with_untrusted_clause(group_review_system_prompt(), &nonce);
+    let cli_tokens = (system.len() + NO_TOOLS_LINE_CHARS_UPPER_BOUND) as f64 / 4.0;
+    assert!(
+        cli_tokens <= GROUP_REVIEW_SYSTEM_TOKENS,
+        "the cli system prompt is up to {cli_tokens} tokens, over the estimate"
+    );
+}
+
 /// The cockpit's and the pre-flight's estimate of stage 2 is built from these figures
 /// (`camerata_ui_core::scan::GROUP_REVIEW_*`). They have to cover what the stage really sends, at
 /// four characters a token, and not be wildly above it.
