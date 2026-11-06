@@ -1900,6 +1900,7 @@ fn concurrent_writers_never_publish_a_mixed_or_cut_record() {
 /// record. The record is still the old whole one, and nothing that lists the folder takes the
 /// temporary file for a record.
 #[test]
+#[serial_test::serial(process_env)]
 fn a_cut_temporary_file_is_never_read_as_a_record() {
     use super::journal::{request_key, CallFile};
     let (_s, _g) = state_dir();

@@ -78,18 +78,9 @@ fn shown_key(key: &str) -> String {
     key.replace('\0', "|")
 }
 
-/// The holds of every row by site key: the release gate's own rows (the same ones the review
-/// screen's Held count and the export panel read), in the gate's order.
+/// The holds of every row by site key, from the one hold function.
 fn holds_by_key(reviewed: &ReviewedReport) -> BTreeMap<String, Vec<(HoldReason, String)>> {
-    let gate = crate::release_gate::holds::gate_holds(reviewed);
-    let mut by_key: BTreeMap<String, Vec<(HoldReason, String)>> = BTreeMap::new();
-    for held in gate.held.iter().chain(&gate.merged_without_decision) {
-        let reasons = by_key.entry(held.key.clone()).or_default();
-        if !reasons.iter().any(|(r, _)| *r == held.reason) {
-            reasons.push((held.reason, held.detail.clone()));
-        }
-    }
-    by_key
+    crate::release_gate::holds::hold_set(reviewed).reasons
 }
 
 /// The rows in the order the context lists them: the held rows (in report order), then the rest
