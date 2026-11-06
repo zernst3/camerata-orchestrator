@@ -1123,6 +1123,14 @@ async fn ledger_states_budget_escalated_and_over_budget() {
     assert!(report.ledger.escalation().is_some(), "the escalation block");
     let block = report.ledger.escalation().unwrap();
     assert_eq!(block.budget, 5);
+    // The set that was in force is on record, in priority order.
+    assert_eq!(
+        block.over_budget_reasons,
+        EscalationReason::default_over_budget_set()
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(block.counted_lines, 3_000);
     assert_eq!(block.candidates, 24);
     // The 12 critical secrets are escalated (5 inside the budget, 7 past it); the layering
@@ -1134,7 +1142,7 @@ async fn ledger_states_budget_escalated_and_over_budget() {
     assert!((block.share_escalated - 12.0 / 24.0).abs() < 1e-9);
     assert_eq!(
         block.sentence(),
-        "Escalated 12 of a budget of 5 (7 over, all secret exposure at critical)"
+        "Escalated 12 of a budget of 5 (7 over, all secret exposure at high or critical)"
     );
     // The tree says the same, and every over-budget candidate records its reason.
     let t = tree(&report);
@@ -1164,14 +1172,14 @@ fn the_escalation_sentence_reads_every_shape() {
         .insert("secret_exposure".to_string(), 17);
     assert_eq!(
         block.sentence(),
-        "Escalated 347 of a budget of 300 (47 over, all unauthenticated reach or secret exposure at critical)"
+        "Escalated 347 of a budget of 300 (47 over, all unauthenticated reach at critical, and secret exposure at high or critical)"
     );
     block
         .over_budget_by_reason
         .insert("evidence_unverified".to_string(), 2);
-    assert!(block
-        .sentence()
-        .ends_with("secret exposure at critical or unverified evidence)"));
+    assert!(block.sentence().ends_with(
+        "secret exposure at high or critical, and unverified evidence at any severity)"
+    ));
     let within = crate::scan_ledger::EscalationBlock {
         budget: 20,
         escalated: 18,
@@ -1856,6 +1864,22 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
             .is_none()
     );
     assert!(llm.calls().is_empty());
+}
+
+/// On the CLI backend the stage 2 system prompt is the same prompt plus the no-tools line
+/// (`NO_TOOLS_LINE` on the base branch, about 260 characters, a suffix). The estimate has to
+/// cover that variant too. The line is not on this branch, so its length is an upper bound here.
+#[test]
+fn the_estimate_covers_the_cli_backends_longer_system_prompt() {
+    use camerata_ui_core::scan::GROUP_REVIEW_SYSTEM_TOKENS;
+    const NO_TOOLS_LINE_CHARS_UPPER_BOUND: usize = 300;
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let system = crate::prompt_frame::with_untrusted_clause(group_review_system_prompt(), &nonce);
+    let cli_tokens = (system.len() + NO_TOOLS_LINE_CHARS_UPPER_BOUND) as f64 / 4.0;
+    assert!(
+        cli_tokens <= GROUP_REVIEW_SYSTEM_TOKENS,
+        "the cli system prompt is up to {cli_tokens} tokens, over the estimate"
+    );
 }
 
 /// The cockpit's and the pre-flight's estimate of stage 2 is built from these figures

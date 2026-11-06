@@ -569,8 +569,14 @@ fn the_collapse_reads_no_detail_so_it_runs_on_the_short_one() {
 fn calibration_and_the_severity_floor_read_detail_so_they_run_on_the_full_one() {
     // D5 floor: the phrase that raises a finding to critical is in the explanation, not in the
     // one-sentence statement. On the short text there is no floor; on the full text there is.
-    let short = finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"));
-    let full = finding(&format!("{TITLE}{HEADLINE_SEP}{FULL}"));
+    // The floor reads only a security row's message, so the fixture row is an invented one (its
+    // message is the whole account of what it found), not the placeholder convention rule.
+    let invented = |detail: &str| Finding {
+        rule_id: "AI-REFUND-PATH".to_string(),
+        ..finding(detail)
+    };
+    let short = invented(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"));
+    let full = invented(&format!("{TITLE}{HEADLINE_SEP}{FULL}"));
     assert!(severity_calibration_floor(&short).is_none());
     assert!(
         severity_calibration_floor(&full).is_some(),

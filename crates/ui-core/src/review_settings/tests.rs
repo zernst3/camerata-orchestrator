@@ -394,7 +394,7 @@ fn ticking_a_reason_adds_or_removes_it_in_priority_order() {
 }
 
 #[test]
-fn the_lane_offers_the_five_default_reasons_and_any_other_the_project_holds() {
+fn the_lane_offers_the_seven_default_reasons_and_any_other_the_project_holds() {
     let mut v = view();
     assert_eq!(
         reason_choices(&v),
@@ -405,7 +405,7 @@ fn the_lane_offers_the_five_default_reasons_and_any_other_the_project_holds() {
         .push(EscalationReason::RuleMisfit);
     let choices = reason_choices(&v);
     assert!(choices.contains(&EscalationReason::RuleMisfit));
-    assert_eq!(choices.len(), 6);
+    assert_eq!(choices.len(), 8);
 }
 
 #[test]
@@ -636,6 +636,8 @@ fn reasons_are_labelled_as_the_spec_words_them() {
             "secret exposure",
             "data loss",
             "cross tenant",
+            "authorization bypass",
+            "injection",
             "evidence unverified"
         ]
     );
@@ -700,7 +702,7 @@ fn a_preview_answer_is_kept_only_for_the_request_the_draft_still_describes() {
 }
 
 #[test]
-fn the_fixture_settings_hold_the_five_default_over_budget_reasons() {
+fn the_fixture_settings_hold_the_seven_default_over_budget_reasons() {
     assert_eq!(
         view().escalation.over_budget_reasons,
         EscalationReason::default_over_budget_set(),

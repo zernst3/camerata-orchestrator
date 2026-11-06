@@ -61,8 +61,10 @@ fn the_over_budget_page_draws_the_head_the_line_and_the_band_with_their_sentence
         "the over-budget band says {sentence:?}: {html}"
     );
     for r in &over {
+        // R-3: the severe reasons go over budget at high as well as critical.
         assert!(
             r.candidate.severity == "critical"
+                || (r.candidate.severity == "high" && r.candidate.reason.is_severe_at_high())
                 || r.candidate.reason
                     == camerata_api_types::review::EscalationReason::EvidenceUnverified,
             "{} at {} is under a band that would claim a severity it does not have",
@@ -210,13 +212,17 @@ fn no_queue_page_claims_a_severity_the_rows_over_budget_do_not_have() {
         let sentence = camerata_ui_core::queue::over_budget_reasons_text(&over);
         let html = page(id);
         assert!(html.contains(&sentence), "{id}: {sentence}");
-        if sentence.contains("at critical") {
-            for r in over.iter().filter(|r| {
-                r.candidate.reason
-                    != camerata_api_types::review::EscalationReason::EvidenceUnverified
-            }) {
-                assert_eq!(r.candidate.severity, "critical", "{id}");
-            }
+        // A severity the sentence names is one a row over budget has.
+        for severity in ["critical", "high", "medium", "low"] {
+            let named = sentence
+                .split(|c: char| !c.is_alphabetic())
+                .any(|word| word == severity);
+            let held = over.iter().any(|r| {
+                r.candidate.severity == severity
+                    && r.candidate.reason
+                        != camerata_api_types::review::EscalationReason::EvidenceUnverified
+            });
+            assert!(!named || held, "{id}: {sentence} names {severity}");
         }
     }
     assert!(with_band >= 3, "a vacuous pass proves nothing");

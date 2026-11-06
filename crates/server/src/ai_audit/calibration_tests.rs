@@ -101,6 +101,15 @@ fn site(path: &str, line: usize) -> Finding {
     }
 }
 
+/// A site of a security rule: the verdict mechanics tests raise it to critical, which a
+/// convention rule's row (`site`) is not (see `a_verdict_cannot_raise_a_convention_rule_row_to_critical`).
+fn security_site(path: &str, line: usize) -> Finding {
+    Finding {
+        rule_id: "SEC-X-1".to_string(),
+        ..site(path, line)
+    }
+}
+
 /// A file of `n` lines, `line 1` .. `line n`.
 fn numbered_file(path: &str, n: usize) -> (String, String) {
     (
@@ -444,7 +453,11 @@ async fn each_site_is_its_own_call_and_gets_its_own_verdict() {
     let files = vec![numbered_file("a.rs", 10)];
     let (out, failed) = run(
         &llm,
-        vec![site("a.rs", 1), site("a.rs", 2), site("a.rs", 3)],
+        vec![
+            security_site("a.rs", 1),
+            security_site("a.rs", 2),
+            security_site("a.rs", 3),
+        ],
         &files,
     )
     .await;
@@ -706,7 +719,7 @@ fn a_held_upward_raise_is_recorded_on_the_row_as_severity_raise_held() {
         vec![crate::review_tree::OutlierReason::SeverityRaiseHeld]
     );
     // A verdict that does not raise records nothing.
-    let clean = apply(raw, vec![site("a.rs", 2)]);
+    let clean = apply(raw, vec![security_site("a.rs", 2)]);
     assert!(outlier_reasons_of(&clean[0]).is_empty());
 }
 
@@ -1043,4 +1056,56 @@ fn the_estimator_prices_stage_one_from_the_engines_own_figures() {
         "the prefix is {prefix_bytes} bytes ({tokens_at_four} tokens at 4 a token) against the \
          estimator's {CALIBRATION_PREFIX_TOKENS}"
     );
+}
+
+// ── A convention rule's row is never raised to critical by a verdict ───────────────────────
+
+fn style_row() -> Finding {
+    Finding {
+        rule_id: "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1".to_string(),
+        severity: "low".to_string(),
+        snippet: "createClient(process.env.SUPABASE_URL!, SERVICE_KEY)".to_string(),
+        detail: "A non-null assertion on an environment read.".to_string(),
+        ..site("scripts/backfill.ts", 5)
+    }
+}
+
+/// The shape that put a non-null-assertion row at Critical: the model saw a hardcoded key a line
+/// away and rated THIS row for it. The key is its own row under its own rule; this one is a
+/// style row, and a raise to critical is held at the rule's own severity, recorded as such.
+#[test]
+fn a_verdict_cannot_raise_a_convention_rule_row_to_critical() {
+    let raw = r#"{"verdicts":[{"index":0,"severity":"critical","real":"yes","effort":"low","reason":"a service key sits on the next line"}]}"#;
+    let out = apply(raw, vec![style_row()]);
+    assert_eq!(out[0].severity, "low", "the raise is held");
+    assert_eq!(
+        outlier_reasons_of(&out[0]),
+        vec![crate::review_tree::OutlierReason::SeverityRaiseHeld]
+    );
+    assert!(out[0]
+        .calibration_rationale
+        .as_deref()
+        .is_some_and(|r| r.contains("convention")));
+    assert_eq!(
+        stage1_of(&out[0]).map(|s| s.real.as_str().to_string()),
+        Some("yes".to_string()),
+        "the verdict itself is still recorded"
+    );
+}
+
+#[test]
+fn a_convention_rule_row_may_still_be_raised_to_high_and_a_security_row_to_critical() {
+    let raise_high =
+        r#"{"verdicts":[{"index":0,"severity":"high","real":"yes","effort":"low","reason":"x"}]}"#;
+    assert_eq!(apply(raise_high, vec![style_row()])[0].severity, "high");
+    let raise_critical = r#"{"verdicts":[{"index":0,"severity":"critical","real":"yes","effort":"low","reason":"x"}]}"#;
+    for rule in ["SEC-NO-HARDCODED-SECRETS-1", "AI-SERVICE-KEY-LITERAL"] {
+        let mut f = style_row();
+        f.rule_id = rule.to_string();
+        assert_eq!(
+            apply(raise_critical, vec![f])[0].severity,
+            "critical",
+            "{rule}"
+        );
+    }
 }

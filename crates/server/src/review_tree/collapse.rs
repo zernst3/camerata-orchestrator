@@ -29,7 +29,7 @@ use crate::ai_audit::{
     finding_class, finding_origin, inherit_fix, is_placeholder_secret_row, is_secret_rule,
     kind_actionability_rank, kinds_merge_compatible, record_severity_adjustment, same_credential,
     same_snippet, severity_rank, shared_captured_object, Origin, MIN_MERGE_SNIPPET,
-    SEMANTIC_MERGE_WINDOW,
+    OUTLIER_REASONS_CAPTURE, SEMANTIC_MERGE_WINDOW, STAGE1_CAPTURE,
 };
 use crate::onboard::evidence_check::{
     EVIDENCE_UNVERIFIED_CAPTURE, EVIDENCE_UNVERIFIED_SITES_CAPTURE,
@@ -228,6 +228,21 @@ fn carry_evidence_marks(survivor: &mut Finding, sources: &[Finding]) {
     );
 }
 
+/// A collapse must never leave the survivor unrated for a site stage 1 rated: the deterministic
+/// row often wins the survivor slot over the model row, and only the model row was rated. The
+/// survivor takes the stage 1 verdict and the outlier reasons of a collapsed source when it has
+/// none of its own; one it already has is never replaced.
+fn carry_stage1_record(survivor: &mut Finding, source: &Finding) {
+    for key in [STAGE1_CAPTURE, OUTLIER_REASONS_CAPTURE] {
+        if survivor.captures.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = source.captures.get(key) {
+            survivor.captures.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 /// Collapse every set of mechanically identical rows into one row, keeping every source in
 /// [`Finding::flagged_by`]. Pure and linear: rows are bucketed by repo, path and rule family
 /// first, and only compared inside a line window. The output keeps the input's order (a survivor
@@ -330,6 +345,7 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                 if src.captures.contains_key(EVIDENCE_UNVERIFIED_CAPTURE) {
                     folded_rows.push(src.clone());
                 }
+                carry_stage1_record(&mut row, &src);
                 if donor.is_none() && src.fix_specific.is_some() {
                     donor = Some(src);
                 }

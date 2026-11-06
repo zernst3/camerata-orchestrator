@@ -228,6 +228,8 @@ fn the_stage_2_verdicts_are_in_the_context() {
             escalated: false,
             over_budget_reason: None,
             why: "reachable without signing in".to_string(),
+            slot: 1,
+            stage2_severity: None,
         }];
         tree.budget = EscalationBudget::compute(1.0, 20, 10_000);
         let allowed = EscalationReason::default_over_budget_set();

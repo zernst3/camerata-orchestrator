@@ -773,6 +773,8 @@ impl Seeding {
                 severity: c.severity.clone(),
                 stage2_rank: *rank,
                 global_rank: u32::try_from(i + 1).unwrap_or(u32::MAX),
+                stage2_severity: None,
+                slot: 0,
                 escalated: false,
                 over_budget_reason: None,
                 why: c.why.clone(),
@@ -817,6 +819,10 @@ impl Seeding {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_reasons: EscalationReason::default_over_budget_set()
+                .iter()
+                .map(|r| r.as_str().to_string())
+                .collect(),
             unplaced: Vec::new(),
             rules_reviewed: tree
                 .nodes

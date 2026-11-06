@@ -384,7 +384,7 @@ async fn a_seeded_project_carries_the_escalation_block_in_its_ledger() {
         );
         assert_eq!(
             block.sentence(),
-            "Escalated 4 of a budget of 2 (2 over, all secret exposure or cross-tenant access at critical)",
+            "Escalated 4 of a budget of 2 (2 over, all secret exposure or cross-tenant access at high or critical)",
             "{variant:?}"
         );
     }

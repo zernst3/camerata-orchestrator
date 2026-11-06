@@ -38,6 +38,8 @@
       "secret_exposure",
       "data_loss",
       "cross_tenant",
+      "authorization_bypass",
+      "injection",
       "conflicting_verdicts",
       "likely_false_alarm_at_high_severity",
       "outlier_in_group",
@@ -370,6 +372,7 @@
           "over_budget_reason": "null",
           "reason": "string",
           "severity": "string",
+          "slot": "number",
           "stage2_rank": "number",
           "why": "string"
         },
@@ -478,6 +481,7 @@
           "over_budget_reason": "null",
           "reason": "string",
           "severity": "string",
+          "slot": "number",
           "stage2_rank": "number",
           "why": "string"
         },

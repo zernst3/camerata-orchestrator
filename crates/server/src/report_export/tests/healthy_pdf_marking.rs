@@ -2208,3 +2208,67 @@ fn matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_
 }
 
 // ── Branding (2026-09-13 review): precedence + neutral fallback ────────────────
+
+// ── The summary's claim about preview tools matches the ledger ─────────────────────────────
+
+const NO_PREVIEW_TOOL_CLAIM: &str = "had no scan-time preview tool available";
+
+fn failed_pass_lines(report: &ScanReport) -> Vec<String> {
+    build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .executive_summary
+    .failed_passes
+}
+
+/// A selected rule no preview tool is wired for is judged by the model, and the ledger records it
+/// as run. The summary used to tell the client such rules were "not reflected in this report".
+#[test]
+fn a_rule_the_ledger_shows_as_run_is_not_called_unchecked_for_want_of_a_preview_tool() {
+    use crate::scan_ledger::RuleTier;
+    let mut report = report_with(vec![], vec![]);
+    report.coverage_notes = vec![
+        crate::scan_tools::unrouted_note("JAVASCRIPT-A-1"),
+        crate::scan_tools::unrouted_note("JAVASCRIPT-B-1"),
+    ];
+    for rule in ["JAVASCRIPT-A-1", "JAVASCRIPT-B-1"] {
+        report
+            .ledger
+            .record_rule("owner/repo", rule, RuleTier::Semantic, true, None, 5, 0);
+    }
+    let lines = failed_pass_lines(&report);
+    assert!(
+        !lines.iter().any(|l| l.contains(NO_PREVIEW_TOOL_CLAIM)),
+        "the ledger shows both rules ran: {lines:?}"
+    );
+}
+
+#[test]
+fn a_rule_the_ledger_does_not_show_as_run_keeps_the_no_preview_tool_line() {
+    use crate::scan_ledger::RuleTier;
+    let mut report = report_with(vec![], vec![]);
+    report.coverage_notes = vec![
+        crate::scan_tools::unrouted_note("JAVASCRIPT-A-1"),
+        crate::scan_tools::unrouted_note("JAVASCRIPT-C-1"),
+    ];
+    report.ledger.record_rule(
+        "owner/repo",
+        "JAVASCRIPT-A-1",
+        RuleTier::Semantic,
+        true,
+        None,
+        5,
+        0,
+    );
+    let lines = failed_pass_lines(&report);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains(NO_PREVIEW_TOOL_CLAIM))
+            .count(),
+        1,
+        "one rule is on no ledger entry as run, so the line stays: {lines:?}"
+    );
+}

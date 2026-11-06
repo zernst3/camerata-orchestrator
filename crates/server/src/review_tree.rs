@@ -196,32 +196,126 @@ fn rank_sort_key(stage2_rank: u32) -> u32 {
     }
 }
 
+/// One row that was escalated, before it is placed in a site.
+struct RawEscalation {
+    node_id: String,
+    key: String,
+    reason: EscalationReason,
+    /// The row is of a convention rule, not a security rule.
+    convention: bool,
+    stage2_rank: u32,
+    /// The row's own severity.
+    severity: String,
+    /// The group reviewer's severity for the row, when it disagreed (capped for a convention row).
+    stage2_severity: Option<String>,
+    why: String,
+    site: (String, String, usize),
+}
+
+impl RawEscalation {
+    /// The severity the row is ordered by: the higher of its own and the reviewer's.
+    fn ordering_severity(&self) -> &str {
+        match &self.stage2_severity {
+            Some(s2)
+                if crate::ai_audit::severity_rank(s2)
+                    > crate::ai_audit::severity_rank(&self.severity) =>
+            {
+                s2
+            }
+            _ => &self.severity,
+        }
+    }
+}
+
+/// The group reviewer's own severity for `row`, from its recorded disagreement with stage 1 (R-4).
+/// A convention rule's row is never rated critical by it, the cap stage 1 has: the value is held
+/// at high, so the back door the stage 1 hold closed stays closed.
+fn stage2_severity_of(row: &Finding) -> Option<String> {
+    let mine = row
+        .review
+        .stage2_disagreement
+        .iter()
+        .find(|d| d.field == camerata_api_types::review::DisagreementField::Severity)?
+        .mine
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(mine.as_str(), "critical" | "high" | "medium" | "low") {
+        return None;
+    }
+    if mine == "critical" && crate::ai_audit::is_convention_rule_row(row) {
+        return Some("high".to_string());
+    }
+    Some(mine)
+}
+
+/// One site (repo, path and line) with every escalated row at it: one slot of the budget (R-1).
+struct RankedSite {
+    /// The rows at the site, the best reason first.
+    members: Vec<RawEscalation>,
+    /// The highest severity of any row at the site.
+    severity: String,
+    /// The best reason rank of any row at the site.
+    reason_rank: u8,
+    /// The best group reviewer rank of any row at the site (0 sorts last).
+    stage2_rank: u32,
+    /// The node of the row that decides the site's place.
+    node_id: String,
+    /// The site's first key, for a stable order.
+    key: String,
+}
+
+impl RankedSite {
+    fn new(mut members: Vec<RawEscalation>) -> Self {
+        members.sort_by(|a, b| {
+            (a.reason.rank(), rank_sort_key(a.stage2_rank), &a.key).cmp(&(
+                b.reason.rank(),
+                rank_sort_key(b.stage2_rank),
+                &b.key,
+            ))
+        });
+        let severity = members
+            .iter()
+            .map(RawEscalation::ordering_severity)
+            .max_by_key(|s| crate::ai_audit::severity_rank(s))
+            .unwrap_or_default()
+            .to_string();
+        let stage2_rank = members
+            .iter()
+            .map(|m| m.stage2_rank)
+            .min_by_key(|r| rank_sort_key(*r))
+            .unwrap_or(0);
+        Self {
+            severity,
+            reason_rank: members[0].reason.rank(),
+            stage2_rank,
+            node_id: members[0].node_id.clone(),
+            key: members[0].key.clone(),
+            members,
+        }
+    }
+}
+
 /// Rank every stage 2 escalation of `nodes` into one list and mark the line (design 4.4).
 ///
-/// 1. Every escalation of every node is collected. One site has one reason: the highest-ranked
+/// 1. Every escalation of every node is collected. One row has one reason: the highest-ranked
 ///    reason it was given. An escalation naming a site that is not in `rows` is ignored.
 /// 2. The engine adds a candidate, reason `evidence_unverified`, for every row whose quoted
 ///    evidence was not found (D5: the release gate refuses that row without a decision anyway),
 ///    and lifts a `needs_more_code` escalation of such a row to it.
-/// 3. The list is sorted by reason rank, then interleaved across nodes inside one reason rank
-///    (rank 1 of every node before rank 2 of any, severity first inside a round), so one noisy
-///    rule cannot take the whole budget (D6). The same candidates always give the same list.
-/// 4. The first `budget` are escalated; past it only the D5 reasons at critical severity and
+/// 3. Rows at one site (the same repo, path and line) share one slot whatever their rules (R-1):
+///    the site takes its highest severity and its best reason, and every row keeps its own reason.
+/// 4. The sites are sorted by severity (critical first), then by reason rank (R-2: a low row with
+///    a top reason never outranks a high row), then interleaved across nodes inside one severity
+///    and reason (rank 1 of every node before rank 2 of any), so one noisy rule cannot take the
+///    whole budget (D6). The same candidates always give the same list.
+/// 5. The first `budget` slots are escalated; past it only the D5 reasons at their severity and
 ///    `evidence_unverified` are, each recording why. The rest stay, in order, below the line.
 pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSettings) -> Ranked {
     use std::collections::{BTreeMap, HashMap};
 
-    struct Raw {
-        node_id: String,
-        key: String,
-        reason: EscalationReason,
-        stage2_rank: u32,
-        severity: String,
-        why: String,
-    }
-
+    let site_of = |f: &Finding| (f.repo.clone(), f.path.clone(), f.line);
     let by_key: HashMap<&str, &Finding> = rows.iter().map(|f| (f.site_key.as_str(), f)).collect();
-    let mut raw: BTreeMap<String, Raw> = BTreeMap::new();
+    let mut raw: BTreeMap<String, RawEscalation> = BTreeMap::new();
     for node in nodes {
         for e in &node.escalations {
             let Some(row) = by_key.get(e.key.as_str()) else {
@@ -234,13 +328,16 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             if better {
                 raw.insert(
                     e.key.clone(),
-                    Raw {
+                    RawEscalation {
                         node_id: node.id.clone(),
                         key: e.key.clone(),
                         reason: e.reason,
+                        convention: crate::ai_audit::is_convention_rule_row(row),
                         stage2_rank: e.rank,
                         severity: row.severity.clone(),
+                        stage2_severity: stage2_severity_of(row),
                         why: e.why.clone(),
+                        site: site_of(row),
                     },
                 );
             }
@@ -261,49 +358,76 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             None => {
                 raw.insert(
                     f.site_key.clone(),
-                    Raw {
+                    RawEscalation {
                         node_id: f.group_path.get(1).cloned().unwrap_or_default(),
                         key: f.site_key.clone(),
                         reason: EscalationReason::EvidenceUnverified,
+                        convention: false,
                         stage2_rank: 0,
                         severity: f.severity.clone(),
+                        stage2_severity: stage2_severity_of(f),
                         why: "The quoted evidence was not found in the scanned file, so the \
                               release gate needs a decision on this site."
                             .to_string(),
+                        site: site_of(f),
                     },
                 );
             }
         }
     }
 
-    // Reason rank, then node, each node's list sorted by severity and its own rank.
-    let sev = |s: &str| std::cmp::Reverse(crate::ai_audit::severity_rank(s));
-    let mut by_reason: BTreeMap<u8, BTreeMap<String, Vec<Raw>>> = BTreeMap::new();
+    // One slot per site.
+    let mut by_site: BTreeMap<(String, String, usize), Vec<RawEscalation>> = BTreeMap::new();
     for r in raw.into_values() {
-        by_reason
-            .entry(r.reason.rank())
-            .or_default()
-            .entry(r.node_id.clone())
-            .or_default()
-            .push(r);
+        by_site.entry(r.site.clone()).or_default().push(r);
     }
-    let mut ordered: Vec<Raw> = Vec::new();
+    let sites: Vec<RankedSite> = by_site
+        .into_values()
+        .map(|mut members| {
+            // A row of a convention rule beside a row of a security rule at the same site that
+            // carries a security reason is a misfit of its own rule: the defect the reviewer saw
+            // is the other row (R-1's duplicate case). A convention row alone at its site keeps
+            // the reviewer's reason: nothing says a row of the defect's own rule exists.
+            if members
+                .iter()
+                .any(|m| !m.convention && m.reason.is_security_flaw())
+            {
+                for m in members
+                    .iter_mut()
+                    .filter(|m| m.convention && m.reason.is_security_flaw())
+                {
+                    m.reason = EscalationReason::RuleMisfit;
+                }
+            }
+            RankedSite::new(members)
+        })
+        .collect();
+
+    // Severity, then reason rank (R-2), then node; each node's list sorted by its own rank.
+    let sev = |s: &str| std::cmp::Reverse(crate::ai_audit::severity_rank(s));
+    let mut by_reason: BTreeMap<_, BTreeMap<String, Vec<RankedSite>>> = BTreeMap::new();
+    for site in sites {
+        by_reason
+            .entry((sev(&site.severity), site.reason_rank))
+            .or_default()
+            .entry(site.node_id.clone())
+            .or_default()
+            .push(site);
+    }
+    let mut ordered: Vec<RankedSite> = Vec::new();
     for per_node in by_reason.into_values() {
-        let mut lists: Vec<(String, std::collections::VecDeque<Raw>)> = per_node
+        let mut lists: Vec<(String, std::collections::VecDeque<RankedSite>)> = per_node
             .into_iter()
             .map(|(node, mut items)| {
                 items.sort_by(|a, b| {
-                    (sev(&a.severity), rank_sort_key(a.stage2_rank), &a.key).cmp(&(
-                        sev(&b.severity),
-                        rank_sort_key(b.stage2_rank),
-                        &b.key,
-                    ))
+                    (rank_sort_key(a.stage2_rank), &a.key)
+                        .cmp(&(rank_sort_key(b.stage2_rank), &b.key))
                 });
                 (node, items.into())
             })
             .collect();
         loop {
-            let mut round: Vec<Raw> = lists
+            let mut round: Vec<RankedSite> = lists
                 .iter_mut()
                 .filter_map(|(_, items)| items.pop_front())
                 .collect();
@@ -311,38 +435,34 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 break;
             }
             round.sort_by(|a, b| {
-                (
-                    sev(&a.severity),
-                    rank_sort_key(a.stage2_rank),
-                    &a.node_id,
-                    &a.key,
-                )
-                    .cmp(&(
-                        sev(&b.severity),
-                        rank_sort_key(b.stage2_rank),
-                        &b.node_id,
-                        &b.key,
-                    ))
+                (rank_sort_key(a.stage2_rank), &a.node_id, &a.key).cmp(&(
+                    rank_sort_key(b.stage2_rank),
+                    &b.node_id,
+                    &b.key,
+                ))
             });
             ordered.extend(round);
         }
     }
 
-    let mut candidates: Vec<EscalationCandidate> = ordered
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| EscalationCandidate {
-            key: r.key,
-            node_id: r.node_id,
-            reason: r.reason,
-            severity: r.severity,
-            stage2_rank: r.stage2_rank,
-            global_rank: i as u32 + 1,
-            escalated: false,
-            over_budget_reason: None,
-            why: r.why,
-        })
-        .collect();
+    let mut candidates: Vec<EscalationCandidate> = Vec::new();
+    for (slot, site) in ordered.into_iter().enumerate() {
+        for r in site.members {
+            candidates.push(EscalationCandidate {
+                key: r.key,
+                node_id: r.node_id,
+                reason: r.reason,
+                severity: r.severity,
+                stage2_severity: r.stage2_severity,
+                stage2_rank: r.stage2_rank,
+                global_rank: candidates.len() as u32 + 1,
+                slot: slot as u32 + 1,
+                escalated: false,
+                over_budget_reason: None,
+                why: r.why,
+            });
+        }
+    }
     let mut budget = EscalationBudget::compute(
         settings.rate_per_kloc,
         settings.floor,

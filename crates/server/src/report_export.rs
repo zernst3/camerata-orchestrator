@@ -1643,7 +1643,10 @@ pub fn build_report_json(
     // line per affected tool, through the SAME failed_passes channel the template already
     // renders in both the executive summary and the methodology. See
     // `tool_coverage_disclosures`'s doc comment for the honesty hole this closes.
-    failed_pass_notes.extend(tool_coverage_disclosures(&report.coverage_notes));
+    failed_pass_notes.extend(tool_coverage_disclosures_for(
+        &report.coverage_notes,
+        &report_ledger,
+    ));
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (

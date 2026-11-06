@@ -173,11 +173,13 @@ pub enum EngineMode {
 }
 
 /// The reasons that may exceed the budget (design A4 and D5): the server's default set.
-pub const OVER_BUDGET_REASONS: [EscalationReason; 5] = [
+pub const OVER_BUDGET_REASONS: [EscalationReason; 7] = [
     EscalationReason::UnauthenticatedReach,
     EscalationReason::SecretExposure,
     EscalationReason::DataLoss,
     EscalationReason::CrossTenant,
+    EscalationReason::AuthorizationBypass,
+    EscalationReason::Injection,
     EscalationReason::EvidenceUnverified,
 ];
 
@@ -1021,6 +1023,8 @@ pub fn build(p: &Params) -> ReviewDataSet {
             severity: rows[i].severity.clone(),
             stage2_rank: *slot,
             global_rank,
+            stage2_severity: None,
+            slot: 0,
             escalated,
             over_budget_reason: over,
             why: rows[i]

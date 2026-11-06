@@ -284,6 +284,16 @@ pub(super) fn is_access_control_or_injection_class(f: &Finding) -> bool {
     )
 }
 
+/// Whether the text-based floors may look at `f` at all. A phrase in a message is evidence of a
+/// defect only when the row IS about a security concern: a security rule of the corpus, a
+/// security category, or a row the model invented (`AI-`), whose message is the whole account of
+/// what it found. A row of a convention rule (structured errors, layering, middleware order) that
+/// says "an unauthenticated caller gets a 401" is describing its own context, and the word must
+/// not raise it to Critical.
+pub(super) fn floor_may_apply(f: &Finding) -> bool {
+    finding_class(f) == FindingClass::Security || f.rule_id.starts_with("AI-")
+}
+
 /// The deterministic D5 severity floor for ONE finding: `None` when no rule of thumb applies,
 /// else the floor severity plus the rationale to record. Order matters — unauthenticated/full-
 /// compromise is checked first (it is the highest floor and the two conditions are mutually
@@ -293,6 +303,9 @@ pub(super) fn is_access_control_or_injection_class(f: &Finding) -> bool {
 /// anything else), then the RLS-hedge guard (which can only RAISE whatever floor is already
 /// computed, never lower it — see the combine step in `apply_severity_calibration_rule`).
 pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
+    if !floor_may_apply(f) {
+        return None;
+    }
     let text = calibration_floor_scan_text(f);
     let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
         Some((

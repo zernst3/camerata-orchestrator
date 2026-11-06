@@ -179,6 +179,31 @@ fn tool_command(tool: ScanTool) -> &'static str {
     }
 }
 
+/// The coverage note for a selected rule no scan tool is wired for. The one producer of the
+/// note: [`unrouted_note_rule`] reads the rule id back from it, so the two cannot drift.
+pub fn unrouted_note(rule_id: &str) -> CoverageNote {
+    CoverageNote {
+        tool_failed: false,
+        repo: None,
+        tool: "unrouted".to_string(),
+        message: format!("{UNROUTED_NOTE_PREFIX}{rule_id}{UNROUTED_NOTE_SUFFIX}"),
+    }
+}
+
+const UNROUTED_NOTE_PREFIX: &str = "Could not preview ";
+const UNROUTED_NOTE_SUFFIX: &str =
+    " \u{2014} no scan-runnable tool wired for its linter source; it enforces once wired into CI.";
+
+/// The rule id an [`unrouted_note`] names, or `None` for any other note.
+pub fn unrouted_note_rule(note: &CoverageNote) -> Option<&str> {
+    if note.tool != "unrouted" {
+        return None;
+    }
+    note.message
+        .strip_prefix(UNROUTED_NOTE_PREFIX)?
+        .strip_suffix(UNROUTED_NOTE_SUFFIX)
+}
+
 /// Derive the scan tool a rule's findings would come from, by inspecting its
 /// grounding sources' `linter` field (the corpus's tool+rule provenance), falling
 /// back to [`crate::mechanical_gate::semgrep_covered_rule_ids`] when no source names
@@ -1529,16 +1554,7 @@ pub async fn run_scan_tools<'r>(
         }
     }
     for sr in &ungrouped {
-        coverage_notes.push(CoverageNote {
-            tool_failed: false,
-            repo: None,
-            tool: "unrouted".to_string(),
-            message: format!(
-                "Could not preview {} — no scan-runnable tool wired for its linter source; \
-                 it enforces once wired into CI.",
-                sr.id
-            ),
-        });
+        coverage_notes.push(unrouted_note(&sr.id));
     }
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {

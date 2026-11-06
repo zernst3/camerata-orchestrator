@@ -268,7 +268,7 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
 /// headline), and writes the summary, the sub-groups by index and the few escalations. No batch
 /// discount and no cache breakpoint: the architect is waiting on it. Pinned to the real prompt by
 /// `group_review_tests::the_estimators_figures_cover_the_real_prompt`.
-pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_800.0;
+pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_900.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: the repository line, the rule text and the hint header.
 pub const GROUP_REVIEW_CALL_OVERHEAD_TOKENS: f64 = 400.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: one site's line, at full width (an 80-character path, a

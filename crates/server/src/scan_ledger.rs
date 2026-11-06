@@ -621,6 +621,10 @@ pub struct EscalationBlock {
     /// The escalated sites past the budget, by the reason that allowed it.
     #[serde(default)]
     pub over_budget_by_reason: BTreeMap<String, usize>,
+    /// The reasons that were allowed past the budget in this run (wire names, in priority order):
+    /// the project's effective set, so a set the engine upgraded on load is on record.
+    #[serde(default)]
+    pub over_budget_reasons: Vec<String>,
     /// Sites the group reviewer's sub-groups did not name; they sit in the rule's `unplaced`
     /// sub-group, and are listed by site key.
     #[serde(default)]
@@ -654,7 +658,9 @@ impl EscalationBlock {
             .iter()
             .filter(|c| keys.contains(c.key.as_str()))
             .collect();
-        let escalated = candidates.iter().filter(|c| c.escalated).count();
+        // The budget counts slots: rows at one site share one (R-1).
+        let (slots, escalated) =
+            camerata_api_types::review::count_slots(candidates.iter().copied());
         let budget = tree.budget.budget;
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         let mut over_by_reason: BTreeMap<String, usize> = BTreeMap::new();
@@ -671,7 +677,7 @@ impl EscalationBlock {
             floor: tree.budget.floor,
             counted_lines: tree.budget.counted_lines,
             budget,
-            candidates: candidates.len(),
+            candidates: slots,
             escalated,
             over_budget: escalated.saturating_sub(budget),
             total_sites: total,
@@ -682,6 +688,7 @@ impl EscalationBlock {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_reasons: self.over_budget_reasons.clone(),
             unplaced: self
                 .unplaced
                 .iter()
@@ -694,7 +701,8 @@ impl EscalationBlock {
     }
 
     /// The sentence the methodology section and the ledger state: "Escalated 347 of a budget of
-    /// 300 (47 over, all unauthenticated reach or secret exposure at critical)".
+    /// 300 (47 over, all unauthenticated reach at critical, and secret exposure at high or
+    /// critical)".
     pub fn sentence(&self) -> String {
         use camerata_api_types::review::EscalationReason;
         if self.over_budget == 0 {
@@ -709,18 +717,29 @@ impl EscalationBlock {
             .filter_map(|name| EscalationReason::parse(name))
             .collect();
         reasons.sort_by_key(|r| r.rank());
-        // Every reason but unverified evidence is past the budget only at critical severity.
-        let at_critical: Vec<&str> = reasons
-            .iter()
-            .filter(|r| **r != EscalationReason::EvidenceUnverified)
-            .map(|r| r.phrase())
-            .collect();
+        // A reason is past the budget at critical, or at high or critical for the severe ones
+        // (R-3). Unverified evidence is past it at any severity.
+        let phrases = |severe_at_high: bool| -> Vec<&str> {
+            reasons
+                .iter()
+                .filter(|r| **r != EscalationReason::EvidenceUnverified)
+                .filter(|r| r.is_severe_at_high() == severe_at_high)
+                .map(|r| r.phrase())
+                .collect()
+        };
         let mut parts: Vec<String> = Vec::new();
+        let (at_critical, at_high) = (phrases(false), phrases(true));
         if !at_critical.is_empty() {
             parts.push(format!("{} at critical", at_critical.join(" or ")));
         }
+        if !at_high.is_empty() {
+            parts.push(format!("{} at high or critical", at_high.join(" or ")));
+        }
         if reasons.contains(&EscalationReason::EvidenceUnverified) {
-            parts.push(EscalationReason::EvidenceUnverified.phrase().to_string());
+            parts.push(format!(
+                "{} at any severity",
+                EscalationReason::EvidenceUnverified.phrase()
+            ));
         }
         if parts.is_empty() {
             return format!(
@@ -733,7 +752,7 @@ impl EscalationBlock {
             self.escalated,
             self.budget,
             self.over_budget,
-            parts.join(" or ")
+            parts.join(", and ")
         )
     }
 }

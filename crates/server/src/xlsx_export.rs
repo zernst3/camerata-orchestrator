@@ -3648,7 +3648,7 @@ pub fn build_workbook(
     // W7 (G1/G3): the same concise per-tool coverage lines the PDF/JSON disclose through
     // `failed_passes` — never the notes' raw internal diagnostics.
     let tool_coverage_notes =
-        crate::report_export::tool_coverage_disclosures(&report.coverage_notes);
+        crate::report_export::tool_coverage_disclosures_for(&report.coverage_notes, &report.ledger);
     // W7 (G2): every rule the ledger confirms did not run, sorted for a stable sheet.
     let mut rules_not_run: Vec<(String, String)> = report
         .ledger
@@ -7183,6 +7183,47 @@ mod tests {
             shared.contains("Rules not run this scan")
                 && shared.contains("JS-SOME-NEVER-RUN-RULE-1"),
             "a ledger-excluded rule must be named on the Coverage sheet"
+        );
+    }
+
+    /// The workbook's preview-tool line follows the ledger like the PDF's: a selected rule no
+    /// preview tool is wired for is judged by the model and the ledger records it as run, so the
+    /// Coverage sheet must not say it is missing; a rule the ledger does not show as run keeps it.
+    #[test]
+    fn the_coverage_sheet_says_no_preview_tool_only_when_the_ledger_shows_the_rule_not_run() {
+        let workbook_text = |ran: bool| {
+            let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
+            let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+            report.coverage_notes = vec![crate::scan_tools::unrouted_note("JS-NO-TOOL-RULE-1")];
+            if ran {
+                report.ledger.record_rule(
+                    "owner/repo",
+                    "JS-NO-TOOL-RULE-1",
+                    crate::scan_ledger::RuleTier::Semantic,
+                    true,
+                    None,
+                    4,
+                    0,
+                );
+            }
+            let bytes = build_workbook(
+                &crate::report_export::ReviewedReport::unreviewed(
+                    &report.clone().seal(),
+                    &HashMap::new(),
+                ),
+                None,
+                &empty_opts(),
+            )
+            .unwrap();
+            read_zip_entry(&bytes, "xl/sharedStrings.xml")
+        };
+        assert!(
+            !workbook_text(true).contains("no scan-time preview tool"),
+            "the ledger shows the rule ran"
+        );
+        assert!(
+            workbook_text(false).contains("no scan-time preview tool"),
+            "the ledger does not show the rule as run"
         );
     }
 

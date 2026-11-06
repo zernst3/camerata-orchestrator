@@ -145,6 +145,17 @@ impl BookkeepingCaptures {
                 if *key == crate::review_flags::REVIEW_FLAGS_CAPTURE {
                     continue;
                 }
+                // Stage 1's verdict and outlier reasons stay too: the collapse that follows
+                // moves them from a collapsed row to its survivor. Held aside, they would be
+                // restored by the identity of a row that no longer exists, and the group
+                // reviewer would read "not rated" for a site stage 1 rated. Neither names an
+                // object (both are bookkeeping keys), so they cannot fuse two rows.
+                if *key == crate::ai_audit::STAGE1_CAPTURE
+                    || *key == crate::ai_audit::OUTLIER_REASONS_CAPTURE
+                {
+                    continue;
+                }
+
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
                 }
@@ -4437,6 +4448,44 @@ mod tests {
                 .contains_key(crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE));
             assert!(f.captures.contains_key("history-status"));
         }
+    }
+
+    /// The scan holds bookkeeping aside, collapses, and puts it back by row identity. A collapsed
+    /// source's identity is gone by then, so stage 1's verdict on a source must travel to the
+    /// survivor through the collapse itself: the held-aside step leaves it on the rows.
+    #[test]
+    fn the_stage_1_verdict_of_a_collapsed_row_survives_take_collapse_and_restore() {
+        let mut deterministic = Finding {
+            repo: "acme/api".to_string(),
+            path: "db/0005_rpc.sql".to_string(),
+            line: 2,
+            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            severity: "high".to_string(),
+            snippet: "create function enrollment_summary() security definer".to_string(),
+            detail: "a definer function".to_string(),
+            ..Finding::default()
+        };
+        deterministic.confidence = None;
+        let mut model = deterministic.clone();
+        model.confidence = Some("high".to_string());
+        // A different snippet: the two rows have different identities, as they do in a scan.
+        model.snippet.push_str(" -- granted to authenticated");
+        model.captures.insert(
+            crate::ai_audit::STAGE1_CAPTURE.to_string(),
+            serde_json::json!({"real": "yes", "reason": "no caller test"}).to_string(),
+        );
+        let mut rows = vec![model, deterministic];
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut rows);
+        let tools = crate::review_tree::ToolMap::builtin();
+        let mut collapsed = crate::review_tree::collapse_identical(rows, &tools).rows;
+        held.restore(&mut collapsed);
+        assert_eq!(collapsed.len(), 1);
+        let stage1 = crate::ai_audit::stage1_of(&collapsed[0]);
+        assert_eq!(
+            stage1.map(|s| s.real.as_str().to_string()),
+            Some("yes".to_string())
+        );
     }
 
     /// M4 fix (a): a second review flag written after the bookkeeping was held aside does not

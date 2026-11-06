@@ -332,7 +332,9 @@ pub fn reason_label(reason: EscalationReason) -> &'static str {
 
 /// The note under the reason checkboxes: which of them need critical severity.
 pub fn reasons_note() -> &'static str {
-    "Every reason except evidence unverified counts only at critical severity."
+    "Evidence unverified counts at any severity. Secret exposure, data loss, cross-tenant, \
+     authorization bypass and injection count at high or critical. The rest count only at \
+     critical."
 }
 
 /// The proposed request to preview on the server, when the draft is valid and not yet saved.

@@ -866,7 +866,8 @@ impl StageTelemetry {
                 .map_or_else(|| "n/a".to_string(), |r| format!("{:.1}%", r * 100.0));
             writeln!(
                 out,
-                "  fix give-up rate: {rate} ({} of {} answered by the fix model; {} not answered: {} \
+                "  fix give-up rate: {rate} ({} of the {} findings the fix model answered ended \
+                 with no fix that passed the self-check; {} findings were not answered: {} \
                  stopped by the spend limit, {} failed in transport; {} used the authored \
                  remediation with no model call)",
                 fix.gave_up,

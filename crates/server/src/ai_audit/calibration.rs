@@ -538,6 +538,18 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
                 f.severity
             ));
             outlier_reasons.push(crate::review_tree::OutlierReason::SeverityRaiseHeld);
+        } else if would_raise && candidate == "critical" && is_convention_rule_row(&f) {
+            // HELD: the rule is a convention (style, layering, error shape), not a security
+            // rule. A row of such a rule is not the place a critical lands: when the model sees a
+            // real defect near it, that defect is a row of its own rule. The raise is held at
+            // the rule's own severity and recorded for the tree, as a precondition hold is.
+            f.calibration_rationale = Some(format!(
+                "Calibration held at {} (the model proposed {candidate}): the rule is a \
+                 convention rule, not a security rule, so its row is not raised to critical. A \
+                 defect beside it is a row of its own rule.",
+                f.severity
+            ));
+            outlier_reasons.push(crate::review_tree::OutlierReason::SeverityRaiseHeld);
         } else if candidate != f.severity {
             let before = std::mem::replace(&mut f.severity, candidate.to_string());
             // A fixed template: the two severities and the basis they were checked against, the
