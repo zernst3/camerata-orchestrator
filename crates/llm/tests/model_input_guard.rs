@@ -26,7 +26,45 @@ const SEND_MARKERS: &[&str] = &[
     "localhost:11434",
     "Command::new(\"claude\")",
     "Command::new(&self.program)",
+    // The paths of the model APIs, whatever host a config or a test points them at.
+    "/v1/messages",
+    "/chat/completions",
+    "v1beta/models",
 ];
+
+/// Whether `code` (a file's source without its comment lines) holds a send marker, and which.
+///
+/// Beyond the fixed texts: a string literal naming a model provider's host (`anthropic.com`,
+/// `openrouter.ai`), and a `Command::new` of anything but a literal in a file that also names the
+/// `claude` CLI or its `-p` flag (the program is then chosen at run time, and it may be a model
+/// CLI under another name).
+fn marker_in(code: &str) -> Option<String> {
+    if let Some(marker) = SEND_MARKERS.iter().find(|m| code.contains(**m)) {
+        return Some((*marker).to_string());
+    }
+    for host in ["anthropic.com", "openrouter.ai"] {
+        if code
+            .lines()
+            .any(|line| line.contains('"') && line.contains(host))
+        {
+            return Some(format!("a string literal naming {host}"));
+        }
+    }
+    let names_the_cli = code.contains("\"claude\"") || code.contains("\"-p\"");
+    if names_the_cli {
+        for line in code.lines() {
+            if let Some(at) = line.find("Command::new(") {
+                let arg = line[at + "Command::new(".len()..].trim_start();
+                if !arg.starts_with('"') {
+                    return Some(
+                        "Command::new of a name chosen at run time, beside `claude`".into(),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
 
 /// A known send site: the file, and the functions in it that build what is sent, each with the
 /// text its body must contain (the call into the chokepoint).
@@ -77,23 +115,56 @@ const SITES: &[Site] = &[
     },
 ];
 
-/// Files that name a marker and send nothing, each with the reason.
-const NOT_SENDERS: &[(&str, &str)] = &[
+/// Files that name a marker and send nothing: the exact file, why, and the texts that must NOT
+/// appear in it (so the exemption cannot quietly grow a sender). No directory is exempt: a new
+/// module next to these is scanned.
+const NOT_SENDERS: &[(&str, &str, &[&str])] = &[
     (
         "crates/api-types/src/claude_cli.rs",
         "builds a `claude` command in its one unit test, to check the API key is removed from the \
          child's environment; the command is never spawned",
+        &[".spawn(", ".output(", ".status("],
     ),
     (
-        "crates/llm/src/llm/",
-        "the transports' own test modules (a local mock of the Messages endpoint)",
+        "crates/llm/src/llm/stream_tests.rs",
+        "the transports' test module that mocks the Messages endpoint with a local server",
+        &["reqwest::", "Command::new"],
+    ),
+    (
+        "crates/llm/src/llm/model_input_tests.rs",
+        "the chokepoint's own tests: they read the wire bodies and argv the builders make",
+        &["reqwest::", ".spawn(", ".output("],
+    ),
+    (
+        "crates/llm/src/llm/temperature_tests.rs",
+        "the transports' test module for the temperature field of the wire body",
+        &["reqwest::", "Command::new"],
+    ),
+    (
+        "crates/server/src/cockpit_resume_tests.rs",
+        "test module: runs its own fake `claude` script once to warm it, before the server under \
+         test calls it through the transports",
+        &["reqwest::", "api."],
+    ),
+    (
+        "crates/server/src/model_input_chat_tests.rs",
+        "test module: runs its own recording fake `claude` script once to warm it; the request \
+         itself goes through the chat handler and the transports",
+        &["reqwest::", "api."],
+    ),
+    (
+        "crates/llm/src/model_registry.rs",
+        "lists models (GET /v1/models, OpenRouter's model and provider catalogues); it sends no \
+         prompt",
+        &[".post(", "Command::new"],
     ),
 ];
 
-fn is_not_a_sender(file: &str) -> bool {
+fn not_a_sender(file: &str) -> Option<&'static [&'static str]> {
     NOT_SENDERS
         .iter()
-        .any(|(prefix, _)| file.starts_with(prefix))
+        .find(|(path, _, _)| *path == file)
+        .map(|(_, _, forbidden)| *forbidden)
 }
 
 /// The body of `fn name` in `source` (from its opening brace to the matching close), if there is
@@ -139,9 +210,19 @@ fn violations(files: &[(String, String)]) -> Vec<String> {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        let marker = SEND_MARKERS.iter().find(|m| code.contains(**m));
+        let marker = marker_in(&code);
+        if let (Some(forbidden), true) = (not_a_sender(path), site.is_none()) {
+            for text in forbidden {
+                if code.contains(text) {
+                    out.push(format!(
+                        "{path} is listed in NOT_SENDERS but now holds `{text}`: it may send; \
+                         move it to SITES with the function that guards it"
+                    ));
+                }
+            }
+        }
         match (site, marker) {
-            (None, Some(marker)) if !is_not_a_sender(path) => out.push(format!(
+            (None, Some(marker)) if not_a_sender(path).is_none() => out.push(format!(
                 "{path} names `{marker}` but is not a known model send site: route the request \
                  through camerata_llm::model_input (or camerata_secrets::model_input) and add the \
                  file to SITES with the function that guards it"
@@ -275,6 +356,71 @@ fn a_known_builder_that_skips_the_chokepoint_is_caught() {
     );
     assert!(
         found.iter().any(|v| v.contains("build_cli_command")),
+        "{found:?}"
+    );
+}
+
+/// Each new marker is caught in a file nobody listed.
+#[test]
+fn every_kind_of_send_marker_is_caught_in_an_unlisted_file() {
+    let planted: &[(&str, &str)] = &[
+        ("an Anthropic path", "const P: &str = \"/v1/messages\";"),
+        ("a chat completions path", "let url = format!(\"{base}/chat/completions\");"),
+        ("a Gemini path", "let url = \"models/x:generate\"; let v = \"v1beta/models\";"),
+        ("an Anthropic host", "let host = \"api.anthropic.com\";"),
+        ("an OpenRouter host", "let host = \"https://openrouter.ai/api\";"),
+        (
+            "a program chosen at run time beside the claude CLI",
+            "const BIN: &str = \"claude\";\nfn go(bin: &str) { let c = tokio::process::Command::new(bin); }",
+        ),
+        (
+            "the claude -p flag with a program chosen at run time",
+            "fn go(p: &str) { let c = Command::new(p).arg(\"-p\"); }",
+        ),
+    ];
+    for (what, source) in planted {
+        let mut files = workspace_sources();
+        files.push((
+            "crates/somewhere/src/new_sender.rs".to_string(),
+            (*source).to_string(),
+        ));
+        let found = violations(&files);
+        assert_eq!(found.len(), 1, "{what}: {found:?}");
+        assert!(found[0].contains("new_sender.rs"), "{what}: {found:?}");
+    }
+}
+
+/// No directory is exempt: a new module beside the transports' test modules is scanned.
+#[test]
+fn a_new_module_in_the_transport_directory_is_scanned() {
+    let mut files = workspace_sources();
+    files.push((
+        "crates/llm/src/llm/second_transport.rs".to_string(),
+        "const URL: &str = \"https://api.anthropic.com/v1/messages\";".to_string(),
+    ));
+    let found = violations(&files);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("second_transport.rs"), "{found:?}");
+}
+
+/// A file that was cleared as sending nothing is held to it.
+#[test]
+fn an_exempt_file_that_starts_to_send_is_caught() {
+    let files: Vec<(String, String)> = workspace_sources()
+        .into_iter()
+        .map(|(path, text)| {
+            if path == "crates/llm/src/model_registry.rs" {
+                (path, format!("{text}\nfn leak(c: &reqwest::Client) {{ c.post(\"https://example.test\"); }}"))
+            } else {
+                (path, text)
+            }
+        })
+        .collect();
+    let found = violations(&files);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.contains("model_registry.rs") && v.contains(".post(")),
         "{found:?}"
     );
 }
