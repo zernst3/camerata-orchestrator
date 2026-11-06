@@ -173,11 +173,13 @@ pub enum EngineMode {
 }
 
 /// The reasons that may exceed the budget (design A4 and D5): the server's default set.
-pub const OVER_BUDGET_REASONS: [EscalationReason; 5] = [
+pub const OVER_BUDGET_REASONS: [EscalationReason; 7] = [
     EscalationReason::UnauthenticatedReach,
     EscalationReason::SecretExposure,
     EscalationReason::DataLoss,
     EscalationReason::CrossTenant,
+    EscalationReason::AuthorizationBypass,
+    EscalationReason::Injection,
     EscalationReason::EvidenceUnverified,
 ];
 

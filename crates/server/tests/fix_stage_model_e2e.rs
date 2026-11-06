@@ -377,7 +377,7 @@ async fn the_telemetry_records_the_fix_model_per_call_and_the_give_up_rate() {
     );
     assert!(table.contains("fix give-up rate: 100.0%"), "{table}");
     assert!(
-        table.contains("0 not answered: 0 stopped by the spend limit, 0 failed in transport"),
+        table.contains("0 findings were not answered: 0 stopped by the spend limit, 0 failed in transport"),
         "{table}"
     );
 
