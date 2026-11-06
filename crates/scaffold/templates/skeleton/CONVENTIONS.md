@@ -10,7 +10,7 @@ These conventions are the scaffolder's baseline rule selection for the vetted
 Dioxus-fullstack PWA skeleton (grounded in the Camerata principle library's
 `rust:dioxus` domain). This is a **starting baseline, not a final review** — once the
 Architect orchestrator's autonomous rule-review step exists (see
-`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`), it re-reviews the full
+the product-owner vibe-mode design notes), it re-reviews the full
 corpus against this app's actual requirements and refines this file. Cite a rule's ID
 when applying it (for example, per RUST-DIOXUS-9).
 

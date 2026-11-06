@@ -11,13 +11,26 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::archive::{xlsx_cells, xlsx_strings};
+use super::archive::{xlsx_cells, xlsx_header_footers, xlsx_strings};
 use super::report::Problem;
 
 /// One problem per secret in `text`, located by `location` (and by line when `with_line`).
 /// Scans the text as given AND with zero-width characters stripped, so one inserted inside a key
 /// cannot hide it from the detector while a reader still sees the key.
 fn scan_text(file: &str, location: &str, text: &str, with_line: bool) -> Vec<Problem> {
+    scan_text_except(file, location, text, with_line, &|_, _| false)
+}
+
+/// [`scan_text`] with a `skip` test: a match for which `skip(match, matched text)` is true is
+/// left out. Only [`csv_problems`] uses it, for the one shape a JSON cell scanned as one string
+/// invents (see there); everything else keeps every match.
+fn scan_text_except(
+    file: &str,
+    location: &str,
+    text: &str,
+    with_line: bool,
+    skip: &dyn Fn(&camerata_secrets::SecretMatch, &str) -> bool,
+) -> Vec<Problem> {
     let stripped = crate::report_export::strip_zero_width(text);
     let mut variants: Vec<&str> = vec![text];
     if stripped.as_ref() != text {
@@ -27,6 +40,9 @@ fn scan_text(file: &str, location: &str, text: &str, with_line: bool) -> Vec<Pro
     let mut problems = Vec::new();
     for variant in variants {
         for m in camerata_secrets::detect_secrets(variant) {
+            if skip(&m, variant) {
+                continue;
+            }
             let form = m.redacted_form(variant);
             // A multi-line form (a PEM block) reads as one line in a message.
             let evidence = form.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -134,15 +150,177 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
         };
         for (c, cell) in record.iter().enumerate() {
             let column = headers.get(c).unwrap_or("?");
-            problems.extend(scan_text(
-                file,
-                &format!("row {}, column {column:?}", i + 1),
-                cell,
-                false,
-            ));
+            let at = format!("row {}, column {column:?}", i + 1);
+            match nested_json_cell(cell) {
+                // A nested list or object (the `also_locations` column) is JSON text. It is
+                // scanned BOTH ways, and the union is reported, so the check is never weaker
+                // than scanning the cell as one string was:
+                // 1. walked like `findings.json`, every string and key on its own (the same
+                //    detector, the same strictness), which also sees an unquoted `.env` line
+                //    inside a snippet that the one-string scan cannot (the line is not at a line
+                //    start there);
+                // 2. as one string, which also sees a value whose NAME sits in a neighbouring
+                //    field (a rule id naming a key beside a bare value in the snippet).
+                // The one-string scan invents exactly one false shape: a named secret literal
+                // whose "value" is itself a NAME, not a value, beside a rule id naming a key:
+                // an environment variable name (the efficiency run's refused export) or an HTTP
+                // header name such as `Access-Control-Allow-Credentials` (D6, the faktura and
+                // lumen exports). Only that shape is skipped, and only on the one-string pass.
+                Some(value) => {
+                    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                    for p in json_problems(file, &value) {
+                        seen.insert((p.message.clone(), p.evidence.clone()));
+                        problems.push(Problem::new(
+                            file,
+                            format!("{at}, {}", p.location),
+                            p.message,
+                            p.evidence,
+                        ));
+                    }
+                    for p in scan_text_except(file, &at, cell, false, &|m, text| {
+                        m.shape == camerata_secrets::SecretShape::NamedSecretLiteral && {
+                            let value = &text[m.value.clone()];
+                            is_environment_variable_name(value) || is_http_header_name(value)
+                        }
+                    }) {
+                        if seen.insert((p.message.clone(), p.evidence.clone())) {
+                            problems.push(p);
+                        }
+                    }
+                }
+                None => problems.extend(scan_text(file, &at, cell, false)),
+            }
         }
     }
     problems
+}
+
+/// Whether a matched "value" is an environment variable NAME rather than a value: upper case
+/// letters, digits and underscores only, at least one underscore, a letter first, and fewer
+/// than four digits (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY`, `S3_SECRET_ACCESS_KEY`), with the
+/// `=` the line may end in. A generated secret of that length has lower case letters or more
+/// digits in it; one with neither is still caught when its name is in the same string.
+fn is_environment_variable_name(value: &str) -> bool {
+    let name = value.trim_end_matches('=');
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && name.contains('_')
+        && name.chars().filter(char::is_ascii_digit).count() < 4
+}
+
+/// Words an HTTP header name is built from (`Access-Control-Allow-Credentials`,
+/// `Strict-Transport-Security`, `Cross-Origin-Opener-Policy`), lower case. A value is a header
+/// name only when EVERY part is one of these, so a passphrase of ordinary words
+/// (`Correct-Horse-Battery-Staple`) or a hyphenated random token is still a credential, and a
+/// header outside the list stays refused (the safe direction: the gate fails closed).
+const HEADER_WORDS: &[&str] = &[
+    "access",
+    "control",
+    "allow",
+    "credentials",
+    "origin",
+    "headers",
+    "methods",
+    "expose",
+    "max",
+    "age",
+    "content",
+    "type",
+    "security",
+    "policy",
+    "strict",
+    "transport",
+    "request",
+    "forwarded",
+    "for",
+    "proto",
+    "host",
+    "cache",
+    "frame",
+    "options",
+    "referrer",
+    "permitted",
+    "cross",
+    "domain",
+    "policies",
+    "embedder",
+    "opener",
+    "resource",
+    "real",
+    "ip",
+    "requested",
+    "with",
+    "accept",
+    "language",
+    "encoding",
+    "disposition",
+    "length",
+    "vary",
+    "etag",
+    "location",
+    "user",
+    "agent",
+    "csrf",
+    "xsrf",
+    "fetch",
+    "site",
+    "dest",
+    "mode",
+    "timing",
+    "report",
+    "only",
+    "private",
+    "network",
+    "local",
+    "x",
+    "upgrade",
+    "insecure",
+    "requests",
+    "public",
+    "pins",
+    "permissions",
+    // `Public-Key-Pins-Report-Only`: the word is a header word only in company with the others,
+    // since every part of a value must be one of these.
+    "key",
+];
+
+/// Whether a matched "value" is an HTTP header NAME: two or more alphabetic words joined by `-`,
+/// all Title-Case or all lower case, every one a header word (see [`HEADER_WORDS`]). No digit,
+/// no mixed case inside a word: the shape of `Access-Control-Allow-Origin`, not of a key.
+fn is_http_header_name(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    let well_cased = |title: bool| {
+        parts.iter().all(|part| {
+            let mut chars = part.chars();
+            let first_ok = chars.next().is_some_and(|c| {
+                if title {
+                    c.is_ascii_uppercase()
+                } else {
+                    c.is_ascii_lowercase()
+                }
+            });
+            first_ok && chars.all(|c| c.is_ascii_lowercase())
+        })
+    };
+    parts.len() >= 2
+        && (well_cased(true) || well_cased(false))
+        && parts
+            .iter()
+            .all(|part| HEADER_WORDS.contains(&part.to_ascii_lowercase().as_str()))
+}
+
+/// The parsed value of a CSV cell holding a nested JSON list or object, as `json_array_to_csv`
+/// writes one. `None` for any other cell (including a scalar that happens to parse as JSON).
+fn nested_json_cell(cell: &str) -> Option<Value> {
+    let trimmed = cell.trim();
+    if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .filter(|v| v.is_array() || v.is_object())
 }
 
 /// A workbook: every cell (located by sheet and cell reference) and every shared string (so a
@@ -164,6 +342,30 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
             file,
             "workbook",
             format!("the workbook could not be read for the secrets check: {e}"),
+            None,
+        )),
+    }
+    // Sheet headers and footers (the confidentiality line) live in each sheet's XML, not in a
+    // cell or the shared-strings table, so they are read separately.
+    match xlsx_header_footers(bytes) {
+        Ok(parts) => {
+            for hf in parts {
+                for text in hf.sections() {
+                    problems.extend(scan_text(
+                        file,
+                        &format!("sheet {:?} {}", hf.sheet, hf.part),
+                        text,
+                        false,
+                    ));
+                }
+            }
+        }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "the workbook's headers and footers could not be read for the secrets check: {e}"
+            ),
             None,
         )),
     }

@@ -308,11 +308,27 @@ pub enum LeadEngineerError {
 /// investigation agent is to a Story in architect mode. It returns an [`Intake`]
 /// so a future multi-turn clarify loop can branch on
 /// [`Intake::NeedsClarification`]; V1 drives the [`Intake::Ready`] arm.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait LeadEngineer: Send + Sync {
     /// Evaluate `form` and return either a buildable plan or clarifying
     /// questions.
-    async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError>;
+    fn evaluate<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        form: &'life1 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Intake, LeadEngineerError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic fallback ──────────────────────────────────────────────────
@@ -465,10 +481,9 @@ impl LeadEngineer for StubLeadEngineer {
 /// name the same id so the server default and the CLI fallback agree. Behind
 /// the seam: only this concrete type names a model.
 ///
-/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
-/// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
-/// runtime for CLI / one-off invocations.
-pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5";
+/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`]
+/// (the open project's setting). The environment is never consulted.
+pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
 /// reviewer) allow so the agent can SCAN the bound repo on demand. These cannot mutate the
@@ -547,17 +562,51 @@ struct ModelOutput {
 }
 
 impl ClaudeLeadEngineer {
-    /// Construct with the configured model: reads `CAMERATA_LEAD_ENGINEER_MODEL`
-    /// first, then falls back to [`DEFAULT_LEAD_ENGINEER_MODEL`]. Use
+    /// The `claude -p` command for one planning call (everything except the spawn), so the exact
+    /// argument list is testable without a `claude` binary.
+    fn build_command(&self, prompt: &str) -> tokio::process::Command {
+        // A READ-ONLY, JSON-output, ungoverned planning call. There is NO MCP gateway and
+        // NO write tools — the lead engineer reasons and plans, it does not build. THE
+        // INVARIANT: when a repo clone is bound, the call runs WITH it as cwd + `--add-dir`
+        // and the read-only built-ins (Read/Grep/Glob/LS) enabled, so the engineer can scan
+        // ANY file in the real codebase while planning, not just the inlined digest. Reads
+        // are inherently safe here: no write/exec tool is offered, so this adds no write path.
+        let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
+        // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
+        // carries a raw secret, and the prompt reaches `claude -p` as an argument.
+        cmd.arg("-p")
+            .arg(camerata_secrets::model_input::redact_for_model(prompt).as_ref())
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--allowedTools")
+            .arg(READ_ONLY_TOOLS.join(" "))
+            .arg("--dangerously-skip-permissions")
+            .arg("--output-format")
+            .arg("json")
+            .kill_on_drop(true);
+        if let Some(dir) = &self.repo_dir {
+            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the lead engineer can scan across all the project's repos.
+            // READ-only — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        cmd
+    }
+
+    /// Construct on the built-in [`DEFAULT_LEAD_ENGINEER_MODEL`]; the environment is never
+    /// read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from the server's `/api/models` catalog or a per-project config).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_LEAD_ENGINEER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_LEAD_ENGINEER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_LEAD_ENGINEER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -800,36 +849,7 @@ impl LeadEngineer for ClaudeLeadEngineer {
     async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
         let prompt = Self::build_prompt(form, self.grounding.as_deref());
 
-        // A READ-ONLY, JSON-output, ungoverned planning call. There is NO MCP gateway and
-        // NO write tools — the lead engineer reasons and plans, it does not build. THE
-        // INVARIANT: when a repo clone is bound, the call runs WITH it as cwd + `--add-dir`
-        // and the read-only built-ins (Read/Grep/Glob/LS) enabled, so the engineer can scan
-        // ANY file in the real codebase while planning, not just the inlined digest. Reads
-        // are inherently safe here: no write/exec tool is offered, so this adds no write path.
-        let mut cmd = tokio::process::Command::new("claude");
-        // The subscription CLI must never inherit an API key from the parent's `.env`.
-        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--model")
-            .arg(&self.model)
-            .arg("--allowedTools")
-            .arg(READ_ONLY_TOOLS.join(" "))
-            .arg("--dangerously-skip-permissions")
-            .arg("--output-format")
-            .arg("json")
-            .kill_on_drop(true);
-        if let Some(dir) = &self.repo_dir {
-            cmd.current_dir(dir).arg("--add-dir").arg(dir);
-            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
-            // `--add-dir` so the lead engineer can scan across all the project's repos.
-            // READ-only — no write tool is offered. Skip any that duplicate the cwd.
-            for extra in &self.extra_repo_dirs {
-                if extra != dir {
-                    cmd.arg("--add-dir").arg(extra);
-                }
-            }
-        }
+        let mut cmd = self.build_command(&prompt);
         let out = cmd.output().await.map_err(LeadEngineerError::Spawn)?;
 
         if !out.status.success() {
@@ -923,6 +943,29 @@ mod tests {
                 "{forbidden} must never be in the planning read-tool set"
             );
         }
+    }
+
+    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
+    /// argument, so it is redacted on its way into the argv.
+    #[test]
+    fn the_prompt_handed_to_claude_carries_no_raw_secret() {
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+        let cmd = ClaudeLeadEngineer::new()
+            .build_command(&format!("Review this. The config says {}.", planted.text));
+        let argv: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|a| a.contains(&planted.value)),
+            "a secret value reached the claude argv"
+        );
+        assert!(
+            argv.iter().any(|a| a.starts_with("Review this.")),
+            "{argv:?}"
+        );
     }
 
     #[test]
@@ -1307,18 +1350,22 @@ mod tests {
         // Keep this in sync with camerata_server::llm::DEFAULT_MODEL.
         // If the catalog's default changes, this test will fail as a reminder to
         // update DEFAULT_LEAD_ENGINEER_MODEL in this crate too.
-        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5");
+        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5-5");
     }
 
     #[test]
-    fn new_without_env_var_uses_constant() {
-        // When CAMERATA_LEAD_ENGINEER_MODEL is absent, new() must fall back to
-        // DEFAULT_LEAD_ENGINEER_MODEL. We can only test this reliably when the env
-        // var is NOT set in the current process. The test is guarded so CI noise
-        // does not override a legitimately set var.
-        if std::env::var("CAMERATA_LEAD_ENGINEER_MODEL").is_err() {
-            let le = ClaudeLeadEngineer::new();
-            assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
-        }
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The lead engineer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LEAD_ENGINEER_MODEL", "env-model");
+        let le = ClaudeLeadEngineer::new();
+        assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
+        // An explicit model (the project's setting) is the only way to change it.
+        assert_eq!(ClaudeLeadEngineer::with_model("picked").model, "picked");
+        // A blank pick is the built-in default, not the environment.
+        assert_eq!(
+            ClaudeLeadEngineer::with_model("  ").model,
+            DEFAULT_LEAD_ENGINEER_MODEL
+        );
     }
 }

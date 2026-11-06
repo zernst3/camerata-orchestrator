@@ -79,3 +79,35 @@ fn redact_json_values_redacts_object_keys_too() {
     assert_eq!(redact_json_values(&mut value), 1);
     assert!(!value.to_string().contains(&key));
 }
+
+#[test]
+fn a_secret_key_and_a_secret_value_in_one_object_are_both_counted() {
+    let key = planted(SecretShape::StripeLiveSecretKey).value;
+    let inner = planted(SecretShape::GitHubToken).value;
+    let mut map = serde_json::Map::new();
+    map.insert(key.clone(), json!(format!("token {inner}")));
+    let mut value = serde_json::Value::Object(map);
+    assert_eq!(redact_json_values(&mut value), 2);
+    let text = value.to_string();
+    assert!(!text.contains(&key) && !text.contains(&inner));
+}
+
+#[test]
+fn secret_hits_carry_the_path_shape_and_redacted_form_never_the_value() {
+    let key = planted(SecretShape::StripeLiveSecretKey).value;
+    let value = json!({"findings": [{"snippet": format!("STRIPE={key}")}]});
+    let hits = crate::find_secret_hits_in_json(&value);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "findings[0].snippet");
+    assert_eq!(hits[0].shape, SecretShape::StripeLiveSecretKey);
+    assert!(
+        hits[0].form.starts_with("sk_live_\u{2026}"),
+        "{}",
+        hits[0].form
+    );
+    assert!(!hits[0].form.contains(&key));
+    assert_eq!(
+        SecretShape::StripeLiveSecretKey.display_name(),
+        "Stripe live secret key"
+    );
+}

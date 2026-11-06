@@ -1,6 +1,6 @@
 id = "ARCH-NO-PAN-STORAGE-1"
-version = 1
-title = "Full card numbers (PAN), CVV/CVC, and raw magnetic-stripe/track data are never stored, logged, or persisted by the application"
+version = 4
+title = "Full card numbers (PAN), CVV/CVC and raw magnetic-stripe/track data are never stored, logged or persisted by the application"
 domain = "api-layer"
 layer = "universal"
 enforcement = "mechanical"
@@ -15,7 +15,7 @@ qualifies = "Deterministically checkable IN PRINCIPLE (a column/field/log-statem
 
 [[sources]]
 url = "https://www.pcisecuritystandards.org/document_library/"
-title = "PCI Security Standards Council — PCI DSS v4.0, Requirement 3 (Protect Stored Account Data) and Requirement 3.3.1 (sensitive authentication data, including CVV/CVC and full track data, is never stored after authorization)"
+title = "PCI Security Standards Council: PCI DSS v4.0, Requirement 3 (Protect Stored Account Data) and Requirement 3.3.1 (sensitive authentication data, including CVV/CVC and full track data, is never stored after authorization)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/311.html"
@@ -45,21 +45,14 @@ in the traditional sense yet with the value now sitting in a log aggregator inde
 [[option]]
 id = "never-touch-raw-card-data-tokenize-at-the-provider"
 label = "Capture card details only through the provider's hosted fields or client-side tokenization; the application server never receives a raw PAN/CVV/track value"
-directive = """
-Card details are captured only through the payment provider's hosted input fields (e.g. Stripe Elements, Braintree
-Drop-in) or a client-side tokenization SDK, so the application's own server never receives a raw card number (PAN),
-CVV/CVC, or magnetic-stripe/track data — it handles only the provider-issued token or payment-method id. No
-request-body field, variable, database column, serialized payload, or log statement anywhere in the application
-ever holds a full card number, security code, or raw track data; the card is captured in the customer's browser by
-the provider and tokenized before it can reach application code.
-"""
+directive = "Card details are captured only through the payment provider's hosted input fields (e.g. Stripe Elements, Braintree Drop-in) or a client-side tokenization SDK, so the application's own server never receives a raw card number (PAN), CVV/CVC or magnetic-stripe/track data; it handles only the provider-issued token or payment-method id. No request-body field, variable, database column, serialized payload or log statement anywhere in the application ever holds a full card number, security code or raw track data; the card is captured in the customer's browser by the provider and tokenized before it can reach application code."
 remediation = """
-Replace any custom card-input form or server-side field that reads a raw card number, CVV, or track data with the
+Replace any custom card-input form or server-side field that reads a raw card number, CVV or track data with the
 payment provider's hosted input fields (e.g. Stripe Elements, Braintree Drop-in) or client-side tokenization SDK,
-so the application's own server never receives the raw value — only a token/payment-method id to pass to the
+so the application's own server never receives the raw value: only a token/payment-method id to pass to the
 charge call. Audit request-logging middleware to confirm it does not log full request bodies on any endpoint a
 card-capture form could post to. Verify by submitting a test card through the flow and confirming no application
-log, database column, or server-side variable at any point holds the full card number, CVV, or track data — only
+log, database column or server-side variable at any point holds the full card number, CVV or track data: only
 the provider-issued token appears.
 """
 effort = "medium"
@@ -69,5 +62,5 @@ why = "Modern payment providers' hosted-field/tokenization flow is the standard,
 id = "accept-raw-card-data-server-side-and-pass-through"
 violates = true
 label = "Accept raw card details on a custom server-side form field and pass them through to the payment provider's charge API directly"
-directive = "the application's own endpoint accepts card_number/cvv/expiry fields in the request body, holds them in server-side memory/variables for the duration of the charge call, and forwards them to the payment provider's raw-charge API, without using the provider's hosted fields or client-side tokenization"
-why = "Rejected: the instant a raw PAN or CVV is read by application code, it is in scope for the application's own logs, error-reporting/APM tools, memory dumps, and any request-logging middleware already running — none of which were built with cardholder-data handling in mind, and PCI DSS's Requirement 3.3.1 prohibition on storing CVV/track data after authorization applies regardless of intent to discard it quickly. This also pulls the application into PCI DSS's most demanding self-assessment tier for a benefit (avoiding a UI swap to the provider's hosted fields) that does not justify the compliance and breach-exposure cost."
+directive = "the application's own endpoint accepts card_number/cvv/expiry fields in the request body, holds them in server-side memory/variables for the duration of the charge call and forwards them to the payment provider's raw-charge API, without using the provider's hosted fields or client-side tokenization"
+why = "Rejected: the instant a raw PAN or CVV is read by application code, it is in scope for the application's own logs, error-reporting/APM tools, memory dumps and any request-logging middleware already running, none of which were built with cardholder-data handling in mind, and PCI DSS's Requirement 3.3.1 prohibition on storing CVV/track data after authorization applies regardless of intent to discard it quickly. This also pulls the application into PCI DSS's most demanding self-assessment tier for a benefit (avoiding a UI swap to the provider's hosted fields) that does not justify the compliance and breach-exposure cost."

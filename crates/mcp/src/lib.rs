@@ -1,5 +1,5 @@
 //! `camerata-mcp` — the FIRST rung of the MCP adapter ladder (Phase E, GAP-1; see
-//! `docs/plans/2026-07-01_backend-headless-core.md`).
+//! the backend headless-core notes).
 //!
 //! An rmcp 1.7 MCP **server** over **stdio** that exposes Camerata's first-rung verbs
 //! as MCP tools. Every tool is a thin delegation to [`camerata_client::Client`] — a

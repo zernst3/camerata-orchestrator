@@ -496,7 +496,7 @@ mod tests {
         assert!(ids.contains(RULE_RESOURCE_LIFECYCLE), "{ids:?}");
     }
 
-    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+    // ── mutation-gap tests (the master sequence plan section 2b) ────────
 
     #[test]
     fn kill_on_drop_false_does_not_protect_an_inline_chain() {

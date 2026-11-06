@@ -485,15 +485,15 @@ pub fn exports(dialect: EcmaDialect, source: &str) -> ExportSurface {
 
 /// A top-level import binding: the module it came from, the name that module exports it
 /// under (`"default"` for a default import), and whether the import was type-only.
-struct ImportBinding {
-    specifier: String,
-    origin: String,
-    type_only: bool,
+pub(crate) struct ImportBinding {
+    pub(crate) specifier: String,
+    pub(crate) origin: String,
+    pub(crate) type_only: bool,
 }
 
 /// The file's named and default import bindings by LOCAL name. `import { a as b }` maps `b`.
 /// A namespace import is not here: re-exporting one is an own export of a namespace object.
-fn import_bindings(root: Node, source: &str) -> HashMap<String, ImportBinding> {
+pub(crate) fn import_bindings(root: Node, source: &str) -> HashMap<String, ImportBinding> {
     let mut out = HashMap::new();
     let mut cursor = root.walk();
     for node in root.children(&mut cursor) {

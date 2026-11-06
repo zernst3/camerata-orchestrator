@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1"
-version = 1
+version = 4
 title = "HTTP requests are made through typed services, not directly from components"
 domain = "javascript:angular"
 layer = "framework"
@@ -24,17 +24,17 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/http/making-requests"
-title = "Angular HttpClient — Making requests: use reusable injectable services"
+title = "Angular HttpClient: Making requests: use reusable injectable services"
 
 [decision]
-question = "What position does the project take on: HTTP requests are made through typed services, not directly from components?"
+question = "Where in the Angular application are HTTP requests made?"
 default = "http-requests-are-made-through-typed-services"
 why = "HTTP requests are a data-access concern; making them directly from a component mixes transport concerns into the presentation layer. When a component calls HttpClient.get() or HttpClient.post() directly, the HTTP logic is embedded in the component, unreachable by other routes or services that might need the same data, and difficult to test without mocking HttpClient. A service (often called a 'data service' or 'API service') wraps the HTTP calls, maps the response to domain types, and exposes Observable methods that components can call. Services handle the HTTP layer; components inject the service and call its methods. The pattern parallels the Express backend rule: route handlers delegate to a service layer; Angular components delegate to a service layer. The service is testable, reusable across the app, and the component focuses on presentation and coordination. The rule is: HttpClient is injected only into services, never into components. A component that needs data calls a service method that returns an Observable; the service handles the HTTP request, response parsing, and error translation."
 
 [[option]]
 id = "http-requests-are-made-through-typed-services"
 label = "HTTP requests are made through typed services, not directly from components"
-directive = "All HTTP requests (GET, POST, PUT, DELETE) are made through typed services that wrap HttpClient. Services inject HttpClient, define methods that call it (with proper return types and error handling), and expose Observables of typed domain objects to components. Components never inject HttpClient or call it directly; they call service methods. A component that needs to fetch data injects a data service and subscribes to its Observable, or uses the async pipe. Direct HttpClient.get() or HttpClient.post() calls from within a component are forbidden."
+directive = "All HTTP requests (GET, POST, PUT, DELETE) are made through typed services that wrap HttpClient. Services inject HttpClient, define methods that call it (with proper return types and error handling) and expose Observables of typed domain objects to components. Components never inject HttpClient or call it directly; they call service methods. A component that needs to fetch data injects a data service and subscribes to its Observable, or uses the async pipe. Direct HttpClient.get() or HttpClient.post() calls from within a component are forbidden."
 remediation = """
 Move the direct HttpClient call out of the component and into a typed service method that returns an Observable of a typed domain object, and have the component call the service instead. Verify by confirming the component no longer injects HttpClient directly and the service's method signature declares its return type.
 """
@@ -43,5 +43,5 @@ why = "Services decouple the HTTP layer from presentation, making the logic reus
 [[option]]
 id = "components-call-httpclient-directly-for-data-fetc"
 label = "Components call HttpClient directly"
-directive = "components inject HttpClient and make HTTP requests directly, handling the request, response, and error in the component"
+directive = "components inject HttpClient and make HTTP requests directly, handling the request, response and error in the component"
 why = "Injecting HttpClient directly into a component embeds transport concerns in the presentation layer: the HTTP logic is reachable only through the component, cannot be reused by another route or service that needs the same data, and requires mocking HttpClient in every component test rather than providing a stub service. Two components that need the same API call must duplicate the request, response parsing, and error handling, which drifts out of sync over time."

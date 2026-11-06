@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-STRUCTURED-CONCURRENCY-JOINSET-1"
-version = 1
+version = 4
 title = "Use JoinSet for structured concurrency; track spawned tasks and ensure all complete or are cancelled"
 domain = "rust:tokio"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Structured concurrency with JoinSet?"
+question = "How are spawned async tasks tracked so that all of them complete or are cancelled?"
 default = "use-joinset-for-structured-concurrency"
 why = "tokio::task::JoinSet holds a set of spawned tasks and ensures they are joined (awaited or cancelled) before the scope exits. Without JoinSet, a task spawned via tokio::spawn can run past the scope where it was created, leading to orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies (e.g., a spawned task tries to access data that has been dropped). JoinSet enforces structured concurrency: all spawned tasks are joined at a well-defined point, and the code path cannot exit until all tasks are accounted for. If a task panics, the panic is caught when joining and can be handled. JoinSet makes concurrent code easier to reason about because the lifetime of spawned tasks is visible and finite."
 
@@ -28,14 +28,14 @@ id = "use-unstructured-spawn"
 violates = true
 label = "Use unstructured tokio::spawn"
 directive = "Tasks are spawned via tokio::spawn without a JoinSet. Tasks may run past the scope where they are spawned, and the application relies on explicit cancellation or task-local cleanup."
-why = "A spawned task can run past the scope where it was created, producing orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies; if a task panics, the panic is silently lost rather than being propagated and handled at a well-defined join point."
+why = "A spawned task can run past the scope where it was created, producing orphaned tasks, resource leaks and subtle bugs where a task outlives its dependencies; if a task panics, the panic is silently lost rather than being propagated and handled at a well-defined join point."
 
 [[option]]
 id = "use-tasktracker-for-dynamic-graceful-shutdown"
 label = "Use tokio::task::TaskTracker for a dynamic, long-lived set of tasks with graceful-shutdown semantics"
-directive = "For a task set whose membership grows and shrinks over the process's lifetime (e.g. one task spawned per incoming connection or per job), track spawned tasks with a TaskTracker instead of a single JoinSet scoped to one block. Call `tracker.spawn(...)` for each task, `tracker.close()` once no more tasks will be spawned, and `tracker.wait().await` (typically paired with a CancellationToken for signaling shutdown to the tasks) to await completion of every tracked task before the process exits."
+directive = "For a task set whose membership grows and shrinks over the process's lifetime (e.g. one task spawned per incoming connection or per job), track spawned tasks with a TaskTracker instead of a single JoinSet scoped to one block. Call `tracker.spawn(...)` for each task, `tracker.close()` once no more tasks will be spawned and `tracker.wait().await` (typically paired with a CancellationToken for signaling shutdown to the tasks) to await completion of every tracked task before the process exits."
 why = "JoinSet is the right fit when a fixed batch of tasks is spawned and joined within one well-defined scope; TaskTracker is the right fit when tasks are spawned continuously from different call sites over the life of the program and there's no single scope that owns them all, but a graceful shutdown still needs to wait for all in-flight tasks to finish before exiting. The trade-off: TaskTracker doesn't give you each individual task's return value or panic back at a join point the way JoinSet's join_next() does — it's oriented around 'has everything finished,' not 'what did each task return,' so pick JoinSet when you need per-task results and TaskTracker when you need graceful-shutdown accounting for a dynamic task population."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html"
-title = "tokio::task::JoinSet — Structured task collection; aborts on drop"
+title = "tokio::task::JoinSet: Structured task collection; aborts on drop"

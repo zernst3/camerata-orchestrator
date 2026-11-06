@@ -1,18 +1,22 @@
 id = "CICD-LEAST-PRIVILEGE-TOKEN-1"
-version = 1
+version = 5
 title = "The CI job token's default permissions are scoped to least privilege explicitly, never left at the platform's broad default"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# CI workflow rule: the subject is pipeline definition files, which each CI system reads only from
+# these places.
+applies_to = { paths = [".github/**", "**/action.yml", "**/action.yaml", ".gitea/**", ".forgejo/**", "**/.gitlab-ci.yml", ".gitlab/**", "**/azure-pipelines*.yml", "**/azure-pipelines*.yaml", ".circleci/**", "**/bitbucket-pipelines.yml", ".buildkite/**", "**/.drone.yml", ".woodpecker/**", "**/Jenkinsfile"] }
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable by scanning workflow files for the presence (or absence) of a top-level `permissions:` block, and — where present — whether it sets `contents: write` or broader scopes a given job's steps do not actually need. A workflow with NO `permissions:` key at all inherits the repository's or organization's configured default for the automatic GITHUB_TOKEN, which on many repositories (particularly older ones, or ones that have not explicitly tightened the organization default) is read/write access to most scopes. Conformance holds when every workflow (or, more granularly, every job) sets an explicit `permissions:` block granting only the scopes its own steps use, defaulting the rest to `read` or none; it fails when no `permissions:` key is present and the repository/organization default has not been independently confirmed to already be least-privilege, or when a broader scope than a job's steps require is explicitly granted."
 
 [[sources]]
 url = "https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token"
-title = "GitHub docs — Automatic token authentication: setting the permissions for the GITHUB_TOKEN, and the recommendation to set the default to read-only at the repository/organization level"
+title = "GitHub docs: Automatic token authentication: setting the permissions for the GITHUB_TOKEN, and the recommendation to set the default to read-only at the repository/organization level"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/CI_CD_Security_Cheat_Sheet.html"
@@ -20,7 +24,7 @@ title = "OWASP CI/CD Security Cheat Sheet"
 
 [[sources]]
 url = "https://github.com/ossf/scorecard/blob/main/docs/checks.md#token-permissions"
-title = "OpenSSF Scorecard — Token-Permissions check: workflows should declare top-level permissions as read-only or none, and grant write scopes only where needed, job-by-job"
+title = "OpenSSF Scorecard: Token-Permissions check: workflows should declare top-level permissions as read-only or none, and grant write scopes only where needed, job-by-job"
 linter = "scorecard: Token-Permissions"
 
 [decision]
@@ -65,7 +69,7 @@ that genuinely needs a write scope, move that elevated permission to a job-level
 only that job and only the specific scope required, rather than granting it workflow-wide. Confirm (or request) the
 repository or organization's default GITHUB_TOKEN permission is also set to read-only, so a workflow that omits the
 key entirely still fails safe. Verify by confirming a job that does not need to write (lint, test) genuinely cannot
-write to repository contents, issues, or packages even if its own code attempted to.
+write to repository contents, issues or packages even if its own code attempted to.
 """
 effort = "low"
 why = "The default token scope on many repositories is broad read/write across most of what it could plausibly need, available to every step including third-party code the project does not fully control; an explicit least-privilege permissions block bounds what a compromised step in that job can actually do, rather than leaving the ceiling at whatever the platform or organization default happens to be."
@@ -75,4 +79,4 @@ id = "no-explicit-permissions-block-inherit-platform-default"
 violates = true
 label = "Omit the permissions block entirely and inherit whatever the platform/organization's default GITHUB_TOKEN scope currently is"
 directive = "Workflow files set no explicit permissions: key at all, relying on the repository or organization's currently-configured default token scope, whatever that happens to be."
-why = "Rejected: the default scope varies by repository age, organization policy, and settings nobody reviewing this specific workflow necessarily controls or has verified — a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."
+why = "Rejected: the default scope varies by repository age, organization policy and settings nobody reviewing this specific workflow necessarily controls or has verified: a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."

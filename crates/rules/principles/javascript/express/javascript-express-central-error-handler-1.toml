@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1"
-version = 1
+version = 4
 title = "Errors flow to one central error-handling middleware; async handlers forward via next"
 domain = "javascript:express"
 layer = "framework"
@@ -18,21 +18,21 @@ verification = "grounded"
 
 [[sources]]
 url = "https://expressjs.com/en/advanced/best-practice-performance.html"
-title = "Express.js — Production best practices: error handling (async/await + next(err))"
+title = "Express.js: Production best practices: error handling (async/await + next(err))"
 
 [[sources]]
 url = "https://expressjs.com/en/guide/error-handling.html"
-title = "Express.js — Error Handling: four-argument (err, req, res, next) error middleware"
+title = "Express.js: Error Handling: four-argument (err, req, res, next) error middleware"
 
 [decision]
-question = "What position does the project take on: Errors flow to one central error-handling middleware; async handlers forward via next?"
+question = "How do Express route handlers report errors, and where are those errors turned into responses?"
 default = "errors-flow-to-one-central-error-handling-middleware"
-why = "Express has one built-in mechanism for handling errors: the error-handling middleware, a function with the four-argument (err, req, res, next) signature, registered last. Routes signal a failure by throwing (in sync code) or calling next(err) (in async code), and Express routes it there. The async-rejection hazard is version-specific: in Express 4 and earlier, a Promise rejection inside an async route handler is NOT caught automatically, so an un-wrapped async handler that rejects leaves the request hanging until it times out, with no response and no error logged, unless the handler is wrapped (a manual try/catch calling next(err), an asyncHandler wrapper, or the express-async-errors package). Express 5 (released 2024, and the version this project's own API runs — see apps/api) removes this hazard: rejected promises returned from async route handlers and middleware are automatically caught and forwarded to the error-handling middleware, with no wrapper required. Each route inventing its own try/catch that formats and sends an error response produces inconsistent status codes and bodies across the API and scatters the logging, regardless of Express version. Centralizing means one place decides the error response shape, the status mapping, and the logging. Ad-hoc per-route error handling trades that single consistent contract for N partial reimplementations, and the gaps surface as a route that returns a 200 with an error body, or (on Express 4) one that hangs forever on a rejected promise."
+why = "Express has one built-in mechanism for handling errors: the error-handling middleware, a function with the four-argument (err, req, res, next) signature, registered last. Routes signal a failure by throwing (in sync code) or calling next(err) (in async code), and Express routes it there. The async-rejection hazard is version-specific: in Express 4 and earlier, a Promise rejection inside an async route handler is NOT caught automatically, so an un-wrapped async handler that rejects leaves the request hanging until it times out, with no response and no error logged, unless the handler is wrapped (a manual try/catch calling next(err), an asyncHandler wrapper, or the express-async-errors package). Express 5 (released 2024) removes this hazard: rejected promises returned from async route handlers and middleware are automatically caught and forwarded to the error-handling middleware, with no wrapper required. Each route inventing its own try/catch that formats and sends an error response produces inconsistent status codes and bodies across the API and scatters the logging, regardless of Express version. Centralizing means one place decides the error response shape, the status mapping, and the logging. Ad-hoc per-route error handling trades that single consistent contract for N partial reimplementations, and the gaps surface as a route that returns a 200 with an error body, or (on Express 4) one that hangs forever on a rejected promise."
 
 [[option]]
 id = "errors-flow-to-one-central-error-handling-middleware"
 label = "Errors flow to one central error-handling middleware; async handlers forward via next"
-directive = "The app registers a single error-handling middleware with the (err, req, res, next) signature, last in the middleware chain, which owns the error response shape, status-code mapping, and error logging. Route handlers signal failure by throwing (sync) or forwarding to next(err) (async), never by formatting and sending error responses ad hoc. On Express 5, an async handler's rejected promise is forwarded to the central handler automatically — no wrapper needed. On Express 4 and earlier, async handlers must be wrapped so their rejections reach the central handler (an asyncHandler wrapper, the express-async-errors package, or manual try/catch + next(err)); a bare async route whose rejection can escape is forbidden on that version."
+directive = "The app registers a single error-handling middleware with the (err, req, res, next) signature, last in the middleware chain, which owns the error response shape, status-code mapping and error logging. Route handlers signal failure by throwing (sync) or forwarding to next(err) (async), never by formatting and sending error responses ad hoc. On Express 5, an async handler's rejected promise is forwarded to the central handler automatically: no wrapper needed. On Express 4 and earlier, async handlers must be wrapped so their rejections reach the central handler (an asyncHandler wrapper, the express-async-errors package or manual try/catch + next(err)); a bare async route whose rejection can escape is forbidden on that version."
 remediation = """
 Remove the route's local try/catch error formatting and instead forward the error via next(err) (or let it throw, for a wrapped async handler) so it reaches the single central error-handling middleware. Confirm that middleware is registered last in the chain and owns the response shape and status-code mapping. Verify by triggering the error in this route and confirming the response matches the shape the central handler produces for other routes.
 """

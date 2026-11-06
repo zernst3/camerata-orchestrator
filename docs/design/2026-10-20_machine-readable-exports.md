@@ -145,6 +145,14 @@ Field notes:
   the domains that actually fired in THIS scan - the honest weakest-link date, never a
   flattering newest. Until the staleness feature ships, this field is `null` and the
   README omits the line rather than print a fabricated date.
+- **22c additions (2026-10-28)**: `client_name` (the inspection setup's client, the name the
+  confidentiality marking prints), `corpus_rules_applied` (distinct audited rule ids the loaded
+  corpus holds), `counted_lines`, `excluded_noise_files` and `excluded_noise_lines` (the quote
+  basis, recorded at scan time through `camerata count`'s own filter and line definition,
+  `onboard::count`), plus `model_backend`/`model_provider` (22a) and `cost_cap_reached`. Each
+  has a README line ("Prepared for:", "Corpus rules applied:", "Counted lines:", "Excluded as
+  noise: F files, L lines") that gate 7 holds equal to the manifest; an unrecorded value is
+  `null` and its line is omitted.
 
 ### Build order and the self-reference problem
 

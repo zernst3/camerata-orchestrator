@@ -57,15 +57,29 @@ pub enum ReviewError {
 
 /// REVIEWER SEAM — review a live [`RefinementSession`] and produce a
 /// [`RefinementReview`] to fold in. Provider / model / tier live behind this seam.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait RefinementReviewer: Send + Sync {
     /// Review the session (in the light of the original form) and return the
     /// changes to apply this turn.
-    async fn review(
-        &self,
-        session: &RefinementSession,
-        form: &IntakeForm,
-    ) -> Result<RefinementReview, ReviewError>;
+    fn review<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        session: &'life1 RefinementSession,
+        form: &'life2 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<RefinementReview, ReviewError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic stub ──────────────────────────────────────────────────────
@@ -270,9 +284,9 @@ impl RefinementReviewer for StubRefinementReviewer {
 /// manually. Behind the seam: only this concrete type names a model.
 ///
 /// Callers that want a different model should use
-/// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
-/// environment variable overrides this at runtime for CLI / one-off invocations.
-pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5";
+/// [`ClaudeRefinementReviewer::with_model`] (the open project's setting). The environment is
+/// never consulted.
+pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5-5";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
 /// session and returns the review JSON. Read-only and ungoverned (it plans, it
@@ -306,17 +320,49 @@ impl Default for ClaudeRefinementReviewer {
 }
 
 impl ClaudeRefinementReviewer {
-    /// Construct with the configured model: reads `CAMERATA_REVIEWER_MODEL`
-    /// first, then falls back to [`DEFAULT_REVIEWER_MODEL`]. Use
+    /// The `claude -p` command for one review call (everything except the spawn), so the exact
+    /// argument list is testable without a `claude` binary.
+    fn build_command(&self, prompt: &str) -> tokio::process::Command {
+        // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
+        // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
+        // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
+        // real codebase while reviewing, not just the inlined digest. No write path is added
+        // (no write/exec tool is offered).
+        let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
+        // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
+        // carries a raw secret, and the prompt reaches `claude -p` as an argument.
+        cmd.arg("-p")
+            .arg(camerata_secrets::model_input::redact_for_model(prompt).as_ref())
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--allowedTools")
+            .arg(crate::engine::READ_ONLY_TOOLS.join(" "))
+            .arg("--dangerously-skip-permissions")
+            .arg("--output-format")
+            .arg("json")
+            .kill_on_drop(true);
+        if let Some(dir) = &self.repo_dir {
+            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
+            // — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        cmd
+    }
+
+    /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from a per-project config or the server's `/api/models` catalog).
     pub fn new() -> Self {
-        let model = std::env::var("CAMERATA_REVIEWER_MODEL")
-            .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_REVIEWER_MODEL.to_string());
         Self {
-            model,
+            model: DEFAULT_REVIEWER_MODEL.to_string(),
             grounding: None,
             repo_dir: None,
             extra_repo_dirs: Vec::new(),
@@ -474,35 +520,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
         let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
-        // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
-        // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
-        // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
-        // real codebase while reviewing, not just the inlined digest. No write path is added
-        // (no write/exec tool is offered).
-        let mut cmd = tokio::process::Command::new("claude");
-        // The subscription CLI must never inherit an API key from the parent's `.env`.
-        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--model")
-            .arg(&self.model)
-            .arg("--allowedTools")
-            .arg(crate::engine::READ_ONLY_TOOLS.join(" "))
-            .arg("--dangerously-skip-permissions")
-            .arg("--output-format")
-            .arg("json")
-            .kill_on_drop(true);
-        if let Some(dir) = &self.repo_dir {
-            cmd.current_dir(dir).arg("--add-dir").arg(dir);
-            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
-            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
-            // — no write tool is offered. Skip any that duplicate the cwd.
-            for extra in &self.extra_repo_dirs {
-                if extra != dir {
-                    cmd.arg("--add-dir").arg(extra);
-                }
-            }
-        }
+        let mut cmd = self.build_command(&prompt);
         let out = cmd.output().await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {
             return Err(ReviewError::NonZeroExit {
@@ -666,6 +684,48 @@ mod tests {
 
     fn form_with_owner() -> IntakeForm {
         IntakeForm::sample_app()
+    }
+
+    /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
+    /// argument, so it is redacted on its way into the argv.
+    #[test]
+    fn the_prompt_handed_to_claude_carries_no_raw_secret() {
+        let planted =
+            camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey);
+        let cmd = ClaudeRefinementReviewer::new()
+            .build_command(&format!("Review this. The config says {}.", planted.text));
+        let argv: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|a| a.contains(&planted.value)),
+            "a secret value reached the claude argv"
+        );
+        assert!(
+            argv.iter().any(|a| a.starts_with("Review this.")),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn new_ignores_the_environment_and_uses_the_constant() {
+        // The reviewer's model variable was removed: set to anything, it changes nothing.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_REVIEWER_MODEL", "env-model");
+        assert_eq!(
+            ClaudeRefinementReviewer::new().model,
+            DEFAULT_REVIEWER_MODEL
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model("picked").model,
+            "picked"
+        );
+        assert_eq!(
+            ClaudeRefinementReviewer::with_model(" ").model,
+            DEFAULT_REVIEWER_MODEL
+        );
     }
 
     #[test]

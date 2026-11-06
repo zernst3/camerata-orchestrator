@@ -2,7 +2,7 @@
 # W6 — run Camerata's SELF-MEASUREMENT suite. Seconds, deterministic, zero API spend.
 #
 # > these two prevent overspending on tokens
-# >   — Zach, on I1 + I2 (docs/plans/2026-10-09_audit-findings-tracker.md)
+# >   — Zach, on I1 + I2 (the audit findings tracker)
 #
 # A graded sweep of four benchmark repos costs roughly $26 and four hours of wall clock.
 # Everything this script catches is money and time not spent. Run it before you push, and

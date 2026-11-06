@@ -61,6 +61,41 @@ pub fn audit_architectural(
     findings
 }
 
+/// How many files a rule is evaluated against on a repo, decided from the rule's own checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleScopeFiles {
+    /// The rule's checker has file globs; this many of the repo's files match them.
+    Files(usize),
+    /// The rule's checker has no file globs: its scope is the repo as a whole.
+    RepoLevel,
+    /// No checker owns this rule id (a registry rule), so there is no file scope to count.
+    Unknown,
+}
+
+/// The files `rule_id` is checked against in `files`: those matching the interest globs of the
+/// checker that answers it, not every file the repo handed the audit.
+pub fn files_in_scope(rule_id: &str, files: &[(String, String)]) -> RuleScopeFiles {
+    for checker in all_checkers() {
+        if !checker
+            .rule_ids()
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(rule_id))
+        {
+            continue;
+        }
+        let globs = checker.interest_globs();
+        if globs.is_empty() {
+            return RuleScopeFiles::RepoLevel;
+        }
+        let n = files
+            .iter()
+            .filter(|(path, _)| camerata_checks::arch_checker::matches_any_glob(globs, path))
+            .count();
+        return RuleScopeFiles::Files(n);
+    }
+    RuleScopeFiles::Unknown
+}
+
 /// How many of `findings` the ledger credits to `rule_id` as emitted: defects and held review
 /// rows. A not-assessed row is neither a finding nor a clean result, so it never counts (and a
 /// rule that only produced one is not credited as "verified clean" by this count alone).
@@ -269,6 +304,35 @@ mod tests {
             .into_iter()
             .map(|(p, c)| (p.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_rule_counts_only_the_files_its_checker_matches() {
+        let repo = files(vec![
+            ("supabase/migrations/1_init.sql", "create table a();"),
+            ("supabase/migrations/2_more.sql", "create table b();"),
+            ("src/main.rs", "fn main() {}"),
+            ("README.md", "hi"),
+        ]);
+        assert_eq!(
+            files_in_scope("SUPABASE-RLS-ENABLED-1", &repo),
+            RuleScopeFiles::Files(2)
+        );
+        let no_sql = files(vec![("src/main.rs", "fn main() {}")]);
+        assert_eq!(
+            files_in_scope("SUPABASE-RLS-ENABLED-1", &no_sql),
+            RuleScopeFiles::Files(0),
+            "a checker with nothing of interest is credited no files, not every file"
+        );
+    }
+
+    #[test]
+    fn a_rule_no_checker_owns_has_no_file_scope_to_count() {
+        let repo = files(vec![("src/main.rs", "fn main() {}")]);
+        assert_eq!(
+            files_in_scope("NOT-A-CHECKER-RULE-1", &repo),
+            RuleScopeFiles::Unknown
+        );
     }
 
     #[test]

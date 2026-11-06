@@ -2,7 +2,7 @@
 //!
 //! > **E2 AGREED** — rules may declare a maximum severity; no report may exceed it.
 //! >
-//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the audit findings tracker
 //!
 //! # Why this file exists separately from `report_export.rs`'s own `req_e2_*` tests
 //!
@@ -64,11 +64,19 @@ fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
 
 fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
     ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 2,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -87,6 +95,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "owner/repo".to_string(),
                 sha: Some("abcdef1234567890".to_string()),
@@ -104,6 +113,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
             audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-10-10T00:00:00Z".to_string(),
             finished_at: "2026-10-10T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -135,8 +145,10 @@ fn exported_severities(
         vec![rule_id],
     );
     let json = build_report_json(
-        &report.seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.seal(),
+            &HashMap::new(),
+        ),
         corpus,
         &ReportOptions::default(),
     );

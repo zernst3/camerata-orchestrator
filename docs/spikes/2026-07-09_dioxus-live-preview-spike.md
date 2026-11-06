@@ -4,7 +4,7 @@ Status: DE-RISKING SPIKE, not production code. Target app: `itinerary-app` (Diox
 web app). Toolchain: `dx` (Dioxus CLI) 0.7.9, rustc 1.95.0, macOS (Darwin 25.3.0),
 `wasm32-unknown-unknown` target already installed.
 
-This spike answers the 5 questions from the design doc (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+This spike answers the 5 questions from the design doc (the product-owner vibe-mode design notes, private working notes,
 section 5) needed to de-risk the "live running-app preview" loop for the Product-Owner
 head. All test edits were made to `itinerary-app` and **fully reverted** afterward (see
 Cleanup section) — nothing in that repo was left changed.

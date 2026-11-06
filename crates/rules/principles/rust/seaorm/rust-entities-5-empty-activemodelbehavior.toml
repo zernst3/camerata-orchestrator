@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-5"
-version = 1
+version = 3
 title = "Empty ActiveModelBehavior unless a hook is genuinely needed"
 domain = "rust:seaorm"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Empty ActiveModelBehavior unless a hook is genuinely needed?"
+question = "How do SeaORM entities implement ActiveModelBehavior when they need no hooks?"
 default = "empty-activemodelbehavior-unless-a-hook-is-genuinely-needed"
 why = "The vast majority of entities need no hooks; stubbing concrete hook bodies in across the codebase adds noise without value, since reviewer attention is then spent on placeholder hooks that do not run. The empty impl block itself, however, is not optional: SeaORM's documentation explicitly directs entity authors not to delete the ActiveModelBehavior impl block even when it is empty, so the rule pairs the empty-by-default position with a never-delete clause on the block itself. The first alternative (stub bodies everywhere) trades the rule's silence for visual uniformity but spends reviewer attention on noise; the second alternative (delete the block when empty) contradicts the SeaORM guidance and removes part of the entity's required surface."
 
@@ -37,4 +37,4 @@ why = "Contradicts SeaORM's official entity-format guidance, which explicitly di
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — ActiveModelBehavior hooks; do not delete empty impl"
+title = "SeaORM docs: Entity Format: ActiveModelBehavior hooks; do not delete empty impl"

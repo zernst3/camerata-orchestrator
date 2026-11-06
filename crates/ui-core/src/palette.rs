@@ -28,6 +28,7 @@
 //! the keyboard, and the palette's entries act on the Queue underneath.
 
 use crate::order_preset::OrderPreset;
+use crate::tree::shell::Lane;
 use crate::triage::{
     pane_command, state_hotkey, FocusMove, KeyMods, PaneCommand, PaneFocus, TriageState,
 };
@@ -146,6 +147,13 @@ pub enum PaletteAction {
     ToggleTimer,
     /// The strip's Review time button.
     OpenStats,
+    /// The Help menu's "Start walkthrough": the inspection walkthrough, from its first step.
+    StartWalkthrough,
+    /// The review shell: switch to this lane (the same switch as its tab and its digit key).
+    GoLane(Lane),
+    /// The review shell: the Escalations lane, with the cursor on the first row that still needs
+    /// a decision.
+    FirstNeedingDecision,
 }
 
 impl PaletteAction {
@@ -161,7 +169,10 @@ impl PaletteAction {
                 PaneCommand::PromptFor(_) | PaneCommand::OpenCode | PaneCommand::OpenStack,
             ) => false,
             Self::Undo | Self::SetOrder(_) | Self::ToggleTimer => true,
-            Self::OpenHub | Self::FullDetail | Self::OpenStats => false,
+            // The walkthrough's popup takes the keyboard itself.
+            Self::OpenHub | Self::FullDetail | Self::OpenStats | Self::StartWalkthrough => false,
+            // A lane takes the keyboard itself, and so does the row the cursor is put on.
+            Self::GoLane(_) | Self::FirstNeedingDecision => false,
         }
     }
 }
@@ -242,6 +253,7 @@ fn decision_keywords(state: TriageState) -> &'static str {
         TriageState::Ignored => "skip reason",
         TriageState::TechDebt => "debt later ticket",
         TriageState::FalsePositive => "fp wrong noise reason",
+        TriageState::MergedInto => "merge duplicate same cause",
         TriageState::Unresolved => "",
     }
 }
@@ -254,6 +266,9 @@ fn decision_label(state: TriageState) -> String {
         TriageState::TechDebt => "Save this finding as tech debt".to_string(),
         TriageState::FalsePositive => {
             "Mark this finding a false positive (asks for a reason)".to_string()
+        }
+        TriageState::MergedInto => {
+            "Merge this finding into another (asks for a reason)".to_string()
         }
         TriageState::Unresolved => "Move this finding to Unresolved".to_string(),
     }
@@ -361,8 +376,49 @@ pub fn entries(ctx: &PaletteContext) -> Vec<PaletteEntry> {
             "stats hours minutes",
         ));
     }
+    // The Help menu's item, reachable from the keyboard here. Always listed: it needs no row.
+    out.push(entry(
+        PaletteAction::StartWalkthrough,
+        WALKTHROUGH_LABEL,
+        "help guide tour guided inspection tutorial",
+    ));
     out
 }
+
+/// The entries of the review shell's palette (Ctrl or Cmd K from any lane): one line to go to each
+/// lane, and the filters that land on a row. Nothing here acts on a finding: each line moves the
+/// reviewer to a place the tabs and keys already reach.
+pub fn shell_entries() -> Vec<PaletteEntry> {
+    let mut out: Vec<PaletteEntry> = Lane::ALL
+        .into_iter()
+        .map(|lane| PaletteEntry {
+            action: PaletteAction::GoLane(lane),
+            label: format!("Go to {}", lane.label()),
+            hint: lane.digit().to_string(),
+            keywords: lane_keywords(lane),
+        })
+        .collect();
+    out.push(entry(
+        PaletteAction::FirstNeedingDecision,
+        "Show the first escalated row that needs a decision",
+        "needed need undecided open pending queue next",
+    ));
+    out
+}
+
+/// The words each lane's line also answers to.
+fn lane_keywords(lane: Lane) -> &'static str {
+    match lane {
+        Lane::Tree => "groups nodes sites batch",
+        Lane::Escalations => "queue line budget candidates",
+        Lane::EngineCheck => "qc quality verdict yes no cards",
+        Lane::Flat => "queue table rows all",
+        Lane::Settings => "rate floor formula models sample",
+    }
+}
+
+/// The label of the walkthrough's line, the same words as the Help menu's item.
+pub const WALKTHROUGH_LABEL: &str = "Start walkthrough";
 
 // ── Staleness ────────────────────────────────────────────────────────────────────────────
 
@@ -451,6 +507,43 @@ impl PaletteState {
     /// The highlighted entry among the narrowed list, or `None` when nothing matches.
     pub fn selected<'a>(&self, shown: &[&'a PaletteEntry]) -> Option<&'a PaletteEntry> {
         shown.get(self.cursor(shown.len())).copied()
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn the_shell_palette_has_a_line_for_each_lane_and_needed_finds_the_decision_filter() {
+        let all = shell_entries();
+        for lane in Lane::ALL {
+            let hits: Vec<_> = filter(&all, &format!("go to {}", lane.label()))
+                .into_iter()
+                .filter(|e| e.action == PaletteAction::GoLane(lane))
+                .collect();
+            assert_eq!(hits.len(), 1, "one line takes you to {}", lane.label());
+        }
+        let needed = filter(&all, "needed");
+        assert_eq!(needed.len(), 1, "{needed:?}");
+        assert_eq!(needed[0].action, PaletteAction::FirstNeedingDecision);
+        assert!(
+            needed[0].label.contains("needs a decision"),
+            "{}",
+            needed[0].label
+        );
+        for e in &all {
+            assert!(
+                !e.action.returns_focus(),
+                "{}: a lane takes the keyboard itself",
+                e.label
+            );
+            assert!(
+                !e.label.contains('\u{2014}') && !e.label.contains('\u{2013}'),
+                "{}",
+                e.label
+            );
+        }
     }
 }
 
@@ -695,6 +788,30 @@ mod tests {
     }
 
     #[test]
+    fn the_walkthrough_line_is_always_there_and_found_by_its_words() {
+        let bare = PaletteContext::default();
+        for ctx in [bare, full()] {
+            let list = entries(&ctx);
+            let line = list
+                .iter()
+                .find(|e| e.action == PaletteAction::StartWalkthrough)
+                .expect("the walkthrough line");
+            assert_eq!(line.label, WALKTHROUGH_LABEL);
+            assert_eq!(WALKTHROUGH_LABEL, "Start walkthrough");
+        }
+        let list = entries(&full());
+        for query in ["walkthrough", "guided", "tour", "help"] {
+            let found = filter(&list, query);
+            assert!(
+                found
+                    .iter()
+                    .any(|e| e.action == PaletteAction::StartWalkthrough),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn the_order_entries_leave_out_the_current_cut() {
         let list = entries(&full());
         let orders: Vec<OrderPreset> = list
@@ -755,6 +872,7 @@ mod tests {
             (PaletteAction::OpenHub, false),
             (PaletteAction::FullDetail, false),
             (PaletteAction::OpenStats, false),
+            (PaletteAction::StartWalkthrough, false),
         ] {
             assert_eq!(action.returns_focus(), returns, "{action:?}");
         }

@@ -92,12 +92,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 /// the PDF-compile stage of this test skips gracefully rather than hard-failing CI
 /// environments that don't have Typst installed.
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 #[tokio::test]
@@ -250,8 +245,10 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );

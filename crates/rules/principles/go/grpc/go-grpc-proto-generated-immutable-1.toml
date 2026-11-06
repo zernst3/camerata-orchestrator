@@ -1,5 +1,5 @@
 id = "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1"
-version = 1
+version = 3
 title = "Proto-generated code is not hand-edited; changes flow through .proto definitions and code generation, never direct edits to generated files"
 domain = "go:grpc"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/languages/go/basics/"
-title = "gRPC — Basics tutorial (Go)"
+title = "gRPC: Basics tutorial (Go)"
 
 [decision]
 question = "How should proto-generated Go code be maintained?"
@@ -21,7 +21,7 @@ why = "The protoc compiler generates Go code from .proto definitions. Handwritin
 [[option]]
 id = "proto-generated-immutable"
 label = "Generated code is immutable; changes flow through .proto → code generation"
-directive = "All proto-generated files (.pb.go, _grpc.pb.go) are treated as read-only build artifacts. Changes to the gRPC interface, message fields, or service methods are made in the .proto definition, then code is regenerated via `protoc`. CI or pre-commit checks ensure generated code is up-to-date; out-of-sync generated code is a build failure."
+directive = "All proto-generated files (.pb.go, _grpc.pb.go) are treated as read-only build artifacts. Changes to the gRPC interface, message fields or service methods are made in the .proto definition, then code is regenerated via `protoc`. CI or pre-commit checks ensure generated code is up-to-date; out-of-sync generated code is a build failure."
 remediation = """
 Move the hand-added helper method or field change out of the generated .pb.go file and into the .proto definition, then regenerate the code with protoc. Add a CI or pre-commit check that fails if generated code differs from what regenerating the .proto would produce. Verify by regenerating from the .proto and confirming the generated files match what's checked in, with no manual edits left in place.
 """
@@ -30,7 +30,7 @@ why = "Generated code is a build artifact, not a maintained source file; the .pr
 [[option]]
 id = "hand-edited-generated"
 label = "Generated code is hand-edited to add helper methods or tweak types"
-directive = "Developers edit .pb.go or _grpc.pb.go directly to add helper methods, change field names, or adjust types beyond what .proto supports."
+directive = "Developers edit .pb.go or _grpc.pb.go directly to add helper methods, change field names or adjust types beyond what .proto supports."
 why = "Trades single-source-of-truth for post-generation customization; high risk of accidental overwrites when protoc is re-run, and makes the codebase hard to maintain."
 
 [[option]]

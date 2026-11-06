@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-STANDALONE-COMPONENTS-1"
-version = 1
+version = 3
 title = "Angular component organization: standalone components, or NgModule declarations"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/components/anatomy-of-components"
-title = "Angular — Anatomy of components (standalone: true)"
+title = "Angular: Anatomy of components (standalone: true)"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/src/rules/prefer-standalone.ts"
-title = "angular-eslint — prefer-standalone"
+title = "angular-eslint: prefer-standalone"
 linter = "@angular-eslint/prefer-standalone"
 
 [decision]
@@ -27,14 +27,14 @@ id = "components-are-standalone-with-explicit-dependenc"
 label = "components are standalone with explicit per-component imports"
 directive = "Components use standalone: true with explicit imports arrays listing their dependencies (pipes, directives, other components). Standalone services use providedIn: 'root' (or equivalent). NgModules are used only for shared configuration (e.g., HTTP interceptors) or third-party libraries that require them, and that set is documented. A standalone component that forgets to import a required pipe or directive is rejected at build time."
 remediation = """
-Set standalone: true on the component and add an explicit imports array listing the pipes, directives, and components it actually uses, removing it from any NgModule's declarations array. Verify by confirming the component compiles and renders correctly without being declared in an NgModule.
+Set standalone: true on the component and add an explicit imports array listing the pipes, directives and components it actually uses, removing it from any NgModule's declarations array. Verify by confirming the component compiles and renders correctly without being declared in an NgModule.
 """
 why = "Makes each component's dependencies explicit and co-located in its imports array, so a missing one fails the build rather than surfacing at runtime, and tree-shaking and lazy loading are more predictable because nothing is pulled in transitively. The strongest fit for new apps on modern Angular (14+); it requires that version's standalone support."
 
 [[option]]
 id = "all-components-are-declared-in-ngmodules-with-tran"
 label = "components are declared in NgModules with transitive resolution"
-directive = "Components, directives, and pipes are declared in NgModules, and dependencies are managed transitively through module declarations and imports rather than per-component imports arrays."
+directive = "Components, directives and pipes are declared in NgModules, and dependencies are managed transitively through module declarations and imports rather than per-component imports arrays."
 remediation = """
 Remove standalone: true from the component and declare it in an NgModule instead, letting its dependencies resolve transitively through the module's own imports rather than a per-component imports array. Verify by confirming the component renders correctly once registered in the module's declarations and the module's imports cover its dependencies.
 """

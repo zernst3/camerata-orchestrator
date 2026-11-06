@@ -56,7 +56,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         why: "w".to_string(),
         violates: true,
     };
-    let mut selected = vec![("ARCH-X-1".to_string(), "d".to_string())];
+    let mut selected = vec![crate::scan_routing::AuditRule::new("ARCH-X-1", "d")];
     let evidence = format!(".env:3 {}", p.text);
     let reasoning = format!("because {}", p.value);
     let violating = apply_alternative_decision(
@@ -84,6 +84,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         kind: None,
     }];
     let rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-X-1".to_string(),
         recommended_option_id: "good".to_string(),
         recommendation_reasoning: reasoning.clone(),
@@ -96,6 +97,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
     assert!(!leaks(&convention[0], &p), "convention-observed row leaked");
 
     let no_conv_rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-Y-1".to_string(),
         no_convention: true,
         recommendation_reasoning: reasoning,
@@ -138,7 +140,7 @@ fn merge_location_group_output_is_redacted_when_a_member_was_not() {
     let files = vec![(".env".to_string(), format!("# top\n{}\n", p.text))];
     let mut other = raw_finding(&p, 2);
     other.rule_id = "SEC-NO-HARDCODED-SECRETS-1".to_string();
-    let merged = merge_by_location(vec![raw_finding(&p, 2), other], &files);
+    let merged = crate::review_tree::collapse_and_group(vec![raw_finding(&p, 2), other], &files);
     assert!(!merged.is_empty());
     for f in &merged {
         assert!(!leaks(f, &p), "merged row leaked");
@@ -146,7 +148,7 @@ fn merge_location_group_output_is_redacted_when_a_member_was_not() {
 }
 
 #[test]
-fn merge_semantic_group_and_structural_group_outputs_are_redacted() {
+fn grouped_rows_are_redacted_when_a_member_was_not() {
     let p = secret();
     let mut a = raw_finding(&p, 2);
     a.category = Some("arch-conformance".to_string());
@@ -154,42 +156,42 @@ fn merge_semantic_group_and_structural_group_outputs_are_redacted() {
     a.severity = "low".to_string();
     let mut b = a.clone();
     b.line = 9;
-    let grouped = group_structural_needs_review(vec![a, b]);
-    assert_eq!(
-        grouped.len(),
-        1,
-        "two needs-review structural rows fold into one"
-    );
-    assert!(!leaks(&grouped[0], &p), "structural group row leaked");
-
     let files = vec![(".env".to_string(), format!("x\n{}\n", p.text))];
-    let merged = merge_semantic_groups(vec![raw_finding(&p, 2), raw_finding(&p, 3)], &files);
+    let grouped = crate::review_tree::collapse_and_group(vec![a, b], &files);
+    assert_eq!(grouped.len(), 2, "two rows in, two rows out");
+    for f in &grouped {
+        assert!(!leaks(f, &p), "grouped row leaked");
+    }
+
+    let merged = cluster_heads(vec![raw_finding(&p, 2), raw_finding(&p, 3)], &files);
     for f in &merged {
         assert!(!leaks(f, &p), "semantic group row leaked");
     }
 }
 
 #[test]
-fn needs_review_reason_appended_to_detail_is_redacted() {
+fn the_stage1_reason_kept_on_the_row_is_redacted_and_never_reaches_the_detail() {
     let p = secret();
     let findings = vec![Finding {
         detail: "A finding.".to_string(),
         ..raw_finding(&p, 3)
     }];
     let raw = serde_json::json!({"verdicts": [{
-        "index": 0, "confidence": "low",
+        "index": 0, "real": "unclear",
         "reason": format!("the key {} may be a test value", p.value),
     }]})
     .to_string();
     let out = apply_verdicts(&raw, findings);
     assert_eq!(out.len(), 1);
-    assert!(
-        out[0].detail.contains("[needs review:"),
-        "{}",
-        out[0].detail
-    );
+    assert_eq!(out[0].detail, "A finding.", "the client text is untouched");
     assert!(!out[0].detail.contains(&p.value));
     assert!(detect_secrets(&out[0].detail).is_empty());
+    // The reason kept on the row for the group reviewer is redacted too.
+    let kept = out[0]
+        .captures
+        .get(crate::ai_audit::STAGE1_CAPTURE)
+        .expect("the stage 1 verdict is kept on the row");
+    assert!(!kept.contains(&p.value), "{kept}");
 }
 
 /// Replies with one canned body to every call and records every request.
@@ -221,9 +223,10 @@ impl Stub {
 #[async_trait::async_trait]
 impl LlmPort for Stub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
-            text: self.text.clone(),
+            text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -304,6 +307,38 @@ async fn fix_specific_prompt_carries_no_secret_value_and_forbids_repeating_one()
     );
 }
 
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn fix_specific_entry_point_redacts_raw_files_before_the_model_reads_them() {
+    // The caller hands over the RAW scanned files, as `onboard` does. The entry point itself
+    // must route them through `files_for_model` before building the context window.
+    let p = secret();
+    let mut finding = raw_finding(&p, 3);
+    finding.fix_specific = None;
+    crate::onboard::redact::redact_finding(&mut finding);
+    let raw_files = vec![(".env".to_string(), format!("# top\n\n{}\n", p.text))];
+    let stub = Stub::new(r#"{"fixes":[]}"#);
+    let _ = generate_fix_specifics(
+        &stub,
+        "acme/app",
+        vec![finding],
+        &raw_files,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let sent = stub.everything_sent();
+    assert!(
+        !sent.contains(&p.value),
+        "generate_fix_specifics sent the raw file to the model"
+    );
+    assert!(
+        sent.contains("sb_secret_…"),
+        "the redacted form is what the model sees"
+    );
+}
+
 // ---- model-prompt redaction (section 5): every builder, end to end ------------------------
 
 /// A repo whose `.env` holds the planted secret on line 3 and whose source quotes it again.
@@ -336,10 +371,10 @@ fn two_options() -> Vec<RuleAlternatives> {
 #[test]
 fn build_digest_over_files_for_model_contains_no_secret_value() {
     let p = secret();
-    let digest = build_digest(&crate::onboard::redact::files_for_model_with(
-        &leaky_repo(&p),
-        true,
-    ));
+    let digest = build_digest(
+        &crate::onboard::redact::files_for_model_with(&leaky_repo(&p), true),
+        &crate::prompt_frame::FrameNonce::generate(),
+    );
     assert!(!digest.contains(&p.value), "the digest carried the value");
     assert!(
         digest.contains("sb_secret_\u{2026}"),
@@ -369,7 +404,7 @@ async fn audit_repo_passes_alternatives_and_calibration_prompts_contain_no_secre
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &two_options(),
         &std::collections::HashMap::new(),
         None,
@@ -423,12 +458,28 @@ async fn verify_findings_prompt_contains_only_redacted_snippets() {
     // Deliberately NOT pre-redacted: a row that bypassed construction must still not reach the
     // calibration model raw.
     let findings = vec![raw_finding(&p, 3)];
-    let stub = Stub::new(r#"{"verdicts":[]}"#);
-    let _ = verify_findings(&stub, "acme/app", findings, None, None, None, false, "").await;
+    let stub = Stub::new(r#"{}"#);
+    // The code window is cut from the file as given: a file that bypassed the run's own
+    // redaction must not reach the model raw through the window either.
+    let files = vec![(".env".to_string(), format!("x\ny\n{}\nz\n", p.text))];
+    let _ = verify_findings(
+        &stub,
+        "acme/app",
+        findings,
+        None,
+        None,
+        None,
+        &Stage1Inputs::new("").with_files(&files),
+    )
+    .await;
     let sent = stub.everything_sent();
     assert!(
-        sent.contains("Scrutinize these findings"),
+        sent.contains("The finding (scanned severity"),
         "the calibration prompt was built"
+    );
+    assert!(
+        sent.contains("The code around the site"),
+        "the window was built from the file"
     );
     assert!(
         !sent.contains(&p.value),
@@ -447,7 +498,7 @@ async fn model_prompt_redaction_flag_off_sends_raw_and_warns() {
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &[],
         &std::collections::HashMap::new(),
         None,

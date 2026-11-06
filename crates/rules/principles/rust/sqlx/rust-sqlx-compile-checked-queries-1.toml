@@ -1,5 +1,5 @@
 id = "RUST-SQLX-COMPILE-CHECKED-QUERIES-1"
-version = 1
+version = 4
 title = "Use the sqlx::query! macro for compile-time SQL validation; never use format! to build SQL strings"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,14 +10,14 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Compile-checked SQL queries?"
+question = "How are SQL statements built and checked against the database schema before they run?"
 default = "use-sqlx-query-macro"
 why = "sqlx::query! is a compile-time macro that checks SQL syntax and column names against the live database schema at build time. If the SQL is invalid or refers to a non-existent column, the build fails immediately. This catches errors before deployment. Using format! or string concatenation to build SQL strings bypasses this check. When SQL is built dynamically at runtime, typos in column names, missing joins, or SQL injection vulnerabilities can slip past the compiler. sqlx::query! also binds parameters via ? placeholders and macro argument substitution, which prevents SQL injection. If a query must be truly dynamic (e.g., filtering by different columns based on user input), the valid column names are validated in Rust code before being interpolated, not interpolated directly into the SQL string. The rule is: all queries use sqlx::query! unless the query is so dynamic that it cannot be validated at compile time; in that case, the dynamic parts are validated and parameterized explicitly."
 
 [[option]]
 id = "use-sqlx-query-macro"
 label = "Use sqlx::query! for compile-time SQL validation"
-directive = "SQL queries are written using sqlx::query! (or sqlx::query_as!, sqlx::query_scalar!, etc.) which validates the SQL against the database schema at compile time. Parameters are bound using placeholders (?) and macro arguments. SQL strings are never built with format!, string concatenation, or string interpolation."
+directive = "SQL queries are written using sqlx::query! (or sqlx::query_as!, sqlx::query_scalar!, etc.) which validates the SQL against the database schema at compile time. Parameters are bound using placeholders (?) and macro arguments. SQL strings are never built with format!, string concatenation or string interpolation."
 remediation = """
 Replace the format!-built or string-concatenated SQL with sqlx::query! (or query_as!/query_scalar! as appropriate), binding parameters through the macro's placeholders instead of interpolating them into the string. Verify by running cargo build and confirming the macro validates the query against the database schema at compile time, and that a value with a SQL metacharacter is bound as a parameter rather than concatenated.
 """
@@ -27,13 +27,13 @@ why = "Compile-time validation and parameterized binding prevent SQL errors and 
 id = "use-format-or-string-interpolation"
 violates = true
 label = "Build SQL strings with format! or string interpolation"
-directive = "SQL queries are built using format!, string concatenation, or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
-why = "Bypasses compile-time SQL validation entirely: typos in column names, missing joins, and SQL injection vulnerabilities all slip past the compiler and surface only at runtime, often in production; there is no structural defense against inserting user input directly into the SQL string."
+directive = "SQL queries are built using format!, string concatenation or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
+why = "Bypasses compile-time SQL validation entirely: typos in column names, missing joins and SQL injection vulnerabilities all slip past the compiler and surface only at runtime, often in production; there is no structural defense against inserting user input directly into the SQL string."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.query.html"
-title = "sqlx::query! — Statically checked SQL query macro"
+title = "sqlx::query!: Statically checked SQL query macro"
 
 [[sources]]
 url = "https://github.com/launchbadge/sqlx/blob/main/README.md"
-title = "SQLx README — compile-time SQL verification against live database schema"
+title = "SQLx README: compile-time SQL verification against live database schema"

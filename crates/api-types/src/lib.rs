@@ -1,5 +1,5 @@
 //! `camerata-api-types` — the pure-serde wire-contract leaf crate (Phase A of the DTO
-//! extraction, see `docs/plans/2026-07-01_backend-headless-core.md`).
+//! extraction, see the backend headless-core notes).
 //!
 //! This crate holds the DTO/domain-serde shapes shared across the backend layers, with
 //! NO dependency on any other camerata-* crate (only `serde`, `serde_json`, `chrono`,
@@ -49,12 +49,21 @@
 //!   reviewed record, the stats) as a deny-list the export tests check every client artifact
 //!   against. Names only, no shapes: the shapes live in `camerata-ui-core`.
 //!
+//! - [`decisions`]: the reviewer's decisions on sites (state, scope, reason, the per-site records a
+//!   node decision writes) and the request and response shapes of the decision routes, shared by
+//!   the server's decision store and the review UI.
+//!
+//! - [`site_key`]: the stable name of one finding row across reruns (repo, path, fingerprint and an
+//!   ordinal, never the line), shared by the server, the export code and the review UI.
+//!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
 pub mod audit;
 pub mod claude_cli;
 pub mod credentials;
+pub mod decisions;
+pub mod edits;
 pub mod feedback;
 pub mod fingerprint;
 pub mod governance;
@@ -62,8 +71,11 @@ pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
 pub mod project;
+pub mod review;
 pub mod review_timing;
+pub mod review_view;
 pub mod run;
+pub mod site_key;
 pub mod snippet;
 pub mod stories;
 pub mod symbol;

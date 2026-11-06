@@ -152,14 +152,32 @@ impl EnforcementCatch {
 /// Append-only: `record_catch` inserts one row; there is NO read/query path.
 /// All callers MUST fail-soft: a `Err(...)` return must be logged and swallowed,
 /// never propagated.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait EnforcementCatchLedger: Send + Sync {
     /// Create / migrate the `enforcement_catches` table. Idempotent.
-    async fn migrate_enforcement(&self) -> Result<(), PersistenceError>;
+    fn migrate_enforcement<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), PersistenceError>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 
     /// Append one catch record. Single INSERT. Append-only.
     /// Callers MUST log-and-swallow any returned error (fail-soft invariant).
-    async fn record_catch(&self, catch: EnforcementCatch) -> Result<(), PersistenceError>;
+    fn record_catch<'life0, 'async_trait>(
+        &'life0 self,
+        catch: EnforcementCatch,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), PersistenceError>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-AUTHORIZATION-1"
-version = 1
+version = 3
 title = "Every private Realtime channel has an RLS policy on realtime.messages; public-access is an explicit, reviewed choice, never the silent default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -17,11 +17,11 @@ qualifies = "Enforced by a scan mirroring SUPABASE-RLS-NO-POLICY-1's shape, reta
 
 [[sources]]
 url = "https://supabase.com/docs/guides/realtime/authorization"
-title = "Supabase docs — Realtime Authorization: 'Realtime uses the messages table in your database's realtime schema to generate access policies for your clients when they connect to a Channel topic'; private channels require `private: true` client-side and disabling 'Allow public access' in Realtime Settings; authorization is validated at connection time against the realtime.messages RLS policies"
+title = "Supabase docs: Realtime Authorization: 'Realtime uses the messages table in your database's realtime schema to generate access policies for your clients when they connect to a Channel topic'; private channels require `private: true` client-side and disabling 'Allow public access' in Realtime Settings; authorization is validated at connection time against the realtime.messages RLS policies"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Does every Realtime channel carrying non-public data declare itself private and have a matching RLS policy on realtime.messages, rather than defaulting to Realtime's unauthenticated public-access mode?"
@@ -59,7 +59,7 @@ is configured with both halves in place:
   disabled in the project's Realtime Settings, which is what routes the channel through
   authorization at all; and
 - `realtime.messages` has RLS enabled with at least one `CREATE POLICY` scoping who may join,
-  broadcast to, or receive from that topic — typically keyed off a claim or a join against the
+  broadcast to or receive from that topic, typically keyed off a claim or a join against the
   application's own membership or ownership table.
 
 Either half alone leaves the check absent. A channel with no `private` flag is public: anyone who
@@ -70,7 +70,7 @@ validated at connection time against the policies that exist, and zero policies 
 remediation = """
 For `<topic>`, set `config: { private: true }` on the channel and disable 'Allow public access' in your project's
 Realtime Settings. Add a CREATE POLICY on `realtime.messages` scoping which authenticated users may join, broadcast
-to, or receive from this topic (typically keyed off a claim or a join against your application's own membership/
+to or receive from this topic (typically keyed off a claim or a join against your application's own membership/
 ownership table). Verify by connecting to the channel as a user who should NOT have access and confirming the
 connection is rejected, not merely that the client UI happens not to display anything.
 """
@@ -82,4 +82,4 @@ id = "treat-application-table-rls-as-sufficient-for-realtime-channels"
 violates = true
 label = "Realtime channels are left in public mode, with the application table's own RLS policies as the only access control"
 directive = "Channels are instantiated with no `private` flag and no `realtime.messages` policy, on the basis that the application table's existing RLS policies already protect the data the channel carries."
-why = "Rejected: table RLS and realtime.messages RLS are evaluated by entirely separate code paths. A channel left in public mode broadcasts or accepts subscriptions with NO authorization check regardless of how tightly the application table itself is locked down — the channel is a second, independent access surface onto the same information, and Supabase's own documentation is explicit that the private flag plus a matching realtime.messages policy are both required for any check to run at all."
+why = "Rejected: table RLS and realtime.messages RLS are evaluated by entirely separate code paths. A channel left in public mode broadcasts or accepts subscriptions with NO authorization check regardless of how tightly the application table itself is locked down: the channel is a second, independent access surface onto the same information, and Supabase's own documentation is explicit that the private flag plus a matching realtime.messages policy are both required for any check to run at all."

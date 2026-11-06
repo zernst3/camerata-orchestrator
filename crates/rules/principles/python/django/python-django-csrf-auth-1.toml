@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-CSRF-AUTH-1"
-version = 1
+version = 2
 title = "Protected views use the login_required decorator or LoginRequiredMixin; CSRF middleware stays enabled globally"
 domain = "python:django"
 layer = "framework"
@@ -44,8 +44,8 @@ why = "Flips the failure mode: with per-view `@login_required` / `LoginRequiredM
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/ref/csrf/"
-title = "Django docs — Cross Site Request Forgery protection (CsrfViewMiddleware, csrf_exempt)"
+title = "Django docs: Cross Site Request Forgery protection (CsrfViewMiddleware, csrf_exempt)"
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/topics/auth/default/#limiting-access-to-logged-in-users"
-title = "Django docs — Limiting access to logged-in users (login_required, LoginRequiredMixin)"
+title = "Django docs: Limiting access to logged-in users (login_required, LoginRequiredMixin)"

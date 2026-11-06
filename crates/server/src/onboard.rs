@@ -20,10 +20,13 @@ pub mod architectural;
 pub mod audit;
 pub mod clone_advisory;
 pub mod count;
+pub mod credential_cross_ref;
+pub mod evidence_check;
 pub mod files;
 pub mod finding_context;
 pub mod finding_context_batch;
 pub mod greenfield;
+pub mod patterns_matrix;
 pub mod propose;
 pub(crate) mod redact;
 pub mod report;
@@ -88,6 +91,106 @@ pub const AUDIT_RULES: &[&str] = &[
     "SEC-NO-DISABLED-TLS-1",
     "SEC-NO-UNSAFE-DESERIALIZATION-1",
 ];
+
+/// The `Finding::captures` key recording which kind of producer made a finding: `semantic` for
+/// the language-model review, `deterministic` for the content floor. The incremental delta rescan
+/// carries the model's findings forward for unchanged files and recomputes the deterministic ones,
+/// and it must decide that from who produced the finding, not from the tier its rule id was first
+/// recorded under: the model can report under a floor rule id (H12). Absent on a finding saved
+/// before this existed, which the rescan then classifies by its rule's ledger tier as before.
+pub const PRODUCED_TIER_CAPTURE: &str = "produced_tier";
+
+// The `captures` keys that are bookkeeping about a finding, not names of objects it is about,
+// are listed once, in `crate::ai_audit::BOOKKEEPING_CAPTURE_KEYS`.
+//
+// Captured VALUES are an identity signal: the merge stages treat two findings that share a
+// captured value of three or more characters as the same root cause, even across files. A value
+// like `semantic`, or the commit every carried finding names, would fuse unrelated findings into
+// one row. So these keys are held aside across the merge stages (`BookkeepingCaptures`) and put
+// back on the surviving rows.
+use crate::ai_audit::BOOKKEEPING_CAPTURE_KEYS;
+
+/// The `captures` key holding a secret finding's commit-history status.
+pub const HISTORY_STATUS_CAPTURE: &str = "history-status";
+
+/// Bookkeeping captures taken off findings before the merge stages and restored after them, keyed
+/// by what identifies a row there (repo, path, rule and snippet; not the line, which a merge may
+/// move).
+#[derive(Debug, Default)]
+struct BookkeepingCaptures {
+    held: std::collections::HashMap<RowIdentity, Vec<(String, String)>>,
+}
+
+/// What identifies a row across the merge stages: repo, path, rule id and snippet.
+type RowIdentity = (String, String, String, String);
+
+impl BookkeepingCaptures {
+    fn key(f: &Finding) -> RowIdentity {
+        (
+            f.repo.clone(),
+            f.path.clone(),
+            f.rule_id.clone(),
+            f.snippet.clone(),
+        )
+    }
+
+    /// Remove the bookkeeping keys from `findings`, remembering them.
+    fn take(&mut self, findings: &mut [Finding]) {
+        for f in findings {
+            let mut taken = Vec::new();
+            for key in BOOKKEEPING_CAPTURE_KEYS {
+                // The review flags stay on the row: they are not identity (`object_captures`
+                // excludes every bookkeeping key), and a flag a later stage writes would
+                // otherwise replace the held list on restore and lose the earlier flags.
+                if *key == crate::review_flags::REVIEW_FLAGS_CAPTURE {
+                    continue;
+                }
+                // Stage 1's verdict and outlier reasons stay too: the collapse that follows
+                // moves them from a collapsed row to its survivor. Held aside, they would be
+                // restored by the identity of a row that no longer exists, and the group
+                // reviewer would read "not rated" for a site stage 1 rated. Neither names an
+                // object (both are bookkeeping keys), so they cannot fuse two rows.
+                if *key == crate::ai_audit::STAGE1_CAPTURE
+                    || *key == crate::ai_audit::OUTLIER_REASONS_CAPTURE
+                {
+                    continue;
+                }
+
+                if let Some(value) = f.captures.remove(*key) {
+                    taken.push(((*key).to_string(), value));
+                }
+            }
+            if !taken.is_empty() {
+                self.held.entry(Self::key(f)).or_default().extend(taken);
+            }
+        }
+    }
+
+    /// Put the remembered keys back on the rows that survived. A key a row already carries is
+    /// left alone, except the severity adjustments, which are one sentence per line: the ones
+    /// held come first and any a later stage added after them are kept, so none is lost.
+    fn restore(&self, findings: &mut [Finding]) {
+        for f in findings {
+            let Some(held) = self.held.get(&Self::key(f)) else {
+                continue;
+            };
+            for (key, value) in held {
+                let slot = f.captures.entry(key.clone()).or_default();
+                if key == crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE {
+                    let mut lines: Vec<String> = Vec::new();
+                    for line in value.lines().chain(slot.lines()) {
+                        if !line.trim().is_empty() && !lines.iter().any(|l| l == line) {
+                            lines.push(line.to_string());
+                        }
+                    }
+                    *slot = lines.join("\n");
+                } else if slot.is_empty() {
+                    *slot = value.clone();
+                }
+            }
+        }
+    }
+}
 
 /// One violation already present in the repo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,7 +266,7 @@ pub struct Finding {
     pub effort: Option<String>,
     /// Semantic category from a closed taxonomy (`authorization`, `rls-policy`,
     /// `transport-security`, `arch-conformance`, `testing-style`, …). Drives the SECOND,
-    /// cross-family merge pass ([`crate::ai_audit::merge_semantic_groups`]): two findings only
+    /// cross-family merge pass ([`crate::review_tree::group_semantic`]): two findings only
     /// collapse when they share a category. `None` when no source or heuristic could classify
     /// the rule — a `None`-category finding is NEVER semantically merged (fail-open to
     /// over-telling). Assigned from the deterministic rule-id token map or the calibration
@@ -172,7 +275,7 @@ pub struct Finding {
     pub category: Option<String>,
     /// Whether this finding's snippet was resolved to REAL code present in the file (a
     /// presence-type violation) vs an absence/architectural observation whose snippet is a
-    /// description, not code (`located == false`). Computed in [`crate::ai_audit::merge_by_location`]
+    /// description, not code (`located == false`). Computed in [`crate::review_tree::collapse_identical`]
     /// and reused (rather than recomputed) by the informational-bucketing predicate — an
     /// absence-type stance finding is the noise Item 2 down-buckets. Deterministic floor/checker
     /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
@@ -199,8 +302,8 @@ pub struct Finding {
     #[serde(default)]
     pub evaluated_option_id: Option<String>,
     /// Evidence sites ABSORBED from other findings merged into this one during cross-tier /
-    /// cross-file dedup ([`crate::ai_audit::merge_by_location`] /
-    /// [`crate::ai_audit::merge_semantic_groups`], P1 — the deduplication + cross-tier merge
+    /// cross-file dedup ([`crate::review_tree::collapse_identical`] /
+    /// [`crate::review_tree::group_semantic`], P1 — the deduplication + cross-tier merge
     /// design). A finding that survives a merge as the cluster's PRIMARY keeps its own
     /// `repo`/`path`/`line`/`snippet` as before, but every OTHER cluster member's own evidence
     /// site is preserved here instead of being silently discarded — a merged row still
@@ -287,6 +390,46 @@ pub struct Finding {
     /// engine's uncertainty.
     #[serde(default)]
     pub could_be_intentional: bool,
+    /// The stable name of this row across reruns: repo, path, the fingerprint of rule id plus
+    /// snippet, and an ordinal for repeats ([`camerata_api_types::site_key`]). Never contains
+    /// the line, so an edit above the site does not rename it. Empty until
+    /// [`crate::inspections::backfill_site_keys`] assigns it (when an inspection is recorded
+    /// and when one is loaded from disk); [`crate::report_export::finding_key`] reads it, and
+    /// falls back to the ordinal-0 key while it is empty.
+    #[serde(default)]
+    pub site_key: String,
+    /// Where this row sits in the review tree: `[category node id, rule node id, sub-group node
+    /// id]` (for example `["cat:authorization", "rule:SEC-RLS-1", "sub:SEC-RLS-1/3"]`). Empty
+    /// until grouping runs; see [`crate::review_tree`]. Placement only: it never changes
+    /// whether the row exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_path: Vec<String>,
+    /// This row's standing in its sub-group. The primary orders the sub-group and has no power
+    /// over the others.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::review_tree::GroupRole::is_primary"
+    )]
+    pub group_role: crate::review_tree::GroupRole,
+    /// What the group reviewer (stage 2) said about this site, as columns: why it is or is not an
+    /// escalation candidate and where it stands against the line, why it is an outlier, the
+    /// sub-group and cause it was placed in, and any disagreement with stage 1. Internal: no
+    /// client export reads it. Empty until the group reviewer has read the site's rule group.
+    #[serde(
+        default,
+        skip_serializing_if = "camerata_api_types::review::SiteReview::is_empty"
+    )]
+    pub review: camerata_api_types::review::SiteReview,
+    /// The sources collapsed into this row because they were mechanically identical to it
+    /// (same repo and file, same rule family, same place). Each keeps its own path, line and
+    /// site key. Empty for a row nothing was collapsed into.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flagged_by: Vec<crate::review_tree::FlaggedBy>,
+    /// A pointer to a higher-ranked row this one may duplicate. Written by the grouping pass for
+    /// every similarity that is not mechanical identity; never changes a row count or a
+    /// severity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible_duplicate_of: Option<crate::review_tree::DuplicateLink>,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -313,6 +456,115 @@ pub struct MergedLocation {
     /// that shares the SAME fix as the primary. A report renders a consequence site under
     /// "also affects" instead of listing it as a peer evidence location.
     pub consequence: bool,
+    /// The severity this site carried before it was absorbed. A merged row keeps ONE severity
+    /// (see `ai_audit::merged_severity`); an absorbed member's own severity is kept here so a
+    /// higher rating is never hidden by the merge. Empty for a record that predates the field
+    /// (back-compatible serde default); renderers show it only when present.
+    #[serde(default)]
+    pub severity: String,
+    /// The absorbed member's own one-line headline (its title), kept for the same reason as
+    /// `severity`. Empty when the member had none or the record predates the field.
+    #[serde(default)]
+    pub headline: String,
+}
+
+impl MergedLocation {
+    /// An absorbed site with no rating or headline recorded. Every construction goes through
+    /// this (and [`Self::with_rating`]) so a new field never breaks a caller.
+    pub fn site(
+        repo: impl Into<String>,
+        path: impl Into<String>,
+        line: usize,
+        rule_id: impl Into<String>,
+        snippet: impl Into<String>,
+        consequence: bool,
+    ) -> Self {
+        Self {
+            repo: repo.into(),
+            path: path.into(),
+            line,
+            rule_id: rule_id.into(),
+            snippet: snippet.into(),
+            consequence,
+            severity: String::new(),
+            headline: String::new(),
+        }
+    }
+
+    /// The same site, recording the severity and headline the absorbed finding carried.
+    pub fn with_rating(mut self, severity: impl Into<String>, headline: impl Into<String>) -> Self {
+        self.severity = severity.into();
+        self.headline = headline.into();
+        self
+    }
+
+    /// Where this site is, for counting distinct places.
+    pub fn place(&self) -> SitePlace {
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &self.headline),
+        )
+    }
+}
+
+/// The identity of a place in the code: repo, path and line. A finding with no line (0) has no
+/// place of its own beyond the file, so its snippet tells two apart, and with no snippet either
+/// its own identity (rule id and headline) does.
+pub type SitePlace = (String, String, usize, String);
+
+/// A finding's own identity for telling two apart when neither a line nor a snippet does.
+pub fn site_identity(rule_id: &str, headline: &str) -> String {
+    format!("{rule_id}|{}", headline.trim())
+}
+
+/// See [`SitePlace`]. `identity` is [`site_identity`] of the finding.
+pub fn site_place(repo: &str, path: &str, line: usize, snippet: &str, identity: &str) -> SitePlace {
+    let discriminator = if line != 0 {
+        String::new()
+    } else if snippet.trim().is_empty() {
+        identity.to_string()
+    } else {
+        snippet.trim().to_string()
+    };
+    (repo.to_string(), path.to_string(), line, discriminator)
+}
+
+impl Finding {
+    /// This finding's own place in the code.
+    pub fn place(&self) -> SitePlace {
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &crate::ai_audit::finding_headline(self)),
+        )
+    }
+
+    /// How many DISTINCT places this row stands for: its own plus every absorbed site at a
+    /// different place. A member absorbed at the row's own line is the same place, not another
+    /// site, and reads as "also flagged here".
+    pub fn distinct_site_count(&self) -> usize {
+        let mut seen: std::collections::HashSet<SitePlace> = std::collections::HashSet::new();
+        seen.insert(self.place());
+        for l in &self.also_locations {
+            seen.insert(l.place());
+        }
+        // A source collapsed into this row that cited another line is another place.
+        for b in &self.flagged_by {
+            seen.insert(site_place(
+                &self.repo,
+                &b.path,
+                b.line,
+                &self.snippet,
+                &site_identity(&b.rule_id, ""),
+            ));
+        }
+        seen.len()
+    }
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -334,6 +586,12 @@ impl Default for Finding {
     fn default() -> Self {
         Self {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: String::new(),
             path: String::new(),
             line: 0,
@@ -362,66 +620,6 @@ impl Default for Finding {
             kind: None,
         }
     }
-}
-
-/// Compute the [`crate::scan_ledger::StageAccounting`] for a stage that reduces `pre` findings
-/// to `post` findings via the `also_locations`-preserving absorb pattern used by
-/// [`crate::ai_audit::merge_semantic_groups`] and [`crate::ai_audit::group_structural_needs_review`]:
-/// every finding that does not survive as its own output row is instead represented as a
-/// [`MergedLocation`] entry (keyed by `(repo, path, line, rule_id)`) inside the row it was
-/// absorbed into.
-///
-/// # Why this exists (pipeline-integrity ledger fix)
-///
-/// The original instrumentation at both call sites counted merges by diffing `also_matches` — a
-/// rule-id SET, deduplicated by construction — before vs. after the stage. That undercounts (or,
-/// when every absorbed finding shares the surviving primary's OWN rule id — the common "one rule
-/// fires N times in this file" shape `merge_semantic_group` explicitly collapses via its
-/// same-rule-id N-site signal — drops to ZERO) whenever more than one absorbed finding shares a
-/// rule id with the primary or with each other: `seen.insert(rule_id)` in
-/// `ai_audit::merge_semantic_group` only pushes a rule id into `also_matches` the FIRST time it
-/// is seen, so a second (or Nth) absorbed finding with that same id leaves no trace in
-/// `also_matches` at all, even though its OWN evidence site is still unconditionally pushed into
-/// `also_locations`. The `also_matches` id-set is a "which rule families does this row's defect
-/// span" summary, never a per-absorbed-FINDING log — it was never the right signal for an
-/// accounting invariant.
-///
-/// `also_locations` is: every absorbed member gets exactly one entry, unconditionally, regardless
-/// of rule-id collisions (see `merge_semantic_group`'s and `build_structural_group_finding`'s
-/// unconditional pushes). Diffing THAT — as a MULTISET, so a key appearing twice pre-stage (e.g.
-/// already carried in by an earlier merge stage such as `ai-location-merge`) is matched off
-/// before anything is counted as newly merged by THIS stage, rather than naively deduplicated
-/// into a set — gives an exact, collision-proof count of what this stage actually absorbed.
-pub(crate) fn account_location_merge(
-    pre: &[Finding],
-    post: &[Finding],
-) -> crate::scan_ledger::StageAccounting {
-    fn key(l: &MergedLocation) -> (String, String, usize, String) {
-        (l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone())
-    }
-    let mut pre_counts: std::collections::HashMap<(String, String, usize, String), usize> =
-        std::collections::HashMap::new();
-    for f in pre {
-        for l in &f.also_locations {
-            *pre_counts.entry(key(l)).or_insert(0) += 1;
-        }
-    }
-    let mut acc = crate::scan_ledger::StageAccounting::default();
-    for f in post {
-        for l in &f.also_locations {
-            let k = key(l);
-            if let Some(c) = pre_counts.get_mut(&k) {
-                if *c > 0 {
-                    // Already accounted for by an earlier stage — carried forward, not newly
-                    // absorbed here.
-                    *c -= 1;
-                    continue;
-                }
-            }
-            acc.push_merge(l.rule_id.clone(), f.rule_id.clone());
-        }
-    }
-    acc
 }
 
 /// One alternative the architect can codify for a proposed rule.
@@ -552,6 +750,16 @@ pub struct LanguageVolume {
     pub lines: usize,
 }
 
+/// The size of one repo of a multi-repo scan: the files read and the non-blank source lines in
+/// them. [`ScanReport::code_lines`] is the sum over the repos; this keeps the parts, so a report
+/// about several services can say how large each one is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RepoVolume {
+    pub repo: String,
+    pub files: usize,
+    pub lines: usize,
+}
+
 /// Turn a `language -> line count` accumulator (merged across every repo in the scan) into the
 /// sorted `Vec<LanguageVolume>` the report carries: highest line count first, language name as
 /// the tiebreak so output is deterministic.
@@ -579,6 +787,77 @@ pub struct CoverageNote {
     pub tool: String,
     /// Human-readable explanation of why this tool/rule was skipped or failed.
     pub message: String,
+    /// The repo (`owner/repo`) the note is about, for a tool that ran once per repo. `None` for a
+    /// note about the whole scan, or one written before notes named their repo. A tool that
+    /// failed on one repo and ran on another is two facts; this is what keeps them apart when
+    /// the ledger is reconciled.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// True when the tool was INVOKED and then failed (it crashed, exited non-zero without a
+    /// result, or wrote output nobody could read). False for a tool that was not run: withheld
+    /// by policy, not installed or not provisionable, or given no rule to run. The first is a
+    /// failed part (it locks a client export and can be resumed); the second is a disclosed limit
+    /// of the scope. `serde(default)` (false) so a report persisted before this loads unchanged.
+    #[serde(default)]
+    pub tool_failed: bool,
+}
+
+/// The pass name a repo that could not be read is recorded under. Stable: a persisted report
+/// carries it.
+pub const REPOSITORY_READ_PASS: &str = "repository read";
+
+/// What a repo that could not be inspected leaves behind: see
+/// [`ScanReport::note_repo_not_inspected`]. Split into its three destinations so the scan loop,
+/// which holds them as separate locals, and the report method share one implementation.
+fn record_repo_not_inspected(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    failed_passes: &mut Vec<crate::ai_audit::FailedPass>,
+    not_inspected: &mut Vec<(String, String)>,
+    spec: &str,
+    reason: &str,
+    selected: &[SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    if not_inspected.iter().any(|(repo, _)| repo == spec) {
+        return;
+    }
+    not_inspected.push((spec.to_string(), reason.to_string()));
+    failed_passes.push(crate::ai_audit::FailedPass {
+        repo: spec.to_string(),
+        pass: REPOSITORY_READ_PASS.to_string(),
+        reason: reason.to_string(),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Io,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    });
+    // Every rule that would have run on this repo is on record as not run, so none of them can
+    // read as "checked, found nothing" for it, and the rules that did run on other repos are
+    // listed as incomplete with this repo named.
+    let skip = format!("{}: {reason}", crate::scan_ledger::REPO_UNREADABLE_MARKER);
+    for rid in AUDIT_RULES {
+        ledger.record_rule(
+            spec,
+            *rid,
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(skip.clone()),
+            0,
+            0,
+        );
+    }
+    for rule in selected.iter().filter(|r| r.applies_to(spec)) {
+        if AUDIT_RULES.contains(&rule.id.as_str()) {
+            continue;
+        }
+        let tier = if is_ci_tier_rule(&rule.id, corpus) {
+            crate::scan_ledger::RuleTier::Architectural
+        } else {
+            crate::scan_ledger::RuleTier::Semantic
+        };
+        ledger.record_rule(spec, rule.id.clone(), tier, false, Some(skip.clone()), 0, 0);
+    }
 }
 
 /// The git identity of ONE audited source dir at the moment it was scanned: exactly
@@ -627,9 +906,13 @@ pub struct ScanProvenance {
     pub audit_model: Option<String>,
     /// The model resolved for the calibration pass. `None` when calibration never ran.
     pub calibration_model: Option<String>,
+    /// The model the group reviewer (stage 2) ran on, resolved. `None` when it never ran (no AI
+    /// review, no findings, or a report from before the group reviewer existed).
+    #[serde(default)]
+    pub group_review_model: Option<String>,
     /// The model the clone-candidate judge (`clone_advisory`, Wave C) ran on, resolved by
-    /// `resolve_clone_judge_model`: the explicit pick, else `CAMERATA_CLONE_JUDGE_MODEL`, else
-    /// the project's fast tier. `None` when the judge never made a model call this scan (no
+    /// `resolve_clone_judge_model`: the explicit pick, else
+    /// the fast tier's built-in primary (Haiku 5.5). `None` when the judge never made a model call this scan (no
     /// clone rule armed, no candidates, or no model available), so a before/after comparison
     /// can attribute a change in the clone rules' findings to the judge.
     #[serde(default)]
@@ -654,6 +937,13 @@ pub struct ScanProvenance {
     /// deterministic floor (and therefore dep-audit) ran. `None` when
     /// `run_deterministic` was false (dep-audit never ran).
     pub osv_scanner_version: Option<String>,
+    /// "Vulnerability data as of": how current the CISA KEV, FIRST EPSS and OSV data behind the
+    /// dependency findings was, or plainly that a feed was not checked (see
+    /// [`crate::vuln_intel`]). `None` when no dependency audit ran (or the report predates the
+    /// stamp); the export then states every feed as not checked. `serde(default)` so a
+    /// previously persisted report still loads.
+    #[serde(default)]
+    pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
     /// RFC3339 timestamp when this audit run started.
     pub started_at: String,
     /// RFC3339 timestamp when this audit run finished.
@@ -690,6 +980,13 @@ pub struct ScanReport {
     /// scan. Surfaced so the filter's effect is visible ("N scanned, M excluded as noise").
     #[serde(default)]
     pub files_excluded: usize,
+    /// Non-blank lines in the files counted in `files_excluded`, read at scan time through
+    /// `count::excluded_noise_lines`, the function `camerata count` uses, so the export can state
+    /// the full quote basis (counted lines plus what was excluded as noise) without the source
+    /// on disk. `None` for a report from before this was recorded, or from a path that read no
+    /// local files: an honest absence in the manifest, never a fabricated zero.
+    #[serde(default)]
+    pub excluded_noise_lines: Option<usize>,
     /// Total characters of scannable code across all repos (after noise pruning). Drives the
     /// pre-audit cost estimate: the digest the model sees is built from this, so it's the
     /// honest token base before chunk/batch multipliers.
@@ -786,6 +1083,31 @@ pub struct ScanReport {
     /// `operator_chosen`. See `docs/design/2026-09-22_audit-integrated-alternatives.md`.
     #[serde(default)]
     pub recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation>,
+    /// Every recommendation the scan made, one per (rule, repo): each names its repo, so a
+    /// convention one service follows is never stated for another. [`Self::recommendations`] is
+    /// the by-rule view kept for readers that want one entry per rule; this is the list a
+    /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
+    #[serde(default)]
+    pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// Where services of one project differ on a rule: the rules violated in at least one repo
+    /// and clean in at least one other, as an observation, never a finding (see
+    /// [`patterns_matrix`]). Empty for a project of one repo. Rebuilt from the ledger and the
+    /// findings by [`Self::refresh_patterns_across_services`] whenever a report is stored or
+    /// sealed, so it can never disagree with them.
+    #[serde(default)]
+    pub patterns_across_services: patterns_matrix::PatternsAcrossServices,
+    /// The files and source lines of each repo read, in scan order. [`Self::code_lines`] and
+    /// [`Self::files_scanned`] are the totals over these.
+    #[serde(default)]
+    pub volume_by_repo: Vec<RepoVolume>,
+    /// The repos the scan was asked to inspect and could not: `(repo, reason)`. A folder that
+    /// is gone, a repo whose files could not be read. Such a repo is also in
+    /// [`Self::failed_passes`] (pass `repository read`) and has not-run rows in the ledger, but
+    /// this is the one list that says the deliverable covers fewer repos than the project, and
+    /// the release gate refuses a package while it is not empty. Empty on a scan that read every
+    /// repo.
+    #[serde(default)]
+    pub repos_not_inspected: Vec<(String, String)>,
     /// W6: every audit pass that FAILED or timed out during this scan (e.g. the alternative-
     /// recommendation pass hitting the CLI hang timeout), never silently swallowed. The
     /// export (`report_export::build_report_json`) turns each entry into an explicit
@@ -795,6 +1117,22 @@ pub struct ScanReport {
     /// deserializes as empty rather than failing to load.
     #[serde(default)]
     pub failed_passes: Vec<crate::ai_audit::FailedPass>,
+    /// The saved run this scan is (see [`crate::run_store`]); `camerata inspect --resume` and the
+    /// cockpit's "Run what remains" button run what is left of it. `None` when the run could not
+    /// be saved, and for a report written before runs were saved.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// The review tree: category, rule, sub-group, then the sites ([`crate::review_tree`]). Built
+    /// from the rows wherever a report becomes final ([`Self::assign_site_keys`]), so it is
+    /// sealed with them and stored in the inspection entry. `None` only on a report that never
+    /// passed through there.
+    #[serde(default)]
+    pub tree: Option<crate::review_tree::ReviewTree>,
+    /// A10: the rows the engine threw out and kept (`engine_discard`), each marked with its
+    /// reason. They are not in [`Self::findings`], so every exporter leaves them out by default,
+    /// and they never hold or block an export. Additive/`serde(default)` so older reports load.
+    #[serde(default)]
+    pub discarded: Vec<Finding>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -808,6 +1146,120 @@ pub struct ScanReport {
 }
 
 impl ScanReport {
+    /// Whether the AI review covered every file it was handed: no fatal AI error, no scan pass
+    /// that failed over files (`files_not_reviewed > 0`), and the spend limit did not stop the
+    /// run. The ONE completeness predicate: a scan manifest's `ai_covered` and the delta rescan's
+    /// reading of a saved inspection both use it, so neither can carry the absent findings of an
+    /// unreviewed file forward as "reviewed, found nothing". A failed pass that is not over
+    /// files (recommendations, fix text, the clone judge) leaves every file's review intact and
+    /// does not count. This does not say whether the review was on at all; callers add that.
+    pub fn ai_review_complete(&self) -> bool {
+        self.ai_error.is_none()
+            && self.failed_passes.iter().all(|f| f.files_not_reviewed == 0)
+            && !self.ledger.is_cost_capped()
+            && !self.ledger.is_outage_stopped()
+            && self.repos_not_inspected.is_empty()
+    }
+
+    /// Why this inspection is not a complete run, in plain words for the operator; empty when it
+    /// is complete. A client export is refused, and a package that records any of these is
+    /// refused by the release gate, while this is not empty (Zach, 2026-10-28: "We can't ship a
+    /// product to anyone that didn't fully run end-to-end properly."). Counts every failed pass,
+    /// every part that did not run (spend limit or outage stop), a fatal AI error and any repo
+    /// not inspected. Files left out as scope (vendored, generated, binary, over the size limit)
+    /// are not failures and are not counted here.
+    pub fn incomplete_reasons(&self) -> Vec<String> {
+        use crate::ai_audit::FailureClass;
+        let mut out: Vec<String> = Vec::new();
+        if let Some(e) = &self.ai_error {
+            out.push(format!("the AI review failed: {e}"));
+        }
+        if !self.repos_not_inspected.is_empty() {
+            let names: Vec<&str> = self
+                .repos_not_inspected
+                .iter()
+                .map(|(repo, _)| repo.as_str())
+                .collect();
+            out.push(format!(
+                "{} repositor{} not inspected: {}",
+                names.len(),
+                if names.len() == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                },
+                names.join(", ")
+            ));
+        }
+        // A disclosed limit of the scope (a tool not run by policy) is not a failed part.
+        let parts = || self.failed_passes.iter().filter(|f| !f.scope_note);
+        let did_not_run = parts()
+            .filter(|f| matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
+            .count();
+        let failed: Vec<&crate::ai_audit::FailedPass> = parts()
+            .filter(|f| !matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
+            .collect();
+        if !failed.is_empty() {
+            let mut names: Vec<String> = failed
+                .iter()
+                .take(3)
+                .map(|f| format!("{}, {}", f.repo, f.pass))
+                .collect();
+            if failed.len() > 3 {
+                names.push(format!("and {} more", failed.len() - 3));
+            }
+            out.push(format!(
+                "{} part{} failed ({})",
+                failed.len(),
+                if failed.len() == 1 { "" } else { "s" },
+                names.join("; ")
+            ));
+        }
+        if did_not_run > 0 || self.ledger.is_outage_stopped() || self.ledger.is_cost_capped() {
+            let cause = if self.ledger.is_outage_stopped() {
+                "the run stopped because the model provider could not be reached"
+            } else if self.ledger.is_cost_capped() {
+                if self.ledger.cost_cap().is_some_and(|c| c.cost_unknown) {
+                    "the spend limit could not be enforced (a call's cost could not be \
+                     determined) and stopped the run"
+                } else {
+                    "the spend limit stopped the run"
+                }
+            } else {
+                "the spend limit or an outage stopped the run"
+            };
+            out.push(format!(
+                "{cause}; {did_not_run} part{} did not run and {} never checked",
+                if did_not_run == 1 { "" } else { "s" },
+                if did_not_run == 1 { "was" } else { "were" }
+            ));
+        }
+        out
+    }
+
+    /// Record a repo the scan was asked to inspect and could not (a folder that is gone, files
+    /// that could not be read): a failed `repository read` pass, a not-run ledger row for every
+    /// rule that applies to it, and an entry in [`Self::repos_not_inspected`]. The repo is never
+    /// listed in [`Self::repos`], so nothing downstream reads it as inspected, and the release
+    /// gate refuses a package while the list is not empty.
+    pub fn note_repo_not_inspected(
+        &mut self,
+        spec: &str,
+        reason: &str,
+        selected: &[SelectedRule],
+        corpus: Option<&camerata_rules::RuleSet>,
+    ) {
+        record_repo_not_inspected(
+            &mut self.ledger,
+            &mut self.failed_passes,
+            &mut self.repos_not_inspected,
+            spec,
+            reason,
+            selected,
+            corpus,
+        );
+    }
+
     /// Redact every finding and every report-level string in place; returns how many secret
     /// values had to be replaced. Zero on a healthy pipeline (every producer redacts at
     /// construction), so a non-zero count is a missed producer. Idempotent.
@@ -834,11 +1286,14 @@ impl ScanReport {
     /// The connect-GitHub gate result: no scan performed.
     pub fn gated(repos: &[String]) -> Self {
         Self {
+            run_id: None,
+            tree: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
             code_lines: 0,
@@ -858,7 +1313,12 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
+            volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
@@ -871,11 +1331,14 @@ impl ScanReport {
     /// zero-findings scan.
     pub fn crashed(repos: &[String], message: String) -> Self {
         Self {
+            run_id: None,
+            tree: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
             code_lines: 0,
@@ -892,13 +1355,175 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
+            patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
+            volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
+            discarded: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
+    /// Fold a targeted rescan's picks into the stored report. A pick replaces the stored one for
+    /// its (rule, repo) in [`Self::recommendations_by_repo`], the list the multi-repo workbook's
+    /// "Rules applied" rows and the evidence gate read, and the by-rule view takes it as the
+    /// rule's latest pick. A pick that names no repo updates the by-rule view only. Every other
+    /// service's pick is left as it was.
+    pub fn fold_rescan_recommendations(&mut self, picks: Vec<crate::ai_audit::RuleRecommendation>) {
+        for pick in picks {
+            if !pick.repo.is_empty() {
+                self.recommendations_by_repo
+                    .retain(|r| !(r.rule_id == pick.rule_id && r.repo == pick.repo));
+                self.recommendations_by_repo.push(pick.clone());
+            }
+            self.recommendations.insert(pick.rule_id.clone(), pick);
+        }
+    }
+
+    /// Give every finding its stable site key ([`Finding::site_key`]). Call it wherever a report
+    /// becomes final and is handed out (the sealed export report, the report an audit job
+    /// returns, the one stored as the last scan), so no consumer ever sees an unkeyed row.
+    ///
+    /// It is also where the review tree is made: every row is keyed, a possible-duplicate link
+    /// follows its target to the target's final key, and the tree is rebuilt from the rows
+    /// ([`Self::attach_tree`]). Safe to call again.
+    pub fn assign_site_keys(&mut self) {
+        let before: Vec<String> = self.findings.iter().map(|f| f.site_key.clone()).collect();
+        crate::inspections::backfill_site_keys(&mut self.findings);
+        // A10: the rows the engine threw out are addressable too (a later decision, the Engine
+        // Check), so they carry a site key of their own.
+        crate::inspections::backfill_site_keys(&mut self.discarded);
+        let moved: std::collections::HashMap<String, String> = before
+            .iter()
+            .zip(&self.findings)
+            .filter(|(old, f)| !old.is_empty() && **old != f.site_key)
+            .map(|(old, f)| (old.clone(), f.site_key.clone()))
+            .collect();
+        if !moved.is_empty() {
+            for f in &mut self.findings {
+                if let Some(link) = f.possible_duplicate_of.as_mut() {
+                    if let Some(new_key) = moved.get(&link.key) {
+                        link.key.clone_from(new_key);
+                    }
+                }
+            }
+        }
+        self.attach_tree();
+    }
+
+    /// What a report stored by an older engine needs when it is loaded: the sites an older merge
+    /// folded into another row are promoted to rows of their own
+    /// ([`crate::review_tree::unfold_also_locations`]), then every row is keyed and the tree is
+    /// built ([`Self::assign_site_keys`]). Idempotent; a report made by the current engine passes
+    /// through unchanged.
+    pub fn normalize_loaded(&mut self) {
+        let rows_in = self.findings.len();
+        let added = crate::review_tree::unfold_also_locations(&mut self.findings);
+        if added > 0 {
+            // The unfold is its own ledger stage, so rows in plus what it added equals rows out
+            // and the report's row arithmetic still closes: rows exported + collapsed - unfolded
+            // additions == rows detected.
+            let mut acc = crate::scan_ledger::StageAccounting::default();
+            acc.push_added("also_locations_unfolded", added);
+            self.ledger.record_stage(
+                crate::review_tree::UNFOLD_STAGE,
+                rows_in,
+                self.findings.len(),
+                acc,
+            );
+        }
+        self.assign_site_keys();
+    }
+
+    /// Fold a targeted rescan's rows into the stored report. `refreshed` lists, per repo whose
+    /// audit returned Ok, the rule ids that were re-evaluated there; only the old rows (shipped
+    /// and thrown out) of those `(rule, repo)` pairs are replaced. A repo whose rescan failed, or
+    /// that the rule does not apply to, keeps every old row: nothing is lost to a failure, which
+    /// the caller discloses.
+    pub fn fold_rescan_rows(
+        &mut self,
+        refreshed: &[(String, Vec<String>)],
+        rows: Vec<Finding>,
+        discarded: Vec<Finding>,
+    ) {
+        let replaced = |f: &Finding| {
+            refreshed.iter().any(|(repo, ids)| {
+                *repo == f.repo && ids.iter().any(|id| id.eq_ignore_ascii_case(&f.rule_id))
+            })
+        };
+        self.findings.retain(|f| !replaced(f));
+        self.findings.extend(rows);
+        self.discarded.retain(|f| !replaced(f));
+        self.discarded.extend(discarded);
+        self.ledger.set_discarded(&self.discarded);
+        // The stored report is handed out as it is (the rescan route only sweeps secrets), so the
+        // new rows are keyed and the tree is rebuilt now, not at the next seal.
+        self.assign_site_keys();
+    }
+
+    /// A10: whether the rows the engine threw out and kept ([`Self::discarded`]) are the rows the
+    /// ledger counted, by reason, and each carries its mark.
+    pub fn discarded_reconciles(&self) -> bool {
+        self.discarded
+            .iter()
+            .all(crate::engine_discard::is_discarded)
+            && crate::engine_discard::tally(&self.discarded) == self.ledger.discarded().by_reason
+    }
+
+    /// Put the rows the reviewer restored back among the kept rows: each leaves
+    /// [`Self::discarded`], loses its mark and carries
+    /// [`crate::engine_discard::ENGINE_RESTORED_CAPTURE`]. The ledger's discarded tally is
+    /// brought back in step, so the report still reconciles. Returns how many rows were put
+    /// back. Rows that were never thrown out are untouched.
+    pub fn reinstate_restored(&mut self, restored: &crate::engine_discard::RestoredKeys) -> usize {
+        if restored.is_empty() || self.discarded.is_empty() {
+            return 0;
+        }
+        let thrown = std::mem::take(&mut self.discarded);
+        let (stay, back) = crate::engine_discard::reinstate(thrown, restored);
+        self.discarded = stay;
+        let count = back.len();
+        for mut f in back {
+            // It was never in the tree: it is placed again with the rows around it.
+            f.group_path.clear();
+            f.group_role = crate::review_tree::GroupRole::Primary;
+            self.findings.push(f);
+        }
+        if count > 0 {
+            self.ledger.set_discarded(&self.discarded);
+        }
+        count
+    }
+
+    /// Rebuild [`Self::tree`] from the rows: every row in exactly one sub-group, nodes above them.
+    /// A node that is still there keeps what the previous tree knew about it. The rows' own
+    /// `group_path` and `group_role` are rewritten to agree with the tree.
+    pub fn attach_tree(&mut self) {
+        let prev = self.tree.take();
+        let run_id = self.run_id.clone().unwrap_or_default();
+        self.tree = Some(crate::review_tree::build_tree(
+            &mut self.findings,
+            &mut self.discarded,
+            prev,
+            &crate::review_tree::ToolMap::builtin(),
+            &run_id,
+        ));
+    }
+
+    /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
+    /// [`Self::seal`] and wherever a report is stored for the cockpit, after the last change to
+    /// either. The themes a model grouped the rows into are kept only while the rows they cite
+    /// still exist.
+    pub fn refresh_patterns_across_services(&mut self) {
+        let themes = std::mem::take(&mut self.patterns_across_services.themes);
+        let mut fresh = patterns_matrix::build(self);
+        fresh.themes = patterns_matrix::keep_valid_themes(themes, &fresh);
+        self.patterns_across_services = fresh;
+    }
+
     /// THE sealing point (Pass-1 W1 — see
-    /// `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement C1: "every row the
+    /// the audit findings tracker, requirement C1: "every row the
     /// engine produces reaches the reader; nothing may be added to the report after the point
     /// where the row set is final"). Consumes `self` — the ONLY way to produce a
     /// [`SealedReport`]. Call this exactly once, as the LAST step of a scan pipeline, strictly
@@ -919,8 +1544,32 @@ impl ScanReport {
     /// gate appended to a private clone INSIDE `build_report_json` while the xlsx/JSON siblings
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
-    pub fn seal(mut self) -> SealedReport {
+    pub fn seal(self) -> SealedReport {
+        self.seal_with_restored(&crate::engine_discard::RestoredKeys::default())
+    }
+
+    /// [`Self::seal`] for a project whose reviewer has put thrown-out findings back
+    /// ([`crate::decisions::DecisionState::EngineRestored`]): a row the reviewer restored is
+    /// never thrown out again by the safety net below, and a restored row that an earlier step
+    /// already moved to [`Self::discarded`] is put back first ([`Self::reinstate_restored`]).
+    /// With nothing restored it is exactly [`Self::seal`].
+    pub fn seal_with_restored(
+        mut self,
+        restored: &crate::engine_discard::RestoredKeys,
+    ) -> SealedReport {
+        // A reviewer's restore first: a row an earlier step moved aside comes back before the
+        // safety net below looks at the rows.
+        self.reinstate_restored(restored);
+        // A10: the safety net behind the engine's own throw-out steps. A row that reached the seal
+        // marked thrown out, or as a row that is not a finding (a carried row from an older run),
+        // is moved aside, kept, and counted. Nothing is deleted.
+        let thrown = crate::junk_finding::take_thrown_out(&mut self.findings, restored);
+        if !thrown.is_empty() {
+            self.ledger.record_discarded(&thrown);
+            self.discarded.extend(thrown);
+        }
         self.sweep_secrets_before_seal();
+        self.refresh_patterns_across_services();
         // W21: audit every row's `path` HERE, because this is the one moment "every row" is
         // a complete and stable statement, and it is upstream of all three exporters — so
         // one audit covers the PDF, the workbook and the JSON rather than needing a check
@@ -929,6 +1578,12 @@ impl ScanReport {
         let hygiene =
             crate::scan_ledger::PathHygiene::audit(self.findings.iter().map(|f| f.path.as_str()));
         self.ledger.record_path_hygiene(hygiene);
+        // After the secret sweep, so a key is made from the text the report ships.
+        self.assign_site_keys();
+        // M4: real junk is marked (and so held) and wording judgments are flagged, on the rows
+        // that ship. A mark is recomputed here, so a carried row never keeps a stale one.
+        let content = crate::junk_finding::mark_rows(&mut self.findings);
+        self.ledger.record_content_check(content);
         SealedReport(self)
     }
 }
@@ -957,6 +1612,17 @@ impl SealedReport {
     /// reads more clearly with an explicit method call.
     pub fn as_scan_report(&self) -> &ScanReport {
         &self.0
+    }
+
+    /// A COPY of this report with the reviewer's overlay applied by `change`, wrapped as sealed
+    /// again WITHOUT re-sealing. The original is untouched. Only the overlay
+    /// ([`crate::report_export::apply_overlay`]) calls this: the copy's row set is the sealed set
+    /// plus the reviewer's own changes, which is the final set an export reads, and re-running the
+    /// seal over it would throw a restored row out again.
+    pub(crate) fn overlaid(&self, change: impl FnOnce(&mut ScanReport)) -> SealedReport {
+        let mut copy = self.0.clone();
+        change(&mut copy);
+        SealedReport(copy)
     }
 
     /// Unwrap back into an owned [`ScanReport`]. Only ever needed by code that must hand the
@@ -1139,18 +1805,44 @@ pub(crate) fn semantic_rule_ids_for_repo(
         .collect()
 }
 
+/// Split one repo's fresh AI findings into what the ledger needs: how many findings each rule
+/// FIRED (`NotAssessed` rows excluded, so an honesty row never counts as a detection) and which
+/// rules were NOT ASSESSED, with the reason. A rule in the second map was armed but nothing was
+/// judged against it.
+pub(crate) fn split_fired_and_not_assessed(
+    findings: &[Finding],
+) -> (
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<String, String>,
+) {
+    use camerata_api_types::audit::FindingKind;
+    let mut fired: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut not_assessed: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for f in findings {
+        match &f.kind {
+            Some(FindingKind::NotAssessed(n)) => {
+                not_assessed.insert(f.rule_id.clone(), n.reason_detail.clone());
+            }
+            _ => *fired.entry(f.rule_id.clone()).or_insert(0) += 1,
+        }
+    }
+    (fired, not_assessed)
+}
+
 /// Queue the honest disclosure for a rule that has a registered checker but got no credited
 /// deterministic verdict for this repo: "the scan was incomplete" when the checker was withheld
 /// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
 fn note_unanswered_checker_rule(
     ledger: &mut crate::scan_ledger::ScanLedger,
+    repo: &str,
     rule_id: &str,
     scan_incomplete: bool,
 ) {
     if scan_incomplete && architectural::is_withheld_on_incomplete_scan(rule_id) {
-        ledger.note_incomplete_scan_rule(rule_id);
+        ledger.note_incomplete_scan_rule(repo, rule_id);
     } else {
-        ledger.note_config_gated_rule(rule_id);
+        ledger.note_config_gated_rule(repo, rule_id);
     }
 }
 
@@ -1287,6 +1979,72 @@ pub fn build_llm(
 /// takes effect on the next audit with no restart. The server passes its live store and the
 /// CLI passes the real Keychain store.
 #[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_controlled(
+    creds: &dyn crate::credentials::CredentialStore,
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+    // How this run executes: efficiency switches and the spend cap (see
+    // [`crate::cost_cap::RunControls`]).
+    controls: crate::cost_cap::RunControls,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
+    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
+    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
+    };
+    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
+    // session file; the sink remembers each session id so source deletion can remove exactly
+    // those files. The Api backend never spawns `claude`, so it records nothing.
+    let sessions = crate::llm::SessionSink::new();
+    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
+    let (mut report, manifest) = audit_repos_with_llm_controlled(
+        &llm,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        backend_resolution,
+        corpus,
+        chosen_options,
+        controls,
+    )
+    .await;
+    report.provenance.model_sessions = sessions.snapshot();
+    (report, manifest)
+}
+
+/// [`audit_repos_controlled`] with the default controls: every efficiency measure on unless the
+/// environment ([`crate::efficiency::EFFICIENCY_ENV`]) says otherwise, and no spend cap.
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     creds: &dyn crate::credentials::CredentialStore,
     sources: &[(String, std::path::PathBuf)],
@@ -1308,21 +2066,55 @@ pub async fn audit_repos(
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
-    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
-    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
-    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
-    let llm_backend = match &backend_resolution {
-        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
-        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
-        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
-    };
-    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
-    // session file; the sink remembers each session id so source deletion can remove exactly
-    // those files. The Api backend never spawns `claude`, so it records nothing.
-    let sessions = crate::llm::SessionSink::new();
-    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
-    let (mut report, manifest) = audit_repos_with_llm(
-        &llm,
+    audit_repos_controlled(
+        creds,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        ledger,
+        backend_resolution,
+        corpus,
+        chosen_options,
+        crate::cost_cap::RunControls::from_env(),
+    )
+    .await
+}
+
+/// [`audit_repos_with_llm_controlled`] with the default controls (see [`audit_repos`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_with_llm(
+    llm: &dyn crate::llm::LlmPort,
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    audit_repos_with_llm_controlled(
+        llm,
         sources,
         selected,
         extra_notes,
@@ -1340,10 +2132,9 @@ pub async fn audit_repos(
         backend_resolution,
         corpus,
         chosen_options,
+        crate::cost_cap::RunControls::from_env(),
     )
-    .await;
-    report.provenance.model_sessions = sessions.snapshot();
-    (report, manifest)
+    .await
 }
 
 /// The brownfield audit over an injected model. [`audit_repos`] is this with the real `Llm`; a
@@ -1351,7 +2142,7 @@ pub async fn audit_repos(
 /// checkers, the clone advisory seam, the semantic pass, calibration) runs with no network and
 /// no spend. Everything about the audit is documented on the parameters below and in the body.
 #[allow(clippy::too_many_arguments)]
-pub async fn audit_repos_with_llm(
+pub async fn audit_repos_with_llm_controlled(
     llm: &dyn crate::llm::LlmPort,
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
@@ -1401,6 +2192,8 @@ pub async fn audit_repos_with_llm(
     // `RuleSelection.chosen_option` by the caller. Used as the "currently selected" marker in
     // the recommendation prompt and as the fallback when the model's answer can't be trusted.
     chosen_options: &std::collections::HashMap<String, String>,
+    // How this run executes: efficiency switches and the spend cap.
+    controls: crate::cost_cap::RunControls,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // The live preview streams findings into the job as passes complete, BEFORE the final dedup,
     // calibration and bounds. Hand the job the corpus up front so every streamed batch (the
@@ -1455,6 +2248,28 @@ pub async fn audit_repos_with_llm(
     // installed into the client's AGENTS.md/CONVENTIONS.md as a directive.
     let scan_rules = inspectable_rules_for_scan(selected, corpus);
     let selected: &[SelectedRule] = &scan_rules;
+    // SPEND LIMIT, enforceability: with a limit set, every model this run will call must have a
+    // list price, or its calls would add nothing to the spend the limit counts. Refused here,
+    // before any file is read or any model is called.
+    if run_ai_review {
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let models = crate::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            deep,
+            &ids,
+            &controls,
+        );
+        if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
+            let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
+            let mut report = ScanReport::gated(&repos);
+            report.gated = false;
+            report.blocked = true;
+            report.message = Some(why.clone());
+            report.ai_blocked_reason = Some(why);
+            return (report, incremental_prior.cloned().unwrap_or_default());
+        }
+    }
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -1462,9 +2277,18 @@ pub async fn audit_repos_with_llm(
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
     // if its rule fingerprint matches. Also stamped onto the report's provenance below (P1) so
     // the report states exactly which rule SET produced these findings.
-    let rules_fp = crate::scan_cache::rules_fingerprint(
-        selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
-    );
+    // Each rule's corpus content hash is part of it (when the corpus is loaded), so a corpus
+    // edit to a rule (its scope, its options) forces a full rescan rather than reusing findings
+    // produced under the old rule.
+    let rules_fp = crate::scan_cache::rules_fingerprint_with_content(selected.iter().map(|r| {
+        (
+            r.id.as_str(),
+            r.repos.as_slice(),
+            corpus
+                .and_then(|c| c.get_by_id(&r.id))
+                .map(camerata_rules::Rule::content_hash),
+        )
+    }));
     // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
     // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
     let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
@@ -1481,12 +2305,22 @@ pub async fn audit_repos_with_llm(
         &crate::ai_audit::resolve_audit_model(model),
         calibration_model,
         selected,
-    );
-    let effective_prior = incremental_prior.filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
+    )
+    .with_terse_output(controls.efficiency.terse_output)
+    .with_applies_to_routing(controls.efficiency.applies_to_routing);
+    // Rank 5 `result_cache`: OFF forces a full AI re-scan (the same as `--full`), whatever the
+    // prior manifest holds.
+    let effective_prior = incremental_prior
+        .filter(|_| controls.efficiency.result_cache)
+        .filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
     let mut manifest_builder = crate::scan_cache::ManifestBuilder::new()
         .with_rules_fingerprint(rules_fp.clone())
         .with_ai_key(ai_key.clone());
     let mut all_findings = Vec::new();
+    // The review tree's sub-groups, formed repo by repo as the rows are grouped; the tree is
+    // assembled from them and the rows once the report is built.
+    let mut sub_allocator = crate::review_tree::SubgroupAllocator::new();
+    let mut tree_sub_nodes: Vec<crate::review_tree::TreeNode> = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut test_files_total = 0usize;
@@ -1497,28 +2331,50 @@ pub async fn audit_repos_with_llm(
     // how large the repo was. `scan_repos` (the lighter phase-1 preview) already did this
     // correctly; this mirrors that logic over the SAME `files` this loop already reads.
     let mut files_excluded_total = 0usize;
+    // 22c: the non-blank lines in those excluded files, for the manifest's quote basis.
+    let mut excluded_noise_lines_total = 0usize;
+    let mut any_repo_read = false;
     let mut engine_artifacts_total = 0usize;
+    // H4: every auditable file the walk did not read (over the size cap or past the file cap),
+    // by path, for the Coverage section.
+    // Bounded: the first paths per reason are named, the rest counted (`SkippedFileList`).
+    let mut skipped_files_total = crate::scan_ledger::SkippedFileList::default();
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    let mut volume_by_repo: Vec<RepoVolume> = Vec::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
     // Per-rule alternative recommendations, accumulated across every repo this scan touches
     // (see `ScanReport::recommendations`'s doc comment for the last-repo-wins simplification
     // when a project-level rule is scanned in more than one repo).
-    let mut recommendations: std::collections::HashMap<
-        String,
+    // Kept per (rule, repo): each repo is assessed on its own, so the convention found in one
+    // repo is never overwritten by, or stated for, another.
+    let mut recommendations: std::collections::BTreeMap<
+        (String, String),
         crate::ai_audit::RuleRecommendation,
-    > = std::collections::HashMap::new();
+    > = std::collections::BTreeMap::new();
+    // Repos the scan could not read: see `ScanReport::repos_not_inspected`.
+    let mut repos_not_inspected: Vec<(String, String)> = Vec::new();
+    // How many repos had a whole-repo AI failure, beyond the first.
+    let mut ai_error_repos = 0usize;
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // A10: the rows the engine threw out. Kept, marked with the reason, and apart from the rows
+    // that ship: they become `ScanReport::discarded`.
+    let mut all_discarded: Vec<Finding> = Vec::new();
     // W1: the pipeline-integrity ledger for this scan — see `crate::scan_ledger`'s module
     // doc. Named `pipeline_ledger` (not `ledger`) to avoid colliding with this function's own
     // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
     // thing (cumulative token-usage accounting, not pipeline row/rule integrity).
     let mut pipeline_ledger = crate::scan_ledger::ScanLedger::new();
+    // Which repos each selected rule is bound to, so the patterns matrix can tell a rule that is
+    // not bound to a repo (not applicable there) from one that should have run and did not.
+    for rule in selected {
+        pipeline_ledger.note_rule_scope(&rule.id, &rule.repos);
+    }
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -1535,9 +2391,21 @@ pub async fn audit_repos_with_llm(
     // the FIRST is kept (matching `ai_blocked_reason`'s single-reason shape); it is still
     // also folded into `notes` below so it is not lost from the human-readable message either.
     let mut first_ai_error: Option<String> = None;
+    // H11: what the incremental run re-audited and carried forward, summed over every repo, for
+    // the one `IncrementalCarry` record the exporters read.
+    let mut incremental_carry = crate::scan_cache::CarryTally::default();
+    // Producer and carried-from marks held aside while the merge stages run (see
+    // [`BookkeepingCaptures`]), restored once the whole scan's rows are final.
+    let mut bookkeeping = BookkeepingCaptures::default();
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
-    let meter = crate::ai_audit::UsageMeter::default();
+    // The model the fix stage calls (rank 10): resolved once, from the same controls the
+    // spend-limit check above listed it from, to the same id (never left for the transport's
+    // process default to fill in; see `ai_audit::stage_model`).
+    let fix_model: Option<String> = Some(crate::ai_audit::resolve_audit_model(
+        controls.fix_model_for(model, calibration_model),
+    ));
+    let meter = crate::ai_audit::UsageMeter::with_controls(controls.clone());
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -1577,7 +2445,7 @@ pub async fn audit_repos_with_llm(
     // The model is now ALSO handed the full selected ruleset, including rules that
     // already have a deterministic detector, as a deliberate second pair of eyes; a
     // model finding that duplicates a deterministic one at the same site collapses back
-    // into a single row (`crate::ai_audit::merge_semantic_groups`), never doubling a row.
+    // into a single row (`crate::review_tree::group_semantic`), never doubling a row.
     //
     // NO exclusion remains here.
     //
@@ -1603,6 +2471,9 @@ pub async fn audit_repos_with_llm(
     // each repo against its own chosen rules ∪ the project-level set, never the whole
     // selection across the board.
 
+    // The tool progress shown for the job is keyed by repo and tool when there is more than one
+    // repo, so each repo's floor and architectural results are rows of their own.
+    let multi_repo = sources.len() > 1;
     for (spec, dir) in sources {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -1627,20 +2498,56 @@ pub async fn audit_repos_with_llm(
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
-        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir))
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
+        // The excluded-noise line count (22c) is read in the same blocking task, through the
+        // function `camerata count` uses (`count::excluded_noise_lines`).
+        match tokio::task::spawn_blocking(move || {
+            read_local_repo_files(&dir).map(|extracted| {
+                let noise_lines =
+                    count::excluded_noise_lines(&dir, &extracted.excluded_noise_paths);
+                (extracted, noise_lines)
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
         {
-            Ok(ExtractedRepo {
-                files,
-                reference_files,
-                truncated,
-                reference_truncated,
-                excluded_noise,
-                excluded_noise_paths: _,
-            }) => {
+            Ok((
+                ExtractedRepo {
+                    files,
+                    reference_files,
+                    truncated,
+                    reference_truncated,
+                    skipped_oversize,
+                    skipped_beyond_cap,
+                    skipped_unreadable,
+                    skipped_sizes,
+                    file_cap,
+                    excluded_noise,
+                    excluded_noise_paths: _,
+                },
+                noise_lines,
+            )) => {
+                // H9: the path-only floor rules still run over every file the walk named but
+                // could not read: a 2 MB `.pem` or a binary `.p12` is a secret file by its name.
+                let unread_paths: Vec<String> = skipped_oversize
+                    .iter()
+                    .chain(&skipped_beyond_cap)
+                    .chain(&skipped_unreadable)
+                    .cloned()
+                    .collect();
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
+                excluded_noise_lines_total += noise_lines;
+                any_repo_read = true;
+                skipped_files_total.record_repo(
+                    spec,
+                    crate::scan_ledger::RepoSkips {
+                        oversize: skipped_oversize,
+                        beyond_cap: skipped_beyond_cap,
+                        not_text: skipped_unreadable,
+                        sizes: &skipped_sizes,
+                        file_cap,
+                    },
+                );
                 // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
                 // source — the 2026-10-16 defect. Fed to the integrity gate below.
                 engine_artifacts_total += files
@@ -1650,6 +2557,11 @@ pub async fn audit_repos_with_llm(
                 code_chars_total += files.iter().map(|(_, c)| c.len()).sum::<usize>();
                 let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
                 code_lines_total += repo_lines;
+                volume_by_repo.push(RepoVolume {
+                    repo: spec.to_string(),
+                    files: files.len(),
+                    lines: repo_lines,
+                });
                 for (lang, n) in repo_lang_lines {
                     *lang_lines_total.entry(lang).or_insert(0) += n;
                 }
@@ -1737,9 +2649,13 @@ pub async fn audit_repos_with_llm(
                 let mut repo_findings = Vec::new();
                 if run_deterministic {
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_running(jid, "floor");
+                        jstore.det_tool_running(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "floor", multi_repo),
+                        );
                     }
                     let mut floor = audit_files(spec, &files);
+                    floor.extend(audit::audit_unread_paths(spec, &unread_paths, &files));
                     // P4: the ONE context fact that needs real git plumbing (whether a
                     // committed secret also appears in an EARLIER commit) rather than just
                     // the already-fetched file set `audit_files` works from — see
@@ -1747,7 +2663,11 @@ pub async fn audit_repos_with_llm(
                     // in the impure orchestration layer, instead of `onboard::audit`.
                     attach_secret_history_capture(&mut floor, &repo_root_for_history).await;
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_done(jid, "floor", floor.len());
+                        jstore.det_tool_done(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "floor", multi_repo),
+                            floor.len(),
+                        );
                         jstore.add_findings(jid, floor.clone());
                     }
                     // W1: the content floor runs AUDIT_RULES unconditionally over every file
@@ -1757,6 +2677,7 @@ pub async fn audit_repos_with_llm(
                     for rid in AUDIT_RULES {
                         let emitted = floor.iter().filter(|f| f.rule_id == *rid).count();
                         pipeline_ledger.record_rule(
+                            spec,
                             *rid,
                             crate::scan_ledger::RuleTier::Deterministic,
                             true,
@@ -1764,6 +2685,11 @@ pub async fn audit_repos_with_llm(
                             files.len(),
                             emitted,
                         );
+                    }
+                    for f in &mut floor {
+                        f.captures
+                            .entry(PRODUCED_TIER_CAPTURE.to_string())
+                            .or_insert_with(|| "deterministic".to_string());
                     }
                     repo_findings = floor;
 
@@ -1776,7 +2702,10 @@ pub async fn audit_repos_with_llm(
                     // above) AND at least one of its `interest_globs` files exists — never a
                     // false "clean" on a repo with no `supabase/` directory.
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_running(jid, "architectural");
+                        jstore.det_tool_running(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
+                        );
                     }
                     // Reference text (HTML, components, docs) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
@@ -1789,7 +2718,11 @@ pub async fn audit_repos_with_llm(
                         architectural::architectural_input(&files, &reference_files, &arch_armed);
                     let arch = audit_architectural(spec, &arch_input, &arch_armed);
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_done(jid, "architectural", arch.len());
+                        jstore.det_tool_done(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
+                            arch.len(),
+                        );
                         jstore.add_findings(jid, arch.clone());
                     }
                     // W1 / W4: classify every CI-tier (mechanical/architectural) rule SELECTED
@@ -1816,17 +2749,31 @@ pub async fn audit_repos_with_llm(
                             corpus,
                         ) {
                             Some("arch_checker") => {
+                                // The files the rule's checker actually matched, not every file
+                                // the repo handed the audit: a rule with no file in scope had
+                                // nothing to look at, which is not a clean result.
+                                let scope = architectural::files_in_scope(rid, &files);
+                                let evaluated = match scope {
+                                    architectural::RuleScopeFiles::Files(n) => n,
+                                    architectural::RuleScopeFiles::RepoLevel
+                                    | architectural::RuleScopeFiles::Unknown => files.len(),
+                                };
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
                                     None,
-                                    files.len(),
+                                    evaluated,
                                     emitted,
                                 );
+                                if scope == architectural::RuleScopeFiles::RepoLevel {
+                                    pipeline_ledger.mark_repo_level_rule(spec, rid);
+                                }
                             }
                             Some("gateway_rule_registry") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
@@ -1837,6 +2784,7 @@ pub async fn audit_repos_with_llm(
                             }
                             Some("semgrep") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::ExternalTool,
                                     true,
@@ -1847,6 +2795,7 @@ pub async fn audit_repos_with_llm(
                             }
                             Some("scan_preview_linter") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::ExternalTool,
                                     true,
@@ -1888,6 +2837,7 @@ pub async fn audit_repos_with_llm(
                                 ) {
                                     note_unanswered_checker_rule(
                                         &mut pipeline_ledger,
+                                        spec,
                                         rid,
                                         scan_incomplete,
                                     );
@@ -1909,12 +2859,23 @@ pub async fn audit_repos_with_llm(
                         .collect();
                     if !clone_armed.is_empty() {
                         let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
-                        let judge_model = clone_advisory::resolve_clone_judge_model(None);
-                        let unavailable = ai_blocked_reason
-                            .clone()
-                            .unwrap_or_else(|| "deterministic-only scan".to_string());
+                        let judge_model = controls.clone_judge_model_for();
+                        // SPEND CAP: the judge is a stage like any other; past the cap it does not
+                        // start and is recorded as NOT RUN.
+                        let clone_blocked = run_ai_review
+                            && meter.stage_blocked(spec, crate::ai_audit::STAGE_CLONE_JUDGE);
+                        let unavailable = if clone_blocked {
+                            format!(
+                                "{} before the judge ran",
+                                crate::cost_cap::cause_for(meter.cost_unknown())
+                            )
+                        } else {
+                            ai_blocked_reason
+                                .clone()
+                                .unwrap_or_else(|| "deterministic-only scan".to_string())
+                        };
                         let outcome = clone_advisory::judge_clone_candidates(
-                            run_ai_review.then_some(llm),
+                            (run_ai_review && !clone_blocked).then_some(llm),
                             clone_advisory::JudgeRequest {
                                 repo: spec,
                                 files: &files,
@@ -1928,7 +2889,7 @@ pub async fn audit_repos_with_llm(
                             feedback,
                         )
                         .await;
-                        clone_advisory::record_in_ledger(&mut pipeline_ledger, &outcome);
+                        clone_advisory::record_in_ledger(&mut pipeline_ledger, spec, &outcome);
                         if outcome.judge_model.is_some() {
                             clone_judge_model_used = outcome.judge_model.clone();
                         }
@@ -1947,6 +2908,7 @@ pub async fn audit_repos_with_llm(
                     // "verified clean" just because it was selected.
                     for rid in AUDIT_RULES {
                         pipeline_ledger.record_rule(
+                            spec,
                             *rid,
                             crate::scan_ledger::RuleTier::Deterministic,
                             false,
@@ -1977,6 +2939,7 @@ pub async fn audit_repos_with_llm(
                         .is_some();
                         if has_detector {
                             pipeline_ledger.record_rule(
+                                spec,
                                 *rid,
                                 crate::scan_ledger::RuleTier::Architectural,
                                 false,
@@ -1992,6 +2955,7 @@ pub async fn audit_repos_with_llm(
                             // were on, since the config it needs is absent for this repo.
                             note_unanswered_checker_rule(
                                 &mut pipeline_ledger,
+                                spec,
                                 rid,
                                 scan_incomplete,
                             );
@@ -2009,14 +2973,30 @@ pub async fn audit_repos_with_llm(
                 if let (Some(prior), None) = (incremental_prior, effective_prior) {
                     // The prior matched on schema, rule selection and AI coverage, so what
                     // differs is the question it answered (model, prompt, rule wording).
-                    let question_changed =
-                        prior.is_current() && prior.matches_rules(&rules_fp) && prior.ai_covered;
-                    notes.push(if question_changed {
+                    let rules_match = prior.is_current() && prior.matches_rules(&rules_fp);
+                    let question_changed = rules_match && prior.ai_covered;
+                    notes.push(if !controls.efficiency.result_cache {
+                        format!("{spec}: result cache switched off (full re-scan)")
+                    } else if run_ai_review && rules_match && !prior.ai_covered {
+                        // H3: the earlier scan left files unreviewed (a failed pass, a spend
+                        // stop, an AI error or no AI at all). Its fingerprints are not evidence
+                        // that those files were looked at, so the review runs over everything.
                         format!(
-                            "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
+                            "{spec}: prior scan incomplete, full AI review re-run (full re-scan)"
+                        )
+                    } else if rules_match && !prior.ai_covered {
+                        // The AI review is off in this run, so nothing is re-run in full: the
+                        // earlier scan has no complete AI review to reuse, and that is all this
+                        // run can say about it.
+                        format!(
+                            "{spec}: prior scan had no complete AI review, so nothing is reused (full re-scan)"
+                        )
+                    } else if question_changed {
+                        format!(
+                            "{spec}: model, prompt or rule wording changed since last scan (full re-scan)"
                         )
                     } else {
-                        format!("{spec}: rule selection changed since last scan — full re-scan")
+                        format!("{spec}: rule selection changed since last scan (full re-scan)")
                     });
                 }
                 if effective_prior.is_some() && part.unchanged_count > 0 {
@@ -2034,12 +3014,89 @@ pub async fn audit_repos_with_llm(
                 // findings (those are AI results from a prior run), no per-repo audit, no
                 // tokens. A deterministic-only scan therefore never touches the LLM.
                 let mut ai_for_repo: Vec<Finding> = Vec::new();
-                if run_ai_review {
-                    ai_for_repo = part.carried.clone();
+                // Set when none of this repo's files was reviewed by the AI pass (the spend limit
+                // had already stopped the run, or the whole review failed). The incremental cache
+                // must not record those files as audited.
+                let mut ai_all_unreviewed = false;
+                if run_ai_review && meter.repo_blocked(spec) {
+                    // The spend limit stopped the run before this repo: its model work is not
+                    // started (no digests built, no calls), its rules are on record as not run
+                    // and it is named as unfinished. Its token-free checks above still ran.
+                    ai_all_unreviewed = true;
+                    notes.push(if meter.outage_stopped() {
+                        format!(
+                            "{spec}: AI review not run (the run stopped because the model \
+                             provider could not be reached)"
+                        )
+                    } else {
+                        format!(
+                            "{spec}: AI review not run ({})",
+                            crate::cost_cap::cause_for(meter.cost_unknown())
+                        )
+                    });
+                    for (rid, _) in &semantic {
+                        pipeline_ledger.record_rule(
+                            spec,
+                            rid.clone(),
+                            crate::scan_ledger::RuleTier::Semantic,
+                            false,
+                            Some(if meter.outage_stopped() {
+                                "not run: the run stopped because the model provider could not \
+                                 be reached, before any pass checked it"
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "not run: {} before any pass checked it",
+                                    crate::cost_cap::cause_for(meter.cost_unknown())
+                                )
+                            }),
+                            0,
+                            0,
+                        );
+                    }
+                    all_failed_passes.push(crate::ai_audit::FailedPass {
+                        repo: spec.to_string(),
+                        pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES.to_string(),
+                        reason: if meter.outage_stopped() {
+                            "NOT RUN: the run stopped because the model provider could not be \
+                             reached before this repository was reviewed. This inspection is \
+                             incomplete."
+                                .to_string()
+                        } else {
+                            format!(
+                                "NOT RUN: {} before this repository was reviewed. This \
+                                 inspection is incomplete.",
+                                crate::cost_cap::cause_for(meter.cost_unknown())
+                            )
+                        },
+                        files_not_reviewed: files.len(),
+                        class: if meter.outage_stopped() {
+                            crate::ai_audit::FailureClass::OutageStop
+                        } else {
+                            crate::ai_audit::FailureClass::SpendLimit
+                        },
+                        files: Vec::new(),
+                        attempts: Vec::new(),
+                        scope_note: false,
+                    });
+                } else if run_ai_review {
+                    // H11: every carried finding names the commit it was last found at, so a
+                    // reader can tell it was not re-audited this run. A finding carried on from
+                    // an earlier incremental run keeps the commit it was last actually audited at.
+                    let prior_commit = effective_prior.and_then(|m| m.commits.get(spec)).cloned();
+                    let mut carried = part.carried.clone();
+                    crate::scan_cache::mark_carried(&mut carried, prior_commit.as_deref());
+                    incremental_carry.add_repo(
+                        part.changed.len(),
+                        part.unchanged_count,
+                        carried.len(),
+                        prior_commit,
+                    );
+                    ai_for_repo = carried.clone();
                     if let Some((jstore, jid)) = job {
                         // Carried findings are real results for this run — surface them in the
                         // live preview alongside the floor.
-                        jstore.add_findings(jid, part.carried.clone());
+                        jstore.add_findings(jid, carried);
                     }
                     // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY
                     // findings. Skipped when nothing changed (a fully-cached repo costs zero
@@ -2057,6 +3114,7 @@ pub async fn audit_repos_with_llm(
                         for (rid, _) in &semantic {
                             let emitted = part.carried.iter().filter(|f| &f.rule_id == rid).count();
                             pipeline_ledger.record_rule(
+                                spec,
                                 rid.clone(),
                                 crate::scan_ledger::RuleTier::Semantic,
                                 true,
@@ -2066,34 +3124,56 @@ pub async fn audit_repos_with_llm(
                             );
                         }
                     } else {
-                        match crate::ai_audit::audit_repo(
-                            llm,
-                            spec,
-                            &part.changed,
-                            &semantic,
-                            &alternatives,
-                            // `forced` is always empty on the main scan — nothing is
-                            // operator-forced here; that's exclusively the targeted
-                            // `rescan-alternatives` endpoint's job.
-                            &std::collections::HashMap::new(),
-                            model,
-                            calibration_model,
-                            mode,
-                            thorough,
-                            feedback,
-                            job,
-                            Some(&meter),
-                            Some(&files),
-                        )
-                        .await
-                        {
+                        // The rules with the `applies_to` scope the corpus declares for
+                        // each (rank 7): `audit_repo` routes on it when the switch is on.
+                        let audit_rules = crate::scan_routing::audit_rules(&semantic, corpus);
+                        // `forced` is always empty on the main scan — nothing is
+                        // operator-forced here; that's exclusively the targeted
+                        // `rescan-alternatives` endpoint's job.
+                        let no_forced = std::collections::HashMap::new();
+                        // H5: with the consensus option on, the whole audit runs three times
+                        // and only what two runs agree on comes back (see `crate::consensus`).
+                        let audited =
+                            crate::consensus::run_audit_passes(spec, controls.consensus, || {
+                                crate::ai_audit::audit_repo(
+                                    llm,
+                                    spec,
+                                    &part.changed,
+                                    &audit_rules,
+                                    &alternatives,
+                                    &no_forced,
+                                    model,
+                                    calibration_model,
+                                    mode,
+                                    thorough,
+                                    feedback,
+                                    job,
+                                    Some(&meter),
+                                    Some(&files),
+                                )
+                            })
+                            .await;
+                        match audited {
                             Ok((
-                                ai_findings,
+                                mut ai_findings,
                                 _ai_rules,
                                 repo_recs,
                                 repo_failed_passes,
                                 repo_stage_samples,
                             )) => {
+                                // A10: rows the audit threw out come back marked; keep them apart
+                                // from the rows that go on, and count them by reason.
+                                let (thrown_out, kept) =
+                                    crate::engine_discard::split_discarded(ai_findings);
+                                ai_findings = kept;
+                                pipeline_ledger.record_discarded(&thrown_out);
+                                all_discarded.extend(thrown_out);
+                                // H12: whoever the rule id belongs to, these came from the model.
+                                for f in &mut ai_findings {
+                                    f.captures
+                                        .entry(PRODUCED_TIER_CAPTURE.to_string())
+                                        .or_insert_with(|| "semantic".to_string());
+                                }
                                 for sample in repo_stage_samples {
                                     pipeline_ledger.record_stage_sample(sample);
                                 }
@@ -2106,11 +3186,8 @@ pub async fn audit_repos_with_llm(
                                 // "verified clean"). An AD HOC `AI-`-prefixed id the model
                                 // invented (never pre-declared — it only exists because it
                                 // fired) is recorded as its own new entry, same tier.
-                                let mut ai_counts: std::collections::HashMap<String, usize> =
-                                    std::collections::HashMap::new();
-                                for f in &ai_findings {
-                                    *ai_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
-                                }
+                                let (mut ai_counts, not_assessed) =
+                                    split_fired_and_not_assessed(&ai_findings);
                                 // Pass-1 W2 (A5.4): a rule this repo's alternatives pass judged
                                 // NOT APPLICABLE (positive evidence the concern is absent here)
                                 // must be recorded as its OWN outcome, never folded into
@@ -2124,13 +3201,58 @@ pub async fn audit_repos_with_llm(
                                 for rec in &repo_recs {
                                     if !rec.applicable {
                                         pipeline_ledger.note_not_applicable_rule(
+                                            spec,
                                             rec.rule_id.to_ascii_uppercase(),
                                         );
                                     }
                                 }
+                                // SPEND CAP: a rule the cap left unchecked on part of the code
+                                // is NOT recorded as having run, so the integrity ledger cannot
+                                // read "ran, found nothing" for code that was never looked at.
+                                let cap_record = meter.cost_cap_record();
                                 for (rid, _) in &semantic {
+                                    // A rule the router found no file for was never run: record
+                                    // it as not run with the reason, never as "ran, found
+                                    // nothing" (that would read as verified clean).
+                                    if let Some(note) = not_assessed.get(rid) {
+                                        pipeline_ledger.record_rule(
+                                            spec,
+                                            rid.clone(),
+                                            crate::scan_ledger::RuleTier::Semantic,
+                                            false,
+                                            Some(note.clone()),
+                                            0,
+                                            0,
+                                        );
+                                        continue;
+                                    }
                                     let emitted = ai_counts.remove(rid).unwrap_or(0);
+                                    let coverage = cap_record
+                                        .as_ref()
+                                        .map(|c| c.rule_coverage(spec, rid))
+                                        .unwrap_or(crate::cost_cap::RuleCoverage::Complete);
+                                    if coverage == crate::cost_cap::RuleCoverage::NotRun {
+                                        pipeline_ledger.record_rule(
+                                            spec,
+                                            rid.clone(),
+                                            crate::scan_ledger::RuleTier::Semantic,
+                                            false,
+                                            Some(format!(
+                                                "not run: {} before any pass checked it",
+                                                cap_record
+                                                    .as_ref()
+                                                    .map(crate::cost_cap::CostCapRecord::cause)
+                                                    .unwrap_or(
+                                                        crate::cost_cap::CAUSE_LIMIT_REACHED
+                                                    )
+                                            )),
+                                            0,
+                                            emitted,
+                                        );
+                                        continue;
+                                    }
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid.clone(),
                                         crate::scan_ledger::RuleTier::Semantic,
                                         true,
@@ -2138,9 +3260,26 @@ pub async fn audit_repos_with_llm(
                                         files.len(),
                                         emitted,
                                     );
+                                    if coverage == crate::cost_cap::RuleCoverage::Partial {
+                                        pipeline_ledger.note_partial_rule(
+                                            rid,
+                                            spec,
+                                            format!(
+                                                "checked on part of the code only: {} before \
+                                                 the rest was checked",
+                                                cap_record
+                                                    .as_ref()
+                                                    .map(crate::cost_cap::CostCapRecord::cause)
+                                                    .unwrap_or(
+                                                        crate::cost_cap::CAUSE_LIMIT_REACHED
+                                                    )
+                                            ),
+                                        );
+                                    }
                                 }
                                 for (rid, emitted) in ai_counts {
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid,
                                         crate::scan_ledger::RuleTier::Semantic,
                                         true,
@@ -2149,9 +3288,52 @@ pub async fn audit_repos_with_llm(
                                         emitted,
                                     );
                                 }
+                                // H10: a rule whose scope held back part of the files says so. The
+                                // routing is recomputed here from the same rules and files the
+                                // audit was handed; `audit_repo` is not changed to report it.
+                                let route_plan = crate::scan_routing::plan_routes(
+                                    &audit_rules,
+                                    &part.changed,
+                                    controls.efficiency.applies_to_routing,
+                                );
+                                for group in &route_plan.groups {
+                                    let kind = match group.scope {
+                                        crate::scan_routing::Scope::Language(_) => "language",
+                                        crate::scan_routing::Scope::Declared { .. } => "declared",
+                                        crate::scan_routing::Scope::All => continue,
+                                    };
+                                    let evaluated = crate::scan_routing::files_in_scope(
+                                        &part.changed,
+                                        &group.scope,
+                                    )
+                                    .len();
+                                    // A group with no file was not run (it is recorded as not
+                                    // assessed). A group that saw every file counts too: the
+                                    // ledger sums over repos, so another repo's subset is judged
+                                    // against the whole.
+                                    if evaluated == 0 {
+                                        continue;
+                                    }
+                                    // On an incremental run the audit is handed only the changed
+                                    // files, so the count is over those, and the ledger says so.
+                                    let changed_files_only =
+                                        effective_prior.is_some() && part.unchanged_count > 0;
+                                    for rule in &group.rules {
+                                        pipeline_ledger.note_scope_subset(
+                                            &rule.id,
+                                            spec,
+                                            evaluated,
+                                            part.changed.len(),
+                                            kind,
+                                            changed_files_only,
+                                        );
+                                    }
+                                }
                                 ai_for_repo.extend(ai_findings);
-                                for rec in repo_recs {
-                                    recommendations.insert(rec.rule_id.clone(), rec);
+                                for mut rec in repo_recs {
+                                    rec.repo = spec.to_string();
+                                    recommendations
+                                        .insert((rec.rule_id.clone(), spec.to_string()), rec);
                                 }
                                 // W6: a sub-pass (e.g. alternative recommendations) can fail
                                 // without failing the whole audit_repo call — never let that
@@ -2167,19 +3349,39 @@ pub async fn audit_repos_with_llm(
                                 // to "verified clean" via mere selection.
                                 for (rid, _) in &semantic {
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid.clone(),
                                         crate::scan_ledger::RuleTier::Semantic,
                                         false,
                                         Some(format!(
-                                            "AI/semantic audit pass failed for this repo: {e}"
+                                            "{}: {e}",
+                                            crate::scan_ledger::AI_AUDIT_FAILED_MARKER
                                         )),
                                         0,
                                         0,
                                     );
                                 }
+                                // H4: a whole-repo failure is a failed pass over every file of
+                                // the repo, so Coverage lists it and the methodology never claims
+                                // the advisory tier ran here. The pass name is the one the
+                                // exporters read (`coverage_gaps::AI_REVIEW_ALL_PASSES`).
+                                all_failed_passes.push(crate::ai_audit::FailedPass {
+                                    repo: spec.to_string(),
+                                    pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES
+                                        .to_string(),
+                                    reason: e.to_string(),
+                                    files_not_reviewed: files.len(),
+                                    class: crate::ai_audit::classify_pass_error(&e),
+                                    files: Vec::new(),
+                                    attempts: camerata_llm::failure::attempts_of(&e),
+                                    scope_note: false,
+                                });
+                                ai_all_unreviewed = true;
                                 let msg = format!("{spec}: AI audit skipped ({e})");
                                 if first_ai_error.is_none() {
                                     first_ai_error = Some(msg.clone());
+                                } else {
+                                    ai_error_repos += 1;
                                 }
                                 notes.push(msg);
                             }
@@ -2187,21 +3389,69 @@ pub async fn audit_repos_with_llm(
                     }
                 } else if !files.is_empty() {
                     notes.push(format!("{spec}: AI review deselected — deterministic only"));
+                    // H4: a compliance block is not a choice to skip the review. The block
+                    // reason is the skip reason, and the repo's files are listed as unreviewed
+                    // by the AI pass, like any other whole-repo failure.
+                    let skip_reason = ai_blocked_reason.as_ref().map_or_else(
+                        || "AI/semantic review not requested this run".to_string(),
+                        |why| format!("AI/semantic review blocked: {why}"),
+                    );
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
+                            spec,
                             rid.clone(),
                             crate::scan_ledger::RuleTier::Semantic,
                             false,
-                            Some("AI/semantic review not requested this run".to_string()),
+                            Some(skip_reason.clone()),
                             0,
                             0,
                         );
+                    }
+                    if let Some(why) = &ai_blocked_reason {
+                        all_failed_passes.push(crate::ai_audit::FailedPass {
+                            repo: spec.to_string(),
+                            pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES
+                                .to_string(),
+                            reason: why.clone(),
+                            files_not_reviewed: files.len(),
+                            class: crate::ai_audit::FailureClass::AuthOrBilling,
+                            files: Vec::new(),
+                            attempts: Vec::new(),
+                            scope_note: false,
+                        });
                     }
                 }
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
                 // (so next run can tell what changed) + the repo's AI findings (carried ∪ fresh).
-                manifest_builder.record_repo(spec, &files, &ai_for_repo);
+                //
+                // A file the AI pass did not review is not recorded: the next scan then treats it
+                // as changed and audits it, instead of carrying it on as reviewed and clean. That
+                // is every file of a repo the spend limit never reached or whose review failed
+                // outright, and the files of each chunk the limit refused.
+                let unreviewed: std::collections::HashSet<String> = if ai_all_unreviewed {
+                    files.iter().map(|(path, _)| path.clone()).collect()
+                } else {
+                    meter
+                        .cost_cap_record()
+                        .map(|cap| {
+                            cap.unreviewed_files()
+                                .into_iter()
+                                .filter(|(repo, _)| repo == spec)
+                                .map(|(_, path)| path)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                manifest_builder.record_repo_except(spec, &files, &ai_for_repo, &unreviewed);
+                // A dirty tree is not the commit: recording HEAD would name a state that was not audited.
+                if let Some(sha) = audited_refs
+                    .last()
+                    .filter(|r| !r.dirty)
+                    .and_then(|r| r.sha.as_deref())
+                {
+                    manifest_builder.record_commit(spec, sha);
+                }
 
                 repo_findings.extend(ai_for_repo);
                 // P7: drop any finding whose rule carries a stack exception that applies to
@@ -2217,17 +3467,24 @@ pub async fn audit_repos_with_llm(
                         &repo_stack.frameworks,
                         c,
                     );
+                    // A10: an excepted finding is kept, marked, and apart from the rows that go on.
+                    let (excepted, kept) =
+                        crate::engine_discard::split_discarded(std::mem::take(&mut repo_findings));
+                    repo_findings = kept;
+                    pipeline_ledger.record_discarded(&excepted);
+                    all_discarded.extend(excepted);
                     let rows_out = repo_findings.len();
-                    // W1: a stack exception DROPS a finding outright (it names an idiomatic
-                    // platform pattern, not a violation) — the one stage in this loop that
-                    // reduces the row count without a merge target, so it gets its own
+                    // W1: a stack exception TAKES a finding out of the rows that ship (it names
+                    // an idiomatic platform pattern, not a violation) — the one stage in this
+                    // loop that reduces the row count without a merge target, so it gets its own
                     // explicit `other` bucket rather than silently vanishing into
-                    // "unaccounted".
+                    // "unaccounted". The row itself is kept (A10): see `ScanReport::discarded`.
                     if rows_in != rows_out {
                         let mut acc = crate::scan_ledger::StageAccounting::default();
                         acc.other
                             .push(("stack_exception_excluded".to_string(), rows_in - rows_out));
-                        pipeline_ledger.record_stage(
+                        pipeline_ledger.record_stage_for_repo(
+                            spec,
                             "stack-exception-filter",
                             rows_in,
                             rows_out,
@@ -2235,25 +3492,43 @@ pub async fn audit_repos_with_llm(
                         );
                     }
                 }
-                // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
-                // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
-                // the same defect flagged by two rule families a few lines apart, keeping the
-                // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
-                // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                // Bug 3, now without absorption: the COMBINED floor + arch + AI set is first
+                // collapsed on mechanical identity only (the same rule family, the same file, the
+                // same place; every collapsed source stays on the survivor in `flagged_by`), then
+                // grouped. Grouping writes each row's place in the review tree and links rows
+                // that may describe the same thing; it returns every row it was given. Runs
+                // BEFORE suppression classification so a waiver still sees the grouped row.
                 //
-                // W1 ledger fix: account for merges via `also_locations` (one entry per
-                // ABSORBED FINDING, pushed unconditionally — see `account_location_merge`'s doc
-                // comment), not `also_matches` (a deduplicated rule-id SET that silently
-                // undercounts, or entirely drops, an absorption whose rule id collides with the
-                // primary's or with another absorbed member's — the exact shape of the
-                // 45-rows-in/32-out/8-merged/5-unaccounted defect this fixes).
-                let pre_merge_findings = repo_findings.clone();
+                // Ledger: `collapse-identical` reconciles `rows_in == rows_out + collapsed`;
+                // `group` reconciles `rows_in == rows_out` with nothing to account for.
+                bookkeeping.take(&mut repo_findings);
+                let tool_map = crate::review_tree::ToolMap::from_corpus(corpus);
                 let rows_in = repo_findings.len();
-                let mut repo_findings =
-                    crate::ai_audit::merge_semantic_groups(repo_findings, &files);
-                let rows_out = repo_findings.len();
-                let acc = account_location_merge(&pre_merge_findings, &repo_findings);
-                pipeline_ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+                let collapse = crate::review_tree::collapse_identical(repo_findings, &tool_map);
+                let acc = collapse.accounting();
+                let rows_out = collapse.rows.len();
+                pipeline_ledger.record_stage_for_repo(
+                    spec,
+                    "collapse-identical",
+                    rows_in,
+                    rows_out,
+                    acc,
+                );
+                let rows_in = rows_out;
+                let (mut repo_findings, repo_sub_nodes) = crate::review_tree::group_semantic(
+                    collapse.rows,
+                    &files,
+                    &tool_map,
+                    &mut sub_allocator,
+                );
+                tree_sub_nodes.extend(repo_sub_nodes);
+                pipeline_ledger.record_stage_for_repo(
+                    spec,
+                    "group",
+                    rows_in,
+                    repo_findings.len(),
+                    crate::scan_ledger::StageAccounting::default(),
+                );
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
                 // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
@@ -2273,16 +3548,25 @@ pub async fn audit_repos_with_llm(
                 // already-resolved `llm` (built from `backend_resolution` above) and folds
                 // usage into the SAME `meter` as calibration/audit, so its spend is never
                 // invisible to the actual-vs-estimated readout.
-                if run_ai_review && !repo_findings.is_empty() {
+                if run_ai_review
+                    && !repo_findings.is_empty()
+                    && !meter.stage_blocked(spec, crate::ai_audit::STAGE_FIX)
+                {
                     let (fixed_findings, fix_failed_passes) =
-                        crate::ai_audit::generate_fix_specifics(
+                        crate::ai_audit::generate_fix_specifics_in(
                             llm,
                             spec,
                             repo_findings,
                             &files,
-                            calibration_model.or(model),
+                            fix_model.as_deref(),
                             Some(&meter),
                             corpus,
+                            // A batch run sends the fix rounds as batches too (chosen per
+                            // round); a real-time run stays real time.
+                            crate::ai_audit::stage_batch::StageRoute {
+                                batch: mode == crate::ai_audit::ScanMode::Batch,
+                                job,
+                            },
                         )
                         .await;
                     repo_findings = fixed_findings;
@@ -2291,6 +3575,15 @@ pub async fn audit_repos_with_llm(
                     // is never silent.
                     all_failed_passes.extend(fix_failed_passes);
                 }
+                // M5: open each row's file and look for the quoted snippet near its line. A row
+                // where it is not found is marked and held, never dropped or reworded; the counts
+                // go to the ledger. The last step on a repo's rows before they join the report.
+                evidence_check::verify_and_record(
+                    &mut pipeline_ledger,
+                    &mut repo_findings,
+                    &files,
+                    Some(&repo_root_for_history),
+                );
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -2299,7 +3592,20 @@ pub async fn audit_repos_with_llm(
                     ));
                 }
             }
-            Err(e) => notes.push(format!("{spec}: audit failed ({e})")),
+            Err(e) => {
+                notes.push(format!("{spec}: audit failed ({e})"));
+                // A repo that cannot be read is not silently left out: it is a failed pass, a
+                // not-run row for every rule that applies to it, and a line on the report.
+                record_repo_not_inspected(
+                    &mut pipeline_ledger,
+                    &mut all_failed_passes,
+                    &mut repos_not_inspected,
+                    spec,
+                    &e.to_string(),
+                    selected,
+                    corpus,
+                );
+            }
         }
     }
 
@@ -2313,6 +3619,9 @@ pub async fn audit_repos_with_llm(
     let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
+            if meter.stage_blocked(spec, crate::ai_audit::STAGE_DEEP) {
+                continue;
+            }
             let dr = crate::ai_audit::run_deep_tier(
                 llm,
                 spec,
@@ -2331,25 +3640,17 @@ pub async fn audit_repos_with_llm(
         None
     };
 
-    // P7: collapse needs-review STRUCTURAL findings (one rule flagged as a debatable
-    // structural/consistency preference at many unrelated locations) into ONE grouped,
-    // informational finding per rule — see `group_structural_needs_review`'s doc comment. Runs
-    // ACROSS THE WHOLE SCAN (every repo), after every per-repo pass, so a rule that fires in
-    // more than one repo still collapses to a single row.
-    //
-    // W1 ledger fix: this stage used to carry NO ledger instrumentation at all, so the rows it
-    // collapses were invisible to the pipeline-integrity ledger entirely (never even reported as
-    // unaccounted) — a blind spot, not a clean reconciliation. Instrumented the same way as
-    // `cross-family-merge`, via `account_location_merge` over `also_locations`.
-    let pre_structural_group = all_findings.clone();
-    let rows_in = all_findings.len();
-    let all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
-    let rows_out = all_findings.len();
-    if rows_in != rows_out {
-        let acc = account_location_merge(&pre_structural_group, &all_findings);
-        pipeline_ledger.record_stage("structural-needs-review-merge", rows_in, rows_out, acc);
-    }
+    // P7 used to collapse the needs-review STRUCTURAL rows of one rule into a single grouped row
+    // here, absorbing the rest. Nothing is absorbed any more: every one of those rows stays a row
+    // and the review tree holds them together (a rule node of routine rows, decided as a batch).
+    bookkeeping.restore(&mut all_findings);
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.discarded = all_discarded;
+    report.tree = Some(crate::review_tree::ReviewTree {
+        nodes: tree_sub_nodes,
+        ..crate::review_tree::ReviewTree::default()
+    });
+    report.attach_tree();
     // A Firebase repository gets the one sentence that says what Firebase coverage is, so a
     // clean Firebase section is never read as coverage of the Dart client or of console rules.
     if report
@@ -2358,18 +3659,33 @@ pub async fn audit_repos_with_llm(
         .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
     {
         report.coverage_notes.push(CoverageNote {
+            tool_failed: false,
+            repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),
         });
     }
     report.test_file_count = test_files_total;
     report.files_excluded = files_excluded_total;
+    // Recorded only when at least one repo was actually read, so a run that read nothing
+    // states no figure rather than a zero.
+    report.excluded_noise_lines = any_repo_read.then_some(excluded_noise_lines_total);
     report.code_chars = code_chars_total;
     report.code_lines = code_lines_total;
     report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);
+    report.volume_by_repo = volume_by_repo;
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
-    report.recommendations = recommendations;
+    // The by-rule view (the repo scanned last wins, as it always did) and the full list, one
+    // entry per (rule, repo), each naming its repo.
+    for repo in &report.repos {
+        for ((rule_id, rec_repo), rec) in &recommendations {
+            if rec_repo == repo {
+                report.recommendations.insert(rule_id.clone(), rec.clone());
+            }
+        }
+    }
+    report.recommendations_by_repo = recommendations.into_values().collect();
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
     // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
@@ -2392,14 +3708,27 @@ pub async fn audit_repos_with_llm(
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
     for stage in pipeline_ledger.stages() {
-        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label, stage) {
+        // A stage that ran over one repo is disclosed against that repo, not the whole project.
+        let label = stage.disclosure_label(&repo_label);
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(label, stage) {
             all_failed_passes.push(fp);
         }
     }
     report.ledger = pipeline_ledger;
+    if let Some(carry) = incremental_carry.finish() {
+        report.ledger.record_incremental(carry);
+    }
     // The question this scan's AI findings answered, kept on the (persisted) inspection so the
     // delta rescan can prove its carried findings are still current. See `ScanLedger::ai_key`.
     report.ledger.record_ai_key(ai_key);
+    // Which efficiency measures were on, so any two runs can be compared knowing what differed.
+    report.ledger.record_efficiency(controls.efficiency);
+    fold_spend_records(
+        &mut report.ledger,
+        &meter,
+        &mut all_failed_passes,
+        &mut notes,
+    );
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
     // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
@@ -2419,7 +3748,14 @@ pub async fn audit_repos_with_llm(
     // local pass (the deterministic floor and friends) was requested and DID run, so this is
     // a real partial result, not "nothing ran at all".
     report.ai_blocked_reason = ai_blocked_reason;
-    report.ai_error = first_ai_error;
+    // The first failure is the structured error; the others are failed passes of their own (one
+    // per repo, listed in Coverage), and the count is said here so it is not read as one repo.
+    report.ai_error = first_ai_error.map(|first| match ai_error_repos {
+        0 => first,
+        1 => format!("{first} (and 1 other repository failed the same way)"),
+        n => format!("{first} (and {n} other repositories failed the same way)"),
+    });
+    report.repos_not_inspected = repos_not_inspected;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.
@@ -2439,6 +3775,9 @@ pub async fn audit_repos_with_llm(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
+    let skipped_totals = skipped_files_total.totals();
+    let file_cap_hits = skipped_files_total.file_cap_hits();
+    let (skipped_files, skipped_beyond_cap_total) = skipped_files_total.finish();
     report
         .ledger
         .record_input(crate::scan_ledger::ScanInputFacts {
@@ -2450,6 +3789,10 @@ pub async fn audit_repos_with_llm(
             // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
             // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
             audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
+            skipped_files,
+            skipped_beyond_cap_total,
+            skipped_totals,
+            file_cap_hits,
         });
     // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
     // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero
@@ -2458,6 +3801,7 @@ pub async fn audit_repos_with_llm(
     // what a reader always assumed it meant.
     let ai_ran = ai_ran_for_ledger;
     report.provenance = ScanProvenance {
+        group_review_model: None,
         audited_refs,
         audit_model: ai_ran.then(|| crate::ai_audit::resolve_audit_model(model)),
         calibration_model: calibration_model.map(str::to_string),
@@ -2475,6 +3819,7 @@ pub async fn audit_repos_with_llm(
         camerata_version: env!("CARGO_PKG_VERSION").to_string(),
         osv_scanner_version: run_deterministic
             .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
+        vulnerability_data: None,
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
         // Filled by [`audit_repos`], the one place that builds a real CLI `Llm`; an injected
@@ -2489,7 +3834,13 @@ pub async fn audit_repos_with_llm(
     // manifest (the file fingerprints are always worth caching), but with `ai_covered = false` so
     // a later AI-on scan ignores its (empty/partial) AI findings as a baseline rather than
     // trusting them (see `effective_prior` above).
-    let ai_covered = run_ai_review && report.ai_error.is_none();
+    //
+    // H3: also false when any scan pass failed over files (`files_not_reviewed > 0`) or the
+    // spend limit stopped part of the run. Those files' fingerprints are still recorded, so
+    // were this manifest called complete the next run would treat them as reviewed and carry
+    // their (absent) findings forever. A failed pass that is not over files (recommendations,
+    // fix text, the clone judge) leaves the review of every file intact and does not count.
+    let ai_covered = run_ai_review && report.ai_review_complete();
     (
         report,
         manifest_builder
@@ -2497,6 +3848,48 @@ pub async fn audit_repos_with_llm(
             .with_clone_verdicts(clone_verdicts)
             .finish(),
     )
+}
+
+/// What the run's meter learned about its spend, folded into the scan's ledger, failed parts and
+/// notes: the spend cap's record (when a limit was set), the outage stop (when the provider could
+/// not be reached) and the batch runner's own notes (always).
+fn fold_spend_records(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    meter: &crate::ai_audit::UsageMeter,
+    all_failed_passes: &mut Vec<crate::ai_audit::FailedPass>,
+    notes: &mut Vec<String>,
+) {
+    // The batch runner's notes (a batch the provider lost, a submission that may have been
+    // orphaned) are spend the ledger cannot count. They are kept whether or not a limit was set:
+    // the cap record's copy of them exists only under one.
+    ledger.record_runner_notes(meter.notes());
+    // The spend cap: what it stopped is disclosed through the same failed-pass list every other
+    // incomplete pass uses, and the amounts stay on the operator ledger.
+    if let Some(cap) = meter.cost_cap_record() {
+        all_failed_passes.extend(cap.failed_passes());
+        if cap.stopped_the_run() {
+            notes.push(format!(
+                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
+                 did not run (see the list of passes that did not run)",
+                cap.not_run_passes.len(),
+                cap.not_run_stages.len()
+            ));
+        }
+        ledger.record_cost_cap(cap);
+    }
+    // The outage stop: what it left undone is disclosed through the same failed-pass list, and
+    // the trigger and every part that was never sent stay on the operator ledger.
+    if let Some(outage) = meter.outage_record() {
+        all_failed_passes.extend(outage.failed_passes());
+        notes.push(format!(
+            "INCOMPLETE: the run stopped because the model provider could not be reached; {} \
+             scan pass(es) and {} stage(s) were never sent (see the list of passes that did not \
+             run). Run it again when the provider is back.",
+            outage.not_run_passes.len(),
+            outage.not_run_stages.len()
+        ));
+        ledger.record_outage(outage);
+    }
 }
 
 /// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
@@ -2541,6 +3934,7 @@ async fn attach_secret_history_capture(findings: &mut [Finding], repo_root: &std
 /// caller treats that as "unknown," never a hard error.
 async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Option<usize> {
     let output = tokio::process::Command::new("git")
+        .args(crate::workspace::GIT_NO_REPO_COMMANDS)
         .args(["rev-list", "--all", "--count", "--", path])
         .current_dir(repo_root)
         .kill_on_drop(true)
@@ -2561,7 +3955,10 @@ async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Optio
 async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
     async fn run(dir: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.args(crate::workspace::GIT_NO_REPO_COMMANDS)
+            .args(args)
+            .current_dir(dir)
+            .kill_on_drop(true);
         cmd.output().await.ok()
     }
     let sha = run(dir, &["rev-parse", "HEAD"])
@@ -2608,6 +4005,116 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 mod tests {
     use super::*;
 
+    /// A batch the provider lost, or a submission it may have accepted and orphaned, is spend the
+    /// ledger cannot count. The notes about it reach the ledger whether or not a limit was set.
+    #[test]
+    fn the_batch_runners_notes_reach_the_ledger_of_a_scan_with_no_spend_limit() {
+        let meter =
+            crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::default());
+        meter.record_note("A batch of 3 item(s) may have been submitted and orphaned.".to_string());
+        assert!(meter.cost_cap_record().is_none(), "no limit was set");
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let mut failed = Vec::new();
+        let mut notes = Vec::new();
+
+        fold_spend_records(&mut ledger, &meter, &mut failed, &mut notes);
+
+        assert_eq!(
+            ledger.runner_notes(),
+            ["A batch of 3 item(s) may have been submitted and orphaned."]
+        );
+        assert!(ledger.cost_cap().is_none());
+        assert!(
+            failed.is_empty() && notes.is_empty(),
+            "a note is not a failure"
+        );
+    }
+
+    /// A targeted rescan re-evaluates a few rules on every repo they apply to. Its picks replace
+    /// the stored ones for the same (rule, repo) and leave every other service's pick alone, in
+    /// both the by-rule view and the per-repo list the multi-repo workbook reads.
+    #[test]
+    fn a_rescan_replaces_the_pick_for_its_rule_and_repo_and_keeps_the_other_services() {
+        fn rec(rule: &str, repo: &str, option: &str) -> crate::ai_audit::RuleRecommendation {
+            crate::ai_audit::RuleRecommendation {
+                repo: repo.to_string(),
+                rule_id: rule.to_string(),
+                recommended_option_id: option.to_string(),
+                ..Default::default()
+            }
+        }
+        let mut report = build_report(
+            vec!["acme/a".to_string(), "acme/b".to_string()],
+            Vec::new(),
+            0,
+            Vec::new(),
+        );
+        report.recommendations_by_repo = vec![
+            rec("RULE-X", "acme/a", "old"),
+            rec("RULE-X", "acme/b", "old"),
+            rec("RULE-Y", "acme/a", "keep"),
+        ];
+        report
+            .recommendations
+            .insert("RULE-X".to_string(), rec("RULE-X", "acme/b", "old"));
+        report.fold_rescan_recommendations(vec![rec("RULE-X", "acme/a", "forced")]);
+        let pick = |report: &ScanReport, rule: &str, repo: &str| {
+            report
+                .recommendations_by_repo
+                .iter()
+                .find(|r| r.rule_id == rule && r.repo == repo)
+                .map(|r| r.recommended_option_id.clone())
+        };
+        assert_eq!(pick(&report, "RULE-X", "acme/a").as_deref(), Some("forced"));
+        assert_eq!(
+            pick(&report, "RULE-X", "acme/b").as_deref(),
+            Some("old"),
+            "not rescanned"
+        );
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations_by_repo.len(),
+            3,
+            "one entry per (rule, repo)"
+        );
+        assert_eq!(
+            report.recommendations["RULE-X"].recommended_option_id, "forced",
+            "the by-rule view follows the rescan too"
+        );
+        // A pick that names no repo updates the by-rule view only.
+        report.fold_rescan_recommendations(vec![rec("RULE-Y", "", "nowhere")]);
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations["RULE-Y"].recommended_option_id,
+            "nowhere"
+        );
+    }
+
+    /// A `NotAssessed` honesty row is not a detection: it must not count toward a rule's fired
+    /// total (which would record the rule as having run and found something), and the rule must
+    /// come back as not assessed with the reason.
+    #[test]
+    fn a_not_assessed_row_is_not_counted_as_a_detection() {
+        let rows = crate::ai_audit::not_assessed_findings(
+            "acme/app",
+            &[("SUPA-RLS-1".to_string(), "no file applies".to_string())],
+        );
+        let fired = Finding {
+            rule_id: "ARCH-1".to_string(),
+            ..Finding::default()
+        };
+        let mut findings = rows;
+        findings.push(fired.clone());
+        findings.push(fired);
+        let (counts, not_assessed) = split_fired_and_not_assessed(&findings);
+        assert_eq!(counts.get("ARCH-1"), Some(&2));
+        assert!(!counts.contains_key("SUPA-RLS-1"));
+        assert_eq!(
+            not_assessed.get("SUPA-RLS-1").map(String::as_str),
+            Some("no file applies")
+        );
+    }
+
     /// The audited ref carries the origin URL and the default branch, so the deletion record
     /// can name where the code came from and re-fetch can offer "latest from main".
     #[tokio::test]
@@ -2647,6 +4154,56 @@ mod tests {
             Some("https://github.com/acme/app.git")
         );
         assert!(!format!("{got:?}").contains("ghp_SECRETSECRET"));
+    }
+
+    /// H2: a scanned repository's own git configuration can name a command git runs on
+    /// `git status` (`core.fsmonitor`). Recording the inspected commit must never run it. The
+    /// control step shows whether this git honours the setting: where it does not, the test
+    /// prints SKIPPED and the assertion above proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recording_the_commit_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::test_git::init_repo_with_origin(
+            &repo,
+            "https://github.com/acme/app.git",
+            &[("a.txt", "one\n")],
+        );
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["config", "core.fsmonitor", &hook.display().to_string()])
+            .status()
+            .unwrap();
+        assert!(set.success());
+
+        let got = capture_audited_ref("acme/app", &repo).await;
+        let _ = commits_touching_path(&repo, "a.txt").await;
+        let _ = crate::onboard::files::read_local_repo_files(&repo);
+        assert!(got.sha.is_some());
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the inspection"
+        );
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// A folder with no git history yields no origin and no default branch, never an error.
@@ -2833,6 +4390,132 @@ mod tests {
         }
     }
 
+    /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the
+    /// producer, the carried-from commit) must not read as "the same captured object": two
+    /// unrelated findings in different files that share one stay separate rows through the merge
+    /// stages, and get their bookkeeping back afterwards.
+    #[test]
+    fn bookkeeping_captures_do_not_fuse_unrelated_findings_and_are_restored() {
+        let adjusted = |path: &str, snippet: &str| {
+            let mut f = Finding {
+                repo: "acme/api".to_string(),
+                path: path.to_string(),
+                line: 3,
+                rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+                severity: "high".to_string(),
+                snippet: snippet.to_string(),
+                detail: format!("a secret in {path}"),
+                ..Finding::default()
+            };
+            f.captures.insert(
+                crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+                "severity lowered from critical to high: the rule's authored ceiling".to_string(),
+            );
+            f.captures.insert(
+                "history-status".to_string(),
+                "committed once so far in this repository's history".to_string(),
+            );
+            f
+        };
+        let findings = vec![
+            adjusted("src/a.ts", "const a = loadSettings();"),
+            adjusted("deploy/b.py", "B = read_config()"),
+        ];
+
+        let mut guarded = findings.clone();
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut guarded);
+        assert!(guarded.iter().all(|f| f.captures.is_empty()), "{guarded:?}");
+        let mut merged = crate::review_tree::test_support::cluster_heads(guarded, &[]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "unrelated findings stay separate: {merged:?}"
+        );
+        // A stage that runs after the merge adds its own sentence to the first row.
+        merged[0].captures.insert(
+            crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+            "severity lowered from high to medium: a later bound".to_string(),
+        );
+        held.restore(&mut merged);
+        let notes = crate::severity_bounds::recorded_adjustments(&merged[0]);
+        assert_eq!(notes.len(), 2, "both sentences are kept: {notes:?}");
+        assert!(notes[0].contains("authored ceiling") && notes[1].contains("later bound"));
+        for f in &merged {
+            assert_eq!(f.captures.len(), 2, "{f:?}");
+            assert!(f
+                .captures
+                .contains_key(crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE));
+            assert!(f.captures.contains_key("history-status"));
+        }
+    }
+
+    /// The scan holds bookkeeping aside, collapses, and puts it back by row identity. A collapsed
+    /// source's identity is gone by then, so stage 1's verdict on a source must travel to the
+    /// survivor through the collapse itself: the held-aside step leaves it on the rows.
+    #[test]
+    fn the_stage_1_verdict_of_a_collapsed_row_survives_take_collapse_and_restore() {
+        let mut deterministic = Finding {
+            repo: "acme/api".to_string(),
+            path: "db/0005_rpc.sql".to_string(),
+            line: 2,
+            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            severity: "high".to_string(),
+            snippet: "create function enrollment_summary() security definer".to_string(),
+            detail: "a definer function".to_string(),
+            ..Finding::default()
+        };
+        deterministic.confidence = None;
+        let mut model = deterministic.clone();
+        model.confidence = Some("high".to_string());
+        // A different snippet: the two rows have different identities, as they do in a scan.
+        model.snippet.push_str(" -- granted to authenticated");
+        model.captures.insert(
+            crate::ai_audit::STAGE1_CAPTURE.to_string(),
+            serde_json::json!({"real": "yes", "reason": "no caller test"}).to_string(),
+        );
+        let mut rows = vec![model, deterministic];
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut rows);
+        let tools = crate::review_tree::ToolMap::builtin();
+        let mut collapsed = crate::review_tree::collapse_identical(rows, &tools).rows;
+        held.restore(&mut collapsed);
+        assert_eq!(collapsed.len(), 1);
+        let stage1 = crate::ai_audit::stage1_of(&collapsed[0]);
+        assert_eq!(
+            stage1.map(|s| s.real.as_str().to_string()),
+            Some("yes".to_string())
+        );
+    }
+
+    /// M4 fix (a): a second review flag written after the bookkeeping was held aside does not
+    /// replace the first. The detail flag and the fix flag both survive the take and restore.
+    #[test]
+    fn a_second_review_flag_does_not_overwrite_the_first_through_take_and_restore() {
+        use crate::review_flags::{flags_of, set_stage_flags, FlagStage};
+        let mut f = Finding {
+            repo: "acme/api".to_string(),
+            path: "src/a.ts".to_string(),
+            rule_id: "AI-X-1".to_string(),
+            snippet: "const a = 1;".to_string(),
+            ..Finding::default()
+        };
+        set_stage_flags(&mut f, FlagStage::Detail, vec!["precondition_added".into()]);
+        let mut rows = vec![f];
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut rows);
+        // A stage that runs while the keys are held aside adds the fix flag.
+        set_stage_flags(&mut rows[0], FlagStage::Fix, vec!["fix_ungrounded".into()]);
+        held.restore(&mut rows);
+        assert_eq!(
+            flags_of(&rows[0]),
+            vec![
+                "fix_ungrounded".to_string(),
+                "precondition_added".to_string()
+            ]
+        );
+    }
+
     /// req_a8 (the general statement): `semantic_rule_ids_for_repo` applies NO filter other
     /// than per-repo applicability. Asserted over a deliberately adversarial selection drawn
     /// from every id family in the corpus, so a future "small, obviously safe" exclusion
@@ -2868,317 +4551,6 @@ mod tests {
     }
 
     // ── W1 ledger fix: pipeline-integrity accounting for merge stages ──────────────────────
-
-    fn structural_site(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
-        Finding {
-            repo: repo.to_string(),
-            path: path.to_string(),
-            line,
-            rule_id: rule_id.to_string(),
-            severity: "medium".to_string(),
-            snippet: String::new(),
-            detail: String::new(),
-            ..Finding::default()
-        }
-    }
-
-    /// REGRESSION for the real-world defect: `camerata inspect`'s ledger summary reported
-    /// `cross-family-merge rows 45 -> 32 merged=8 ... unaccounted=5` on a real scan — findings
-    /// absorbed by `ai_audit::merge_semantic_group`'s "N occurrences of one rule" collapse signal
-    /// (`same_rule_adjacent`) never show up in the surviving row's `also_matches`, because that
-    /// field is a rule-id SET deduplicated against the primary's OWN id (`seen.insert` in
-    /// `merge_semantic_group`): when every absorbed finding shares the primary's rule id, NOTHING
-    /// new is ever pushed to `also_matches`, even though each absorbed finding's own evidence
-    /// site unconditionally lands in `also_locations`. The OLD instrumentation (diffing
-    /// `also_matches` before/after) reported these rows `unaccounted` — the data survived, only
-    /// the ledger's accounting was blind to it (an accounting bug, not a deletion). This proves
-    /// `account_location_merge` reconciles the stage exactly, and that every input rule id stays
-    /// reachable.
-    #[test]
-    fn cross_family_merge_ledger_fully_reconciles_a_same_rule_id_n_site_collapse() {
-        let findings = vec![
-            structural_site("acme/api", "svc.rs", 10, "ARCH-NO-DIRECT-DB-1"),
-            structural_site("acme/api", "svc.rs", 200, "ARCH-NO-DIRECT-DB-1"),
-            structural_site("acme/api", "svc.rs", 400, "ARCH-NO-DIRECT-DB-1"),
-        ];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "sanity: the N-site collapse must still produce exactly one row: {out:?}"
-        );
-        // Sanity on the OLD, buggy signal: this is EXACTLY the defect shape — nothing new in
-        // `also_matches` for the absorbed rows, because they share the primary's own rule id.
-        assert!(
-            out[0].also_matches.is_empty(),
-            "sanity: also_matches alone can never see this absorption: {:?}",
-            out[0].also_matches
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "every absorbed row must have a recorded disposition, not just the surviving row: \
-             {entry:?}"
-        );
-        assert_eq!(
-            entry.rows_in,
-            entry.rows_out + entry.accounted_total(),
-            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), n - 1);
-
-        // Every input rule id must still be reachable: as a surviving primary, in some row's
-        // `also_matches`, or in some row's `also_locations` (this merge's actual recording
-        // mechanism for a same-rule-id absorption).
-        let reachable: std::collections::HashSet<String> = out
-            .iter()
-            .flat_map(|f| {
-                std::iter::once(f.rule_id.clone())
-                    .chain(f.also_matches.iter().cloned())
-                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
-            })
-            .collect();
-        assert!(
-            reachable.contains("ARCH-NO-DIRECT-DB-1"),
-            "the absorbed rule id must remain reachable: {reachable:?}"
-        );
-    }
-
-    /// The same accounting must hold even when the absorbed findings' rule ids collide with
-    /// EACH OTHER but not with the primary — e.g. two independently-reported AI findings that
-    /// both got invented under the same ad hoc rule id, folded into a deterministic primary via
-    /// a shared captured object. `also_matches` dedupes the id down to ONE entry even though TWO
-    /// rows were absorbed; `account_location_merge` must still count both.
-    #[test]
-    fn cross_family_merge_ledger_reconciles_when_absorbed_rows_share_a_non_primary_rule_id() {
-        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-DETERMINISTIC-SITE-1");
-        det.category = Some("authorization".to_string());
-        det.captures
-            .insert("object".to_string(), "orders".to_string());
-        let mut ai1 = structural_site("acme/api", "handler.rs", 52, "AI-SITE-DEFECT-1");
-        ai1.category = Some("authorization".to_string());
-        ai1.captures
-            .insert("object".to_string(), "orders".to_string());
-        let mut ai2 = structural_site("acme/api", "handler.rs", 54, "AI-SITE-DEFECT-1");
-        ai2.category = Some("authorization".to_string());
-        ai2.captures
-            .insert("object".to_string(), "orders".to_string());
-
-        let findings = vec![det, ai1, ai2];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "all three must merge via the shared captured object: {out:?}"
-        );
-        assert_eq!(
-            out[0].also_matches,
-            vec!["AI-SITE-DEFECT-1".to_string()],
-            "sanity: also_matches dedupes the shared id down to ONE entry even though TWO rows \
-             were absorbed: {:?}",
-            out[0].also_matches
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "both absorbed rows must be recorded even though they share a rule id with each \
-             other: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), n - 1);
-    }
-
-    /// W4 NEW case the root-cause fix makes reachable for the first time: a deterministic
-    /// finding and a MODEL finding for the SAME rule id at the same site. Before W4 this could
-    /// never happen — a rule with a deterministic detector was excluded from the AI prompt
-    /// entirely, so the model never had the chance to cite it. Now that every selected rule
-    /// reaches the model as a deliberate second pair of eyes, this collision is a real,
-    /// reachable shape and must still collapse to ONE row with the deterministic finding as
-    /// primary — never two rows, and never silently dropping the model's corroborating
-    /// evidence.
-    #[test]
-    fn cross_family_merge_collapses_a_deterministic_and_model_finding_sharing_one_rule_id() {
-        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-NO-HARDCODED-SECRETS-1");
-        det.severity = "medium".to_string();
-        det.detail = "deterministic-detected-secret".to_string();
-        // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
-        // `Origin::Deterministic`.
-
-        let mut model = structural_site(
-            "acme/api",
-            "handler.rs",
-            52, // within SEMANTIC_MERGE_WINDOW of the deterministic finding's line
-            "SEC-NO-HARDCODED-SECRETS-1", // the SAME corpus rule id — the model adopted it
-        );
-        model.severity = "critical".to_string(); // uncalibrated AI severity, routinely inflated
-        model.detail = "ai-detected-secret".to_string();
-        model.confidence = Some("high".to_string()); // calibration touched it -> Origin::AdoptedAi
-
-        let findings = vec![det, model];
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "a deterministic + model finding for the SAME rule id at one site must collapse \
-             to one row, never two: {out:?}"
-        );
-        assert_eq!(out[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
-        // `merged_severity` only returns the PRIMARY's own severity (never `max()`) when the
-        // primary's origin is Deterministic in a mixed-tier group — "medium" surviving (not
-        // "critical") is only possible if the deterministic finding actually won primacy.
-        assert_eq!(
-            out[0].severity, "medium",
-            "the deterministic finding must win primacy over the model's inflated severity: \
-             {:?}",
-            out[0]
-        );
-        assert_eq!(
-            out[0].detail, "deterministic-detected-secret",
-            "the surviving row's own text must be the DETERMINISTIC finding's, not the \
-             model's: {:?}",
-            out[0]
-        );
-        // Sanity on the defect shape this collision is the NEW instance of: `also_matches` is a
-        // rule-id SET deduped against the primary's own id, so it can NEVER see an absorption
-        // whose rule id is identical to the primary's — same root cause as the N-site collapse
-        // tested above, just via ORIGIN instead of repeated occurrence.
-        assert!(
-            out[0].also_matches.is_empty(),
-            "sanity: also_matches alone can never see a same-rule-id absorption: {:?}",
-            out[0].also_matches
-        );
-        // The model's finding is NOT silently dropped: its own evidence site survives in
-        // `also_locations`, the mechanism `account_location_merge` reconciles on.
-        assert!(
-            out[0]
-                .also_locations
-                .iter()
-                .any(|l| l.line == 52 && l.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
-            "the model's absorbed finding must still have its own recorded site: {:?}",
-            out[0].also_locations
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "the model's absorbed finding must have a recorded disposition, not vanish into \
-             unaccounted: {entry:?}"
-        );
-        assert_eq!(entry.merged_into.len(), 1);
-    }
-
-    /// REGRESSION for a REAL scan's `cross-family-merge rows 116 -> 83 merged=32 ... held=0
-    /// informational=0 deduped=0 unaccounted=1 !! UNACCOUNTED` — a DIFFERENT leak than the
-    /// same-rule-id-N-site-collapse case above, and different from the already-fixed
-    /// `structural-needs-review-merge` second collapse: this one lives INSIDE
-    /// `ai_audit::merge_semantic_group` itself.
-    ///
-    /// `pre_primary` already absorbed a site (acme/api, handler.rs, 52, RULE-1) in an EARLIER
-    /// stage — simulated here by pre-populating its own `also_locations`, exactly like a merged
-    /// primary surviving the intra-AI-tier exact-location merge would arrive carrying one.
-    /// `y` is a SEPARATE, genuinely distinct top-level `Finding` whose OWN identity
-    /// (repo/path/line/rule_id) happens to be IDENTICAL to that already-absorbed site — a real,
-    /// reachable shape: two different detectors (or two different pipeline stages) independently
-    /// flagging the exact same rule at the exact same line. `semantic_pair_merges`'s
-    /// `same_rule_adjacent` signal (same rule id + same file + same severity) groups `y` together
-    /// with `pre_primary`.
-    ///
-    /// The old `merge_semantic_group` pushed `y`'s own site into the SAME `also_locations` list
-    /// as `pre_primary`'s pre-existing entry, then deduplicated the WHOLE list by
-    /// `(repo, path, line, rule_id)` in one pass — so `y`'s fresh entry collided with the
-    /// pre-existing one and was silently dropped. `account_location_merge` then saw only ONE
-    /// occurrence of that key post-stage, found it already present pre-stage, and reconciled it
-    /// as "carried forward, not new" — so `y` left no trace anywhere: not a surviving row, not a
-    /// new `also_locations` entry, not counted as merged. This proves the fix keeps every
-    /// member's fresh absorption as its OWN entry regardless of a pre-existing key collision, so
-    /// `y` is never lost.
-    #[test]
-    fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
-    ) {
-        let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
-        pre_primary.also_locations = vec![MergedLocation {
-            repo: "acme/api".to_string(),
-            path: "handler.rs".to_string(),
-            line: 52,
-            rule_id: "RULE-1".to_string(),
-            snippet: "already-absorbed-earlier".to_string(),
-            consequence: false,
-        }];
-        let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
-
-        let findings = vec![pre_primary, y];
-        let n = findings.len();
-        let pre_merge_findings = findings.clone();
-        let rows_in = findings.len();
-        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
-        let rows_out = out.len();
-        assert_eq!(
-            rows_out, 1,
-            "sanity: the same-rule-id/same-file/same-severity signal must still merge these \
-             into one row: {out:?}"
-        );
-        // Both the pre-existing absorbed site AND `y`'s own fresh absorption must leave a
-        // DISTINCT recorded site — not collapsed into one just because the key coincides.
-        let sites_at_52 = out[0]
-            .also_locations
-            .iter()
-            .filter(|l| l.path == "handler.rs" && l.line == 52 && l.rule_id == "RULE-1")
-            .count();
-        assert_eq!(
-            sites_at_52, 2,
-            "the pre-existing absorbed site and y's own fresh absorption must BOTH survive as \
-             distinct also_locations entries: {:?}",
-            out[0].also_locations
-        );
-
-        let acc = account_location_merge(&pre_merge_findings, &out);
-        let mut ledger = crate::scan_ledger::ScanLedger::new();
-        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
-        assert_eq!(
-            entry.unaccounted, 0,
-            "y must have a recorded disposition, not vanish into unaccounted just because its \
-             own site coincides with something the primary already absorbed: {entry:?}"
-        );
-        assert_eq!(
-            entry.rows_in,
-            entry.rows_out + entry.accounted_total(),
-            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
-        );
-        assert_eq!(
-            entry.merged_into.len(),
-            1,
-            "exactly one NEW merge (y into pre_primary) must be recorded this stage: {entry:?}"
-        );
-
-        // Every input rule id must still be reachable.
-        let reachable: std::collections::HashSet<String> = out
-            .iter()
-            .flat_map(|f| {
-                std::iter::once(f.rule_id.clone())
-                    .chain(f.also_matches.iter().cloned())
-                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
-            })
-            .collect();
-        assert!(
-            reachable.contains("RULE-1"),
-            "the absorbed rule id must remain reachable: {reachable:?}"
-        );
-    }
 
     #[test]
     fn read_local_pulls_code_files_and_prunes_noise() {
@@ -3944,7 +5316,7 @@ mod tests {
         );
     }
 
-    /// W1 (docs/plans/2026-09-30_cycle2-queue-hardening.md): SUPABASE-FUNC-SEARCH-PATH-1 must
+    /// W1 (the cycle-2 queue-hardening notes): SUPABASE-FUNC-SEARCH-PATH-1 must
     /// arm for a PLAIN Postgres repo too — a SECURITY DEFINER function without a pinned
     /// search_path is exploitable regardless of whether the repo uses Supabase at all. Before
     /// the `extra_domains` fix, this repo (hand-written `.sql`, no `supabase/` layout, no
@@ -4156,6 +5528,12 @@ mod tests {
         ];
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "me/api".into(),
             kind: None,
             path: path.into(),
@@ -4198,6 +5576,12 @@ mod tests {
         let findings = vec![
             Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "me/api".into(),
                 kind: None,
                 path: "a.rs".into(),
@@ -4224,6 +5608,12 @@ mod tests {
             },
             Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "me/web".into(),
                 kind: None,
                 path: "b.tsx".into(),
@@ -4271,6 +5661,12 @@ mod tests {
     fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: repo.to_string(),
             kind: None,
             path: path.to_string(),
@@ -4421,6 +5817,12 @@ mod tests {
     fn tech_debt_csv_escapes_special_fields_correctly() {
         let f = Finding {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "me/api".into(),
             kind: None,
             path: "src/tricky,path.rs".into(),
@@ -5266,6 +6668,21 @@ mod tests {
             "a matching-rules but ai_covered=false prior must be treated as no usable cache \
              (the SAME 'no effective prior' path a rules mismatch takes), not silently reused: {msg}"
         );
+        // The earlier scan was incomplete and this run has the AI review off: the note says that,
+        // not that the rule selection changed.
+        assert!(
+            msg.contains("prior scan had no complete AI review"),
+            "an incomplete prior with the AI off gets its own true note: {msg}"
+        );
+        assert!(
+            !msg.contains("rule selection changed"),
+            "the rules did not change: {msg}"
+        );
+        // This run has the AI review off, so it re-runs nothing: the note must not claim it did.
+        assert!(
+            !msg.contains("full AI review re-run"),
+            "an AI-off run must not claim a full AI review was re-run: {msg}"
+        );
         // A fresh manifest is still produced (and, since this run's AI was off, still correctly
         // stamped ai_covered = false again).
         assert!(!manifest.ai_covered);
@@ -5302,11 +6719,17 @@ mod tests {
             .with_rules_fingerprint(rules_fp)
             // The question the prior answered: the model `audit_repos` will resolve for
             // `model: None`, no calibration pick, no rules.
-            .with_ai_key(crate::scan_cache::AiScanKey::new(
-                &crate::ai_audit::resolve_audit_model(None),
-                None,
-                &[],
-            ))
+            .with_ai_key(
+                crate::scan_cache::AiScanKey::new(
+                    &crate::ai_audit::resolve_audit_model(None),
+                    None,
+                    &[],
+                )
+                // The default switches run the scan with `terse_output` and
+                // `applies_to_routing` on.
+                .with_terse_output(true)
+                .with_applies_to_routing(true),
+            )
             .with_ai_covered(true); // the healthy case: AI ran and completed last time
         b.record_repo(
             "me/api",
@@ -5372,14 +6795,31 @@ mod tests {
     async fn a_prior_from_another_model_or_prompt_version_is_not_reused() {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
-        let current = crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[]);
-        let other_model = crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[]);
+        // A scan under the default switches runs with `terse_output` and `applies_to_routing`
+        // on, and the key says so.
+        let current = crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[])
+            .with_terse_output(true)
+            .with_applies_to_routing(true);
+        let other_model = crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[])
+            .with_terse_output(true)
+            .with_applies_to_routing(true);
         let other_prompt = crate::scan_cache::AiScanKey {
             prompt_schema_version: current.prompt_schema_version + 1,
             ..current.clone()
         };
+        // Rank 4: findings written by the other setting of `terse_output` answered a different
+        // question (a different prompt, a different recall), so they are not reused either.
+        let other_terse_setting = current.clone().with_terse_output(false);
+        // Rank 7: likewise for `applies_to_routing`, which changes which rules each file is
+        // asked about.
+        let other_routing_setting = current.clone().with_applies_to_routing(false);
 
-        for (label, prior_key) in [("model", other_model), ("prompt version", other_prompt)] {
+        for (label, prior_key) in [
+            ("model", other_model),
+            ("prompt version", other_prompt),
+            ("terse_output setting", other_terse_setting),
+            ("applies_to_routing setting", other_routing_setting),
+        ] {
             let (dir, sources) = scratch_repo_with_secret();
             let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
             let mut b = crate::scan_cache::ManifestBuilder::new()
@@ -5564,6 +7004,8 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
+            candidates: None,
             verification: camerata_rules::Verification::Grounded,
             sources: Vec::new(),
             verified: None,
@@ -5616,6 +7058,8 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
+            candidates: None,
             verification: camerata_rules::Verification::Grounded,
             sources: Vec::new(),
             verified: None,
@@ -6093,6 +7537,7 @@ mod tests {
     #[test]
     fn scan_provenance_round_trip_including_dirty_flag() {
         let prov = ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![
                 AuditedRef {
                     repo: "me/api".to_string(),
@@ -6124,6 +7569,7 @@ mod tests {
             ],
             camerata_version: env!("CARGO_PKG_VERSION").to_string(),
             osv_scanner_version: Some("v1.9.2".to_string()),
+            vulnerability_data: None,
             started_at: "2026-07-23T00:00:00+00:00".to_string(),
             finished_at: "2026-07-23T00:05:00+00:00".to_string(),
             model_sessions: vec![crate::llm::ModelSession {

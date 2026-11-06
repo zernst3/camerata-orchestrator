@@ -1,5 +1,5 @@
 //! `WorkItem` — the UI-side wire mirror of the BFF's normalized work item, relocated here
-//! (Phase C of the UI-core extraction, see `docs/plans/2026-07-01_ui-core-extraction.md`)
+//! (Phase C of the UI-core extraction, see the UI-core extraction notes)
 //! from `camerata_ui::cockpit::uow`, which re-exports it so its cockpit call sites resolve
 //! unchanged. `camerata-ui-core`'s `GovDevState` holds pulled `WorkItem`s, and that crate
 //! is renderer-free — so the shape lives in this pure-serde leaf, not in the Dioxus adapter.

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-02
 **Status:** Accepted (implemented)
-**Refines:** `2026-07-01` project readiness gate (`2026-07-01_project-readiness-gate.md`); consolidates the `2026-06-30_workspaces-page.md` plan
+**Refines:** `2026-07-01` project readiness gate (`2026-07-01_project-readiness-gate.md`); consolidates the workspaces page plan (private working notes)
 
 ## Context
 

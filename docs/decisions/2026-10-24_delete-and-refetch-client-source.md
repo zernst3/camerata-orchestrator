@@ -5,7 +5,7 @@
 **Deciders:** Zach (architect), Claude (architect and builder)
 
 Design: [`docs/design/2026-10-24_delete-and-refetch-client-source.md`](../design/2026-10-24_delete-and-refetch-client-source.md).
-Binding decisions: `docs/OVERNIGHT_DECISIONS.md`, the 2026-10-22 entries "Delete client source after
+Binding decisions: the private decision log, the 2026-10-22 entries "Delete client source after
 delivery" and its re-fetch revision. Reference: `docs/TECHNICAL.md` section 7.
 
 ## Context

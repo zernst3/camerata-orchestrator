@@ -1,0 +1,104 @@
+{
+  "about": "What the reviewer did against the run in run.json: the settings, the decisions, the edits, one merge and the Engine Check's verdicts. The seed sends each through the same route the review screens use, so every record has the shape the server writes. Sites are named by their id in run.json.",
+  "settings": {
+    "rate_per_kloc": 0.0,
+    "floor": 2,
+    "sample_size": 40
+  },
+  "decisions": [
+    {
+      "site": "sql-01", "state": "confirmed",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:00:00Z"
+    },
+    {
+      "site": "sql-03", "state": "confirmed",
+      "reason": "the status comes straight from the query string",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:01:00Z"
+    },
+    {
+      "site": "sql-06", "state": "false_positive",
+      "reason": "the date is parsed to a date type before it reaches the query",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:02:00Z"
+    },
+    {
+      "site": "sql-07", "state": "tech_debt_later",
+      "reason": "ticket PORTAL-212: move the reports to bound parameters",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:03:00Z"
+    },
+    {
+      "site": "sec-04", "state": "ignored",
+      "reason": "the address only accepts events and cannot read them",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:04:00Z"
+    },
+    {
+      "site": "auth-01", "state": "confirmed", "needed_me": true,
+      "decided_by": "zach", "decided_at": "2026-11-03T09:05:00Z"
+    },
+    {
+      "site": "auth-02", "state": "confirmed", "needed_me": true,
+      "decided_by": "zach", "decided_at": "2026-11-03T09:06:00Z"
+    },
+    {
+      "site": "auth-03", "state": "confirmed", "needed_me": false,
+      "reason": "real, but the same finding as the one on the admin routes",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:07:00Z"
+    },
+    {
+      "site": "thrown-01", "state": "engine_restored",
+      "reason": "the headline is a placeholder but the code is a real concatenation",
+      "decided_by": "zach", "decided_at": "2026-11-03T09:08:00Z"
+    },
+    {
+      "node_of": "html-01", "level": "subgroup", "state": "confirmed",
+      "reason": "every row writes user text into the page with innerHTML",
+      "decided_by": "zach"
+    }
+  ],
+  "edits": [
+    {
+      "site": "sql-04", "field": "headline",
+      "new": "Search sort builds SQL from the sort column of the request",
+      "reason": "names where the value comes from", "by": "zach"
+    },
+    {
+      "site": "sql-07", "field": "severity", "new": "medium",
+      "reason": "the region is checked against a fixed list in the browser only", "by": "zach"
+    },
+    {
+      "site": "sec-03", "field": "fix",
+      "new": "Move the key to the secrets manager and rotate it.",
+      "reason": "the standard fix does not mention rotation", "by": "zach"
+    }
+  ],
+  "merges": [
+    {
+      "site": "sql-09", "into": "sql-08",
+      "reason": "the same week number reaches both queries", "by": "zach"
+    }
+  ],
+  "engine_check": [
+    { "site": "sec-01", "right": true },
+    { "site": "sql-11", "right": false, "wrong": "wrong_severity" },
+    {
+      "site": "sec-06", "right": false, "wrong": "not_a_real_issue",
+      "correct_with": { "state": "false_positive", "reason": "the token is read from the environment at build time" }
+    }
+  ],
+  "expected_held": {
+    "base": [
+      { "site": "sql-02", "reason": "evidence_unverified" },
+      { "site": "sql-12", "reason": "junk_content" },
+      { "site": "sql-10", "reason": "merged_without_decision" },
+      { "site": "thrown-01", "reason": "restored_without_decision" },
+      { "site": "sql-11", "reason": "engine_check_no_without_correction" }
+    ],
+    "moved": [
+      { "site": "sql-02", "reason": "evidence_unverified" },
+      { "site": "sql-12", "reason": "junk_content" },
+      { "site": "sql-10", "reason": "merged_without_decision" },
+      { "site": "thrown-01", "reason": "restored_without_decision" },
+      { "site": "sql-11", "reason": "engine_check_no_without_correction" }
+    ],
+    "clean": []
+  }
+}

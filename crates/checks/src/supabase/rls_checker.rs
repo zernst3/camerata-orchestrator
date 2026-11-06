@@ -39,7 +39,7 @@ const RULE_IDS: &[&str] = &[
 /// scoped to `supabase/`. [`RULE_RLS_DISABLED_NOT_RESTORED`]'s defect (an explicit RLS
 /// disable that is never correctly restored) is general Postgres, not a Supabase/PostgREST
 /// concept, exactly like `SUPABASE-FUNC-SEARCH-PATH-1`'s own breadth widening (see
-/// `search_path_checker.rs` and `docs/plans/2026-09-30_cycle2-queue-hardening.md` §W1) — a
+/// `search_path_checker.rs` and the cycle-2 queue-hardening notes §W1) — a
 /// hand-rolled `db/migrations/*.sql` layout with no Supabase project at all can still disable
 /// RLS mid-migration and never turn it back on.
 const INTEREST_GLOBS: &[&str] = &["**/*.sql", "supabase/config.toml"];

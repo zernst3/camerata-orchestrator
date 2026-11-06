@@ -44,6 +44,10 @@ mod verify;
 mod tests;
 
 pub use index::detect;
+/// The file guard the clone detector applies before tokenizing: production source only (no
+/// test, generated, declaration, vendored, minified, translation or migration file). Shared
+/// with the W29 Wave D checkers, which read the same population.
+pub(crate) use skip::{classify_path, is_vendored_path};
 
 /// Hash unit: the number of consecutive tokens one fingerprint covers (spec section 3).
 pub const K: usize = 30;

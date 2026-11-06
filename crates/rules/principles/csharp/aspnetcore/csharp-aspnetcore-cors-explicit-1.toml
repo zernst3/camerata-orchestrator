@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-CORS-EXPLICIT-1"
-version = 1
+version = 2
 title = "CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs?"
+question = "How is the CORS policy defined, and where do the allowed origins come from?"
 default = "explicit-named-origins"
 why = "ASP.NET Core does not add CORS headers by default; without UseCors and a matching policy, cross-origin requests from browsers are blocked. The temptation when first enabling CORS is to use AllowAnyOrigin(), which sets Access-Control-Allow-Origin: * on every response. For a public read-only API that serves unauthenticated content, this is correct. For an API that uses cookies, sessions, or tokens (any API that distinguishes one user from another), AllowAnyOrigin() combined with AllowCredentials() is both a specification violation (browsers reject this combination) and a security signal: any page on any domain can make credentialed cross-origin requests to the API, which defeats the browser's same-origin policy protection against CSRF-equivalent attacks. Naming origins explicitly — by reading the allowed list from configuration — means the policy is environment-specific (dev allows localhost, production allows the production domain), the policy is auditable in one place, and a misconfiguration is a startup error rather than a silent policy gap. Named policies (AddCors with a policy name, UseCors with the same name) also allow different endpoints to carry different CORS rules, which a single anonymous AllowAnyOrigin policy cannot express."
 

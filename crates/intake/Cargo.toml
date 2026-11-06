@@ -12,9 +12,17 @@ workspace = true
 camerata-core = { path = "../core" }
 # The one `claude` subprocess env policy (scrubs ANTHROPIC_API_KEY); a pure leaf crate.
 camerata-api-types = { path = "../api-types" }
+# The one gate every text bound for a model passes through (a leaf crate).
+camerata-secrets = { path = "../secrets" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Env-mutating tests (proving a removed model variable is ignored) use EnvGuard and the
+# workspace-wide `#[serial_test::serial(process_env)]` key; see crates/test-env.
+serial_test = "3"
+camerata-test-env = { path = "../test-env" }

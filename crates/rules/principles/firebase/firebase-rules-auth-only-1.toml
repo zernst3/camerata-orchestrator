@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-AUTH-ONLY-1"
-version = 2
+version = 3
 title = "No rule grants access on the sole condition that the caller is signed in, except to data that every signed in user is meant to share"
 domain = "firebase"
 layer = "platform"
@@ -30,7 +30,7 @@ why = "Anyone can create an account, including an anonymous one, so a rule whose
 id = "signed-in-is-not-the-only-condition-on-private-data"
 label = "No rule on private data grants access on the sole condition that the caller is signed in"
 directive = "Rules on private or per user data name the owner or a role, not only the presence of a signed in user. A signed in only condition appears only on data that every account holder is meant to share."
-remediation = "On `<path>`, replace the signed in only condition with one that compares the caller to the document owner (`request.auth.uid == resource.data.ownerId`) or to a role from a custom claim, and keep a signed in only condition only where every account holder is meant to have access. Deploy and confirm in the emulator that a second signed in user is rejected for the first user's documents."
+remediation = "On `<path>`, replace the signed in only condition with one that compares the caller to the document owner (`request.auth.uid == resource.data.ownerId`) or to a role from a custom claim and keep a signed in only condition only where every account holder is meant to have access. Deploy and confirm in the emulator that a second signed in user is rejected for the first user's documents."
 effort = "low"
 why = "Naming the owner or a role keeps one user's data out of reach of every other account, and the change is one condition per path."
 

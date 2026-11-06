@@ -487,6 +487,12 @@ mod tests {
         let ledger = EnforcementLedger::none();
         let findings = vec![crate::onboard::Finding {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "owner/repo".to_string(),
             kind: None,
             path: "src/db.py".to_string(),
@@ -557,6 +563,12 @@ mod tests {
             // Active floor finding → should be recorded (no panic).
             crate::onboard::Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/db.py".to_string(),
@@ -584,6 +596,12 @@ mod tests {
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/legacy.py".to_string(),
@@ -611,6 +629,12 @@ mod tests {
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
                 could_be_intentional: false,
+                site_key: String::new(),
+                group_path: Vec::new(),
+                group_role: crate::review_tree::GroupRole::Primary,
+                review: Default::default(),
+                flagged_by: Vec::new(),
+                possible_duplicate_of: None,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/some.rs".to_string(),

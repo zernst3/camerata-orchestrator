@@ -33,8 +33,9 @@ and anyone using Camerata later.
 3. Client name and inspection setup (it fills the report's confidentiality line).
 4. Model backend: API for client work, and where the key is saved (the Keychain via Settings).
 5. Rules: which stack rules apply and why; leave the defaults unless there is a reason.
-6. Count and estimate (`camerata count` numbers: what the quote is priced on; the cost estimate
-   and the spending cap).
+6. Spend limit and estimate (points at the spend limit field: the run stops between passes once
+   it is reached; the line count, what the quote is priced on, and the cost estimate sit just
+   below it).
 7. Run the inspection; what the progress view shows; it can run unattended.
 8. Failed or not-run passes: what the warning means and that the export says so.
 9. The review queue: the four decisions and their keys, reason prompts, Undo.

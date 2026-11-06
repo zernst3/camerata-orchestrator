@@ -1,5 +1,5 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
-version = 1
+version = 3
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
 domain = "java"
 layer = "language"
@@ -23,13 +23,13 @@ why = "Concatenating or interpolating user input directly into a SQL string is t
 
 [[sources]]
 url = "https://find-sec-bugs.github.io/bugs.htm#SQL_INJECTION_JDBC"
-title = "Find Security Bugs — SQL_INJECTION_JDBC: Potential JDBC SQL injection via string concatenation"
+title = "Find Security Bugs: SQL_INJECTION_JDBC: Potential JDBC SQL injection via string concatenation"
 linter = "SpotBugs/FindSecBugs: SQL_INJECTION_JDBC"
 
 [[option]]
 id = "parameterized-queries"
 label = "use PreparedStatement bind parameters or JPA parameter syntax"
-directive = "Every dynamic value in a SQL statement is passed as a bound parameter (? placeholders in PreparedStatement, :name/:? in JPA, or parameterized ORM queries), never concatenated into the query string. String concatenation, StringBuilder, or String.format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
+directive = "Every dynamic value in a SQL statement is passed as a bound parameter (? placeholders in PreparedStatement, :name/:? in JPA or parameterized ORM queries), never concatenated into the query string. String concatenation, StringBuilder or String.format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
 remediation = """
 Replace the string-concatenated or manually-escaped SQL with bound parameters, using PreparedStatement's ? placeholders or the ORM's parameterized query syntax. Remove the manual escaping logic once parameter binding replaces it. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
 """

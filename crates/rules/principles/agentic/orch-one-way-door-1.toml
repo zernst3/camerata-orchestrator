@@ -1,6 +1,6 @@
 id = "ORCH-ONE-WAY-DOOR-1"
-version = 1
-title = "One-way-door routing — blast radius gates autonomy"
+version = 4
+title = "One-way-door routing: blast radius gates autonomy"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,27 +11,27 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
+title = "AGENTS.md: ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (a third enforcement tier)"
+title = "Decision: Cross-agent rules: the integration gate (a third enforcement tier)"
 
 [[sources]]
 url = "https://s2.q4cdn.com/299287126/files/doc_financials/annual/2015-Letter-to-Shareholders.PDF"
-title = "Jeff Bezos — 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
+title = "Jeff Bezos: 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
 
 [decision]
-question = "What position does the project take on: One-way-door routing — blast radius gates autonomy?"
+question = "How is it decided whether an agent may make a hard-to-reverse change on its own?"
 default = "one-way-door-routing-blast-radius-gates-autonomy"
 why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes. Reversibility, not confidence, gates autonomy. The confidence-gated alternative misses exactly the irreversible calls the rule exists to catch, because high confidence on a structural change is still wrong when the change is hard to reverse. The file-count-gated alternative fails for the same reason in the opposite direction: a 99-file mechanical move can be safer than a 3-file data migration, so file count tracks the wrong axis."
 
 [[option]]
 id = "one-way-door-routing-blast-radius-gates-autonomy"
-label = "One-way-door routing — blast radius gates autonomy"
-directive = "Even with a clear winner, STOP and escalate the decision to a human reviewer if the call is hard to reverse: it shapes the data model, a public/API contract, or a pattern that gets copied. Two-way doors (local, encapsulated, trivially refactored) you may auto-decide. Structural/topology changes (new/moved crate or module boundary, changed public trait/API surface) always pause for a human, even with a clear winner: reversibility decays as downstream code adopts the new shape. Decaying reversibility, not file count, is the real property. (\"Routing\" in the title refers to where the decision goes: to the AI to auto-apply, or to a human to review, based on the blast radius of getting it wrong.)"
+label = "Hard-to-reverse calls (data model, public API, module boundaries, copied patterns) go to a human, even with a clear winner"
+directive = "Even with a clear winner, STOP and escalate the decision to a human reviewer if the call is hard to reverse: it shapes the data model, a public/API contract or a pattern that gets copied. Two-way doors (local, encapsulated, trivially refactored) you may auto-decide. Structural/topology changes (new/moved crate or module boundary, changed public trait/API surface) always pause for a human, even with a clear winner: reversibility decays as downstream code adopts the new shape. Decaying reversibility, not file count, is the real property. (\"Routing\" in the title refers to where the decision goes: to the AI to auto-apply, or to a human to review, based on the blast radius of getting it wrong.)"
 remediation = """
-Configure the agent to auto-decide only on reversible, locally-encapsulated changes, and to always pause for human review on hard-to-reverse calls, meaning anything that shapes the data model, a public or API contract, or a pattern likely to be copied elsewhere. Route structural or topology changes, such as a new or moved crate/module boundary or a changed public trait or API surface, to a human even when the agent is confident in the answer. Verify by confirming a recent structural change in the log carries a human approval, not just an autonomous decision.
+Configure the agent to auto-decide only on reversible, locally-encapsulated changes and to always pause for human review on hard-to-reverse calls, meaning anything that shapes the data model, a public or API contract or a pattern likely to be copied elsewhere. Route structural or topology changes, such as a new or moved crate/module boundary or a changed public trait or API surface, to a human even when the agent is confident in the answer. Verify by confirming a recent structural change in the log carries a human approval, not just an autonomous decision.
 """
 why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes."
 

@@ -1,5 +1,5 @@
 id = "GO-PACKAGE-BOUNDARIES-CLEAR-1"
-version = 1
+version = 2
 title = "Package boundaries are clear; no circular imports; internal packages are used for internal APIs"
 domain = "go"
 layer = "architecture"
@@ -13,12 +13,12 @@ qualifies = "Circular imports are caught at build time and cause compilation fai
 
 [[sources]]
 url = "https://go.dev/doc/go1.4#internalpackages"
-title = "Go 1.4 Release Notes — Internal packages"
+title = "Go 1.4 Release Notes: Internal packages"
 linter = "go build: circular import detection"
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#names"
-title = "Effective Go — Package names"
+title = "Effective Go: Package names"
 
 [decision]
 question = "How are package dependencies structured?"

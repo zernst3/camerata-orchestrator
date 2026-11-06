@@ -45,7 +45,7 @@ JSON so the front-end stays swappable. None of this is a V1 feature. It is a
 non-blocking-shape constraint only.
 
 **Family consistency.** The cockpit reuses the existing Camerata curation GUI idiom
-(`/Users/zacharyernst/Documents/Repos/camerata-ai/src/bin/gui.rs`): collapsible groups,
+(`/Users/auditor/Documents/Repos/camerata-ai/src/bin/gui.rs`): collapsible groups,
 per-item checkboxes, a right-hand detail pane with rationale plus selectable
 alternatives, and banner-style confirm flows for destructive actions. The dashboard
 tables dogfood chorale v0.2.1 so the build is its own showcase. Routing, context

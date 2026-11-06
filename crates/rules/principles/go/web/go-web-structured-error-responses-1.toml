@@ -1,6 +1,6 @@
 id = "GO-WEB-STRUCTURED-ERROR-RESPONSES-1"
-version = 1
-title = "API errors are returned as a consistent structured format with status code, error code, and message; not as raw strings or status codes alone"
+version = 3
+title = "API errors are returned as a consistent structured format with status code, error code and message; not as raw strings or status codes alone"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
@@ -18,7 +18,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.rfc-editor.org/rfc/rfc9457.html"
-title = "RFC 9457 — Problem Details for HTTP APIs"
+title = "RFC 9457: Problem Details for HTTP APIs"
 
 [decision]
 question = "How should API errors be formatted in HTTP responses?"
@@ -30,7 +30,7 @@ id = "structured-error-format"
 label = "All errors return a consistent structured format: {code, message, statusCode, ...}"
 directive = "The API defines an error response envelope (e.g., {code: string, message: string, status: int, details?: object}). All handlers, regardless of which error they encounter, format it into this envelope before sending the HTTP response. Status codes (4xx, 5xx) are paired with the structured body; a 400 Bad Request also includes the structured error code and message."
 remediation = """
-Change the handler's error response to the project's structured error envelope (code, message, status, and optional details) instead of a bare status code or an ad-hoc shape. Verify by triggering the error from a client and confirming the response body contains the structured fields consistently, matching what other endpoints return for their errors.
+Change the handler's error response to the project's structured error envelope (code, message, status and optional details) instead of a bare status code or an ad-hoc shape. Verify by triggering the error from a client and confirming the response body contains the structured fields consistently, matching what other endpoints return for their errors.
 """
 why = "Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
 
@@ -50,5 +50,5 @@ why = "Each endpoint returns errors in its own shape, so no client can parse fai
 [[option]]
 id = "go-rfc9457-problem-details"
 label = "RFC 9457 Problem Details for HTTP APIs"
-directive = "The API's error envelope follows the IETF RFC 9457 'application/problem+json' shape instead of (or as a superset of) a bespoke {code, message, statusCode} schema: type (a URI reference identifying the problem type, or 'about:blank'), title (a short summary constant for a given problem type), status (the HTTP status code, duplicated in the body), detail (an occurrence-specific human-readable explanation), and instance (a URI reference identifying this occurrence). A project-specific machine-readable code can ride as an extension member alongside the required RFC 9457 members. Handlers set Content-Type: application/problem+json on error responses."
+directive = "The API's error envelope follows the IETF RFC 9457 'application/problem+json' shape instead of (or as a superset of) a bespoke {code, message, statusCode} schema: type (a URI reference identifying the problem type, or 'about:blank'), title (a short summary constant for a given problem type), status (the HTTP status code, duplicated in the body), detail (an occurrence-specific human-readable explanation) and instance (a URI reference identifying this occurrence). A project-specific machine-readable code can ride as an extension member alongside the required RFC 9457 members. Handlers set Content-Type: application/problem+json on error responses."
 why = "RFC 9457 is the IETF standard for structured HTTP error bodies. Adopting it (instead of a one-off {code, message, statusCode} shape) buys interoperability for free with any HTTP client, gateway, or API tool that already understands application/problem+json, and the type URI gives a stable, documentable identifier per error category. Go's standard library and most Go web frameworks have no opinion on error body shape, so there is no idiomatic-Go reason to prefer a bespoke schema over the IETF standard when both require the same amount of code to implement."

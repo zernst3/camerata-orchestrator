@@ -342,6 +342,56 @@ async fn delete_purges_cli_cache_and_ledger_under_state_dir_by_path_key() {
     );
 }
 
+/// A `camerata inspect` run over several repos keeps ONE cache and ONE ledger under a
+/// `project-<n>-<hash>` key, with a `.repos.json` beside them listing the canonical folders it
+/// covers. Deleting a source removes every project file whose list contains that checkout (and
+/// only those), so "delete" still leaves no copy of the client's code behind.
+#[tokio::test]
+async fn delete_purges_the_cli_project_cache_that_covers_the_checkout() {
+    let fx = fixture();
+    let cli = fx.roots().cli_state_dir.unwrap();
+    std::fs::create_dir_all(&cli).unwrap();
+    let other_repo = fx.root.join("work/acme/other-repo");
+    std::fs::create_dir_all(&other_repo).unwrap();
+    let write_project = |key: &str, dirs: &[&Path]| {
+        let list: Vec<String> = dirs
+            .iter()
+            .map(|d| d.canonicalize().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let files = [
+            cli.join(format!("{key}.repos.json")),
+            cli.join(format!("{key}.cache.json")),
+            cli.join(format!("{key}.ledger.json")),
+        ];
+        std::fs::write(&files[0], serde_json::to_string(&list).unwrap()).unwrap();
+        std::fs::write(&files[1], "{\"findings\":[]}").unwrap();
+        std::fs::write(&files[2], "{}").unwrap();
+        files
+    };
+    let covering = write_project("project-2-aaaaaaaa", &[&fx.checkout, &other_repo]);
+    let elsewhere = write_project("project-2-bbbbbbbb", &[&other_repo, &fx.root]);
+    // A file that merely looks like a project file but is not valid JSON is left alone.
+    let broken = cli.join("project-2-cccccccc.repos.json");
+    std::fs::write(&broken, "not json").unwrap();
+
+    let record = delete_ok(&fx).await;
+
+    for f in &covering {
+        assert!(!f.exists(), "{} should be removed", f.display());
+    }
+    for f in &elsewhere {
+        assert!(f.exists(), "{} belongs to other repos", f.display());
+    }
+    assert!(broken.exists());
+    let removed: Vec<_> = record
+        .items
+        .iter()
+        .filter(|i| i.path.contains("project-2-aaaaaaaa"))
+        .collect();
+    assert_eq!(removed.len(), 3, "{removed:?}");
+    assert!(removed.iter().all(|i| i.outcome == PurgeOutcome::Removed));
+}
+
 #[tokio::test]
 async fn delete_purges_recorded_model_session_files_and_leaves_unrecorded_ones() {
     let fx = fixture();

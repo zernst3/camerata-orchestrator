@@ -1,6 +1,7 @@
 [package]
 name = "camerata-ui"
 edition.workspace = true
+license.workspace = true
 version = "0.0.0"
 
 [lints]
@@ -19,6 +20,28 @@ workspace = true
 [[bin]]
 name = "camerata-ui"
 path = "src/main.rs"
+
+# The liveview build (review UI spec section 13): `camerata-ui liveview` serves the review lanes
+# (and only those) to a browser on localhost, against a seeded server, so a test can click them.
+# The browser-driven tests live in `tests/clickthrough.rs` and need this feature; without it the
+# default build is the desktop app exactly as before.
+#
+# The pixel baselines (tests/visual.rs) are rendered by macOS Chrome and compared on that platform
+# only: GitHub CI (ubuntu) does not build them, the local release gate runs
+# scripts/visual-check.sh. The comparison's own unit tests (tests/visual_compare.rs) always run.
+[features]
+liveview-review = ["dep:dioxus-liveview", "dep:axum", "tokio/net"]
+visual-baselines = []
+
+[[test]]
+name = "clickthrough"
+path = "tests/clickthrough.rs"
+required-features = ["liveview-review"]
+
+[[test]]
+name = "visual"
+path = "tests/visual.rs"
+required-features = ["visual-baselines"]
 
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
@@ -40,7 +63,7 @@ chorale-dioxus = "0.2.3"
 
 # Framework-agnostic UI logic + state (RUST-HEADLESS-CORE-1). This crate is the thin Dioxus ADAPTER;
 # pure logic, data shapes, and state transitions live in camerata-ui-core (no dioxus dep), unit-tested
-# there with no VirtualDom. Extraction is incremental (docs/plans/2026-07-01_ui-core-extraction.md).
+# there with no VirtualDom. Extraction is incremental (the UI-core extraction notes).
 camerata-ui-core = { path = "../ui-core" }
 # The pure-serde wire-contract leaf. The `WorkItem` wire mirror the cockpit deserializes
 # lives there (Phase C moved it out so camerata-ui-core's GovDevState can hold it);
@@ -62,12 +85,21 @@ dotenvy = "0.15"
 # markdown source in the chat bubble.
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
+# dioxus-ssr renders a component to an HTML string: for headless structure assertions in tests
+# (Tier 1) and, through `test_harness::render_props`, for the review gallery subcommand (a real
+# dependency since 2026-11-03, no longer dev only).
+dioxus-ssr = "0.7"
+
+# The liveview build (feature `liveview-review`). Dioxus 0.7 ships an official liveview
+# integration with axum (`dioxus-liveview`, feature `axum`); it needs axum 0.8, so this is a
+# second axum major beside the server crate's 0.7. Nothing in the desktop build links it.
+dioxus-liveview = { version = "=0.7.9", features = ["axum", "multi-thread"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"], optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread", "test-util"] }
-# UI testing (#112 follow-up). dioxus-ssr renders a component to an HTML string for headless
-# structure assertions (Tier 1); wiremock stands up a fake BFF so the reqwest network helpers can be
+# UI testing (#112 follow-up). wiremock stands up a fake BFF so the reqwest network helpers can be
 # tested against CAMERATA_BFF_URL (Tier 2). No browser / wasm needed.
-dioxus-ssr = "0.7"
 wiremock = "0.6"
 # The wiremock tests point helpers at a mock BFF via the process-global CAMERATA_BFF_URL env var.
 # serial_test's shared key (#[serial(process_env)]) serializes every such test crate-wide so they
@@ -76,6 +108,20 @@ wiremock = "0.6"
 # workspace (CAMERATA_SERVER_BIN too), because two keys would not exclude each other.
 serial_test = "3"
 camerata-test-env = { path = "../test-env" }
+# The click-through tests (tests/clickthrough.rs, feature `liveview-review`) drive Google Chrome
+# over its DevTools protocol. `headless_chrome` is synchronous (no second async runtime in the
+# test), maintained (1.0.22, June 2026), and its default `offline` feature bundles the protocol
+# definitions, so building it needs no network and it never downloads a browser (`fetch` is off).
+headless_chrome = { version = "1.0", default-features = false, features = ["offline"] }
+# Fresh data folders for each seeded server, and the unzip that reads the export back.
+tempfile = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# The ledger block (the escalation sentence) is printed in the export's PDF only; the same extractor
+# the server's own export tests use reads it back.
+pdf-extract = "0.12"
+# Pixel-diff visual regression over the review gallery (tests/visual.rs): decodes the headless
+# Chrome PNGs and the approved baselines to compare them. PNG only, no other codec.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
 # NSEvents and posts them to the probe's own process, so the macOS clipboard behavior

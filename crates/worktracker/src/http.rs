@@ -19,14 +19,48 @@ pub struct HttpResponse {
 
 /// Minimal HTTP transport used by provider adapters. Keeps adapters testable
 /// without a real HTTP client: swap in `FakeTransport` under `#[cfg(test)]`.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait HttpTransport: Send + Sync {
     /// Perform an HTTP GET.
-    async fn get(&self, url: &str) -> anyhow::Result<HttpResponse>;
+    fn get<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        url: &'life1 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<HttpResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
     /// Perform an HTTP POST with a JSON body.
-    async fn post(&self, url: &str, json_body: &str) -> anyhow::Result<HttpResponse>;
+    fn post<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        url: &'life1 str,
+        json_body: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<HttpResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
     /// Perform an HTTP PUT with a JSON body.
-    async fn put(&self, url: &str, json_body: &str) -> anyhow::Result<HttpResponse>;
+    fn put<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        url: &'life1 str,
+        json_body: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<HttpResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ── Reqwest transport (live, production path) ─────────────────────────────────

@@ -1,5 +1,5 @@
 id = "TESTING-AS-DOCUMENTATION-1"
-version = 1
+version = 2
 title = "Test names and structure communicate intent so tests serve as living documentation"
 domain = "testing"
 layer = "universal"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "http://xunitpatterns.com/Goals%20of%20Test%20Automation.html"
-title = "xUnit Test Patterns (Meszaros) — Goals of Test Automation (tests as a specification/documentation of intent)"
+title = "xUnit Test Patterns (Meszaros): Goals of Test Automation (tests as a specification/documentation of intent)"
 
 [[sources]]
 url = "https://testing.googleblog.com/2014/10/testing-on-toilet-writing-descriptive.html"
-title = "Google Testing Blog — TotT: Writing Descriptive Test Names"
+title = "Google Testing Blog: TotT: Writing Descriptive Test Names"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/GivenWhenThen.html"
-title = "Martin Fowler — GivenWhenThen: test structure communicates intent"
+title = "Martin Fowler: GivenWhenThen: test structure communicates intent"
 
 [decision]
 question = "Should tests be written so that they communicate intent and serve as living documentation of the system's behavior?"

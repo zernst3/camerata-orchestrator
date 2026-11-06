@@ -19,18 +19,24 @@
 //! the modules here re-export them so both this crate's callers and the server's
 //! re-export shims resolve them through one path.
 //!
-//! Depends ONLY on `camerata-api-types` among workspace crates — deliberately below
+//! Depends ONLY on `camerata-api-types` and the leaf `camerata-secrets` (the model-input
+//! chokepoint) among workspace crates — deliberately below
 //! `camerata-app-core` and `camerata-server` in the dependency graph so any adapter
 //! (Axum today, others later) can pull in the provider stack without a cycle.
 
 pub mod credentials;
+pub mod failure;
 pub mod llm;
+pub mod model_input;
 pub mod model_registry;
 pub mod provider_policy;
 pub mod rate_limit;
 // Internal retry/backoff policy for the Anthropic API transport (`llm::complete_api` +
 // the Message Batches path). Not part of the public surface — `llm` is the only caller.
 pub(crate) mod retry;
+// The Messages API's server-sent events: the stream parser and the idle-timeout reader behind
+// the API leg of `llm::Llm`.
+pub(crate) mod sse;
 // Claude Code session bookkeeping for the CLI backend: the id each `claude -p` spawn is tagged
 // with and the sink that remembers them, so source deletion can remove exactly those files.
 pub mod session_sink;

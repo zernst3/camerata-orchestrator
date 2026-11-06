@@ -24,7 +24,9 @@
 //!   remove the SOC-2 code.
 //!
 //! - `model_prompt_redaction` (`CAMERATA_FEATURE_MODEL_PROMPT_REDACTION`) — Redact secret
-//!   values from code before any model sees it (`onboard::redact::files_for_model`). ON by
+//!   values from everything sent to any model (`onboard::redact::files_for_model` for the scan's
+//!   files, and the `camerata_llm::model_input` chokepoint for every request, the chat
+//!   assistant's included). ON by
 //!   default; operator-only, no UI. **Environment variable ONLY**: no config file can turn it
 //!   off, because the file would sit in (or be resolved against) a client repository, and a
 //!   client repo must never decide that its own code reaches a model unredacted. Turning it OFF
@@ -38,8 +40,6 @@
 //! 2. Add the env-override arm in [`FeatureFlags::apply_env_overrides`].
 //! 3. Document it in this module comment.
 
-use std::sync::OnceLock;
-
 use serde::{Deserialize, Serialize};
 
 /// serde default helper — returns `true`, which is the absence-default for
@@ -48,29 +48,12 @@ fn default_true() -> bool {
     true
 }
 
-/// The one switch for `model_prompt_redaction`: set to `false` to send raw code to the model.
-pub const MODEL_PROMPT_REDACTION_ENV: &str = "CAMERATA_FEATURE_MODEL_PROMPT_REDACTION";
-
-/// The operator's value of [`MODEL_PROMPT_REDACTION_ENV`] as it was before any `.env` loader ran.
-static OPERATOR_VALUE: OnceLock<Option<String>> = OnceLock::new();
-
-/// Record the operator's real environment value for the redaction switch. A binary calls this
-/// FIRST in `main`, before it loads a `.env` file: a `.env` is resolved against the working
-/// directory, which may be a client repository, and must not be able to switch redaction off.
-/// Idempotent; without a call the live environment is read.
-pub fn pin_operator_redaction_setting() {
-    OPERATOR_VALUE.get_or_init(|| std::env::var(MODEL_PROMPT_REDACTION_ENV).ok());
-}
-
-/// Whether code is redacted before any model sees it. Reads the environment ONLY (never a file in
-/// the working directory or a client repository); ON unless the variable is explicitly `false`.
-pub fn model_prompt_redaction_enabled() -> bool {
-    let value = match OPERATOR_VALUE.get() {
-        Some(pinned) => pinned.clone(),
-        None => std::env::var(MODEL_PROMPT_REDACTION_ENV).ok(),
-    };
-    !value.is_some_and(|v| is_false(&v))
-}
+// The switch itself lives with the chokepoint it controls (`camerata_secrets::model_input`,
+// re-exported by `camerata_llm::model_input`): one definition for the transports, the agent
+// drivers and this server. These names keep resolving here for the binaries and the tests.
+pub use camerata_llm::model_input::{
+    model_prompt_redaction_enabled, pin_operator_redaction_setting, MODEL_PROMPT_REDACTION_ENV,
+};
 
 /// The operator-facing warning when redaction is switched OFF, or `None` when it is on. The CLI
 /// prints it on stderr at startup.

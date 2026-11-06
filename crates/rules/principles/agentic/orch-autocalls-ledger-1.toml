@@ -1,5 +1,5 @@
 id = "ORCH-AUTOCALLS-LEDGER-1"
-version = 1
+version = 4
 title = "Auto-calls ledger + periodic judgment review"
 domain = "agentic"
 layer = "universal"
@@ -7,40 +7,44 @@ enforcement = "structured"
 kind = "decision"
 inspectable = false
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://genai.owasp.org/llmrisk/llm062025-excessive-agency/"
+title = "OWASP Top 10 for LLM Applications, LLM06:2025 Excessive Agency (log and monitor what an agent does, and require human approval for high-impact actions)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-AUTOCALLS-LEDGER-1 (auto-calls ledger + periodic judgment review)"
+title = "Project policy: log every decision an agent makes on its own and have a person review the batch each week"
 
 [decision]
-question = "What position does the project take on: Auto-calls ledger + periodic judgment review?"
+question = "How are the choices agents make on their own recorded and later reviewed for drift?"
 default = "auto-calls-ledger-periodic-judgment-review"
 why = "Per-decision gates miss aggregate drift; many small calls can drift heavy or split into competing patterns over hundreds of choices. This is the altitude check. A daily cadence offers more granular review but interrupts forward progress more often, which is the wrong trade for routines whose value comes from sustained autonomous runs. A monthly cadence accumulates drift in longer windows between reviews and makes each review heavier when it does happen, both of which work against the rule's goal of catching aggregate drift while it is still cheap to correct. Keeping the weekly cadence but letting autonomous runs continue between reviews rather than holding speeds up forward progress but accepts that drift can compound past a missed review window before the next sweep catches it, which defeats the hold-until-cleared mechanism that makes the rule self-correcting."
 
 [[option]]
 id = "auto-calls-ledger-periodic-judgment-review"
-label = "Auto-calls ledger + periodic judgment review"
-directive = "Every self-made clear-winner call is logged with date, rule, decision, alternatives, and why. The agent surfaces the accumulated batch for human accept/modify/reject on a weekly cadence. Further autonomous runs hold until the batch is cleared, so drift cannot compound past the weekly review window."
+label = "Every self-made clear-winner call is logged, and a human reviews the batch weekly before further autonomous runs"
+directive = "Every self-made clear-winner call is logged with date, rule, decision, alternatives and why. The agent surfaces the accumulated batch for human accept/modify/reject on a weekly cadence. Further autonomous runs hold until the batch is cleared, so drift cannot compound past the weekly review window."
 remediation = """
-Set up a ledger that logs every autonomous rule-decided call with its date, the rule, the decision made, the alternatives considered, and the reasoning. Configure the run to surface the accumulated ledger entries to a human for accept/modify/reject once a week, and have further autonomous runs hold until that batch is cleared. Verify by confirming the ledger file grows with each autonomous decision and that a new run pauses when a prior week's batch is still unreviewed.
+Set up a ledger that logs every autonomous rule-decided call with its date, the rule, the decision made, the alternatives considered and the reasoning. Configure the run to surface the accumulated ledger entries to a human for accept/modify/reject once a week, and have further autonomous runs hold until that batch is cleared. Verify by confirming the ledger file grows with each autonomous decision and that a new run pauses when a prior week's batch is still unreviewed.
 """
 why = "Per-decision gates miss aggregate drift; many small calls can drift heavy or split into competing patterns over hundreds of choices."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with"
 label = "Daily batch review with hold"
-directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject daily, and further autonomous runs hold until the batch is cleared"
+directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives and why, the agent surfaces the accumulated batch for human accept/modify/reject daily, and further autonomous runs hold until the batch is cleared"
 why = "A daily cadence offers more granular review and catches drift sooner, but interrupts forward progress more often; that trade is wrong for routines whose value comes from sustained autonomous runs."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-2"
 label = "Monthly batch review with hold"
-directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject monthly, and further autonomous runs hold until the batch is cleared"
+directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives and why, the agent surfaces the accumulated batch for human accept/modify/reject monthly, and further autonomous runs hold until the batch is cleared"
 why = "A monthly cadence accumulates drift across a longer window and makes each review heavier when it arrives; both properties work against the rule's goal of catching aggregate drift while it is still cheap to correct."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-3"
 label = "Weekly batch review without hold"
-directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject weekly, and autonomous runs continue freely between reviews rather than holding until the batch is cleared"
+directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives and why, the agent surfaces the accumulated batch for human accept/modify/reject weekly, and autonomous runs continue freely between reviews rather than holding until the batch is cleared"
 why = "Allowing runs to continue between reviews speeds forward progress but accepts that drift can compound past a missed review window, defeating the hold-until-cleared mechanism that makes the rule self-correcting."

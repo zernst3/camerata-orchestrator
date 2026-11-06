@@ -10,6 +10,9 @@
 //! Run it with:
 //!     cargo run -p camerata-ui
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
+//!
+//! The review gallery (static pages from fixtures, no window) is this binary's `gallery` subcommand:
+//!     cargo run -p camerata-ui -- gallery <out dir>
 
 use camerata_ui::desktop_chrome::{self, CLIPBOARD_SHIM_SCRIPT, GOOGLE_FONTS_LINK};
 
@@ -19,6 +22,7 @@ mod chat;
 mod cockpit;
 mod credentials;
 mod design;
+mod gallery;
 pub mod loading;
 pub mod md;
 mod provider_safety;
@@ -28,8 +32,10 @@ mod server_process;
 mod source_ui;
 mod style;
 mod terminal;
+mod test_harness;
 mod toast;
 mod vcs_settings;
+mod walkthrough;
 mod workspace;
 
 use dioxus::prelude::*;
@@ -50,6 +56,18 @@ pub fn bff_base() -> String {
 }
 
 fn main() {
+    // `cargo run -p camerata-ui -- gallery <out dir>` writes the review gallery's static pages and
+    // never opens the cockpit window; with no arguments the app launches as always.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `camerata-ui liveview --project <id>` (feature `liveview-review`) serves the review lanes to a
+    // browser on localhost, for the click-through tests (review UI spec section 13).
+    #[cfg(feature = "liveview-review")]
+    if args.first().map(String::as_str) == Some("liveview") {
+        std::process::exit(cockpit::liveview::run_cli(&args[1..]));
+    }
+    if let gallery::Launch::Gallery(rest) = gallery::route(&args) {
+        std::process::exit(gallery::run_cli(&rest));
+    }
     // Auto-load the gitignored .env at the repo root (and any parent), so the
     // GitHub token etc. are inherited by the spawned BFF without exporting them.
     // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.

@@ -581,7 +581,7 @@ mod tests {
 
     /// The shipped auto-capture reporter computes its own fingerprint and rate-limits
     /// per fingerprint (PART C of the fingerprint + dedupe fold — see
-    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog),
+    /// the product-owner vibe-mode design notes' usability backlog),
     /// so a render-loop error storm never leaves a scaffolded app. Assert the shipped
     /// template actually carries that logic rather than just the bare listeners.
     #[test]

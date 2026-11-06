@@ -305,6 +305,46 @@ mod tests {
         assert_eq!(cfg.url(), "http://127.0.0.1:8123/");
     }
 
+    /// The Dioxus app for the real-process smoke test, from `CAMERATA_FIXTURES_DIR`.
+    /// `None` when the variable is unset (a visible skip). PANICS when it is set but
+    /// `itinerary-app/` is not a directory inside it: a mistyped variable must fail, not
+    /// pass without having run anything.
+    fn itinerary_app_dir(fixtures: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        let fixtures = fixtures?;
+        let app_dir = PathBuf::from(&fixtures).join("itinerary-app");
+        assert!(
+            app_dir.is_dir(),
+            "CAMERATA_FIXTURES_DIR is set to {}, but {} is not a directory. It must be the \
+             folder holding the local fixtures, with the Dioxus app at itinerary-app/ inside \
+             it. Fix the variable, or unset it to skip this test.",
+            PathBuf::from(&fixtures).display(),
+            app_dir.display()
+        );
+        Some(app_dir)
+    }
+
+    #[test]
+    fn unset_fixtures_variable_is_a_visible_skip() {
+        assert_eq!(itinerary_app_dir(None), None);
+    }
+
+    #[test]
+    fn a_fixtures_dir_holding_the_app_resolves_to_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("itinerary-app")).unwrap();
+        assert_eq!(
+            itinerary_app_dir(Some(tmp.path().as_os_str().to_owned())),
+            Some(tmp.path().join("itinerary-app"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "CAMERATA_FIXTURES_DIR")]
+    fn a_set_fixtures_dir_without_the_app_fails_loudly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = itinerary_app_dir(Some(tmp.path().as_os_str().to_owned()));
+    }
+
     /// Real-process integration smoke check: spawns an ACTUAL `dx serve` against a real
     /// Dioxus app directory (see `itinerary-app`, listed as a working directory for this
     /// session) and asserts a URL/pid come back and Drop cleans it up. Deliberately
@@ -316,7 +356,14 @@ mod tests {
     #[serial_test::serial(process_env)]
     #[ignore]
     async fn spawns_a_real_dx_serve_and_reports_a_url() {
-        let app_dir = PathBuf::from("/Users/zacharyernst/Documents/Repos/itinerary-app");
+        // The Dioxus app lives with the other local fixtures, outside this public repository.
+        let Some(app_dir) = itinerary_app_dir(std::env::var_os("CAMERATA_FIXTURES_DIR")) else {
+            eprintln!(
+                "skipping: set CAMERATA_FIXTURES_DIR to the folder holding the local fixtures \
+                 (this test serves the Dioxus app at itinerary-app/ inside it)"
+            );
+            return;
+        };
         let cfg = PreviewLaunchConfig::new(app_dir, 8099);
         let server = PreviewServer::spawn(cfg).expect("dx serve should spawn");
         assert_eq!(server.url(), "http://127.0.0.1:8099/");

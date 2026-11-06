@@ -12,9 +12,48 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The default model when none is configured / requested. Capable by default; override
-/// per call or via `CAMERATA_LLM_MODEL`.
-pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
+/// The default model when none is configured / requested. Capable by default; a project or a
+/// call names another one explicitly (never the environment).
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+
+/// The model the fix stage runs on when no fix model is set and the `fix_on_haiku` efficiency
+/// measure is on (the default). The fix call is short, narrow, evidence-bound prose and every
+/// answer is checked by the self-check, so it is the stage where a cheaper model costs the least
+/// quality. Named once, here beside [`DEFAULT_MODEL`]: the server resolves it
+/// (`camerata_server::ai_audit::resolve_fix_model`) and the cockpit hint and the CLI help print
+/// its name through [`model_display_name`].
+pub const FIX_STAGE_HAIKU_MODEL: &str = "claude-haiku-5-5";
+
+/// A model id as a person reads it: `claude-haiku-5-5` is `Claude Haiku 5.5`. Words are
+/// capitalized and an all-digit run becomes a dotted version; an id that does not follow the
+/// `claude-<family>-<major>-<minor>` shape comes back unchanged apart from capitalization.
+pub fn model_display_name(id: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut version: Vec<&str> = Vec::new();
+    let flush = |version: &mut Vec<&str>, words: &mut Vec<String>| {
+        if !version.is_empty() {
+            words.push(version.join("."));
+            version.clear();
+        }
+    };
+    for part in id.split('-').filter(|p| !p.is_empty()) {
+        if part.chars().all(|c| c.is_ascii_digit()) {
+            version.push(part);
+        } else {
+            flush(&mut version, &mut words);
+            let mut chars = part.chars();
+            let head = chars.next().map(|c| c.to_ascii_uppercase());
+            words.push(head.into_iter().chain(chars).collect());
+        }
+    }
+    flush(&mut version, &mut words);
+    words.join(" ")
+}
+
+/// What the fix stage runs on by default, for display (`Claude Haiku 5.5`).
+pub fn fix_stage_haiku_display_name() -> String {
+    model_display_name(FIX_STAGE_HAIKU_MODEL)
+}
 
 /// serde default for each [`StepModels`] field — the shipped [`DEFAULT_MODEL`]. Used so a
 /// project JSON written before a given step field existed deserializes to the default
@@ -101,6 +140,46 @@ pub struct L3ReviewConfig {
     /// The model id that runs the L3 reviewer. Empty = use the project's `balanced` tier model.
     #[serde(default)]
     pub model: String,
+    /// What a run does when the reviewer itself cannot run (an outage, a refused call).
+    /// `Advisory` (default, today's behaviour) logs it and lets the run continue;
+    /// `FailClosed` stops the run, so no run passes without a review.
+    #[serde(default)]
+    pub on_error: ReviewOnError,
+    /// Extra implementer passes allowed after a reviewer bounce, beyond the project's
+    /// `max_iterations`. `0` (default) keeps today's behaviour: with the default single pass
+    /// a bounce ends the run. Each round costs a whole implementer session plus one review.
+    #[serde(default)]
+    pub fix_rounds: u8,
+    /// Which model tier runs the review when no model is pinned in `model`. `Balanced`
+    /// (default) is today's behaviour; `Strongest` costs more per call.
+    #[serde(default)]
+    pub tier: ReviewTier,
+}
+
+/// The most extra implementer passes `L3ReviewConfig::fix_rounds` may carry (the settings
+/// panel offers 0, 1 and 2). The server clamps to this whatever a client posts.
+pub const MAX_L3_FIX_ROUNDS: u8 = 2;
+
+/// What a run does when the Layer-3 reviewer cannot run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOnError {
+    /// Log the error and let the run continue (today's behaviour).
+    #[default]
+    Advisory,
+    /// Stop the run: a review is required before a run passes.
+    FailClosed,
+}
+
+/// Which model tier runs the Layer-3 review when no model is pinned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTier {
+    /// The project's balanced tier model (today's behaviour).
+    #[default]
+    Balanced,
+    /// The project's strongest tier model.
+    Strongest,
 }
 
 /// Per-project stall detection thresholds, split by context (watched = interactive,
@@ -128,12 +207,20 @@ impl Default for StallThresholds {
 /// mirrors `TierMap` exactly: `serde(default)` on every field (legacy-JSON back-compat),
 /// a [`Default`] impl seeding every slot with [`DEFAULT_MODEL`], and per-project storage
 /// on `Project` mutated only through `ProjectStore::set_step_model`.
+///
+/// One exception to "every slot is seeded": [`StepModels::fix`] is EMPTY by default, meaning
+/// "not set". The fix stage's default depends on a run-time efficiency switch (Haiku when on,
+/// the calibration model when off), and a seeded model id would read as an explicit choice
+/// that silently overrides that switch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepModels {
     #[serde(default = "default_model")]
     pub audit: String,
     #[serde(default = "default_model")]
     pub calibration: String,
+    /// The fix stage's model. Empty = not set (the default; see the type's doc).
+    #[serde(default)]
+    pub fix: String,
     #[serde(default = "default_model")]
     pub research_chat: String,
     #[serde(default = "default_model")]
@@ -150,12 +237,250 @@ impl Default for StepModels {
     fn default() -> Self {
         Self {
             audit: DEFAULT_MODEL.to_string(),
-            calibration: DEFAULT_MODEL.to_string(),
+            // Stage 1 has a default of its own (A13/A15): a new project seeds it, an existing
+            // project keeps whatever pick it stored.
+            calibration: STAGE1_DEFAULT_MODEL.to_string(),
+            fix: String::new(),
             research_chat: DEFAULT_MODEL.to_string(),
             story_authoring: DEFAULT_MODEL.to_string(),
             decomposition: DEFAULT_MODEL.to_string(),
             escalation: DEFAULT_MODEL.to_string(),
             clarification: DEFAULT_MODEL.to_string(),
         }
+    }
+}
+
+/// The model stage 1 (the per-site first reviewer) runs on when no calibration model is set by the
+/// `--calibration-model` flag or the project setting (A13). Named once, here beside
+/// [`DEFAULT_MODEL`] (which stays the scan default): the server resolves it
+/// (`camerata_server::ai_audit::resolve_calibration_model`) and the pre-flight prices it.
+pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
+
+/// The model stage 2 (the group reviewer) runs on when no group review model is set by the
+/// `--group-review-model` flag or the project setting (A13).
+pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
+
+/// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
+/// in the architect's queue, which reasons may exceed that number, and the group reviewer's
+/// model. Every field `serde(default)`s so a project written before the settings existed loads
+/// with the design values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewSettings {
+    /// Escalations per 1,000 counted lines. Default 1.0.
+    #[serde(default = "default_escalation_rate")]
+    pub escalation_rate_per_kloc: f32,
+    /// The fewest escalations a run may carry. Default 20.
+    #[serde(default = "default_escalation_floor")]
+    pub escalation_floor: usize,
+    /// The reasons that may go past the budget (the severe-reach four at critical severity, and
+    /// `evidence_unverified`, by default).
+    #[serde(
+        default = "default_over_budget_reasons",
+        deserialize_with = "deserialize_over_budget_reasons"
+    )]
+    pub over_budget_reasons: Vec<crate::review::EscalationReason>,
+    /// The group reviewer's model. Empty means not set: the run uses [`STAGE2_DEFAULT_MODEL`].
+    /// Set only here or by the `--group-review-model` flag, never by the environment.
+    #[serde(default)]
+    pub group_review_model: String,
+    /// How many rows the Engine Check draws per run (design A2b). 0 turns the lane off. A project
+    /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
+    #[serde(default = "default_sample_size_per_run")]
+    pub sample_size_per_run: usize,
+}
+
+/// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
+pub const DEFAULT_SAMPLE_SIZE_PER_RUN: usize = 50;
+
+fn default_sample_size_per_run() -> usize {
+    DEFAULT_SAMPLE_SIZE_PER_RUN
+}
+
+// `Project` is `Eq`, so its settings have to be. The rate is a number a person types; a NaN would
+// make `==` on a project false against itself, so [`EscalationBudget::compute`] reads the rate
+// through `f32::max(0.0)`, which turns a NaN into zero, and nothing compares settings for
+// identity.
+impl Eq for ReviewSettings {}
+
+fn default_escalation_rate() -> f32 {
+    crate::review::DEFAULT_ESCALATION_RATE_PER_KLOC
+}
+
+fn default_escalation_floor() -> usize {
+    crate::review::DEFAULT_ESCALATION_FLOOR
+}
+
+fn default_over_budget_reasons() -> Vec<crate::review::EscalationReason> {
+    crate::review::EscalationReason::default_over_budget_set()
+}
+
+static OVER_BUDGET_SET_UPGRADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a stored over-budget set was upgraded from the previous default since the last call.
+/// True once per upgrade (the flag is cleared by the call), so the loader can log it once.
+pub fn take_over_budget_set_upgrade_notice() -> bool {
+    OVER_BUDGET_SET_UPGRADED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The over-budget set as stored. R-3 added `authorization_bypass` and `injection` to the
+/// default set; a project that saved the previous default (the five reasons it held) loads with
+/// the new one. Any other set is the architect's own choice and is kept as written.
+fn deserialize_over_budget_reasons<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crate::review::EscalationReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::review::EscalationReason as R;
+    let stored = Vec::<R>::deserialize(deserializer)?;
+    let previous_default = [
+        R::UnauthenticatedReach,
+        R::SecretExposure,
+        R::DataLoss,
+        R::CrossTenant,
+        R::EvidenceUnverified,
+    ];
+    let is_previous_default = stored.len() == previous_default.len()
+        && previous_default.iter().all(|r| stored.contains(r));
+    Ok(if is_previous_default {
+        OVER_BUDGET_SET_UPGRADED.store(true, std::sync::atomic::Ordering::SeqCst);
+        R::default_over_budget_set()
+    } else {
+        stored
+    })
+}
+
+impl Default for ReviewSettings {
+    fn default() -> Self {
+        Self {
+            escalation_rate_per_kloc: default_escalation_rate(),
+            escalation_floor: default_escalation_floor(),
+            over_budget_reasons: default_over_budget_reasons(),
+            group_review_model: String::new(),
+            sample_size_per_run: default_sample_size_per_run(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_settings_tests {
+    use super::*;
+    use crate::review::EscalationReason;
+
+    #[test]
+    fn the_review_settings_default_to_the_design_values() {
+        let s = ReviewSettings::default();
+        assert!((s.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+        assert_eq!(s.escalation_floor, 20);
+        assert_eq!(
+            s.over_budget_reasons,
+            EscalationReason::default_over_budget_set()
+        );
+        assert!(s.group_review_model.is_empty());
+        assert_eq!(s.sample_size_per_run, 50);
+    }
+
+    #[test]
+    fn a_project_written_before_the_settings_existed_loads_with_the_defaults() {
+        let s: ReviewSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, ReviewSettings::default());
+        let s: ReviewSettings = serde_json::from_str(
+            r#"{"escalation_floor":5,"group_review_model":"claude-opus-5-5"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.escalation_floor, 5);
+        assert_eq!(s.group_review_model, "claude-opus-5-5");
+        assert!((s.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// R-3 added two reasons to the default set. A project that saved the old default (the five
+    /// reasons) keeps what it chose in spirit: it loads with the new default. A set the architect
+    /// changed is never touched.
+    #[test]
+    fn a_project_that_saved_the_old_default_set_loads_the_new_default() {
+        let old = r#"{"over_budget_reasons":["unauthenticated_reach","secret_exposure","data_loss","cross_tenant","evidence_unverified"]}"#;
+        let s: ReviewSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            s.over_budget_reasons,
+            EscalationReason::default_over_budget_set()
+        );
+        assert!(
+            take_over_budget_set_upgrade_notice(),
+            "the upgrade leaves a notice for the loader to log"
+        );
+        assert!(!take_over_budget_set_upgrade_notice(), "once");
+        let narrowed = r#"{"over_budget_reasons":["secret_exposure","evidence_unverified"]}"#;
+        let s: ReviewSettings = serde_json::from_str(narrowed).unwrap();
+        assert_eq!(
+            s.over_budget_reasons,
+            vec![
+                EscalationReason::SecretExposure,
+                EscalationReason::EvidenceUnverified
+            ]
+        );
+    }
+
+    #[test]
+    fn the_stage_defaults_are_opus_5_5_and_fable_5_1() {
+        assert_eq!(STAGE1_DEFAULT_MODEL, "claude-opus-5-5");
+        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-1");
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+    }
+}
+
+#[cfg(test)]
+mod fix_stage_model_name_tests {
+    use super::*;
+
+    /// The built-in default is Sonnet 5.5 and the cheap stages default to Haiku 5.5; older ids
+    /// stay selectable but are never a default.
+    #[test]
+    fn the_built_in_defaults_are_sonnet_5_5_and_haiku_5_5() {
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+        assert_eq!(FIX_STAGE_HAIKU_MODEL, "claude-haiku-5-5");
+        assert_eq!(default_model(), "claude-sonnet-5-5");
+        assert_eq!(StepModels::default().audit, "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn a_model_id_is_displayed_as_family_and_dotted_version() {
+        assert_eq!(model_display_name("claude-haiku-5-5"), "Claude Haiku 5.5");
+        assert_eq!(model_display_name("claude-sonnet-5"), "Claude Sonnet 5");
+        assert_eq!(model_display_name("claude-fable-5-1"), "Claude Fable 5.1");
+        assert_eq!(fix_stage_haiku_display_name(), "Claude Haiku 5.5");
+    }
+}
+
+#[cfg(test)]
+mod l3_review_config_tests {
+    use super::*;
+
+    /// A project file written before the reviewer settings existed must read as today's
+    /// behaviour: balanced tier, advisory on error, no fix round.
+    #[test]
+    fn l3_review_config_defaults_match_todays_behaviour_from_an_old_project_json() {
+        let cfg: L3ReviewConfig = serde_json::from_str(r#"{"enabled":true,"model":""}"#).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.on_error, ReviewOnError::Advisory);
+        assert_eq!(cfg.fix_rounds, 0);
+        assert_eq!(cfg.tier, ReviewTier::Balanced);
+        assert_eq!(L3ReviewConfig::default().on_error, ReviewOnError::Advisory);
+    }
+
+    #[test]
+    fn the_new_settings_round_trip_as_snake_case() {
+        let cfg = L3ReviewConfig {
+            enabled: true,
+            model: String::new(),
+            on_error: ReviewOnError::FailClosed,
+            fix_rounds: 2,
+            tier: ReviewTier::Strongest,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""on_error":"fail_closed""#));
+        assert!(json.contains(r#""tier":"strongest""#));
+        let back: L3ReviewConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
     }
 }

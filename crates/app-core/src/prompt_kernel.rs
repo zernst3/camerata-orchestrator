@@ -15,7 +15,7 @@
 //! "Per-tier addenda"). Every runner resolves its model from the project tier map before
 //! building the prompt, so keying the addendum off the model or tier string needs no new plumbing.
 //!
-//! Source: `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md` (sections 4 and 5).
+//! Source: the prompt-hardening and governance-kernel notes (sections 4 and 5).
 //! Every clause is imperative + inspectable (assertable by prompt unit tests), vendor-neutral,
 //! with tool references kept conditional ("if available"), and each variant kept under ~450 tokens
 //! for cache-prefix stability.

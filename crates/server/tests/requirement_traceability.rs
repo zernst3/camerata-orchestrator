@@ -1,7 +1,7 @@
 //! Requirement traceability gate.
 //!
 //! TEST DISCIPLINE item 2, decided by Zach on 2026-10-09 and recorded in
-//! `docs/plans/2026-10-09_audit-findings-tracker.md`:
+//! the audit findings tracker:
 //!
 //! > "A traceability check fails the build if any requirement has **zero** tests referencing it."
 //!

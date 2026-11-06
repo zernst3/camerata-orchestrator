@@ -1,5 +1,5 @@
 id = "RUST-TESTING-2"
-version = 1
+version = 3
 title = "Integration tests live in a top-level tests/ directory; each file is a separate crate"
 domain = "rust:testing"
 layer = "language"
@@ -11,14 +11,14 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-03-test-organization.html"
-title = "The Rust Book — Ch 11.3: Test Organization (Integration Tests)"
+title = "The Rust Book: Ch 11.3: Test Organization (Integration Tests)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/testing/integration_testing.html"
-title = "Rust By Example — Integration Testing"
+title = "Rust By Example: Integration Testing"
 
 [decision]
-question = "What position does the project take on: where do integration tests live in a Rust project?"
+question = "Where do integration tests live in the project?"
 default = "tests-dir-each-file-separate-crate"
 why = "The Rust Book (Ch 11.3) and Rust By Example establish the tests/ directory (sibling to src/) as the canonical location for integration tests in Rust. Cargo treats each .rs file in tests/ as a separate crate compiled against the public API of the library — this external-crate perspective is the defining characteristic of an integration test in Rust. Shared helper code must use the old-style tests/common/mod.rs path (not tests/common.rs) because Cargo treats any .rs file in tests/ as a test binary and would attempt to run it; common/mod.rs is recognized as a submodule rather than a test binary. Integration tests do not require #[cfg(test)] because Cargo only compiles them during cargo test. Binary crates (src/main.rs only, no src/lib.rs) cannot have integration tests under this convention — core logic must live in a library crate."
 

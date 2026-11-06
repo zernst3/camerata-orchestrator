@@ -24,7 +24,8 @@ pub use camerata_app_core::project::{
     default_routine_secs, default_watched_secs, export_ruleset, parse_ruleset, CustomRule,
     HierarchySchema, ImportOutcome, L3ReviewConfig, MemoryEntry, MemoryKind, MemoryStatus,
     ModelProfile, OperatingPrinciple, Project, ProjectBackend, ProjectImport, ProjectRuleset,
-    RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
+    ReviewOnError, ReviewSettings, ReviewTier, RuleSelection, StallThresholds, StepKind,
+    StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
 };
 
 use crate::model_tier::TierMap;
@@ -61,6 +62,15 @@ impl ProjectStore {
             .ok()
             .and_then(|s| serde_json::from_str::<State>(&s).ok())
             .unwrap_or_default();
+        // A project that saved the previous default over-budget set (five reasons) loads the new
+        // default (seven): say so once, and the run's ledger records the set in force.
+        if camerata_api_types::project::take_over_budget_set_upgrade_notice() {
+            tracing::warn!(
+                "a project's saved over-budget reasons were the previous default and were \
+                 upgraded to the current default (authorization bypass and injection added); \
+                 each run's ledger records the set it used"
+            );
+        }
         // ISOLATION (A7): validate the persisted active pointer. A dangling `active` id
         // (project deleted out-of-band, hand-edited file, partial write) would otherwise
         // make `active()` fall through to `projects.first()`, silently grounding the chat
@@ -146,6 +156,18 @@ impl ProjectStore {
                 // into the Claude Code subscription explicitly. Persisted projects keep
                 // whatever backend they stored (a legacy file without the field stays `Cli`).
                 backend: ProjectBackend::for_new_project(),
+                // Set in the inspection setup; a new project has no client yet.
+                client_name: String::new(),
+                // Every new or imported project starts as a client engagement (see
+                // `Project::client_engagement`); the operator turns it off for their own development.
+                client_engagement: true,
+                client_tooling_opt_in: false,
+                // Stage 2 has a default of its own too; a new project seeds it (A15).
+                review: ReviewSettings {
+                    group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                        .to_string(),
+                    ..ReviewSettings::default()
+                },
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -254,6 +276,15 @@ impl ProjectStore {
                     // freshly imported project always starts on the new-project default
                     // (`Api`), same as a brand-new project, until the operator explicitly sets it.
                     backend: ProjectBackend::for_new_project(),
+                    // Not transferable either, for the same reason as `backend`: an imported
+                    // export must never mark a new report as prepared for the source project's
+                    // client. An overwrite (above) keeps the existing project's own name.
+                    client_name: String::new(),
+                    // Every new or imported project starts as a client engagement (see
+                    // `Project::client_engagement`); the operator turns it off for their own development.
+                    client_engagement: true,
+                    client_tooling_opt_in: false,
+                    review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -315,6 +346,28 @@ impl ProjectStore {
         self.update(id, |p| p.set_model_for_step(step, model))
     }
 
+    /// Set the review tree's settings (the escalation rate and floor, the over-budget reasons and
+    /// the group reviewer's model) for ONE project by id. A rate that is not a finite number of
+    /// zero or more is refused (`Err`), so a stored project never holds one the budget cannot
+    /// use. Returns the updated project, or `None` when no project has that id.
+    pub fn set_review_settings(
+        &self,
+        id: &str,
+        settings: ReviewSettings,
+    ) -> Option<Result<Project, String>> {
+        if !settings.escalation_rate_per_kloc.is_finite() || settings.escalation_rate_per_kloc < 0.0
+        {
+            // The project must exist for the refusal to be about the rate.
+            self.get(id)?;
+            return Some(Err(format!(
+                "the escalation rate must be zero or a positive number of escalations per \
+                 1,000 lines (got {})",
+                settings.escalation_rate_per_kloc
+            )));
+        }
+        self.update(id, |p| p.review = settings).map(Ok)
+    }
+
     /// Set the stall thresholds for a single project by id. Returns the updated project,
     /// or `None` when no project has that id.
     pub fn set_stall_thresholds(&self, id: &str, thresholds: StallThresholds) -> Option<Project> {
@@ -341,6 +394,21 @@ impl ProjectStore {
     /// that id. Persisted to disk like every other per-project mutator.
     pub fn set_backend(&self, project_id: &str, backend: ProjectBackend) -> Option<Project> {
         self.update(project_id, |p| p.backend = backend)
+    }
+
+    /// Set whether a project is a client engagement and whether the operator opts in to running
+    /// the client's own tooling for it (see `Project::client_engagement`). `None` when no project
+    /// has that id.
+    pub fn set_client_engagement(
+        &self,
+        project_id: &str,
+        client_engagement: bool,
+        client_tooling_opt_in: bool,
+    ) -> Option<Project> {
+        self.update(project_id, |p| {
+            p.client_engagement = client_engagement;
+            p.client_tooling_opt_in = client_tooling_opt_in;
+        })
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
@@ -767,21 +835,30 @@ mod tests {
     // ── StepModels (per-project, per-step model config) ────────────────────────
 
     #[test]
-    fn new_project_seeds_every_step_to_default_model() {
-        // (a) A freshly created project carries DEFAULT_MODEL in every step slot.
+    fn new_project_seeds_every_step_to_its_own_default() {
+        // (a) A freshly created project carries each step's own default: DEFAULT_MODEL in every
+        // step slot but calibration, which is stage 1 and has its own default (A13/A15).
         let store = ProjectStore::new();
         let p = store.create("SM", vec![]).unwrap();
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
-        assert_eq!(p.step_models.calibration, DEFAULT_MODEL);
+        assert_eq!(
+            p.step_models.calibration,
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL
+        );
         assert_eq!(p.step_models.research_chat, DEFAULT_MODEL);
         assert_eq!(p.step_models.story_authoring, DEFAULT_MODEL);
         assert_eq!(p.step_models.decomposition, DEFAULT_MODEL);
         assert_eq!(p.step_models.escalation, DEFAULT_MODEL);
         assert_eq!(p.step_models.clarification, DEFAULT_MODEL);
+        // The one exception: the fix step starts unset, so the `fix_on_haiku` switch decides.
+        assert_eq!(p.model_for_step(StepKind::Fix), "");
         // model_for_step agrees with the field for every kind.
+        assert_eq!(
+            p.model_for_step(StepKind::Calibration),
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL
+        );
         for step in [
             StepKind::Audit,
-            StepKind::Calibration,
             StepKind::ResearchChat,
             StepKind::StoryAuthoring,
             StepKind::Decomposition,
@@ -794,6 +871,30 @@ mod tests {
                 "new project defaults step {step:?} to DEFAULT_MODEL"
             );
         }
+    }
+
+    #[test]
+    fn a_new_project_seeds_each_calibration_stage_with_its_own_default() {
+        let store = ProjectStore::new();
+        let p = store.create("Stages", vec![]).unwrap();
+        // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
+        assert_eq!(p.step_models.calibration, "claude-opus-5-5");
+        assert_eq!(p.review.group_review_model, "claude-fable-5-1");
+        // The scan keeps its own default.
+        assert_eq!(p.step_models.audit, DEFAULT_MODEL);
+        // The rest of the review settings are the design values.
+        assert_eq!(p.review.escalation_floor, 20);
+        // A project that already stored explicit picks keeps them.
+        let json = serde_json::json!({
+            "id": "old", "name": "Old",
+            "step_models": { "calibration": "claude-sonnet-5-5" },
+        });
+        let old: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(old.step_models.calibration, "claude-sonnet-5-5");
+        assert_eq!(
+            old.review.group_review_model, "",
+            "unset: the run default applies"
+        );
     }
 
     #[test]
@@ -828,7 +929,7 @@ mod tests {
                 .get(&a.id)
                 .unwrap()
                 .model_for_step(StepKind::Calibration),
-            DEFAULT_MODEL,
+            camerata_api_types::project::STAGE1_DEFAULT_MODEL,
             "setting A's audit model must not touch A's calibration model"
         );
     }
@@ -872,6 +973,69 @@ mod tests {
         assert_eq!(p.model_for_step(StepKind::Audit), DEFAULT_MODEL);
 
         // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_settings_are_per_project_persist_and_refuse_a_bad_rate() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-review-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+        let (a_id, b_id) = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let a = store.create("A", vec![]).unwrap();
+            let b = store.create("B", vec![]).unwrap();
+            // A new project carries the design values, and stage 2's own default model.
+            let seeded = ReviewSettings {
+                group_review_model: "claude-fable-5-1".to_string(),
+                ..ReviewSettings::default()
+            };
+            assert_eq!(a.review, seeded);
+            let set = ReviewSettings {
+                escalation_rate_per_kloc: 0.5,
+                escalation_floor: 7,
+                group_review_model: "claude-opus-5-5".to_string(),
+                ..ReviewSettings::default()
+            };
+            let updated = store
+                .set_review_settings(&a.id, set.clone())
+                .expect("the project exists")
+                .expect("valid settings");
+            assert_eq!(updated.review, set);
+            // B is untouched.
+            assert_eq!(store.get(&b.id).unwrap().review, seeded);
+            // A bad rate is refused and changes nothing.
+            for bad in [-1.0_f32, f32::NAN, f32::INFINITY] {
+                let refused = store
+                    .set_review_settings(
+                        &a.id,
+                        ReviewSettings {
+                            escalation_rate_per_kloc: bad,
+                            ..set.clone()
+                        },
+                    )
+                    .expect("the project exists");
+                assert!(refused.is_err(), "{bad} is refused");
+            }
+            assert_eq!(store.get(&a.id).unwrap().review, set);
+            assert!(store.set_review_settings("no-such-id", set).is_none());
+            (a.id, b.id)
+        };
+        // It survives a reload from the file.
+        let reloaded = ProjectStore::load_or_new(path);
+        let a = reloaded.get(&a_id).unwrap();
+        assert_eq!(a.review.escalation_floor, 7);
+        assert_eq!(a.review.group_review_model, "claude-opus-5-5");
+        assert_eq!(
+            reloaded.get(&b_id).unwrap().review.group_review_model,
+            "claude-fable-5-1"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

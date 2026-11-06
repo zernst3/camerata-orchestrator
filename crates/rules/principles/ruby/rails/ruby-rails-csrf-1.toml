@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-CSRF-1"
-version = 1
+version = 2
 title = "CSRF protection is on by default; only API-only JSON endpoints are selectively exempt with token auth"
 domain = "ruby:rails"
 layer = "framework"
@@ -38,4 +38,4 @@ why = "A valid alternative for stateless APIs, but requires careful implementati
 
 [[sources]]
 url = "https://guides.rubyonrails.org/security.html#cross-site-request-forgery-csrf"
-title = "Rails Guides — Securing Rails Applications: Cross-Site Request Forgery (CSRF)"
+title = "Rails Guides: Securing Rails Applications: Cross-Site Request Forgery (CSRF)"

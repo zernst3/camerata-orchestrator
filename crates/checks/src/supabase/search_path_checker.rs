@@ -9,7 +9,7 @@
 //! all is just as exploitable, so [`INTEREST_GLOBS`] intentionally covers `.sql` anywhere in
 //! the repo (see [`build_timeline_from_globs`](super::timeline::build_timeline_from_globs))
 //! rather than only Supabase's fixed folder convention — see
-//! `docs/plans/2026-09-30_cycle2-queue-hardening.md` §W1.
+//! the cycle-2 queue-hardening notes §W1.
 
 use super::timeline::build_timeline_from_globs;
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
@@ -132,7 +132,7 @@ mod tests {
     }
 
     // ── W1 breadth hardening: general Postgres, not just Supabase ──────────────────────
-    // See docs/plans/2026-09-30_cycle2-queue-hardening.md §W1 — the vulnerability (a
+    // See the cycle-2 queue-hardening notes §W1 — the vulnerability (a
     // SECURITY DEFINER function with no pinned search_path) is general Postgres, so the
     // checker must inspect `.sql` wherever it lives, not only `supabase/migrations/*.sql`.
 

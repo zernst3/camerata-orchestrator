@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-SCOPES-1"
-version = 1
+version = 2
 title = "Reusable query conditions are named scopes on the model, not ad-hoc where chains at call sites"
 domain = "ruby:rails"
 layer = "framework"
@@ -38,4 +38,4 @@ why = "Convenient for filters that must always apply but introduces invisible fi
 
 [[sources]]
 url = "https://guides.rubyonrails.org/active_record_querying.html#scopes"
-title = "Rails Guides — Active Record Query Interface: Scopes"
+title = "Rails Guides: Active Record Query Interface: Scopes"

@@ -1,5 +1,5 @@
 id = "INTEGRATION-EVENT-WIRING-1"
-version = 1
+version = 3
 title = "Every emitted event has a consumer and every subscription is emitted"
 domain = "integration"
 layer = "universal"
@@ -15,11 +15,11 @@ qualifies = "Checked across the whole assembled system in both directions: a per
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Cross-agent rules: the integration gate — wiring completeness (no dangling ends)"
+title = "Design decision: a check over the whole assembled system confirms that every connection between components has both ends"
 
 [[sources]]
 url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
-title = "Integration gate: the generic reconciliation engine + per-stack extractors"
+title = "Design decision: one reconciliation engine compares what each component emits with what the others consume, with one extractor per language stack"
 
 [decision]
 question = "How does the project verify that events wired across the agent seam have no dangling ends (an emit with no consumer, or a subscription with no emitter)?"
@@ -28,7 +28,7 @@ why = "Event wiring is a cross-agent invariant: the emitter agent and the subscr
 [[option]]
 id = "reconcile-event-emit-vs-consume"
 label = "Reconcile emitted events against subscriptions (both directions, deterministic)"
-directive = "Every event the system emits has at least one subscriber somewhere in it, and every subscription corresponds to an event that is actually emitted — checked across all components, so neither a dangling emit (a signal nothing listens for) nor a dangling subscription (a consumer waiting on an event nobody sends) ships."
+directive = "Every event the system emits has at least one subscriber somewhere in it, and every subscription corresponds to an event that is actually emitted: checked across all components, so neither a dangling emit (a signal nothing listens for) nor a dangling subscription (a consumer waiting on an event nobody sends) ships."
 remediation = """
 Add the missing consumer for an event that is emitted but never subscribed to, or add the missing producer/emit call for a subscription that is waiting on an event nothing ever publishes. Remove the dead emit or dead subscription instead if it turns out to be leftover from removed functionality. Verify by re-running the integration gate's event reconciliation on the assembled tree and confirming every emitted event now has at least one matching consumer and every subscription has a matching emitter.
 """

@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-MOCK-AT-BOUNDARY-1"
-version = 1
+version = 3
 title = "Mocks and stubs target only infrastructure boundaries (I/O, external services, time); production class internals are never mocked"
 domain = "csharp:testing"
 layer = "language"
@@ -18,9 +18,9 @@ why = "Mocking a class that contains real business logic defeats the purpose of 
 [[option]]
 id = "mock-at-infrastructure-boundary"
 label = "mock only interface-based boundaries (repositories, HTTP clients, time providers); test production logic directly"
-directive = "Dependencies injected into a class under test via constructor injection are represented as interfaces. In test setup, create a Mock<IMyDependency> using Moq, configure it with .Setup(x => x.Method()).Returns(value), inject it, and call the real system under test. After the Act, use mock.Verify(...) only when the test specifically cares about the interaction (call count, argument values). Use stubs (Setup only, no Verify) when only the returned value matters. Never create a Mock<> of a production class that contains logic you are not trying to isolate; instantiate it directly instead. Introduce seam interfaces (IDateTimeProvider, IFileSystem) for non-injectable static calls that would otherwise create non-determinism."
+directive = "Dependencies injected into a class under test via constructor injection are represented as interfaces. In test setup, create a Mock<IMyDependency> using Moq, configure it with .Setup(x => x.Method()).Returns(value), inject it and call the real system under test. After the Act, use mock.Verify(...) only when the test specifically cares about the interaction (call count, argument values). Use stubs (Setup only, no Verify) when only the returned value matters. Never create a Mock<> of a production class that contains logic you are not trying to isolate; instantiate it directly instead. Introduce seam interfaces (IDateTimeProvider, IFileSystem) for non-injectable static calls that would otherwise create non-determinism."
 remediation = """
-Change the dependency being mocked from a concrete class to an interface representing the infrastructure boundary (repository, HTTP client, time provider), and mock only that interface with Moq while exercising the real production class's logic directly. Remove any test that spins up real infrastructure (a real database, HTTP server, or queue) just to isolate a unit. Verify by confirming the test still passes when the concrete infrastructure implementation is unavailable, since only the interface is mocked.
+Change the dependency being mocked from a concrete class to an interface representing the infrastructure boundary (repository, HTTP client, time provider) and mock only that interface with Moq while exercising the real production class's logic directly. Remove any test that spins up real infrastructure (a real database, HTTP server or queue) just to isolate a unit. Verify by confirming the test still passes when the concrete infrastructure implementation is unavailable, since only the interface is mocked.
 """
 why = "Boundaries are the only correct place to inject test doubles; mocking internals produces tests that pass even when production logic is broken."
 
@@ -33,14 +33,14 @@ why = "Creates a tight coupling between the test and the class's inheritance/vir
 [[option]]
 id = "no-mocks-integration-style"
 label = "spin up real in-process infrastructure (SQLite, in-memory buses) even for unit tests"
-directive = "Unit tests instantiate real database connections (in-memory SQLite), real HTTP servers (TestServer), or real queue implementations."
+directive = "Unit tests instantiate real database connections (in-memory SQLite), real HTTP servers (TestServer) or real queue implementations."
 why = "These are integration tests, not unit tests; they are slower, order-dependent, and require environment setup. Reserve real infrastructure for the IntegrationTests project."
 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Handle stub static references with seams; Avoid infrastructure dependencies"
+title = "Best practices for writing unit tests: Handle stub static references with seams; Avoid infrastructure dependencies"
 
 [[sources]]
 url = "https://github.com/devlooped/moq"
-title = "Moq — The most popular and friendly mocking library for .NET"
+title = "Moq: The most popular and friendly mocking library for .NET"

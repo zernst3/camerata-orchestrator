@@ -107,6 +107,13 @@ pub const ESCALATION_REQUESTS_FILE_ENV: &str = "CAMERATA_ESCALATION_REQUESTS_FIL
 /// writes to the repo.
 pub const MEMORY_PROPOSALS_FILE_ENV: &str = "CAMERATA_MEMORY_PROPOSALS_FILE";
 
+/// Optional env override for the proposed-decision JSONL sink path. When set, every
+/// `propose_decision` call is appended (one JSON object per line) to this file. When unset,
+/// the path is a `decisions.jsonl` sibling of the [`RULES_FILE_ENV`] file (the same
+/// derivation as the clarify sink). The agent to run channel for structured decisions the
+/// investigation agent surfaces; it never writes to the repo.
+pub const DECISIONS_FILE_ENV: &str = "CAMERATA_DECISIONS_FILE";
+
 /// One structured gate-decision record, appended as a single JSONL line to the sink.
 ///
 /// Recording-only: this mirrors what [`Gateway::gated_write`] already decided, so the
@@ -253,6 +260,48 @@ fn append_memory_proposal(record: &MemoryProposalRecord) {
     }
 }
 
+/// One decision the INVESTIGATION agent proposes for the architect to rule on. Wire shape
+/// between the gateway subprocess and the server: the server reads these back after the pass
+/// and files each as a `Pending` decision record. Recording-only: proposing a decision is not a
+/// repo write, does not pause the run, and cannot change a gate verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedDecisionRecord {
+    /// Short name of the decision, e.g. "Session storage: cookies or JWT".
+    pub label: String,
+    /// The ambiguity, in plain language.
+    pub question: String,
+    /// The options on the table (two or more), each with a one-line description.
+    #[serde(default)]
+    pub options: Vec<ClarifyRequestOption>,
+    /// The label of the option the agent recommends.
+    pub recommended: String,
+    /// Why, grounded in files the agent read (with their paths).
+    pub rationale: String,
+    /// Unix-epoch milliseconds when the proposal was recorded.
+    pub ts_ms: u128,
+}
+
+/// Append a proposed-decision record to the decisions JSONL sink (best-effort, recording-only).
+/// Mirrors [`append_clarify_request`]: appends to the per-session sink (a sibling of the rules
+/// file, OUTSIDE the worktree jail); a write failure is ignored; never touches the repo.
+fn append_proposed_decision(record: &ProposedDecisionRecord) {
+    let Some(path) = proposed_decisions_sink_path() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(record) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Append a clarification-request record to the clarify-request JSONL sink (best-effort).
 ///
 /// The agent→run channel for Phase 3b. RECORDING-ONLY: a write failure is ignored. This
@@ -306,6 +355,19 @@ pub fn clarify_requests_sink_path() -> Option<std::path::PathBuf> {
     let rules_path = std::path::PathBuf::from(rules);
     let dir = rules_path.parent()?;
     Some(dir.join("clarify-requests.jsonl"))
+}
+
+/// Resolve the proposed-decision sink path: [`DECISIONS_FILE_ENV`] if set, else a
+/// `decisions.jsonl` sibling of the [`RULES_FILE_ENV`] file. A RECORDING channel only, like the
+/// clarify sink. Returns `None` when nothing is configured (standalone/test runs).
+pub fn proposed_decisions_sink_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(DECISIONS_FILE_ENV) {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    let rules = std::env::var_os(RULES_FILE_ENV)?;
+    let rules_path = std::path::PathBuf::from(rules);
+    let dir = rules_path.parent()?;
+    Some(dir.join("decisions.jsonl"))
 }
 
 /// Resolve the escalation-request sink path: [`ESCALATION_REQUESTS_FILE_ENV`] if set, else an
@@ -547,6 +609,20 @@ pub struct AskClarificationArgs {
     /// Whether the "Other" free-text escape is offered. Default true.
     #[serde(default = "default_true")]
     pub allow_free_text: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProposeDecisionArgs {
+    /// Short name of the decision, e.g. "Session storage: cookies or JWT".
+    pub label: String,
+    /// The ambiguity the architect must resolve, in plain language.
+    pub question: String,
+    /// The options on the table: two or more, each with a one-line benefit and drawback.
+    pub options: Vec<ClarifyRequestOption>,
+    /// The label of the option you recommend (it must be one of the option labels).
+    pub recommended: String,
+    /// Why you recommend it, grounded in files you read (cite their paths).
+    pub rationale: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -818,6 +894,46 @@ impl Gateway {
              will be resumed with the answer appended to your context. Do not attempt to \
              proceed past this decision."
         )
+    }
+
+    /// Propose ONE structured DECISION for the architect to rule on (investigation phase).
+    /// READ-CLASS: records the proposal to the per-session sink (a sibling of the rules file,
+    /// OUTSIDE the worktree jail) so the server can file it as a `Pending` decision. It writes
+    /// nothing to the repo, does not pause the run and gives no gate verdict, so the gate is
+    /// unaffected: there is no new write path here. Call it once per decision.
+    #[tool(
+        name = "propose_decision",
+        description = "Propose ONE decision the architect must resolve before any code is written. Give a short `label`, the `question` (the ambiguity, in plain language), two or more `options` (each with a one-line benefit and drawback), the label of your `recommended` option, and your `rationale` grounded in files you read (cite their paths). Call it once for EACH decision. This does NOT write any files and does NOT pause the run; it records a proposal the architect approves, changes or rejects."
+    )]
+    pub async fn propose_decision(&self, args: Parameters<ProposeDecisionArgs>) -> String {
+        let ProposeDecisionArgs {
+            label,
+            question,
+            options,
+            recommended,
+            rationale,
+        } = args.0;
+
+        let record = ProposedDecisionRecord {
+            label: label.clone(),
+            question,
+            options,
+            recommended,
+            rationale,
+            ts_ms: now_ms(),
+        };
+
+        eprintln!(
+            "[gateway] propose_decision recorded ({} option(s)): {}",
+            record.options.len(),
+            label
+        );
+
+        // Record to the agent to run channel. RECORDING-ONLY: writes to the per-session sink
+        // outside the worktree jail; touches no repo file; cannot change a gate verdict.
+        append_proposed_decision(&record);
+
+        "recorded".to_string()
     }
 
     /// Raise an escalation when the agent's work meets the escalation CONDITION of a selected rule
@@ -1304,6 +1420,110 @@ mod clarify_tool_tests {
 
         // CRITICAL: ask_clarification writes ONLY to the sink (outside any worktree), and
         // does NOT write any repo file — it created nothing else in the dir.
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the sink file should exist: {entries:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn decisions_sink_path_prefers_explicit_then_derives_from_rules_dir() {
+        {
+            let _explicit = camerata_test_env::EnvGuard::set(
+                DECISIONS_FILE_ENV,
+                "/tmp/explicit-decisions.jsonl",
+            );
+            assert_eq!(
+                proposed_decisions_sink_path(),
+                Some(std::path::PathBuf::from("/tmp/explicit-decisions.jsonl"))
+            );
+        }
+        let _no_explicit = camerata_test_env::EnvGuard::remove(DECISIONS_FILE_ENV);
+        let _rules = camerata_test_env::EnvGuard::set(RULES_FILE_ENV, "/tmp/session-9/rules.json");
+        assert_eq!(
+            proposed_decisions_sink_path(),
+            Some(std::path::PathBuf::from("/tmp/session-9/decisions.jsonl"))
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn propose_decision_records_a_structured_decision_to_the_sink_and_writes_nothing_else() {
+        let dir = std::env::temp_dir().join(format!(
+            "cam-propose-decision-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = dir.join("decisions.jsonl");
+        let _env = camerata_test_env::EnvGuard::set(DECISIONS_FILE_ENV, &sink);
+
+        let gw = Gateway::with_rules(vec![gov1_rule()]);
+        let first = gw
+            .propose_decision(Parameters(ProposeDecisionArgs {
+                label: "Session storage: cookies or JWT".to_string(),
+                question: "Where should login sessions live?".to_string(),
+                options: vec![
+                    ClarifyRequestOption {
+                        label: "Cookies".to_string(),
+                        description: "server side sessions".to_string(),
+                    },
+                    ClarifyRequestOption {
+                        label: "JWT".to_string(),
+                        description: "stateless tokens".to_string(),
+                    },
+                ],
+                recommended: "Cookies".to_string(),
+                rationale: "src/auth.rs already sets a session cookie.".to_string(),
+            }))
+            .await;
+        // The tool only records; it does not pause the run or ask the agent to stop.
+        assert_eq!(first, "recorded");
+        let second = gw
+            .propose_decision(Parameters(ProposeDecisionArgs {
+                label: "Pagination".to_string(),
+                question: "Cursor or offset?".to_string(),
+                options: vec![
+                    ClarifyRequestOption {
+                        label: "Cursor".to_string(),
+                        description: String::new(),
+                    },
+                    ClarifyRequestOption {
+                        label: "Offset".to_string(),
+                        description: String::new(),
+                    },
+                ],
+                recommended: "Cursor".to_string(),
+                rationale: "src/list.rs pages by id.".to_string(),
+            }))
+            .await;
+        assert_eq!(second, "recorded");
+
+        // One JSON line per call, each faithful to its arguments.
+        let text = std::fs::read_to_string(&sink).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        let rec: ProposedDecisionRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(rec.label, "Session storage: cookies or JWT");
+        assert_eq!(rec.question, "Where should login sessions live?");
+        assert_eq!(rec.options.len(), 2);
+        assert_eq!(rec.options[1].label, "JWT");
+        assert_eq!(rec.options[1].description, "stateless tokens");
+        assert_eq!(rec.recommended, "Cookies");
+        assert_eq!(rec.rationale, "src/auth.rs already sets a session cookie.");
+        let rec2: ProposedDecisionRecord = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(rec2.label, "Pagination");
+
+        // CRITICAL: recording only. The sink is the one file created; no repo file is written.
         let entries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())

@@ -1,5 +1,5 @@
 id = "JAVA-OPTIONAL-OVER-NULL-1"
-version = 1
+version = 3
 title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
 domain = "java"
 layer = "language"
@@ -17,14 +17,14 @@ why = "Returning null is a contract violation; callers must remember to check fo
 
 [[sources]]
 url = "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Optional.html"
-title = "java.util.Optional javadoc — API Note: Optional is intended primarily for use as a method return type where there is a clear need to represent \"no result\""
+title = "java.util.Optional javadoc: API Note: Optional is intended primarily for use as a method return type where there is a clear need to represent \"no result\""
 
 [[option]]
 id = "optional-return-types"
 label = "return Optional<T> instead of null"
-directive = "Methods that might not have a value to return use Optional<T> as the return type (e.g., Optional<User> findById(int id)). Callers explicitly handle the absence with ifPresent(), orElse(), orElseThrow(), or other Optional methods. Null is used only for internal fields that are immediately assigned in initialization or legacy APIs that cannot be changed."
+directive = "Methods that might not have a value to return use Optional<T> as the return type (e.g., Optional<User> findById(int id)). Callers explicitly handle the absence with ifPresent(), orElse(), orElseThrow() or other Optional methods. Null is used only for internal fields that are immediately assigned in initialization or legacy APIs that cannot be changed."
 remediation = """
-Change the method's return type from a nullable reference to Optional of the value type, and update its callers to handle absence explicitly via ifPresent(), orElse(), or orElseThrow() instead of a null check. Reserve a bare null only for internal fields never exposed as a return value. Verify by confirming the method's signature no longer implies a nullable return and callers fail to compile if they skip handling the empty case.
+Change the method's return type from a nullable reference to Optional of the value type, and update its callers to handle absence explicitly via ifPresent(), orElse() or orElseThrow() instead of a null check. Reserve a bare null only for internal fields never exposed as a return value. Verify by confirming the method's signature no longer implies a nullable return and callers fail to compile if they skip handling the empty case.
 """
 why = "Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
 
@@ -44,5 +44,5 @@ why = "Appropriate for cases where absence is an exceptional error condition, no
 [[option]]
 id = "nullness-static-analysis-jspecify-nullaway"
 label = "keep plain nullable references, enforce nullness with JSpecify annotations + a static-analysis gate (e.g. NullAway)"
-directive = "Instead of routing every possibly-absent return value through Optional<T>, annotate nullable and non-null references directly with JSpecify's standard annotations (org.jspecify.annotations.Nullable / @NonNull), and enforce them at build time with a static-analysis tool such as Error Prone's NullAway, which flags a dereference of a @Nullable-annotated value without a null check, and flags returning null from a method whose return type isn't annotated @Nullable. Optional is still reserved for cases where its monadic API (map/flatMap/orElse chains) is genuinely useful, not required for every nullable return type."
+directive = "Instead of routing every possibly-absent return value through Optional<T>, annotate nullable and non-null references directly with JSpecify's standard annotations (org.jspecify.annotations.Nullable / @NonNull) and enforce them at build time with a static-analysis tool such as Error Prone's NullAway, which flags a dereference of a @Nullable-annotated value without a null check and flags returning null from a method whose return type isn't annotated @Nullable. Optional is still reserved for cases where its monadic API (map/flatMap/orElse chains) is genuinely useful, not required for every nullable return type."
 why = "Gets most of the safety Optional<T> is meant to provide (a nullness contract checked before runtime, not discovered via NullPointerException) without forcing every nullable reference through Optional's boxing and API, which some teams find heavy-handed for simple fields and parameters, not just return types. JSpecify is a standard, tool-agnostic annotation set (adopted by NullAway, IntelliJ, Checker Framework and others), so this is a legitimate, increasingly common alternative or complement to 'return Optional instead of null' — it trades Optional's type-level explicitness at each call site for whole-codebase static enforcement, and works for parameters and fields (which Optional is explicitly not recommended for) as well as return types, at the cost of needing a configured build-time gate rather than relying purely on the type signature."

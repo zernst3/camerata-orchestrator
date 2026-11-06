@@ -4,7 +4,7 @@
 **Branch:** fix2/uow-concurrency
 **Scope:** `crates/server/src/uow.rs`
 **Bugs addressed:** BUG-UOW-1, BUG-INT-1, BUG-UOW-2, BUG-UOW-3, BUG-UOW-4
-**Source:** `docs/audits/2026-06-20_waves45_bug_hunt.md`
+**Source:** the waves 4-5 bug-hunt audit (private working notes)
 
 ---
 

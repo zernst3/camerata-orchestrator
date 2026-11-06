@@ -48,11 +48,19 @@ fn report() -> ScanReport {
         ..Finding::default()
     }];
     ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string(), "acme/web".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -71,6 +79,7 @@ fn report() -> ScanReport {
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "acme/portal".to_string(),
                 sha: Some("abcdef1234567890".to_string()),
@@ -88,6 +97,7 @@ fn report() -> ScanReport {
             audited_rule_ids: vec!["SEC-NO-RAW-SQL-CONCAT-1".to_string()],
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: None,
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -100,8 +110,10 @@ fn report() -> ScanReport {
 
 fn report_json() -> AuditReportJson {
     build_report_json(
-        &report().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report().seal(),
+            &HashMap::new(),
+        ),
         None,
         &ReportOptions::default(),
     )
@@ -151,7 +163,7 @@ fn read_entries(zip_bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         let mut entry = archive.by_index(i).unwrap();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
-        out.insert(entry.name().to_string(), bytes);
+        out.insert(entry.name().unwrap().to_string(), bytes);
     }
     out
 }

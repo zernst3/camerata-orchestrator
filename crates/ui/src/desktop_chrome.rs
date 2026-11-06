@@ -130,7 +130,7 @@ pub const CLIPBOARD_SHIM_SCRIPT: &str = r#"<script>
 /// platform's default for cut/copy/paste is), so this is safe to ship as-is.
 /// The set_as_windows_menu_for_nsapp() call is guarded by #[cfg(target_os = "macos")].
 pub fn app_menu_bar() -> dioxus::desktop::muda::Menu {
-    use dioxus::desktop::muda::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+    use dioxus::desktop::muda::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
     let menu = Menu::new();
 
@@ -175,7 +175,18 @@ pub fn app_menu_bar() -> dioxus::desktop::muda::Menu {
         &PredefinedMenuItem::select_all(None),
     ]);
 
-    let _ = menu.append_items(&[&app, &window, &edit]);
+    // --- Help menu (last). One item, the inspection walkthrough. Its click is heard in the
+    // cockpit (`walkthrough::HelpMenuListener`) by this id, and runs the same function the
+    // command palette's "Start walkthrough" line runs. ---
+    let help = Submenu::new("Help", true);
+    let _ = help.append_items(&[&MenuItem::with_id(
+        HELP_START_WALKTHROUGH_ID,
+        camerata_ui_core::palette::WALKTHROUGH_LABEL,
+        true,
+        None,
+    )]);
+
+    let _ = menu.append_items(&[&app, &window, &edit, &help]);
 
     // Tell AppKit which submenu is the Window menu.  Required for AppKit to
     // auto-populate it with "Bring All to Front" and open-window entries.
@@ -187,9 +198,16 @@ pub fn app_menu_bar() -> dioxus::desktop::muda::Menu {
     // harmless no-op — the call will happen again internally when needed.
     #[cfg(target_os = "macos")]
     window.set_as_windows_menu_for_nsapp();
+    // The same for Help: AppKit adds its search field to the menu it is told is the Help menu.
+    #[cfg(target_os = "macos")]
+    help.set_as_help_menu_for_nsapp();
 
     menu
 }
+
+/// The id of the Help menu's "Start walkthrough" item. The menu is built before the app runs, so
+/// the cockpit finds the click by this id.
+pub const HELP_START_WALKTHROUGH_ID: &str = "camerata.help.start-walkthrough";
 
 /// The clipboard bridge (macOS): Cmd-C / Cmd-X / Cmd-V via Rust + `pb{copy,paste}`.
 ///

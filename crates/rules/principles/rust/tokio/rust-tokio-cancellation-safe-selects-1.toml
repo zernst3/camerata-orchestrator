@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-CANCELLATION-SAFE-SELECTS-1"
-version = 1
+version = 4
 title = "Use tokio::select! safely; ensure the selected branch leaves the system in a consistent state"
 domain = "rust:tokio"
 layer = "framework"
@@ -10,16 +10,16 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Cancellation safety in select!?"
+question = "How are tokio::select! branches made safe for when a losing branch is dropped midway?"
 default = "ensure-select-cancellation-safe"
 why = "tokio::select! waits on multiple branches (futures) and runs whichever completes first. If one branch is a timeout or a cancellation signal, and the timeout fires before the other branch completes, that branch is dropped without running to completion. If the dropped branch was midway through a database transaction, a partial write, or updating shared state, the system is left in an inconsistent state. The rule is: before using select!, reason through what happens if any branch is cancelled. If cancellation would leave a resource or transaction in a bad state, the select! is unsafe. Some safe patterns: wrapping the selected work inside a transaction that can be rolled back, ensuring all shared state updates are atomic, or using a different concurrency pattern (e.g., a oneshot channel that is checked instead of select!). If the risk of inconsistency is unavoidable, document it explicitly and ensure cleanup code runs even if the branch is cancelled."
 
 [[option]]
 id = "ensure-select-cancellation-safe"
 label = "Ensure select! branches are cancellation-safe"
-directive = "Before using tokio::select!, reason through what happens if a branch is cancelled mid-execution (e.g., due to timeout, shutdown signal, or another branch completing). If cancellation would leave a resource, transaction, or shared state in an inconsistent state, either refactor to use a safe pattern (transactions, atomic updates, oneshot channels) or document the known risk and add explicit cleanup code that runs even after cancellation."
+directive = "Before using tokio::select!, reason through what happens if a branch is cancelled mid-execution (e.g., due to timeout, shutdown signal or another branch completing). If cancellation would leave a resource, transaction or shared state in an inconsistent state, either refactor to use a safe pattern (transactions, atomic updates, oneshot channels) or document the known risk and add explicit cleanup code that runs even after cancellation."
 remediation = """
-Review each branch of the tokio::select! for what happens if it is cancelled mid-execution, and refactor any branch that would leave a resource, transaction, or shared state inconsistent (for example by making the operation atomic or restructuring so cancellation only discards fully-owned local state). Verify by forcing cancellation at the point of concern (a timeout or a competing branch completing first) and confirming the shared state remains consistent afterward.
+Review each branch of the tokio::select! for what happens if it is cancelled mid-execution, and refactor any branch that would leave a resource, transaction or shared state inconsistent (for example by making the operation atomic or restructuring so cancellation only discards fully-owned local state). Verify by forcing cancellation at the point of concern (a timeout or a competing branch completing first) and confirming the shared state remains consistent afterward.
 """
 why = "Cancellation-safe code prevents resource leaks and inconsistent state."
 
@@ -28,12 +28,12 @@ id = "select-branches-not-validated"
 violates = true
 label = "Do not validate cancellation safety of select! branches"
 directive = "select! is used without explicit reasoning about what happens if a branch is cancelled or times out. The application relies on cleanup code or eventual consistency to handle any partial state."
-why = "If a cancelled branch was midway through a database transaction, a partial write, or updating shared state, the system is left in an inconsistent state; eventual consistency is not guaranteed in all cases, and the resulting bugs are notoriously hard to reproduce since they surface only under specific timing conditions."
+why = "If a cancelled branch was midway through a database transaction, a partial write or updating shared state, the system is left in an inconsistent state; eventual consistency is not guaranteed in all cases, and the resulting bugs are notoriously hard to reproduce since they surface only under specific timing conditions."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/macro.select.html"
-title = "tokio::select! — Cancellation safety documentation"
+title = "tokio::select!: Cancellation safety documentation"
 
 [[sources]]
 url = "https://tokio.rs/tokio/tutorial/select"
-title = "Tokio tutorial: Select — branch cancellation and drop semantics"
+title = "Tokio tutorial: Select: branch cancellation and drop semantics"

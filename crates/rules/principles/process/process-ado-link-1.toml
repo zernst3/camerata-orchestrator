@@ -1,5 +1,5 @@
 id = "PROCESS-ADO-LINK-1"
-version = 1
+version = 2
 title = "Commits and PRs reference a work-item / ticket id"
 domain = "process"
 layer = "universal"
@@ -20,11 +20,11 @@ qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github"
-title = "Azure Boards — link GitHub commits/PRs to work items via AB#<id>"
+title = "Azure Boards: link GitHub commits/PRs to work items via AB#<id>"
 
 [[sources]]
 url = "https://commitlint.js.org/"
-title = "commitlint — lint commit messages against a convention (CI-wirable)"
+title = "commitlint: lint commit messages against a convention (CI-wirable)"
 linter = "commitlint"
 
 [decision]

@@ -1,11 +1,16 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
-version = 1
+version = 5
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 # Severity ceiling. Rationale: storage authorization IS RLS on storage.objects, so this rule
 # mirrors SUPABASE-RLS-PERMISSIVE-TRUE-1's bounds for the same reason — publicly readable buckets
 # are a routine, often intentional pattern, so the ceiling stays at high and never reaches
@@ -22,11 +27,11 @@ qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RL
 
 [[sources]]
 url = "https://supabase.com/docs/guides/storage/security/access-control"
-title = "Supabase docs — Storage access control: storage authorization IS Row Level Security on storage.objects"
+title = "Supabase docs: Storage access control: storage authorization IS Row Level Security on storage.objects"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Do any storage.objects policies grant unconditional or unscoped anon write/delete access to a bucket?"
@@ -54,15 +59,15 @@ already covers generically.
 id = "flag-unscoped-object-policies-by-bucket"
 label = "storage.objects policies scope writes and deletes to the object's owner, per bucket"
 directive = """
-Storage authorization is Row Level Security on the `storage.objects` table — Supabase allows no
-uploads to a bucket until a policy on that table permits them — so every concern that applies to a
+Storage authorization is Row Level Security on the `storage.objects` table (Supabase allows no
+uploads to a bucket until a policy on that table permits them) so every concern that applies to a
 table policy applies here unchanged.
 
 Policies on `storage.objects` that cover INSERT, UPDATE or DELETE scope the operation to the
 object's owner: `using (bucket_id = '<bucket>' and owner = auth.uid())`, or a folder-prefix
 convention keyed to the user's id. They are not `USING (true)` / `WITH CHECK (true)`, and they do
 not grant to `anon` or `public` without an ownership predicate, because either shape lets anyone
-upload into, overwrite, or delete from the bucket rather than just the person whose file it is.
+upload into, overwrite or delete from the bucket rather than just the person whose file it is.
 Read access is scoped the same way unless the bucket's contents are deliberately public.
 """
 remediation = """
@@ -78,5 +83,5 @@ why = "Storage authorization is RLS on storage.objects in every respect that mat
 id = "unscoped-storage-write-policy-for-anon-or-public"
 violates = true
 label = "A storage.objects write or delete policy for anon or public is unscoped to the object's owner"
-directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite, or delete from the bucket."
+directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite or delete from the bucket."
 why = "Rejected: an unscoped write grant on storage.objects reachable by anon/public is a world-writable bucket. A SELECT-only unscoped policy for deliberately public read data is the default option's reviewed case."

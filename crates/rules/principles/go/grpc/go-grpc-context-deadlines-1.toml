@@ -1,5 +1,5 @@
 id = "GO-GRPC-CONTEXT-DEADLINES-1"
-version = 1
+version = 3
 title = "All RPC implementations respect context deadlines; client deadlines propagate through the call chain and are honored by outbound RPCs"
 domain = "go:grpc"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/guides/deadlines/"
-title = "gRPC — Deadlines"
+title = "gRPC: Deadlines"
 
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#contexts"
-title = "Go Code Review Comments — Contexts"
+title = "Go Code Review Comments: Contexts"
 
 [decision]
 question = "How should context deadlines be handled across gRPC service implementations and calls?"
@@ -43,4 +43,4 @@ id = "ignore-deadlines"
 violates = true
 label = "Services ignore deadlines; no deadline enforcement"
 directive = "RPC implementations do not use the context deadline or pass context to outbound calls; operations run to completion regardless of the client deadline."
-why = "Calls to downstream services are unbounded, so one slow dependency holds its callers open until the server runs out of connections, goroutines, or memory, and requests that never touched the slow dependency start failing too."
+why = "Calls to downstream services are unbounded, so one slow dependency holds its callers open until the server runs out of connections, goroutines or memory, and requests that never touched the slow dependency start failing too."

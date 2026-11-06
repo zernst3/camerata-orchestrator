@@ -1,6 +1,6 @@
 id = "RUST-DOMAIN-2"
-version = 1
-title = "How IDs are typed: per-type newtypes, bare Uuid, or a single phantom-parameterized generic"
+version = 3
+title = "How IDs are typed: per-type newtypes, bare Uuid or a single phantom-parameterized generic"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://rust-lang.github.io/api-guidelines/type-safety.html"
-title = "Rust API Guidelines — C-NEWTYPE: Newtypes provide static distinctions"
+title = "Rust API Guidelines: C-NEWTYPE: Newtypes provide static distinctions"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/generics/new_types.html"
-title = "Rust By Example — New Type Idiom"
+title = "Rust By Example: New Type Idiom"
 
 [[emits]]
 target = "CONVENTIONS.md"
@@ -39,7 +39,7 @@ why = "Makes each identifier kind its own type, so the compiler rejects passing 
 [[option]]
 id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
 label = "Every ID is a bare Uuid"
-directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
+directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId or any other identifier at the type level"
 remediation = """
 Replace the per-type ID newtype with a bare Uuid, removing the type-level distinction between different kinds of identifiers. Verify by confirming the identifier's type is Uuid everywhere it's used, with no wrapper struct remaining.
 """

@@ -1,6 +1,7 @@
 [package]
 name = "camerata"
 edition.workspace = true
+license.workspace = true
 version = "0.0.0"
 
 [lints]
@@ -37,6 +38,9 @@ camerata-server = { path = "../server" }
 # through the same typed client the MCP adapter (Phase E) uses — never in-process calls
 # into camerata-server for these verbs.
 camerata-client = { path = "../client" }
+# The pre-flight estimate in `camerata inspect` reuses the cockpit's estimator (one estimator,
+# no second copy). ui-core is dioxus-free pure logic.
+camerata-ui-core = { path = "../ui-core" }
 camerata-api-types = { path = "../api-types" }
 pdf-extract = { version = "0.12", optional = true }
 anyhow.workspace = true
@@ -69,7 +73,7 @@ tempfile = "3"
 # `tests/inspect_export_equivalence.rs`: read back the product-export ZIP's entries to prove
 # byte-for-byte equivalence without depending on the container's volatile timestamp field.
 # Same version/features pin as `camerata-server`'s own dependency (crates/server/Cargo.toml).
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # `tests/inspect_export_equivalence.rs`: normalize the ONE wall-clock "generated at" cell
 # `xlsx_export::build_workbook` writes (chrono::Utc::now(), minute precision) before comparing
 # entry content — see that test file's own doc comment.

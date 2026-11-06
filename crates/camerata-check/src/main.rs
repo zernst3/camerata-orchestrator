@@ -51,12 +51,19 @@ struct Cli {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    warn_on_unknown_corpus_rule_ids(&cli.rule_id).await;
+    let corpus_dir = camerata_rules::corpus_path();
+    // Best-effort and lenient: an unreachable corpus is never fatal, and one malformed rule file
+    // must not disable every bound. A skipped file is named on stderr, the loaded rules' bounds
+    // still apply, and the report says the corpus was not fully applied (corpus_load_errors).
+    let (corpus, corpus_load_errors) = load_corpus_for_gate(&corpus_dir).await;
+    warn_on_unknown_corpus_rule_ids(&cli.rule_id, corpus.as_ref(), &corpus_dir);
 
     let opts = camerata_check::Options {
         repo_root: cli.path.clone(),
         config_override: cli.config.clone(),
         rule_ids: cli.rule_id.clone(),
+        corpus,
+        corpus_load_errors,
     };
 
     let report = match camerata_check::run(&opts) {
@@ -68,7 +75,7 @@ async fn main() -> ExitCode {
     };
 
     match cli.format {
-        Format::Human => print!("{}", camerata_check::render_human(&report)),
+        Format::Human => print!("{}", camerata_check::render_human_for(&report, cli.strict)),
         Format::Json => match camerata_check::render_json(&report) {
             Ok(json) => println!("{json}"),
             Err(e) => {
@@ -84,19 +91,37 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Best-effort, non-fatal: if the rule corpus happens to be loadable (it is, on any machine
-/// that has this repo checked out; it usually is NOT on a bare client CI runner — the binary
-/// works fine either way, since this is purely an informational typo-catcher, never load-
-/// bearing for the actual check), warn about any `--rule-id` value that isn't a real corpus
-/// rule id at all. A SEPARATE, always-available check (`RunReport::unmatched_rule_ids`, no
-/// corpus needed) already reports ids no *checker* answers; this additionally catches a bare
-/// typo against the corpus itself when the corpus happens to be reachable.
-async fn warn_on_unknown_corpus_rule_ids(rule_ids: &[String]) {
-    if rule_ids.is_empty() {
-        return;
+/// Load the corpus leniently. `None` when nothing loaded at all (no corpus directory, or every
+/// file malformed); otherwise the rules that did load plus the number of files that were
+/// skipped, each reported on stderr with its path and error.
+async fn load_corpus_for_gate(
+    corpus_dir: &std::path::Path,
+) -> (Option<camerata_rules::RuleSet>, usize) {
+    let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    for (path, err) in &errors {
+        eprintln!(
+            "camerata-check: warning: skipped corpus file {}: {err}",
+            path.display()
+        );
     }
-    let corpus_dir = camerata_rules::corpus_path();
-    let Ok(rules) = camerata_rules::load_corpus(&corpus_dir).await else {
+    if set.is_empty() && !errors.is_empty() {
+        return (None, errors.len());
+    }
+    (Some(set), errors.len())
+}
+
+/// Best-effort, non-fatal: if the rule corpus loaded (it does on any machine that has this repo
+/// checked out, or with `CAMERATA_CORPUS_PATH` set; it usually does NOT on a bare client CI
+/// runner holding only a vendored binary), warn about any `--rule-id` value that isn't a real
+/// corpus rule id at all. A SEPARATE, always-available check (`RunReport::unmatched_rule_ids`, no
+/// corpus needed) already reports ids no *checker* answers; this additionally catches a bare
+/// typo against the corpus itself when the corpus is reachable.
+fn warn_on_unknown_corpus_rule_ids(
+    rule_ids: &[String],
+    corpus: Option<&camerata_rules::RuleSet>,
+    corpus_dir: &std::path::Path,
+) {
+    let Some(rules) = corpus else {
         return; // corpus not reachable on this machine — silently skip, never fatal.
     };
     for id in rule_ids {

@@ -6,7 +6,7 @@
 //! Motivation: on a real unseen repo the semantic tier once emitted ZERO rows while five real
 //! security defects went undetected — a silent collapse indistinguishable from "nothing to
 //! report." This test drives the REAL production functions a scan calls after the model
-//! responds (`ai_audit::audit_repo` -> `ai_audit::merge_semantic_groups` ->
+//! responds (`ai_audit::audit_repo` -> `ai_audit::group_semantic` ->
 //! `report_export::build_report_json`) with a STUBBED `LlmPort` standing in for the model, over
 //! a synthetic two-file fixture with a classic cross-file config-to-handler defect: a
 //! verification flag defined in one file, and a privileged handler in ANOTHER file that trusts
@@ -18,7 +18,7 @@
 //! that entry point always constructs a REAL network-backed `Llm` from the process environment
 //! with no `LlmPort` injection seam, so a zero-spend stubbed-model e2e test has to assemble the
 //! same real pipeline functions `audit_repos` itself calls, rather than go through it. Every
-//! function this test calls (`audit_repo`, `merge_semantic_groups`, `build_report_json`) is the
+//! function this test calls (`audit_repo`, `group_semantic`, `build_report_json`) is the
 //! exact, unmodified production code path — only the network call is replaced.
 //!
 //! ZERO API SPEND: the stub never makes a network call.
@@ -30,6 +30,7 @@ use camerata_server::ai_audit::{self, ScanMode};
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse};
 use camerata_server::onboard::ScanReport;
 use camerata_server::report_export::{self, ReportOptions};
+use camerata_server::review_tree;
 use camerata_server::scan_ledger::ScanLedger;
 
 /// The handler file + the exact offending line the stub's canned finding cites — named so the
@@ -64,11 +65,47 @@ const CANNED_FINDING_JSON: &str = r#"{
   "needs_files": []
 }"#;
 
+/// The `terse_output` measure asks a second question after the scan: the full explanation of each
+/// surviving finding. This stub answers it with the canned finding's own `detail` (what the scan
+/// "wrote" in full), and answers every other call with the canned scan response, as before.
+fn answer(req: &LlmRequest, canned: String) -> String {
+    let is_regeneration = req
+        .system
+        .as_deref()
+        .is_some_and(|s| s.starts_with("You write the full explanation"));
+    if !is_regeneration {
+        return canned;
+    }
+    let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
+    let finding = &scan["findings"][0];
+    // The block header the prompt addresses the finding by (`[<id>] rule ...`), then the
+    // `Location: <path>:<line>` line that opens the finding's frame.
+    let header = req
+        .prompt
+        .lines()
+        .find(|l| l.starts_with('[') && l.contains("] rule "))
+        .expect("the regeneration prompt addresses the finding by an id");
+    let id = &header[1..header.find(']').expect("a closing bracket")];
+    let place = req
+        .prompt
+        .lines()
+        .find_map(|l| l.strip_prefix("Location: "))
+        .expect("a location");
+    let (path, line) = place.rsplit_once(':').expect("path:line");
+    serde_json::json!({"details": [{
+        "id": id,
+        "path": path,
+        "line": line.parse::<u64>().expect("a line number"),
+        "detail": finding["detail"],
+    }]})
+    .to_string()
+}
+
 #[async_trait]
 impl LlmPort for StubModel {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: CANNED_FINDING_JSON.to_string(),
+            text: answer(&req, CANNED_FINDING_JSON.to_string()),
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -83,11 +120,12 @@ impl LlmPort for StubModel {
 
     async fn complete_streaming(
         &self,
-        _req: LlmRequest,
+        req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        on_delta(CANNED_FINDING_JSON);
-        self.complete(LlmRequest::new("")).await
+        let response = self.complete(req).await?;
+        on_delta(&response.text);
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -123,11 +161,19 @@ fn minimal_report(
     ledger: ScanLedger,
 ) -> ScanReport {
     ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/webhooks".to_string()],
         stacks: Vec::new(),
         files_scanned: 2,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 400,
         code_lines: 15,
         code_lines_by_language: Vec::new(),
@@ -164,7 +210,7 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         &stub,
         "acme/webhooks",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model
@@ -173,7 +219,9 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         false, // thorough
         None,  // feedback
         None,  // job
-        None,  // meter
+        // A meter, so the default `terse_output` path (a short scan detail, the full one
+        // regenerated afterwards) is what this test drives; the stub answers both calls.
+        Some(&ai_audit::UsageMeter::default()),
         Some(&files),
     )
     .await
@@ -223,7 +271,7 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
     // ═══ The real cross-family/cross-reference merge pass runs over it (singleton group — ═══
     // nothing to merge WITH, since there is no deterministic sibling — but this is the exact
     // function production code calls next, not a hand-simulated shape).
-    let merged = ai_audit::merge_semantic_groups(findings, &files);
+    let merged = review_tree::collapse_and_group(findings, &files);
     assert_eq!(
         merged.len(),
         1,
@@ -259,8 +307,10 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &HashMap::new(),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &HashMap::new(),
+        ),
         Some(&corpus),
         &opts,
     );

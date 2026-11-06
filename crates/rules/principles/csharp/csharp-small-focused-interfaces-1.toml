@@ -1,5 +1,5 @@
 id = "CSHARP-SMALL-FOCUSED-INTERFACES-1"
-version = 1
+version = 2
 title = "Interfaces are narrow and focused on a single responsibility; fat interfaces with many unrelated methods are split"
 domain = "csharp"
 layer = "architecture"
@@ -38,8 +38,8 @@ why = "Masks the ISP violation but does not solve it. Clients still depend on un
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/interface"
-title = "Interface Design — Framework Design Guidelines | Microsoft Learn"
+title = "Interface Design: Framework Design Guidelines | Microsoft Learn"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/archive/msdn-magazine/2014/may/csharp-best-practices-dangers-of-violating-solid-principles-in-csharp"
-title = "C# Best Practices: Dangers of Violating SOLID Principles in C# — MSDN Magazine"
+title = "C# Best Practices: Dangers of Violating SOLID Principles in C#: MSDN Magazine"

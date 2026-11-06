@@ -1,5 +1,5 @@
 id = "CICD-BUILD-PROVENANCE-1"
-version = 1
+version = 4
 title = "Published build artifacts (container images, packages, binaries) carry signed build provenance a consumer can verify back to the exact source commit and workflow run"
 domain = "ci-cd"
 layer = "universal"
@@ -13,11 +13,11 @@ qualifies = "Deterministically checkable (does the publish step generate and att
 
 [[sources]]
 url = "https://slsa.dev/spec/v1.0/provenance"
-title = "SLSA (Supply-chain Levels for Software Artifacts) v1.0 — Provenance: a verifiable statement about how an artifact was built, from what source, by what builder"
+title = "SLSA (Supply-chain Levels for Software Artifacts) v1.0: Provenance: a verifiable statement about how an artifact was built, from what source, by what builder"
 
 [[sources]]
 url = "https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds"
-title = "GitHub docs — Using artifact attestations to establish provenance for builds: generating and verifying SLSA-conformant provenance for GitHub Actions builds"
+title = "GitHub docs: Using artifact attestations to establish provenance for builds: generating and verifying SLSA-conformant provenance for GitHub Actions builds"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/345.html"
@@ -30,16 +30,7 @@ why = "Provenance answers a question none of this corpus's other CI/CD rules ans
 [[option]]
 id = "signed-provenance-attestation-on-every-published-artifact"
 label = "Every production artifact publish step generates a signed provenance attestation; consumers verify it before use"
-directive = """
-The CI workflow step that publishes a production artifact (a container image push, a package publish, a release
-binary upload) also generates a signed provenance attestation (the CI platform's native attestation mechanism — for
-example GitHub Actions' artifact attestations, built on Sigstore/in-toto and conformant with the SLSA provenance
-format — or an equivalent for the project's platform) binding the artifact's digest to the exact source repository,
-commit SHA, and workflow run that produced it. At least one consumer of the artifact (a deployment pipeline pulling
-the image, a documented manual verification step for external consumers) verifies the attestation against the
-expected source and commit before using the artifact, so the control has an actual point where a tampered or
-substituted artifact would be caught rather than only a generation step with nothing downstream checking it.
-"""
+directive = "The CI workflow step that publishes a production artifact (a container image push, a package publish, a release binary upload) also generates a signed provenance attestation (the CI platform's native attestation mechanism, such as GitHub Actions' artifact attestations (built on Sigstore/in-toto and conformant with the SLSA provenance format) or an equivalent for the project's platform) binding the artifact's digest to the exact source repository, commit SHA and workflow run that produced it. At least one consumer of the artifact (a deployment pipeline pulling the image, a documented manual verification step for external consumers) verifies the attestation against the expected source and commit before using the artifact, so the control has an actual point where a tampered or substituted artifact would be caught rather than only a generation step with nothing downstream checking it."
 remediation = """
 Add a provenance-attestation generation step immediately after this artifact's publish step, using the CI
 platform's native attestation mechanism (GitHub Actions artifact attestations, or the platform equivalent) to bind

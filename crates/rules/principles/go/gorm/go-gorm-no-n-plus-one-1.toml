@@ -1,5 +1,5 @@
 id = "GO-GORM-NO-N-PLUS-ONE-1"
-version = 1
+version = 3
 title = "Related data is loaded with Preload or Join in a single query; no N+1 patterns where a loop fetches related records one-by-one"
 domain = "go:gorm"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://gorm.io/docs/preload.html"
-title = "GORM — Preloading (Eager Loading)"
+title = "GORM: Preloading (Eager Loading)"
 
 [decision]
 question = "How should related records (foreign keys, associations) be loaded from the database?"
@@ -21,7 +21,7 @@ why = "A query that fetches N parent records, then in a loop calls a database qu
 [[option]]
 id = "preload-join-one-query"
 label = "Related data is loaded in a single query using Preload or Join"
-directive = "When a handler or service needs to fetch records and their related associations, the repository method loads them in a single query using GORM's Preload() for separate queries per association (optimized into a second query for all children), or Join() for a single JOIN query. The repository method signature includes the associations it loads; callers do not load related data in a loop."
+directive = "When a handler or service needs to fetch records and their related associations, the repository method loads them in a single query using GORM's Preload() for separate queries per association (optimized into a second query for all children) or Join() for a single JOIN query. The repository method signature includes the associations it loads; callers do not load related data in a loop."
 remediation = """
 Replace the per-parent loop that issues one query per child with a single query using GORM's Preload() or Join() to fetch the related records together. Verify by running the endpoint under a query-count profiler and confirming the number of queries no longer scales with the number of parent records returned.
 """

@@ -8,7 +8,7 @@ open-weight models on `fix/checkrunner-diagnostics`: the `CheckRunner` trait now
 
 ## Context
 
-The Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) found three more run-engine
+The Fable 5 audit (private working notes) found three more run-engine
 lifecycle defects, stacked on Batch 2's cancel/provenance work (`fix/lifecycle-provenance`,
 `2026-07-05_lifecycle-provenance.md`).
 

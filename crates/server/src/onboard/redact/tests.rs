@@ -73,14 +73,14 @@ fn finding_carrying(p: &Planted, kind: FindingKind) -> Finding {
         )),
         calibration_rationale: Some(format!("Floored: {}", p.text)),
         captures,
-        also_locations: vec![MergedLocation {
-            repo: "acme/app".to_string(),
-            path: ".env.local".to_string(),
-            line: 5,
-            rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
-            snippet: p.text.clone(),
-            consequence: false,
-        }],
+        also_locations: vec![MergedLocation::site(
+            "acme/app".to_string(),
+            ".env.local".to_string(),
+            5,
+            "SEC-NO-VENDOR-TOKEN-1".to_string(),
+            p.text.clone(),
+            false,
+        )],
         kind: Some(kind),
         ..Finding::default()
     }
@@ -212,6 +212,7 @@ fn snippet_from_line_trims_and_leaves_a_clean_line_alone() {
 fn report_with_text(p: &Planted) -> ScanReport {
     let mut report = ScanReport::gated(&["acme/app".to_string()]);
     let rec = crate::ai_audit::RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-X-1".to_string(),
         recommended_option_id: "a".to_string(),
         recommendation_reasoning: format!("because {}", p.text),
@@ -223,8 +224,17 @@ fn report_with_text(p: &Planted) -> ScanReport {
         }],
         ..crate::ai_audit::RuleRecommendation::default()
     };
+    // The per-repo list holds the same text, one entry per (rule, repo).
+    report
+        .recommendations_by_repo
+        .push(crate::ai_audit::RuleRecommendation {
+            repo: "acme/app".to_string(),
+            ..rec.clone()
+        });
     report.recommendations.insert("ARCH-X-1".to_string(), rec);
     report.coverage_notes.push(crate::onboard::CoverageNote {
+        tool_failed: false,
+        repo: None,
         tool: "eslint".to_string(),
         message: format!("tool output: {}", p.text),
     });
@@ -232,6 +242,11 @@ fn report_with_text(p: &Planted) -> ScanReport {
         repo: "acme/app".to_string(),
         pass: "alternatives".to_string(),
         reason: format!("error: {}", p.text),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     });
     report.ai_error = Some(format!("auth failed {}", p.text));
     report.ai_blocked_reason = Some(p.text.clone());

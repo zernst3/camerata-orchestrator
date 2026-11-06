@@ -2,7 +2,7 @@
 
 > What gets checked, by what, when, and whether you can turn it off. The plain-language
 > reference for users **and** the canonical model for the build. Companion to the governed-dev
-> design (`docs/plans/2026-06-25_*`).
+> design (the 2026-06-25 plans, private working notes).
 
 ## The one-sentence story
 

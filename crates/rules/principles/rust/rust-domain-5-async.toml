@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-5"
-version = 1
+version = 4
 title = "Async all the way down"
 domain = "rust"
 layer = "language"
@@ -11,40 +11,40 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch17-00-async-await.html"
-title = "The Rust Book — Ch 17: Async and Await"
+title = "The Rust Book: Ch 17: Async and Await"
 
 [[sources]]
 url = "https://tokio.rs/tokio/tutorial"
-title = "Tokio Tutorial — async I/O and the requirement to avoid blocking calls in async contexts"
+title = "Tokio Tutorial: async I/O and the requirement to avoid blocking calls in async contexts"
 
 [decision]
-question = "What position does the project take on: Async all the way down?"
+question = "Which functions in the Rust codebase are async, and where, if anywhere, does sync code call into async?"
 default = "async-all-the-way-down"
 why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss. Going sync-first and using block_on at the layer boundaries fights the ecosystem at every layer, produces measurable perf regressions, and creates the runtime-pinning bugs that block_on-inside-an-async-context is famous for. Maintaining dual sync and async APIs doubles the public surface and forces every consumer to choose which variant to call, which is a recurring point of confusion and a maintenance burden for very little gain in the Rust ecosystem."
 
 [[option]]
 id = "async-all-the-way-down"
 label = "Async all the way down"
-directive = "I/O functions, repo traits, service methods, and handlers are async; no block_on in layered code."
+directive = "I/O functions, repo traits, service methods and handlers are async; no block_on in layered code."
 remediation = """
-Change the sync I/O function, repository trait method, service method, or handler to async, removing any block_on call that bridges sync code to the async runtime at a layer boundary. Verify by confirming no block_on call remains in the layered code path and the function signature is async end to end.
+Change the sync I/O function, repository trait method, service method or handler to async, removing any block_on call that bridges sync code to the async runtime at a layer boundary. Verify by confirming no block_on call remains in the layered code path and the function signature is async end to end.
 """
 why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss."
 
 [[option]]
 id = "the-project-s-i-o-functions-repo-traits-service"
 label = "Sync I/O wrapped in block_on at boundaries"
-directive = "the project's I/O functions, repo traits, service methods, and handlers are sync, and async runtime use is wrapped in block_on at the layer boundaries"
+directive = "the project's I/O functions, repo traits, service methods and handlers are sync, and async runtime use is wrapped in block_on at the layer boundaries"
 why = "Fights the ecosystem at every layer: block_on inside an async context produces the runtime-pinning bugs the rule exists to prevent, and the sync wrappers add measurable perf regressions while providing no structural benefit over the async-native shape the I/O libraries already offer."
 
 [[option]]
 id = "the-project-exposes-both-sync-and-async-variants"
 label = "Parallel sync and async API variants"
-directive = "the project exposes both sync and async variants of its I/O functions, repo traits, service methods, and handlers as parallel public APIs"
+directive = "the project exposes both sync and async variants of its I/O functions, repo traits, service methods and handlers as parallel public APIs"
 why = "Doubles the public surface and forces every consumer to choose which variant to call, which is a recurring point of confusion and a maintenance burden for very little gain in the Rust ecosystem where the async path is already the first-class shape."
 
 [[option]]
 id = "sync-first-domain-async-only-at-the-io-boundary"
 label = "sync-first: domain/business logic is synchronous; async is confined to the actual I/O boundary"
-directive = "Write domain and business logic as plain synchronous Rust by default — no async fn, no .await — and only introduce async at the edges that actually perform I/O (the repository implementations, the HTTP handler layer). Domain types and service-layer logic that don't themselves need to await anything concurrently stay sync; the async runtime is confined to infrastructure adapters, not threaded through pure logic."
+directive = "Write domain and business logic as plain synchronous Rust by default (no async fn, no .await) and only introduce async at the edges that actually perform I/O (the repository implementations, the HTTP handler layer). Domain types and service-layer logic that don't themselves need to await anything concurrently stay sync; the async runtime is confined to infrastructure adapters, not threaded through pure logic."
 why = "Sync code is simpler to reason about (no executor, no Send/Sync bounds propagating through every type, no function-coloring problem where a sync caller can't call an async fn without a runtime), easier to unit test (call it directly, no #[tokio::test] or block_on needed), and avoids async's added complexity budget entirely where the domain layer has no need to await concurrently within itself — its inputs and outputs are already in hand by the time domain logic runs. This fits well when I/O is fetched once at the boundary and handed to domain logic as plain values. The trade-off against 'async all the way down': every domain call from an async context still needs a boundary between the two worlds, and if domain logic later needs to fan out concurrent I/O of its own (not just consume already-fetched data), it either needs threading through as async after all or an escape hatch (spawning tasks from the boundary and passing results in). This is a legitimate default for domain layers with no internal concurrency needs, not a general rejection of async at the I/O boundary."

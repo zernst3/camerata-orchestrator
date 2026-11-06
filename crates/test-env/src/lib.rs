@@ -103,9 +103,126 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Whether the `typst` binary is installed and runs.
+fn typst_installed() -> bool {
+    std::process::Command::new("typst")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The decision behind [`typst_on_path`], with its two inputs passed in so it can be tested
+/// without touching the process environment or the machine's `PATH`.
+///
+/// * `present`: typst runs.
+/// * `ci`: the `CI` environment variable is set (GitHub Actions and most CI systems set it).
+///
+/// Present: the test runs (`true`). Missing under CI: PANIC, because a test that proves the
+/// compiled PDF and silently returns when typst is absent turns a broken CI image into a green
+/// build. Missing anywhere else: print a banner on stderr and return `false` so the caller
+/// skips; the skip is visible, never quiet.
+pub fn typst_gate(present: bool, ci: bool, test: &str) -> bool {
+    if present {
+        return true;
+    }
+    assert!(
+        !ci,
+        "{test}: typst is not on PATH, and this test cannot run without it. Install typst in \
+         the CI image (scripts/ci-install-typst.sh); a silent skip would hide a broken PDF."
+    );
+    eprintln!("\n*** SKIPPED {test}: typst is not on PATH, so no PDF can be compiled here ***\n");
+    false
+}
+
+/// THE shared probe every typst-dependent test asks before it compiles a PDF. `true`: typst
+/// is installed, go ahead. `false`: not installed and not under CI, so the test should return
+/// early (a visible banner was printed). Under CI (the `CI` variable is set) a missing typst
+/// panics instead, naming the running test, so no test can quietly skip there.
+pub fn typst_on_path() -> bool {
+    let thread = std::thread::current();
+    typst_on_path_for(thread.name().unwrap_or("a test that needs typst"))
+}
+
+/// [`typst_on_path`] with the test's name given explicitly, for a helper that already knows it.
+pub fn typst_on_path_for(test: &str) -> bool {
+    typst_gate(typst_installed(), std::env::var_os("CI").is_some(), test)
+}
+
+/// The same gate for `python3`, which the fake `claude` of the end-to-end tests is written in:
+/// present, the test runs; missing under CI, PANIC (a quiet skip would hide a broken resume
+/// path); missing elsewhere, a visible banner and `false`.
+pub fn python3_gate(present: bool, ci: bool, test: &str) -> bool {
+    if present {
+        return true;
+    }
+    assert!(
+        !ci,
+        "{test}: python3 is not on PATH, and this test cannot run without it (its fake claude \
+         is a python script). Install python3 in the CI image; a silent skip would hide a \
+         broken resume."
+    );
+    eprintln!("\n*** SKIPPED {test}: python3 is not on PATH, so the fake claude cannot run ***\n");
+    false
+}
+
+/// True when `python3 --version` runs.
+pub fn python3_installed() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// [`python3_gate`] over the real machine and the `CI` variable, for the test named `test`.
+pub fn python3_on_path_for(test: &str) -> bool {
+    python3_gate(python3_installed(), std::env::var_os("CI").is_some(), test)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the typst gate: a missing typst fails under CI, skips visibly elsewhere ----
+
+    #[test]
+    fn typst_present_runs_the_test_under_ci_and_locally() {
+        assert!(typst_gate(true, true, "t"));
+        assert!(typst_gate(true, false, "t"));
+    }
+
+    #[test]
+    fn typst_missing_locally_skips_and_says_so() {
+        assert!(!typst_gate(false, false, "t"));
+    }
+
+    // ---- the python3 gate: the same rule, so the fake-claude tests never skip quietly in CI ----
+
+    #[test]
+    fn python3_present_runs_the_test_under_ci_and_locally() {
+        assert!(python3_gate(true, true, "t"));
+        assert!(python3_gate(true, false, "t"));
+    }
+
+    #[test]
+    fn python3_missing_locally_skips_and_says_so() {
+        assert!(!python3_gate(false, false, "t"));
+    }
+
+    #[test]
+    #[should_panic(expected = "python3 is not on PATH")]
+    fn python3_missing_under_ci_fails_the_test() {
+        python3_gate(false, true, "t");
+    }
+
+    #[test]
+    #[should_panic(expected = "typst is not on PATH")]
+    fn typst_missing_under_ci_fails_the_test_instead_of_skipping() {
+        typst_gate(false, true, "the_test_that_needs_it");
+    }
 
     // Each test uses a variable name private to it, so these tests cannot race with each
     // other or with anything else in this binary.

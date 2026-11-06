@@ -551,6 +551,22 @@ fn exports_never_touch_resolve_repo_dir_or_read_the_repo() {
     .collect();
     let files: Vec<(String, &str)> = [
         ("report_export.rs", include_str!("../report_export.rs")),
+        (
+            "report_export/json_types.rs",
+            include_str!("../report_export/json_types.rs"),
+        ),
+        (
+            "report_export/marking.rs",
+            include_str!("../report_export/marking.rs"),
+        ),
+        (
+            "report_export/citations_fixes.rs",
+            include_str!("../report_export/citations_fixes.rs"),
+        ),
+        (
+            "report_export/classification.rs",
+            include_str!("../report_export/classification.rs"),
+        ),
         ("xlsx_export.rs", include_str!("../xlsx_export.rs")),
         ("onboard/report.rs", include_str!("../onboard/report.rs")),
         (
@@ -608,7 +624,7 @@ fn unzip(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
         }
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
-        out.insert(file.name().to_string(), data);
+        out.insert(file.name().unwrap().to_string(), data);
     }
     out
 }
@@ -617,14 +633,9 @@ fn unzip(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
 /// with a message naming it, instead of returning silently; the assertions that need no PDF live
 /// in tests of their own that always run.
 fn typst_missing(test: &str) -> bool {
-    let missing = std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .is_err();
-    if missing {
-        eprintln!("SKIPPED {test}: typst is not on PATH, so no PDF can be compiled");
-    }
-    missing
+    // Under CI (the `CI` variable) a missing typst FAILS the test; elsewhere it skips with a
+    // banner naming the test.
+    !camerata_test_env::typst_on_path_for(test)
 }
 
 /// Delete `REPO` over HTTP exactly as the modal does; returns the record's `completed_at`.

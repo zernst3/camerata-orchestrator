@@ -1,0 +1,55 @@
+id = "UI-STATE-SHAPE-1"
+version = 2
+title = "Component state stores each fact once: mutually exclusive flags are one status value, and a value computed from props or state is computed during render, not copied into state by an effect"
+domain = "ui"
+layer = "universal"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the rule's own framing: one fact stored in two places is a
+# maintenance hazard (the copies can be made to disagree by the next change) and costs an extra
+# render, not a fault in current behavior. The deterministic check emits at medium (a checker
+# never emits low directly); this ceiling brings the exported finding down to low.
+max_severity = "low"
+default = true
+# `grounded`: React's own documentation states both halves, "avoid contradictions in state" and
+# "avoid redundant state" (Choosing the State Structure), and "updating state based on props or
+# state" in an effect is the first case of You Might Not Need an Effect. The deterministic edge
+# is a W29 work-order item (Wave D); the judgment half stays in the semantic pass because the
+# checker opts into advisory coexistence. Only the owner sets `verified`.
+verification = "grounded"
+qualifies = "Two shapes are checked deterministically, with no judgment involved, in React function components and custom hooks written in JavaScript, JSX, TypeScript or TSX, where useState and useEffect come from react (or from Preact's hooks): (1) two or more boolean state variables whose setters are only ever called with a true or false literal, where every place that sets one of them to true sets the others to false in the same block, each of them is set to true somewhere, and they do not all start true; (2) a state variable whose only writer is a useEffect whose whole body is one call of its setter with an expression built only from the effect's listed dependencies (names, property reads, literals, operators, conditionals, templates, array and object literals, and the array and string methods filter, map, slice, concat, join, includes, some, every, find, findIndex, indexOf, trim, toLowerCase, toUpperCase, startsWith, endsWith and toFixed), with a non-empty dependency list. Not reported by the deterministic check: a setter that is passed to another component or function, aliased or re-declared; a flag toggled or set from a variable or an updater function; a flag set to true anywhere without the others being set to false in the same block; flags that both start true; the updater form of a setter; an effect with a condition, a cleanup, a timer, a promise, a second statement, an empty dependency list, or a read of anything outside its dependencies (Date.now, storage, window, a ref); a state variable that is also written somewhere else, such as an editable copy that resets when a prop changes; useLayoutEffect, useReducer and class components; test, story, fixture, generated, vendored and minified files. Any other way of storing one fact twice (a status split across a boolean and a string, the same value kept in two forms) is a judgment, and is assessed by the reviewed semantic read of the code rather than by the deterministic check. No off-the-shelf linter rule reports either shape: ESLint core and the React Hooks plugin have no rule for exclusive flags or for state copied by an effect."
+
+[[sources]]
+url = "https://react.dev/learn/choosing-the-state-structure"
+title = "React docs: Choosing the State Structure (avoid contradictions and redundant state)"
+
+[[sources]]
+url = "https://react.dev/learn/you-might-not-need-an-effect"
+title = "React docs: You Might Not Need an Effect (updating state based on props or state)"
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer, Wave D, UI-STATE-SHAPE-1"
+
+[decision]
+question = "How is component state shaped when several flags describe one status, or when a value can be computed from props or other state?"
+default = "each-fact-is-stored-once"
+why = "State that stores one fact in two places can be made to disagree. Two booleans such as isLoading and isError, where only one may be true at a time, rely on every handler remembering to set both; the first handler that sets one and forgets the other leaves the component in a state its own code treats as impossible. A value copied from props into state by an effect is stale for one render after every change, causes an extra render each time, and can drift from its inputs as soon as a second writer appears. One status variable, and values computed during render, leave nothing to keep in sync."
+
+[[option]]
+id = "each-fact-is-stored-once"
+label = "Mutually exclusive flags are one status value, and values computed from props or state are computed during render"
+directive = "Store each fact of a component's state once. When several boolean flags describe one status and only one may be true at a time (loading, error, success; which panel is open), keep a single state variable for the status, such as a string union or an enum, and derive each boolean from it during render. When a value can be computed from props or other state, compute it during render (with useMemo if the computation is expensive) instead of copying it into state with an effect."
+remediation = """
+For exclusive flags: replace the boolean state variables named in the finding with one state variable whose value is the status (for example `'idle' | 'loading' | 'error'`), set it once in each place that currently sets the flags and derive each boolean from it during render (`const isLoading = status === 'loading'`). For a value copied by an effect: delete the state variable and the effect named in the finding, and compute the value during render from the same inputs, wrapping it in `useMemo` only if it is expensive. Verify by running the component's tests and checking that every place that read the old variables still renders the same output.
+"""
+effort = "low"
+why = "The change is local to one component: one state variable in place of several, or a computed value in place of a state variable and an effect. Afterwards no handler can leave the flags in a contradictory combination, and the computed value is never stale."
+
+[[option]]
+id = "facts-are-stored-in-several-variables"
+violates = true
+label = "One status is spread over several boolean flags, or a value computed from props or state is copied into state by an effect"
+directive = "Components may keep a separate boolean for each status a process can be in, and may copy values computed from props or state into state with an effect."
+why = "Flags that must never be true together depend on every handler setting all of them correctly; a handler that sets one and forgets another produces a combination the rest of the component never expects, such as a spinner and an error message at once. A value copied into state by an effect is one render behind its inputs after every change, costs an extra render and can drift from them as soon as anything else writes it. The disagreement shows only at runtime, usually as a flash of wrong content or a stuck state."

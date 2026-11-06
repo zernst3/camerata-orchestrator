@@ -92,12 +92,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 fn selected_privileged_no_authz_rule() -> Vec<SelectedRule> {
@@ -259,8 +254,10 @@ async fn privileged_no_authz_finding_reaches_curated_findings_high_and_grounded(
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );

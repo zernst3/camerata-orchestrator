@@ -68,13 +68,35 @@ pub enum TriageState {
     Ignored,
     TechDebt,
     FalsePositive,
+    /// MERGED INTO ANOTHER FINDING (review-tree design 5.1, WO8): the curator ruled this row the
+    /// same problem as another row. The row is kept and exports with a pointer ("Merged into
+    /// <target>"); nothing is deleted.
+    ///
+    /// ### Where the target lives
+    ///
+    /// Not here. This enum is `Copy` and a disposition holds only a state, a reason and a bucket;
+    /// the target site is stored by the server with the decision
+    /// (`DecisionState::MergedInto(target)`, written by `POST /api/projects/:id/merge`). The
+    /// screen's state names the row as merged; the server's record says into what.
+    ///
+    /// ### Why it is not one of [`TriageState::all`]
+    ///
+    /// `all()` is the set of triage TABLES a row is filed into by a gesture on the row. A merge
+    /// is not filed into a table: it needs a second site, picked on the merge screen, so there is
+    /// no table to put it in. It is decided (the Process gate does not block on it), needs a
+    /// reason (it claims the two rows are one problem) and has no hotkey.
+    MergedInto,
 }
 
 /// The names serde writes for the variants (unit variants are written by NAME), for reading a
 /// draft leniently ([`crate::lenient`]). A test pins this to what serde actually writes.
 impl crate::lenient::WireEnum for TriageState {
     fn from_wire(name: &str) -> Option<Self> {
-        Self::all().into_iter().find(|s| s.wire_name() == name)
+        // `MergedInto` is not one of the tables ([`TriageState::all`]) but a draft may name it.
+        Self::all()
+            .into_iter()
+            .chain([Self::MergedInto])
+            .find(|s| s.wire_name() == name)
     }
 }
 
@@ -86,6 +108,7 @@ impl TriageState {
             Self::Ignored => "Ignored",
             Self::TechDebt => "TechDebt",
             Self::FalsePositive => "FalsePositive",
+            Self::MergedInto => "MergedInto",
         }
     }
 
@@ -96,6 +119,7 @@ impl TriageState {
             Self::Ignored => "Ignored",
             Self::TechDebt => "Tech debt",
             Self::FalsePositive => "False positive",
+            Self::MergedInto => "Merged",
         }
     }
 
@@ -138,7 +162,8 @@ impl TriageState {
     /// dropping it would be cheapest and least visible, which is exactly why the rule is the
     /// enum's own answer rather than a condition repeated at each gesture.
     pub fn requires_reason(self) -> bool {
-        matches!(self, Self::Ignored | Self::FalsePositive)
+        // A merge claims two rows are one problem, and the report has to say why.
+        matches!(self, Self::Ignored | Self::FalsePositive | Self::MergedInto)
     }
 }
 
@@ -167,6 +192,25 @@ impl Default for Disposition {
             bucket: TechDebtBucket::Later,
         }
     }
+}
+
+/// The `captures` key holding a row's review flags (a JSON array of strings), written by the
+/// detail and fix stages when a wording check failed and the best text shipped anyway. The same
+/// string as `camerata_server::review_flags::REVIEW_FLAGS_CAPTURE`; a server test pins that.
+pub const REVIEW_FLAGS_CAPTURE: &str = "review_flags";
+
+/// The review flags on a row, sorted and without repeats, as the review screen shows them
+/// (`precondition_added`, `unverified_name:src/a.rs`, `fix_ungrounded`, ...). Empty when the row
+/// has none or the capture cannot be read.
+pub fn review_flags_of(f: &FindingView) -> Vec<String> {
+    let mut flags: Vec<String> = f
+        .captures
+        .get(REVIEW_FLAGS_CAPTURE)
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    flags.sort();
+    flags.dedup();
+    flags
 }
 
 /// One audit finding, as it deserializes off the BFF scan/audit response. Wide, plain serde
@@ -257,8 +301,68 @@ pub struct FindingView {
     /// AI-judged findings.
     #[serde(default)]
     pub captures: std::collections::BTreeMap<String, String>,
+    /// The server's semantic category (`secret-exposure`, `authorization`, ...), mirrored from
+    /// `camerata_server::onboard::Finding::category`. `None` for a deterministic finding the
+    /// server never classified. Read only through [`FindingView::is_secret_exposure`].
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+    /// The stable site key the server assigned this row
+    /// ([`camerata_api_types::site_key::site_key`]), mirrored from
+    /// `camerata_server::onboard::Finding::site_key`. Empty for a row the server never keyed
+    /// (an old report); [`finding_key`] then falls back to the ordinal-0 key.
+    #[serde(default)]
+    pub site_key: String,
+}
+
+#[cfg(test)]
+impl FindingView {
+    /// Give this fixture row the key the server would give it if its line were the ordinal:
+    /// rows that differ only by line stay distinct, as repeats of one snippet do once the server
+    /// has numbered them. Call it AFTER setting `line`; a fixture left unkeyed gets the
+    /// ordinal-0 key, so two rows that differ only by line would share one.
+    pub(crate) fn keyed_by_line(mut self) -> Self {
+        self.site_key = camerata_api_types::site_key::site_key(
+            &self.repo,
+            &self.path,
+            &self.rule_id,
+            &self.snippet,
+            self.line,
+        );
+        self
+    }
+}
+
+impl FindingView {
+    /// True when this finding is about a leaked credential: the server classed it
+    /// `secret-exposure` (the model's rows, and the floor's hardcoded-secret rule), or its rule
+    /// id names a secret, a token, a private key or the Supabase service-role key. The rule-id
+    /// test is not a fallback: the floor's private-key and vendor-token rows carry NO category
+    /// on purpose (on the server a category is a merge key, and two credentials a few lines
+    /// apart must stay two rows), so this is the one place they are recognised. The snippet of
+    /// such a finding is redacted, so two of them in different repos can look identical while
+    /// describing different credentials. Decision memory uses this to keep them apart.
+    pub fn is_secret_exposure(&self) -> bool {
+        if self.category.as_deref() == Some("secret-exposure") {
+            return true;
+        }
+        let id = self.rule_id.to_ascii_uppercase();
+        let words: Vec<&str> = id.split('-').collect();
+        let word_starts = |t: &str| words.iter().any(|w| w.starts_with(t));
+        word_starts("SECRET")
+            || word_starts("HARDCODED")
+            || word_starts("CREDENTIAL")
+            || word_starts("APIKEY")
+            || word_starts("PASSWORD")
+            || word_starts("TOKEN")
+            || ["API-KEY", "PRIVATE-KEY", "VENDOR-TOKEN", "SUPABASE-KEY"]
+                .iter()
+                .any(|run| {
+                    let run: Vec<&str> = run.split('-').collect();
+                    words.windows(run.len()).any(|w| w == run.as_slice())
+                })
+    }
 }
 
 /// One evidence site absorbed into a merged finding — the view-model mirror of
@@ -299,7 +403,7 @@ pub fn site_count(f: &FindingView) -> usize {
 }
 
 /// Which of the curator workbench's four kind surfaces a finding row belongs on
-/// (`docs/plans/2026-10-11_pass2-curator-ui-design.md` §1-§2).
+/// (the pass-2 curator UI design notes §1-§2).
 ///
 /// The split is NOT a UI taste: it is the data model's own
 /// [`FindingKind::is_informational`](camerata_api_types::audit::FindingKind::is_informational)
@@ -1018,7 +1122,7 @@ fn deviation_ratio_ppm(f: &FindingView) -> u64 {
 ///
 /// The default is opinionated; the table is not locked — chorale's column headers still
 /// re-sort on demand.
-pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, usize) {
+pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, String, usize) {
     let enforced = if f.status == "active" { 0 } else { 1 };
     (
         enforced,
@@ -1026,22 +1130,59 @@ pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, usiz
         kind_rank(f),
         deviation_ratio_ppm(f),
         f.rule_id.clone(),
+        // The repo comes before the path: `src/index.ts` in two repos is two files, and the
+        // order must not interleave them.
+        f.repo.clone(),
         f.path.clone(),
         f.line,
     )
+}
+
+/// The value the Queue's File column shows and groups by. In a multi-repo scan the path alone
+/// names no file (`src/index.ts` exists in every service), so the repo leads and two repos'
+/// same-named files are two groups. A single-repo scan shows the bare path, as it always did.
+pub fn file_group_label(f: &FindingView, multi_repo: bool) -> String {
+    if multi_repo && !f.repo.is_empty() {
+        format!("{}: {}", f.repo, f.path)
+    } else {
+        f.path.clone()
+    }
+}
+
+/// One repo's line in the per-repo tally under the triage tabs: `acme/a: 3 to review of 12`.
+pub fn repo_counts_line(repo: &str, counts: TriageCounts) -> String {
+    format!(
+        "{repo}: {} to review of {}",
+        counts.outstanding(),
+        counts.total()
+    )
+}
+
+/// Where a finding lives, for a detail view: `repo: path:line`, or `path:line` when the finding
+/// carries no repo.
+pub fn finding_location_label(f: &FindingView) -> String {
+    if f.repo.is_empty() {
+        format!("{}:{}", f.path, f.line)
+    } else {
+        format!("{}: {}:{}", f.repo, f.path, f.line)
+    }
 }
 
 /// The default finding status (`"active"`). FindingView's `#[serde(default)]` provider; lives in
 /// the scan surface (re-exported here so `FindingView`'s serde attribute resolves within core).
 pub use crate::scan::default_finding_status;
 
-/// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
-/// so its disposition survives table switches and re-sorts.
+/// Stable identity for a finding across the triage tables and across reruns, so its
+/// disposition survives table switches, re-sorts and a code edit that moves the line. It is the
+/// server's site key ([`camerata_api_types::site_key`]: repo, path, rule and snippet
+/// fingerprint, ordinal), read off the row; a row the server never keyed gets the ordinal-0
+/// key. `camerata_server::report_export::finding_key` is the same function over the server's
+/// `Finding`, and a test in the server crate pins that the two agree byte for byte.
 pub fn finding_key(f: &FindingView) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-        f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    if !f.site_key.is_empty() {
+        return f.site_key.clone();
+    }
+    camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0)
 }
 
 /// The disposition state for a finding (Unresolved when absent from the map).
@@ -1122,6 +1263,18 @@ impl TriageModel {
         }
     }
 
+    /// Mark each finding as MERGED into another: set state = MergedInto AND record the
+    /// (required) reason together, mirroring `ignore`'s require-reason invariant. The target
+    /// site is not held here (see [`TriageState::MergedInto`]): the server stores it with the
+    /// decision when the merge route is called.
+    pub fn merge(&mut self, findings: &[FindingView], reason: &str) {
+        for f in findings {
+            let e = self.dispositions.entry(finding_key(f)).or_default();
+            e.state = TriageState::MergedInto;
+            e.reason = reason.to_string();
+        }
+    }
+
     /// Bucket each tech-debt finding (resolve later / now). Leaves the state unchanged; only the
     /// Bucket flag moves.
     pub fn set_bucket(&mut self, findings: &[FindingView], bucket: TechDebtBucket) {
@@ -1150,6 +1303,27 @@ impl TriageModel {
         out
     }
 
+    /// [`Self::counts`] split by repo: one entry per repo that has a row in `findings`, sorted by
+    /// repo name. The sum of the entries is `counts(findings)`. A multi-repo scan shows these
+    /// beside the project total so a reviewer sees which service still has work in it.
+    pub fn counts_by_repo(&self, findings: &[FindingView]) -> Vec<(String, TriageCounts)> {
+        let mut repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        repos
+            .into_iter()
+            .map(|repo| {
+                let rows: Vec<FindingView> = findings
+                    .iter()
+                    .filter(|f| f.repo == repo)
+                    .cloned()
+                    .collect();
+                let counts = self.counts(&rows);
+                (repo, counts)
+            })
+            .collect()
+    }
+
     /// Tally every disposition over `findings` — see [`TriageCounts`].
     ///
     /// `findings` must already be the QUEUE row set ([`findings_on_surface`] with
@@ -1168,6 +1342,7 @@ impl TriageModel {
                 TriageState::Ignored => counts.ignored += 1,
                 TriageState::TechDebt => counts.tech_debt += 1,
                 TriageState::FalsePositive => counts.false_positive += 1,
+                TriageState::MergedInto => counts.merged += 1,
             }
         }
         counts
@@ -1189,6 +1364,9 @@ pub struct TriageCounts {
     pub ignored: usize,
     pub tech_debt: usize,
     pub false_positive: usize,
+    /// Rows merged into another row. Decided, so never outstanding; not a triage table (see
+    /// [`TriageState::MergedInto`]).
+    pub merged: usize,
 }
 
 impl TriageCounts {
@@ -1202,12 +1380,18 @@ impl TriageCounts {
             TriageState::Ignored => self.ignored,
             TriageState::TechDebt => self.tech_debt,
             TriageState::FalsePositive => self.false_positive,
+            TriageState::MergedInto => self.merged,
         }
     }
 
     /// Every row counted.
     pub fn total(self) -> usize {
-        self.unresolved + self.confirmed + self.ignored + self.tech_debt + self.false_positive
+        self.unresolved
+            + self.confirmed
+            + self.ignored
+            + self.tech_debt
+            + self.false_positive
+            + self.merged
     }
 
     /// Rows the curator has NOT decided yet — the ONLY thing the Process gate blocks on.
@@ -1481,6 +1665,8 @@ pub fn state_hotkey(state: TriageState) -> Option<&'static str> {
         TriageState::Ignored => Some("i"),
         TriageState::TechDebt => Some("t"),
         TriageState::FalsePositive => Some("f"),
+        // A merge needs a second site, picked on the merge screen: no key reaches it.
+        TriageState::MergedInto => None,
     }
 }
 
@@ -1715,6 +1901,7 @@ impl TriageModel {
             TriageState::Confirmed => self.confirm(rows),
             TriageState::Ignored => self.ignore(rows, reason),
             TriageState::FalsePositive => self.mark_false_positive(rows, reason),
+            TriageState::MergedInto => self.merge(rows, reason),
             other => self.move_to(rows, other),
         }
         Some(UndoEntry {
@@ -1797,23 +1984,82 @@ mod tests {
     use super::*;
 
     fn finding(json: serde_json::Value) -> FindingView {
-        serde_json::from_value(json).expect("valid FindingView fixture")
+        let row: FindingView = serde_json::from_value(json).expect("valid FindingView fixture");
+        if row.site_key.is_empty() {
+            row.keyed_by_line()
+        } else {
+            row
+        }
     }
 
     // ── moved from the scan adapter (path prefix changed only) ────────────────
 
     #[test]
-    fn finding_key_combines_identity_fields() {
+    fn finding_key_is_the_site_key_and_ignores_the_line() {
+        let row = |line: usize, snippet: &str| -> FindingView {
+            serde_json::from_value(serde_json::json!({
+                "repo": "owner/repo", "path": "src/a.rs", "line": line,
+                "rule_id": "RULE-X", "severity": "high", "snippet": snippet, "detail": ""
+            }))
+            .unwrap()
+        };
+        let key = finding_key(&row(7, "snip"));
+        assert_eq!(
+            key,
+            camerata_api_types::site_key::site_key("owner/repo", "src/a.rs", "RULE-X", "snip", 0)
+        );
+        // The line moving does not rename the site; the code changing does.
+        assert_eq!(key, finding_key(&row(70, "snip")));
+        assert_ne!(key, finding_key(&row(7, "other")));
+    }
+
+    #[test]
+    fn a_row_carrying_the_servers_site_key_is_keyed_by_it() {
         let f = finding(serde_json::json!({
-            "repo": "owner/repo", "path": "src/a.rs", "line": 7,
-            "rule_id": "RULE-X", "severity": "high", "snippet": "snip", "detail": ""
+            "repo": "o/r", "path": "Cargo.lock", "line": 0,
+            "rule_id": "DEP-AUDIT-1", "severity": "high",
+            "snippet": "time@0.1.45", "detail": "", "site_key": "the-servers-key"
         }));
-        let key = finding_key(&f);
-        assert!(key.contains("owner/repo"));
-        assert!(key.contains("RULE-X"));
-        assert!(key.contains("src/a.rs"));
-        assert!(key.contains('7'));
-        assert!(key.contains("snip"));
+        assert_eq!(finding_key(&f), "the-servers-key");
+    }
+
+    #[test]
+    fn two_advisories_on_one_package_version_do_not_share_a_key() {
+        // The server tells them apart with the ordinal it puts in the key (advisory-id order),
+        // and the UI reads that key off the row.
+        let dep = |advisory: &str, site_key: &str| {
+            finding(serde_json::json!({
+                "repo": "o/r", "path": "Cargo.lock", "line": 0,
+                "rule_id": "DEP-AUDIT-1", "severity": "high",
+                "snippet": "time@0.1.45", "detail": "", "site_key": site_key,
+                "captures": { "advisory": advisory }
+            }))
+        };
+        let key = |ordinal| {
+            camerata_api_types::site_key::site_key(
+                "o/r",
+                "Cargo.lock",
+                "DEP-AUDIT-1",
+                "time@0.1.45",
+                ordinal,
+            )
+        };
+        let (a, b) = (
+            dep("RUSTSEC-2020-0071", &key(0)),
+            dep("RUSTSEC-2021-0001", &key(1)),
+        );
+        assert_ne!(finding_key(&a), finding_key(&b));
+        assert_eq!(finding_key(&a), key(0));
+        // Any other row is keyed the same way (ordinal 0 when the server numbered no repeat),
+        // even with an "advisory" capture of its own: the capture is not part of the key.
+        let unkeyed: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "RULE-X",
+            "severity": "low", "snippet": "s", "detail": "",
+            "captures": { "advisory": "X" }
+        }))
+        .unwrap();
+        let expected = camerata_api_types::site_key::site_key("o/r", "a.rs", "RULE-X", "s", 0);
+        assert_eq!(finding_key(&unkeyed), expected);
     }
 
     #[test]
@@ -1847,6 +2093,84 @@ mod tests {
     #[test]
     fn default_finding_status_is_active() {
         assert_eq!(default_finding_status(), "active");
+    }
+
+    // ── M10: the same path in two repos ────────────────────────────────────────────────────
+
+    fn in_repo(repo: &str, path: &str, line: usize) -> FindingView {
+        finding(serde_json::json!({
+            "repo": repo, "path": path, "line": line,
+            "rule_id": "R-1", "severity": "high", "snippet": format!("s{line}"), "detail": ""
+        }))
+    }
+
+    #[test]
+    fn the_file_group_names_the_repo_only_when_there_are_several() {
+        let a = in_repo("acme/a", "src/index.ts", 1);
+        let b = in_repo("acme/b", "src/index.ts", 1);
+        assert_eq!(file_group_label(&a, false), "src/index.ts");
+        assert_eq!(file_group_label(&a, true), "acme/a: src/index.ts");
+        assert_ne!(file_group_label(&a, true), file_group_label(&b, true));
+        let mut orphan = a.clone();
+        orphan.repo.clear();
+        assert_eq!(file_group_label(&orphan, true), "src/index.ts");
+    }
+
+    #[test]
+    fn the_location_label_leads_with_the_repo() {
+        let a = in_repo("acme/a", "src/index.ts", 12);
+        assert_eq!(finding_location_label(&a), "acme/a: src/index.ts:12");
+        let mut orphan = a;
+        orphan.repo.clear();
+        assert_eq!(finding_location_label(&orphan), "src/index.ts:12");
+    }
+
+    #[test]
+    fn the_default_order_does_not_interleave_two_repos_with_the_same_path() {
+        let mut rows = [
+            in_repo("acme/b", "src/index.ts", 1),
+            in_repo("acme/a", "src/index.ts", 1),
+            in_repo("acme/b", "src/index.ts", 1),
+            in_repo("acme/a", "src/index.ts", 1),
+        ];
+        rows.sort_by_key(queue_sort_key);
+        let repos: Vec<&str> = rows.iter().map(|f| f.repo.as_str()).collect();
+        assert_eq!(repos, ["acme/a", "acme/a", "acme/b", "acme/b"]);
+    }
+
+    #[test]
+    fn a_repos_line_says_what_is_left_to_review() {
+        let counts = TriageCounts {
+            unresolved: 3,
+            confirmed: 4,
+            ignored: 5,
+            ..TriageCounts::default()
+        };
+        assert_eq!(
+            repo_counts_line("acme/a", counts),
+            "acme/a: 3 to review of 12"
+        );
+    }
+
+    #[test]
+    fn counts_by_repo_split_the_same_path_and_sum_to_the_total() {
+        let a1 = in_repo("acme/a", "src/index.ts", 1);
+        let a2 = in_repo("acme/a", "src/index.ts", 2);
+        let b1 = in_repo("acme/b", "src/index.ts", 1);
+        let all = vec![a1.clone(), a2, b1.clone()];
+        let mut m = TriageModel::default();
+        m.mark_false_positive(std::slice::from_ref(&b1), "fixture");
+        let by_repo = m.counts_by_repo(&all);
+        assert_eq!(by_repo.len(), 2);
+        assert_eq!(by_repo[0].0, "acme/a");
+        assert_eq!(by_repo[0].1.unresolved, 2);
+        assert_eq!(by_repo[1].0, "acme/b");
+        assert_eq!(by_repo[1].1.false_positive, 1);
+        assert_eq!(by_repo[1].1.outstanding(), 0);
+        let summed: usize = by_repo.iter().map(|(_, c)| c.total()).sum();
+        assert_eq!(summed, m.counts(&all).total());
+        // A decision on repo B's src/index.ts:1 does not touch repo A's.
+        assert_eq!(m.state_of(&a1), TriageState::Unresolved);
     }
 
     // ── evaluated_option_id (audit-integrated alternative recommendation) ──────────────────
@@ -1905,6 +2229,91 @@ mod tests {
         assert_eq!(m.state_of(&item), TriageState::TechDebt);
         m.move_to(std::slice::from_ref(&item), TriageState::Unresolved);
         assert_eq!(m.state_of(&item), TriageState::Unresolved);
+    }
+
+    // ── WO8: MergedInto ───────────────────────────────────────────────────────
+
+    /// A merge is a decision (the Process gate does not wait on it), claims two rows are one
+    /// problem (so it needs a reason), and no key reaches it: it needs a second site.
+    #[test]
+    fn a_merge_is_decided_needs_a_reason_and_has_no_hotkey() {
+        let merged = TriageState::MergedInto;
+        assert!(merged.is_decided());
+        assert!(merged.requires_reason());
+        assert_eq!(state_hotkey(merged), None);
+        assert_eq!(merged.label(), "Merged");
+        // The keyboard cannot reach it, in any case.
+        for key in ["m", "M"] {
+            assert_eq!(pane_command(PaneFocus::Cursor, key, KeyMods::none()), None);
+        }
+        // It is not a table a row is filed into by a gesture on the row.
+        assert!(!TriageState::all().contains(&merged));
+    }
+
+    #[test]
+    fn merging_records_the_reason_with_the_state_and_undo_puts_the_row_back() {
+        let mut m = TriageModel::new();
+        let item = f("r", 1, "low", "active");
+        // No reason: refused, nothing written, no undo offered.
+        assert!(m
+            .dispose_with_undo(
+                std::slice::from_ref(&item),
+                TriageState::MergedInto,
+                "  ",
+                0
+            )
+            .is_none());
+        assert_eq!(m.state_of(&item), TriageState::Unresolved);
+
+        let mut undo = m
+            .dispose_with_undo(
+                std::slice::from_ref(&item),
+                TriageState::MergedInto,
+                "the same unsafe read as the row above",
+                0,
+            )
+            .expect("a merge with a reason applies");
+        assert_eq!(m.state_of(&item), TriageState::MergedInto);
+        let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
+        assert_eq!(d.reason, "the same unsafe read as the row above");
+        assert_eq!(undo.message, "Marked 1 finding as Merged.");
+        assert_eq!(m.undo(&mut undo, 1_000), UndoOutcome::Reverted(1));
+        assert_eq!(m.state_of(&item), TriageState::Unresolved);
+    }
+
+    #[test]
+    fn merged_rows_are_tallied_apart_and_are_never_outstanding() {
+        let mut m = TriageModel::new();
+        let a = f("r", 1, "low", "active");
+        let b = f("r", 2, "low", "active");
+        let c = f("r", 3, "low", "active");
+        m.merge(std::slice::from_ref(&b), "same cause");
+        m.confirm(std::slice::from_ref(&c));
+        let counts = m.counts(&[a, b, c]);
+        assert_eq!(counts.merged, 1);
+        assert_eq!(counts.unresolved, 1);
+        assert_eq!(counts.confirmed, 1);
+        assert_eq!(counts.of(TriageState::MergedInto), 1);
+        assert_eq!(counts.total(), 3, "every row is counted once");
+        assert_eq!(counts.outstanding(), 1, "a merged row is decided");
+    }
+
+    #[test]
+    fn the_merged_state_round_trips_the_draft_and_the_lenient_reader() {
+        use crate::lenient::WireEnum;
+        let d = Disposition {
+            state: TriageState::MergedInto,
+            reason: "same cause".to_string(),
+            bucket: TechDebtBucket::Later,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"MergedInto\""), "{json}");
+        let back: Disposition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(
+            TriageState::from_wire("MergedInto"),
+            Some(TriageState::MergedInto)
+        );
     }
 
     #[test]
@@ -1987,6 +2396,7 @@ mod tests {
                 ignored: 1,
                 tech_debt: 1,
                 false_positive: 1,
+                merged: 0,
             }
         );
         assert_eq!(m.counts(&all).total(), 5);
@@ -2677,8 +3087,10 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let b = deviation_labelled("NAMING-1", 5, None, "snake_case");
         let groups = deviation_groups(&[a1.clone(), defect("D", "high"), a2.clone(), b.clone()]);
 
@@ -2716,10 +3128,13 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let mut a3 = a1.clone();
         a3.path = "src/admin.rs".into();
+        a3 = a3.keyed_by_line();
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);
@@ -3038,10 +3453,13 @@ mod tests {
         let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
         a1.path = "src/routes.rs".into();
         a1.line = 12;
+        a1 = a1.keyed_by_line();
         let mut a2 = a1.clone();
         a2.line = 40;
+        a2 = a2.keyed_by_line();
         let mut a3 = a1.clone();
         a3.path = "src/admin.rs".into();
+        a3 = a3.keyed_by_line();
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);
@@ -4386,5 +4804,30 @@ mod tests {
             "an unmapped emission path must never be described as a defect: {:?}",
             hub.outcome
         );
+    }
+
+    /// M4: the flags of a row are the sorted, repeat-free list in its `review_flags` capture.
+    #[test]
+    fn review_flags_of_reads_the_capture_and_ignores_anything_unreadable() {
+        let mut f: FindingView = serde_json::from_value(serde_json::json!({
+            "path": "a.rs", "line": 1, "rule_id": "R-1", "severity": "low",
+            "snippet": "x", "detail": "d"
+        }))
+        .unwrap();
+        assert!(review_flags_of(&f).is_empty());
+        f.captures.insert(
+            REVIEW_FLAGS_CAPTURE.to_string(),
+            r#"["unverified_name:b.rs","fix_ungrounded","fix_ungrounded"]"#.to_string(),
+        );
+        assert_eq!(
+            review_flags_of(&f),
+            vec![
+                "fix_ungrounded".to_string(),
+                "unverified_name:b.rs".to_string()
+            ]
+        );
+        f.captures
+            .insert(REVIEW_FLAGS_CAPTURE.to_string(), "not json".to_string());
+        assert!(review_flags_of(&f).is_empty());
     }
 }

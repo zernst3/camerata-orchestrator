@@ -1,6 +1,6 @@
 //! `DefectReport` — the Product-Owner feedback loop's INGEST contract (the "Feedback
 //! loop: auto-capture + click-to-report" section of
-//! `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`).
+//! the product-owner vibe-mode design notes).
 //!
 //! Both feedback sources (a scaffolded app's built-in error reporter posting
 //! auto-captured runtime errors, and a human clicking an element in the preview to

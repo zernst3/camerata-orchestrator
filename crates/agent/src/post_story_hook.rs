@@ -455,6 +455,7 @@ mod tests {
             alternatives_considered: vec!["Alternative A".to_string()],
             outcome: DecisionOutcome::Approved,
             provenance: RevisionProvenance::new(RevisionActor::User, Utc::now()),
+            option_descriptions: Vec::new(),
         }
     }
 
@@ -468,6 +469,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Pending,
             provenance: RevisionProvenance::new(RevisionActor::Ai, Utc::now()),
+            option_descriptions: Vec::new(),
         }
     }
 

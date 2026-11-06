@@ -29,8 +29,48 @@
 
 use camerata_checks::vcs_action::{
     build_rules, gate, gate_or_bypass, BypassRequest, GateOrBypassResult, IdLocation,
-    ProcessRuleConfig, ProcessViolation, VcsAction,
+    ProcessRuleConfig, ProcessViolation, StoryIdFormat, VcsAction,
 };
+
+use crate::uow::UnitOfWork;
+
+/// The prefix of a native unit's story-id reference: `uow-<number>`. A native unit has no
+/// tracker item, so a bare `#<number>` would not name it: GitHub links `#3` to issue or pull
+/// request 3 of the repository, which is some other piece of work. `uow-3` links to nothing.
+pub const NATIVE_REF_PREFIX: &str = "uow";
+
+/// The story-id format a native unit's commits and PRs use (`uow-<digits>`).
+fn native_story_id_format() -> StoryIdFormat {
+    StoryIdFormat {
+        prefix: NATIVE_REF_PREFIX.to_string(),
+        separator: '-',
+        custom_regex: None,
+    }
+}
+
+/// `true` when `config` already asks for the native `uow-<digits>` reference.
+fn uses_native_ref(config: &ProcessRuleConfig) -> bool {
+    config.commit_doc.story_id_format == native_story_id_format()
+}
+
+/// The process-rule config to author and gate the commits and PRs of `uow` with: the
+/// project's own config, except that a NATIVE unit's story-id reference is `uow-<number>`
+/// (see [`NATIVE_REF_PREFIX`]) instead of the project's tracker format. The commit gate then
+/// accepts exactly that reference, so a native unit's machine commit and PR pass the same
+/// HARD-BLOCK gate as an issue-backed unit's, and nothing else about the project's rules
+/// changes.
+///
+/// A project that requires an `<prefix>#<id>` ticket link in the subject (PROCESS-ADO-LINK-1)
+/// still requires it: a native unit has no such ticket, so the message carries none and the
+/// gate blocks with that rule's reason, rather than inventing a ticket number that would point
+/// at someone else's work item.
+pub fn config_for_unit(config: &ProcessRuleConfig, uow: &UnitOfWork) -> ProcessRuleConfig {
+    let mut config = config.clone();
+    if uow.is_native() {
+        config.commit_doc.story_id_format = native_story_id_format();
+    }
+    config
+}
 
 /// The outcome of a blocked chokepoint check.
 #[derive(Debug)]
@@ -119,8 +159,8 @@ pub fn gated_branch(config: &ProcessRuleConfig, name: &str) -> Result<(), ChokeE
 /// - **PROCESS-ADO-LINK-1** — when enabled, the configured `<prefix>#<digits>` ticket reference is
 ///   appended to the subject.
 ///
-/// `numeric_id` is the story's numeric identifier (the tail of a canonical `owner/repo#<num>`
-/// story id). If it is empty, no compliant story-id reference can be produced; the returned
+/// `numeric_id` is the unit's numeric reference ([`crate::uow::UnitOfWork::commit_reference`]:
+/// its native number or its tracker item's number). If it is empty, no compliant story-id reference can be produced; the returned
 /// message will omit it and [`gated_commit`] will HARD-BLOCK, which is the intended signal that
 /// the run lacks a usable story id.
 pub fn compliant_machine_commit_message(
@@ -151,7 +191,7 @@ pub fn compliant_machine_commit_message(
     };
 
     // 3. ADO ticket reference for the subject when PROCESS-ADO-LINK-1 is active.
-    let ado_ref = if config.ado_link.enabled && !numeric_id.is_empty() {
+    let ado_ref = if config.ado_link.enabled && !numeric_id.is_empty() && !uses_native_ref(config) {
         format!(" {}#{}", config.ado_link.prefix, numeric_id)
     } else {
         String::new()
@@ -203,7 +243,7 @@ pub fn compliant_machine_pr(
     } else {
         format!("{}{}{}", fmt.prefix, fmt.separator, numeric_id)
     };
-    let ado_ref = if config.ado_link.enabled && !numeric_id.is_empty() {
+    let ado_ref = if config.ado_link.enabled && !numeric_id.is_empty() && !uses_native_ref(config) {
         format!(" {}#{}", config.ado_link.prefix, numeric_id)
     } else {
         String::new()
@@ -229,33 +269,6 @@ pub fn compliant_machine_pr(
     }
 
     (title, body)
-}
-
-/// Extract the numeric story identifier from a Camerata story id.
-///
-/// Canonical story ids are `owner/repo#<num>`; the numeric id is the tail after the last `#`.
-/// When there is no `#`, we fall back to the trailing run of ASCII digits (covers ids like
-/// `story-42`). Returns an empty string when no digits are present, which signals the caller
-/// that a compliant story-id reference cannot be formed.
-pub fn numeric_story_id(story_id: &str) -> String {
-    let tail = story_id
-        .rsplit_once('#')
-        .map(|(_, n)| n)
-        .unwrap_or(story_id);
-    // Take a leading run of digits from the tail (handles `#42` and `#42-suffix`).
-    let leading: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if !leading.is_empty() {
-        return leading;
-    }
-    // Fall back to a trailing run of digits anywhere (handles `story-42`).
-    story_id
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect()
 }
 
 /// Gate a COMMIT, allowing an auditable bypass for orchestration-internal commits that
@@ -449,19 +462,6 @@ mod tests {
     // ── Compliant machine-message generation (Refinement #1) ─────────────────────
 
     #[test]
-    fn numeric_story_id_extracts_tail_after_hash() {
-        assert_eq!(numeric_story_id("acme/widgets#42"), "42");
-        assert_eq!(numeric_story_id("story-1"), "1");
-        assert_eq!(numeric_story_id("#7"), "7");
-    }
-
-    #[test]
-    fn numeric_story_id_empty_when_no_digits() {
-        assert_eq!(numeric_story_id("acme/widgets#"), "");
-        assert_eq!(numeric_story_id("no-number-here"), "");
-    }
-
-    #[test]
     fn machine_commit_passes_default_ruleset() {
         // The shipped default requires conventional shape + substantive body + bare #<id>.
         let cfg = ProcessRuleConfig::default();
@@ -568,5 +568,88 @@ mod tests {
         let cfg = ProcessRuleConfig::default();
         assert!(gated_branch(&cfg, "camerata/acme-x-42").is_ok());
         assert!(gated_branch(&cfg, "literally-anything").is_ok());
+    }
+
+    // ── Native units: the `uow-<n>` reference ───────────────────────────────────
+
+    fn native_unit(number: u64) -> UnitOfWork {
+        UnitOfWork {
+            story_id: format!("uow-x-{number}"),
+            native_number: Some(number),
+            ..Default::default()
+        }
+    }
+
+    /// A native unit's commit and PR carry `uow-<n>`, the commit gate accepts exactly that, and
+    /// the bare `#<n>` GitHub would autolink to issue or PR `n` appears nowhere.
+    #[test]
+    fn a_native_units_messages_use_the_uow_token_and_no_bare_hash_number() {
+        let project = ProcessRuleConfig::default();
+        let unit = native_unit(3);
+        let cfg = config_for_unit(&project, &unit);
+        let numeric = unit.commit_reference();
+        assert_eq!(numeric, "3");
+
+        let commit = compliant_machine_commit_message(&cfg, "feat", "implement story", &numeric);
+        assert!(gated_commit(&cfg, &commit).is_ok(), "{commit:?}");
+        assert!(commit.contains("Refs uow-3."), "{commit:?}");
+        let (title, body) = compliant_machine_pr(&cfg, "Camerata: uow-x-3", "Opened.", &numeric);
+        assert!(gated_pr(&cfg, &title, &body).is_ok(), "{title:?} {body:?}");
+        for text in [&commit, &title, &body] {
+            assert!(
+                !text
+                    .chars()
+                    .zip(text.chars().skip(1))
+                    .any(|(a, b)| a == '#' && b.is_ascii_digit()),
+                "no bare #<n> for a native unit: {text:?}"
+            );
+        }
+
+        // The gate for a native unit refuses the colliding form.
+        assert!(gated_commit(
+            &cfg,
+            "feat: x\n\nA substantive body for the commit. Refs #3."
+        )
+        .is_err());
+    }
+
+    /// An issue-backed unit keeps the project's own format, and the config is returned as is.
+    #[test]
+    fn an_issue_backed_unit_keeps_the_projects_story_id_format() {
+        let project = ProcessRuleConfig::default();
+        let unit = UnitOfWork::keyed("acme/x#42");
+        assert_eq!(config_for_unit(&project, &unit), project);
+        let msg = compliant_machine_commit_message(
+            &config_for_unit(&project, &unit),
+            "feat",
+            "implement story",
+            &unit.commit_reference(),
+        );
+        assert!(msg.contains("Refs #42."), "{msg:?}");
+    }
+
+    /// A project that demands an `AB#<id>` ticket link still demands it of a native unit. The
+    /// message carries none (it will not invent a ticket number that points at someone else's
+    /// work item), so the gate blocks and says which rule.
+    #[test]
+    fn a_native_unit_never_gets_a_made_up_ado_ticket_number() {
+        use camerata_checks::vcs_action::AdoLinkConfig;
+        let project = ProcessRuleConfig {
+            ado_link: AdoLinkConfig {
+                enabled: true,
+                prefix: "AB".to_string(),
+            },
+            ..ProcessRuleConfig::default()
+        };
+        let unit = native_unit(3);
+        let cfg = config_for_unit(&project, &unit);
+        let msg = compliant_machine_commit_message(&cfg, "feat", "implement story", "3");
+        assert!(!msg.contains("AB#"), "{msg:?}");
+        match gated_commit(&cfg, &msg) {
+            Err(ChokeError::Blocked(v)) => {
+                assert!(v.iter().any(|x| x.rule_id == "PROCESS-ADO-LINK-1"), "{v:?}")
+            }
+            other => panic!("expected the ADO link rule to block, got {other:?}"),
+        }
     }
 }

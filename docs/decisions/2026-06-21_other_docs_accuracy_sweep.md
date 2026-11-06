@@ -79,7 +79,8 @@ accurate: the moat-level JS/TS CheckRunner is not yet shipped.
 
 ## Skip list — not touched
 
-USER_GUIDE.md, TECHNICAL.md, BACKLOG.md, DEBT_INVENTORY_*, PHASE0_*, PHASE0_TASKS.md,
-UI_TASKS.md, UI_BACKLOG.md, UI_DESIGN.md, TECH_DESIGN.md, SESSION_*, TEST_WHEN_BACK.md,
-LIVE_RUN_VERIFICATION.md, CORPUS_AUDIT_*, DEMO_COMMANDED_VIOLATION.md,
-RUST_CORE_VERIFICATION.md, WORKTRACKER_INTEGRATION.md — none were read or modified.
+USER_GUIDE.md, TECHNICAL.md, BACKLOG.md, PHASE0_*, PHASE0_TASKS.md,
+UI_TASKS.md, UI_BACKLOG.md, UI_DESIGN.md, TECH_DESIGN.md, LIVE_RUN_VERIFICATION.md,
+DEMO_COMMANDED_VIOLATION.md, RUST_CORE_VERIFICATION.md, WORKTRACKER_INTEGRATION.md and the
+private working notes (debt inventory, session notes, test checklist, corpus audit)
+— none were read or modified.

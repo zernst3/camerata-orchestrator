@@ -1,11 +1,16 @@
 id = "SUPABASE-RLS-VIEW-INVOKER-1"
-version = 1
+version = 4
 title = "A view in an exposed schema must set security_invoker = true so it does not bypass base-table RLS"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 # Severity floor. Rationale: a view without security_invoker executes as its owner, who on
 # Supabase is typically privileged, so it reads straight through the RLS on its base tables —
 # the tables are locked and the view beside them is not, with nothing in the migration diff
@@ -17,12 +22,12 @@ qualifies = "Enforced by a statement-granular scan of CREATE VIEW statements in 
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0010_security_definer_view"
-title = "Supabase Database Linter — 0010_security_definer_view (\"View bypasses row-level security\")"
+title = "Supabase Database Linter: 0010_security_definer_view (\"View bypasses row-level security\")"
 linter = "splinter: security_definer_view"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-createview.html"
-title = "PostgreSQL docs — CREATE VIEW: the security_invoker option"
+title = "PostgreSQL docs: CREATE VIEW: the security_invoker option"
 
 [decision]
 question = "Must every view in an API-exposed schema explicitly set security_invoker = true?"
@@ -51,15 +56,15 @@ id = "flag-views-without-security-invoker"
 label = "Every view in an API-exposed schema sets security_invoker = true"
 directive = """
 Views in an API-exposed schema are created `WITH (security_invoker = true)`. Without it, Postgres
-runs a view's underlying queries with the VIEW OWNER's privileges rather than the querying user's —
+runs a view's underlying queries with the VIEW OWNER's privileges rather than the querying user's,
 and because Supabase table owners are typically a privileged role, that means the view reads
 straight through whatever RLS policies guard its base tables. The tables are locked; the view
 sitting beside them is not, and nothing in the migration diff says so.
 
 `security_invoker` (Postgres 15+, which Supabase runs) makes the view re-check privileges, RLS
 included, against the actual invoking role, which costs nothing and removes the bypass. Where a
-view is deliberately meant to be a narrower curated surface over a locked-down base table — a
-reviewed read-convenience view excluding sensitive columns — that is a real design, but it is one
+view is deliberately meant to be a narrower curated surface over a locked-down base table (a
+reviewed read-convenience view excluding sensitive columns) that is a real design, but it is one
 the project states and reviews rather than one that arises from leaving the option off.
 """
 remediation = """
@@ -75,4 +80,4 @@ id = "allow-owner-privileged-views-for-convenience"
 violates = true
 label = "Views built for internal reporting or aggregation omit security_invoker and run with the owner's privileges"
 directive = "Views whose purpose is internal reporting or aggregation rather than direct end-user data access are created without `security_invoker`, running with the view owner's privileges on the basis that internal tooling does not need row-level scoping."
-why = "Rejected: 'internal dashboard' is not a property a static scan (or a reviewer, months later) can verify at the view definition site — the same view is routinely later exposed through PostgREST once someone builds a customer-facing feature against it, at which point the owner-privileged default silently reintroduces the bypass with no code change to flag. The security_invoker default (Postgres 15+, which Supabase runs) costs nothing and removes the failure mode entirely."
+why = "Rejected: 'internal dashboard' is not a property a static scan (or a reviewer, months later) can verify at the view definition site: the same view is routinely later exposed through PostgREST once someone builds a customer-facing feature against it, at which point the owner-privileged default silently reintroduces the bypass with no code change to flag. The security_invoker default (Postgres 15+, which Supabase runs) costs nothing and removes the failure mode entirely."

@@ -76,6 +76,22 @@ pub struct DetProgress {
     pub total: usize,
 }
 
+/// Where one post-scan stage stands inside a batch, for the cockpit's status line ("Calibration:
+/// batch msgbatch_x, 12,400 of 30,000 ended, 41 min"). Set by the shared batch runner on every
+/// poll tick from the provider's own counts.
+#[derive(Clone, Debug, Serialize, Default, PartialEq, Eq)]
+pub struct StageProgress {
+    /// The stage's short name (`calibration`, `fix`, ...).
+    pub stage: String,
+    /// Items that have ended (succeeded, errored, cancelled or expired) so far.
+    pub done: usize,
+    /// Items the stage submitted in all.
+    pub total: usize,
+    /// Epoch-ms at which this stage first reported progress, so the cockpit can show how long it
+    /// has been running.
+    pub since_ms: u128,
+}
+
 /// A live audit job's state, as the UI polls it.
 #[derive(Clone, Debug, Serialize, Default)]
 pub struct JobState {
@@ -85,6 +101,10 @@ pub struct JobState {
     pub done: usize,
     /// Total passes known so far (grows as repos are fetched + chunked).
     pub total: usize,
+    /// Passes that were refused and did NOT run (the spend limit). Counted separately from
+    /// `done` so a stopped scan never reads as 100% complete.
+    #[serde(default)]
+    pub not_run: usize,
     /// Findings discovered so far — a live preview (pre-final calibration).
     pub findings: Vec<Finding>,
     /// Live progress of the DETERMINISTIC pass (the always-on floor + the scan-preview
@@ -103,6 +123,10 @@ pub struct JobState {
     /// msgbatch_01AbCd"). `None` for parallel/sequential mode jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// Where the stage currently waiting on a batch stands (see [`StageProgress`]). `None` before
+    /// any stage reports and after the job ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_progress: Option<StageProgress>,
     /// ROUTES-5: the project this job scanned, captured at creation from the active
     /// project. `latest_deep_report(project_id)` filters on this so a project's
     /// deep-report export returns ITS OWN latest deep report, not an arbitrary one.
@@ -122,6 +146,18 @@ pub struct JobStore {
     inner: Arc<Mutex<HashMap<String, JobState>>>,
     counter: Arc<AtomicU64>,
     job_meta: Arc<Mutex<HashMap<String, JobMeta>>>,
+}
+
+/// The key a deterministic tool is tracked under in a job's progress. A one-repo scan keeps the
+/// tool's own name. A scan over several repos keys it by repo and tool (`owner/repo:eslint`), so
+/// the second repo's run of a tool starts its own row instead of overwriting the first's count.
+#[must_use]
+pub fn progress_tool_key(repo: &str, tool: &str, multi_repo: bool) -> String {
+    if multi_repo && !repo.is_empty() {
+        format!("{repo}:{tool}")
+    } else {
+        tool.to_string()
+    }
 }
 
 impl JobStore {
@@ -194,6 +230,11 @@ impl JobStore {
     /// Mark `n` passes complete.
     pub fn inc_done(&self, id: &str, n: usize) {
         self.with(id, |j| j.done += n);
+    }
+
+    /// Record `n` passes that were refused and did not run. NOT counted in `done`.
+    pub fn inc_not_run(&self, id: &str, n: usize) {
+        self.with(id, |j| j.not_run += n);
     }
 
     /// Register (or, with `None`, clear) the rule corpus the job's scan runs against. From then
@@ -302,6 +343,15 @@ impl JobStore {
         }
     }
 
+    /// [`Self::declare_tools`] for one repo of a multi-repo scan: each tool is declared under the
+    /// key [`progress_tool_key`] gives it for that repo, so the denominator counts a tool once
+    /// per repo it will run on.
+    pub fn declare_repo_tools(&self, id: &str, repo: &str, tools: &[&str]) {
+        for tool in tools {
+            self.det_register_tool(id, &progress_tool_key(repo, tool, true));
+        }
+    }
+
     /// Snapshot the deterministic progress (test/poll helper).
     #[must_use]
     pub fn det_progress(&self, id: &str) -> Option<DetProgress> {
@@ -317,6 +367,85 @@ impl JobStore {
     /// longer informative).
     pub fn set_batch_id(&self, id: &str, batch_id: impl Into<String>) {
         self.with(id, |j| j.batch_id = Some(batch_id.into()));
+    }
+
+    /// Report how far `stage` has got inside its batch: `done` of `total` items ended. Called on
+    /// every poll tick by the shared batch runner. It also counts as activity on the job, so a
+    /// batch that runs for hours never reads as stalled while its polls succeed, and it labels the
+    /// liveness tracker so the stall warning can say what the job is waiting for.
+    pub fn set_stage_progress(
+        &self,
+        id: &str,
+        stage: crate::stage_telemetry::Stage,
+        done: usize,
+        total: usize,
+    ) {
+        let label = stage.label();
+        let now = now_epoch_ms();
+        self.with(id, |j| {
+            let since_ms = match &j.stage_progress {
+                Some(p) if p.stage == label => p.since_ms,
+                _ => now,
+            };
+            j.stage_progress = Some(StageProgress {
+                stage: label.to_string(),
+                done,
+                total,
+                since_ms,
+            });
+        });
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.tracker
+                .record_progress(format!("{label}: {done} of {total} ended"));
+        }
+    }
+
+    /// Make the job look as if nothing had happened on it for a long time, so a test can see
+    /// that a later call touched it.
+    #[cfg(test)]
+    pub(crate) fn age_activity_for_test(&self, id: &str) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(id)
+        {
+            meta.tracker = LivenessTracker::with_initial_ms(1);
+        }
+    }
+
+    /// The stage is paused waiting out a rate limit or an overload: count it as activity and say
+    /// so on the liveness label, so a long `retry-after` never reads as a stalled job.
+    pub fn note_paused(&self, id: &str) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.tracker.record_progress("paused: rate limited");
+        }
+    }
+
+    /// The label the job's liveness tracker last recorded (`calibration: 6 of 6 ended`), which
+    /// outlives the stage's progress line.
+    #[cfg(test)]
+    pub(crate) fn last_progress_label(&self, id: &str) -> Option<String> {
+        self.job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(|m| m.tracker.last_label())
+    }
+
+    /// The stage is no longer waiting on a batch: drop its progress line.
+    pub fn clear_stage_progress(&self, id: &str) {
+        self.with(id, |j| j.stage_progress = None);
     }
 
     /// Request cancellation of a job by setting its cancel flag. The background worker is
@@ -379,8 +508,9 @@ impl JobStore {
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
-                               // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
-                               // deep report within a project deterministically (not by HashMap order).
+            j.stage_progress = None;
+            // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
+            // deep report within a project deterministically (not by HashMap order).
             j.completed_at_ms = Some(now_ms);
         });
         self.release_preview_corpus(id);
@@ -498,6 +628,12 @@ mod tests {
     fn finding(rule: &str) -> Finding {
         Finding {
             could_be_intentional: false,
+            site_key: String::new(),
+            group_path: Vec::new(),
+            group_role: crate::review_tree::GroupRole::Primary,
+            review: Default::default(),
+            flagged_by: Vec::new(),
+            possible_duplicate_of: None,
             repo: "me/api".into(),
             kind: None,
             path: "src/x.rs".into(),

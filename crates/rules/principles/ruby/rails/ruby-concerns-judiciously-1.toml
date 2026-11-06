@@ -1,5 +1,5 @@
 id = "RUBY-CONCERNS-JUDICIOUSLY-1"
-version = 1
+version = 2
 title = "Concerns (module mixins) are used sparingly for cross-cutting behavior; large concerns or single-use concerns are flags"
 domain = "ruby:rails"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://api.rubyonrails.org/classes/ActiveSupport/Concern.html"
-title = "Rails API — ActiveSupport::Concern"
+title = "Rails API: ActiveSupport::Concern"
 
 [decision]
 question = "When is a concern (Rails mixin module) the right abstraction?"
@@ -35,4 +35,4 @@ why = "Can reduce boilerplate but risks creating hard-to-follow mixins with hidd
 
 [[sources]]
 url = "https://guides.rubyonrails.org/engines.html#concerns"
-title = "Rails Guides — Engines: ActiveSupport::Concern for complex class modifications"
+title = "Rails Guides: Engines: ActiveSupport::Concern for complex class modifications"

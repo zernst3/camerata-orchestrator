@@ -1,6 +1,8 @@
 //! The judge's prompt and the parser of its answer.
 //!
-//! One closed question per rule. The input is structured JSON, never whole files. The answer is a
+//! One closed question per rule. The input is structured JSON, never whole files, and each
+//! candidate's JSON sits in its own frame under the run's random delimiter token
+//! ([`crate::prompt_frame`]), with the shared untrusted-content clause in the system prompt. The answer is a
 //! closed vocabulary: a verdict word outside the rule's list, an id that was not asked about, a
 //! missing verdict and an unparseable response are all "no verdict", and none of them can ship a
 //! finding. Model output is data: the concept phrase is length-capped and scrubbed before it can
@@ -9,6 +11,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use camerata_checks::clone_rules::{CloneRule, JudgeInput};
+
+use crate::prompt_frame::{frame_untrusted, FrameNonce};
 
 /// A parsed verdict for one candidate id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,23 +106,37 @@ pub fn system_prompt(rule: CloneRule) -> String {
 }
 
 /// The marker that separates the stable prefix of the user prompt from the varying batch.
-pub const BATCH_MARKER: &str = "Candidates (JSON):\n";
+pub const BATCH_MARKER: &str = "Candidates (one JSON object per delimited block):\n";
 
 /// A batch's user prompt and the byte length of its stable prefix (the repository line and the
 /// rule's client-facing text), which is the same for every batch of one rule in one scan and is
-/// marked as the single cache breakpoint.
+/// marked as the single cache breakpoint. Each candidate is one line of JSON (its code is escaped
+/// inside the strings, so no line of it can look like a delimiter) framed under `nonce` and
+/// labelled with the candidate's id.
 pub fn batch_prompt(
     repo: &str,
     rule: CloneRule,
     rule_text: &str,
     inputs: &[JudgeInput],
+    nonce: &FrameNonce,
 ) -> (String, usize) {
     let mut prompt = format!("Repository: {repo}\nRule {}: {rule_text}\n\n", rule.id());
     let prefix_len = prompt.len();
     prompt.push_str(BATCH_MARKER);
-    // Serialization of plain structs cannot fail; an empty array would only mean "no candidates".
-    prompt.push_str(&serde_json::to_string(inputs).unwrap_or_else(|_| "[]".to_string()));
+    for input in inputs {
+        prompt.push_str(&frame_untrusted(
+            nonce,
+            &format!("candidate {}", input.id),
+            &candidate_json(input),
+        ));
+    }
     (prompt, prefix_len)
+}
+
+/// One candidate's JSON, as the line the prompt frames. Serialization of plain structs cannot
+/// fail; an empty object would only mean "nothing to show".
+pub fn candidate_json(input: &JudgeInput) -> String {
+    serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// The most words of a concept phrase that are read.

@@ -181,19 +181,44 @@ pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignRefere
 /// designs whose shape resembles it. `contribute` powers the contributing side: add
 /// an already-abstracted design. Implementations decide similarity + storage; the
 /// caller is responsible for only contributing designs the user consented to share.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait DesignCorpus: Send + Sync {
     /// Prior consented designs similar to `form`, best first.
-    async fn similar(&self, form: &IntakeForm) -> Vec<DesignReference>;
+    fn similar<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        form: &'life1 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<DesignReference>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
     /// Contribute one abstracted design. Upserts by [`DesignReference::id`]: a
     /// re-contribution from the same project replaces its prior entry rather than
     /// duplicating it (so the corpus never accumulates stale copies of one app).
-    async fn contribute(&self, design: DesignReference);
+    fn contribute<'life0, 'async_trait>(
+        &'life0 self,
+        design: DesignReference,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
     /// Withdraw a contribution by its id (the owning project's id). This is the
     /// opt-out / right-to-be-forgotten path: it removes the design AND, in a real
     /// implementation, every derived vector row stamped with that id. Removing a
     /// missing id is a no-op.
-    async fn withdraw(&self, id: &str);
+    fn withdraw<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        id: &'life1 str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// An in-memory [`DesignCorpus`] for tests and the prototype. Similarity is a naive

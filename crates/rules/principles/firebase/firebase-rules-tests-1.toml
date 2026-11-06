@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-TESTS-1"
-version = 2
+version = 3
 title = "The security rules have unit tests that run against the emulator"
 domain = "firebase"
 layer = "platform"
@@ -27,7 +27,7 @@ why = "Rules are code that decides who can read and write every document, and a 
 [[option]]
 id = "security-rules-have-unit-tests"
 label = "Security rules have unit tests that run against the emulator"
-directive = "The project depends on the rules unit testing library and tests its rules against the emulator: each collection has a case an owner can do, a case a stranger cannot, and a case an unauthenticated caller cannot. The tests run in CI, so a rules change that opens access fails the build."
+directive = "The project depends on the rules unit testing library and tests its rules against the emulator: each collection has a case an owner can do, a case a stranger cannot and a case an unauthenticated caller cannot. The tests run in CI, so a rules change that opens access fails the build."
 remediation = "Add `@firebase/rules-unit-testing` as a dev dependency and write tests with `initializeTestEnvironment`, `assertSucceeds` and `assertFails` for each collection: one the owner can do, one a stranger cannot, one an unauthenticated caller cannot. Run them with `firebase emulators:exec` in CI so a rules change that opens access fails the build."
 effort = "medium"
 why = "A failing test is the first sign of a rules mistake, instead of a stranger reading the data."

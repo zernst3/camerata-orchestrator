@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::llm::ModelSession;
-use crate::onboard::{AuditedRef, ScanReport};
+use crate::onboard::{AuditedRef, Finding, ScanReport};
 
 /// On-disk schema version of one project's inspection file.
 const FILE_VERSION: u32 = 1;
@@ -107,7 +107,8 @@ pub struct InspectionEntry {
 impl InspectionEntry {
     /// Build an entry from a completed report. `id` is assigned by [`InspectionStore::append`]
     /// (it needs the existing list to stay unique); this leaves it empty.
-    pub fn from_report(project_id: &str, report: ScanReport, kind: InspectionKind) -> Self {
+    pub fn from_report(project_id: &str, mut report: ScanReport, kind: InspectionKind) -> Self {
+        report.normalize_loaded();
         let p = &report.provenance;
         Self {
             id: String::new(),
@@ -163,6 +164,47 @@ pub struct InspectionStore {
     mem: Arc<Mutex<BTreeMap<String, Vec<InspectionEntry>>>>,
 }
 
+/// Give every finding its stable site key ([`camerata_api_types::site_key`]). Ordinals are
+/// assigned over the whole set, in line order then advisory id, so the same findings always get
+/// the same keys whatever order they are stored in. Safe to call again: it recomputes every key
+/// from the row's own fields, so a report saved before the field existed (or edited since) comes
+/// out correct, and one that already has keys comes out unchanged.
+pub fn backfill_site_keys(findings: &mut [Finding]) {
+    let keys = site_keys_of(findings);
+    for (f, key) in findings.iter_mut().zip(keys) {
+        f.site_key = key;
+    }
+}
+
+/// The site key each of `findings` has (or would have), in the order given, without touching
+/// the rows. [`backfill_site_keys`] writes these; the collapse pass reads them to name a source
+/// it is about to fold into another row.
+pub(crate) fn site_keys_of(findings: &[Finding]) -> Vec<String> {
+    let rows: Vec<camerata_api_types::site_key::SiteKeyRow<'_>> = findings
+        .iter()
+        .map(|f| camerata_api_types::site_key::SiteKeyRow {
+            repo: &f.repo,
+            path: &f.path,
+            rule_id: &f.rule_id,
+            snippet: &f.snippet,
+            line: f.line,
+            advisory: advisory_of(f),
+        })
+        .collect();
+    camerata_api_types::site_key::site_keys(&rows)
+}
+
+/// The advisory id of a dependency row; empty for every other row.
+fn advisory_of(f: &Finding) -> &str {
+    if f.rule_id == crate::dep_audit::DEP_AUDIT_RULE_ID {
+        f.captures
+            .get(crate::dep_audit::ADVISORY_CAPTURE)
+            .map_or("", String::as_str)
+    } else {
+        ""
+    }
+}
+
 impl InspectionStore {
     /// An empty, non-persisted store.
     pub fn new() -> Self {
@@ -188,7 +230,8 @@ impl InspectionStore {
                         serde_json::from_str::<ProjectFile>(&s).map_err(|e| e.to_string())
                     }) {
                     Ok(file) => {
-                        for entry in file.entries {
+                        for mut entry in file.entries {
+                            entry.report.normalize_loaded();
                             mem.entry(entry.project_id.clone()).or_default().push(entry);
                         }
                     }
@@ -235,6 +278,7 @@ impl InspectionStore {
     /// entry. A persistence failure is returned as `Err` AFTER the in-memory copy is updated, so
     /// the running app keeps working; the caller logs it.
     pub fn append(&self, mut entry: InspectionEntry) -> Result<InspectionEntry, std::io::Error> {
+        entry.report.normalize_loaded();
         let mut guard = self.lock();
         let list = guard.entry(entry.project_id.clone()).or_default();
         entry.id = unique_id(&entry, list);
@@ -261,8 +305,9 @@ impl InspectionStore {
     pub fn update_latest_report(
         &self,
         project_id: &str,
-        report: ScanReport,
+        mut report: ScanReport,
     ) -> Result<bool, std::io::Error> {
+        report.normalize_loaded();
         self.update_latest(project_id, |e| e.report = report)
     }
 
@@ -436,6 +481,62 @@ mod tests {
             report("acme/app", sha, started),
             InspectionKind::Full,
         )
+    }
+
+    fn finding_at(line: usize, snippet: &str) -> Finding {
+        Finding {
+            repo: "acme/app".to_string(),
+            path: "src/a.rs".to_string(),
+            line,
+            rule_id: "SEC-1".to_string(),
+            snippet: snippet.to_string(),
+            ..Finding::default()
+        }
+    }
+
+    #[test]
+    fn backfill_gives_repeats_distinct_keys_in_line_order_and_is_idempotent() {
+        let mut rows = vec![
+            finding_at(30, "x()"),
+            finding_at(4, "x()"),
+            finding_at(9, "y()"),
+        ];
+        backfill_site_keys(&mut rows);
+        let key = |ordinal, snippet: &str| {
+            camerata_api_types::site_key::site_key(
+                "acme/app", "src/a.rs", "SEC-1", snippet, ordinal,
+            )
+        };
+        assert_eq!(rows[0].site_key, key(1, "x()"));
+        assert_eq!(rows[1].site_key, key(0, "x()"));
+        assert_eq!(rows[2].site_key, key(0, "y()"));
+        let once = rows.clone();
+        backfill_site_keys(&mut rows);
+        assert_eq!(rows, once);
+    }
+
+    #[test]
+    fn a_report_saved_before_site_keys_existed_gets_them_on_load() {
+        let tmp = TempDir::new().unwrap();
+        let store = InspectionStore::at(tmp.path().to_path_buf());
+        let mut e = entry("proj-1", "aaa", "2026-10-24T10:00:00Z");
+        e.report.findings = vec![finding_at(10, "x()")];
+        store.append(e).unwrap();
+        // Strip the field from the file the way an older build wrote it.
+        let path = store.file_for("proj-1").unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let finding = &mut json["entries"][0]["report"]["findings"][0];
+        assert!(finding["site_key"].as_str().is_some_and(|k| !k.is_empty()));
+        finding.as_object_mut().unwrap().remove("site_key");
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let reopened = InspectionStore::at(tmp.path().to_path_buf());
+        let loaded = reopened.latest("proj-1").unwrap();
+        assert_eq!(
+            loaded.report.findings[0].site_key,
+            camerata_api_types::site_key::site_key("acme/app", "src/a.rs", "SEC-1", "x()", 0)
+        );
     }
 
     #[test]

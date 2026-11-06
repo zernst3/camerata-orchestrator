@@ -23,6 +23,9 @@ path = "src/main.rs"
 # `credentials`, and `model_registry` re-export their relocated DTOs from here so every
 # existing `crate::X` call site keeps resolving unchanged.
 camerata-api-types = { path = "../api-types" }
+# The batch spend-cap gate falls back to the cockpit's cost estimator (one estimator, no copy).
+# ui-core is dioxus-free pure logic.
+camerata-ui-core = { path = "../ui-core" }
 # The LLM/provider stack (Phase B of the extraction): the `llm`, `credentials`,
 # `model_registry`, `rate_limit`, and `usage_ledger` modules are now re-export shims
 # over this crate so every existing `crate::X` call site keeps resolving unchanged.
@@ -45,6 +48,9 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 # Auto-load a gitignored .env at the repo root (standalone-server path).
 dotenvy = "0.15"
+# The OS random source for the per-run prompt delimiter token (`prompt_frame`). 0.2 is the
+# version already in Cargo.lock.
+getrandom = "0.2"
 # Resolve the per-user data dir to persist projects across launches.
 dirs = "6"
 # Whole-repo brownfield scan: download the repo tarball in ONE request and
@@ -116,8 +122,8 @@ tempfile = "3"
 glob = "0.3"
 # Regex for the ApiAgentDriver's in-process Grep tool executor (same version as gateway).
 regex = "1"
-rust_xlsxwriter = "0.96.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+rust_xlsxwriter = "0.102.0"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 csv = "1"
 sha2 = { workspace = true }
 

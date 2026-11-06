@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"
-version = 1
+version = 4
 title = "any is forbidden; unknown is the typed escape hatch at boundaries"
 domain = "javascript:typescript"
 layer = "language"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://typescript-eslint.io/rules/no-explicit-any"
-title = "typescript-eslint — @typescript-eslint/no-explicit-any rule"
+title = "typescript-eslint: @typescript-eslint/no-explicit-any rule"
 linter = "@typescript-eslint: no-explicit-any"
 
 [decision]
-question = "What position does the project take on: any is forbidden; unknown is the typed escape hatch at boundaries?"
+question = "How does the code type values whose shape is not known at a boundary, such as parsed JSON or caught errors?"
 default = "any-is-forbidden-unknown-is-the-typed-escape-hatch-at-boundaries"
 why = "any is not a type, it is an instruction to the compiler to stop checking: a value typed any propagates through every assignment, call, and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. unknown serves the same 'I do not know the shape yet' purpose without the contagion: it accepts any value but permits no operation until the code narrows it (a type guard, a schema parse, an assertion), which forces the validation to happen exactly where untrusted data enters. Reaching for any to make an error go away works at that line and moves the failure somewhere with no type information, where it resurfaces as a runtime TypeError far from the cast; unknown keeps the obligation visible and local to the boundary where the shape is actually unknown."
 
@@ -35,4 +35,4 @@ id = "any-is-permitted-as-an-escape-hatch-wherever-a-t"
 violates = true
 label = "Allow any as an escape hatch"
 directive = "any is permitted as an escape hatch wherever a type is inconvenient to express, accepting that values so typed disable checking transitively, rather than requiring unknown plus explicit narrowing at boundaries"
-why = "Using any as an escape hatch wherever a type is inconvenient to express makes the compiler stop checking at that point: any propagates through every assignment, call, and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. The failure surfaces as a runtime TypeError far from the cast rather than a lint error at commit time."
+why = "Using any as an escape hatch wherever a type is inconvenient to express makes the compiler stop checking at that point: any propagates through every assignment, call and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. The failure surfaces as a runtime TypeError far from the cast rather than a lint error at commit time."

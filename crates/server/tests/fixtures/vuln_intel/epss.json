@@ -1,0 +1,13 @@
+{
+  "status": "OK",
+  "status-code": 200,
+  "version": "1.0",
+  "access": "public",
+  "total": 2,
+  "offset": 0,
+  "limit": 100,
+  "data": [
+    {"cve": "CVE-2021-44228", "epss": "0.944010000", "percentile": "0.999990000", "date": "2026-10-27"},
+    {"cve": "CVE-2022-25883", "epss": "0.002380000", "percentile": "0.611090000", "date": "2026-10-27"}
+  ]
+}

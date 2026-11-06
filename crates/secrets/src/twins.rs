@@ -267,7 +267,7 @@ pub(crate) fn classify(
     if value.contains(ELLIPSIS) {
         return Some(Twin::RedactionMarker);
     }
-    if crate::published::is_published_example(&sha256_hex(value)) {
+    if crate::published::is_published_example(&sha256_hex(value), before_value) {
         return Some(Twin::PublishedExampleKey);
     }
     if let Some(role) = role {

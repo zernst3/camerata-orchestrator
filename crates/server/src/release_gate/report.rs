@@ -19,21 +19,56 @@ pub enum CheckId {
     DatasetParity,
     /// The PDF's rows and `findings.json`'s rows are the same set.
     RowParity,
+    /// The PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV
+    /// agree with `json/all-findings.json` by severity AND kind (22d).
+    Counts,
+    /// No finding the model invented is junk: a placeholder title or rule id, no evidence, or an
+    /// explanation that says to discard it (D1).
+    Content,
+    /// Every row whose quoted evidence was not found in the file carries a reviewer decision
+    /// (M5). Runs over the in-memory rows, so a standalone audit of a zip cannot run it.
+    EvidenceUnverified,
+    /// Every merged row has a merge decision with a reason behind it, and every group decision has
+    /// one per-site record for each site it covers (design 5.3).
+    MergedWithoutDecision,
+    /// A finding the engine threw out and the reviewer put back is decided before it ships
+    /// (A12 item 2).
+    RestoredWithoutDecision,
+    /// A site the Engine Check (the reviewer's internal quality control of the engine) said No to
+    /// carries a correction, a decision or a later edit before it ships (design A2b). An Engine
+    /// Check file that cannot be read refuses too: with the verdicts unknown, no No can be ruled
+    /// out. Its operator-facing name says "Engine Check"; the label the README prints does not,
+    /// because the Engine Check never appears in a client output.
+    EngineCheckNoWithoutCorrection,
+    /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
+    /// it is the PDF's line.
+    Marking,
     /// Every manifest hash equals the archive member's hash; every member is listed.
     Manifest,
     /// The README's provenance lines equal the manifest's.
     Provenance,
+    /// The review screen holds no change the decision store has not accepted. An undo whose
+    /// revoke has not landed would export the decision the reviewer took back.
+    UnsyncedReviewerChanges,
 }
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 6] = [
+    pub const ALL: [CheckId; 14] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
         CheckId::RowParity,
+        CheckId::Counts,
+        CheckId::Content,
+        CheckId::EvidenceUnverified,
+        CheckId::MergedWithoutDecision,
+        CheckId::RestoredWithoutDecision,
+        CheckId::EngineCheckNoWithoutCorrection,
+        CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
+        CheckId::UnsyncedReviewerChanges,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -43,8 +78,16 @@ impl CheckId {
             CheckId::DatasetSet => "dataset set",
             CheckId::DatasetParity => "dataset parity",
             CheckId::RowParity => "row parity",
+            CheckId::Counts => "severity and kind counts",
+            CheckId::Content => "finding content",
+            CheckId::EvidenceUnverified => "reviewer decision on unverified evidence",
+            CheckId::MergedWithoutDecision => "decision records behind merged rows",
+            CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
+            CheckId::EngineCheckNoWithoutCorrection => "reviewer correction on flagged findings",
+            CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
+            CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
         }
     }
 }

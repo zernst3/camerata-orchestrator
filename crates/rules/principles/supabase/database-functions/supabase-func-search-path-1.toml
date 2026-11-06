@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-SEARCH-PATH-1"
-version = 1
+version = 5
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned search_path is
@@ -15,6 +15,16 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (a SECURITY DEFINER function and its search_path are facts of its CREATE or ALTER FUNCTION statement); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: an unpinned search_path on a SECURITY DEFINER function lets an
 # attacker create a colliding object in a schema they control and have it resolved and executed
 # with the definer's elevated privileges — the attack PostgreSQL's own CREATE FUNCTION security
@@ -26,11 +36,11 @@ qualifies = "Enforced by a multi-line statement scan over CREATE FUNCTION bodies
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY"
-title = "PostgreSQL docs — CREATE FUNCTION: Writing SECURITY DEFINER Functions Safely (search_path must exclude untrusted-writable schemas)"
+title = "PostgreSQL docs: CREATE FUNCTION: Writing SECURITY DEFINER Functions Safely (search_path must exclude untrusted-writable schemas)"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0011_function_search_path_mutable"
-title = "Supabase Database Linter — 0011_function_search_path_mutable (\"Unsecured function search path\")"
+title = "Supabase Database Linter: 0011_function_search_path_mutable (\"Unsecured function search path\")"
 linter = "splinter: function_search_path_mutable"
 
 [decision]
@@ -96,4 +106,4 @@ id = "definer-function-without-pinned-search-path"
 violates = true
 label = "A SECURITY DEFINER function runs with no pinned search_path"
 directive = "A function declared SECURITY DEFINER carries no `SET search_path = <trusted schema>, pg_temp`, so an object created in a caller-writable schema can resolve with the definer's elevated privileges."
-why = "Rejected: without a pinned search_path a colliding object in a caller-writable schema executes with the definer's rights — the textbook search-path hijack. Functions that do not need elevation use SECURITY INVOKER instead."
+why = "Rejected: without a pinned search_path a colliding object in a caller-writable schema executes with the definer's rights: the textbook search-path hijack. Functions that do not need elevation use SECURITY INVOKER instead."

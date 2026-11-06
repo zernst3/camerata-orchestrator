@@ -1,5 +1,5 @@
 id = "RUST-TESTING-1"
-version = 1
+version = 3
 title = "Unit tests live in a #[cfg(test)] mod tests block in the same file as the code under test"
 domain = "rust:testing"
 layer = "language"
@@ -11,25 +11,25 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-03-test-organization.html"
-title = "The Rust Book — Ch 11.3: Test Organization (Unit Tests)"
+title = "The Rust Book: Ch 11.3: Test Organization (Unit Tests)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/testing/unit_testing.html"
-title = "Rust By Example — Unit Testing"
+title = "Rust By Example: Unit Testing"
 
 [[sources]]
 url = "https://doc.rust-lang.org/reference/attributes/testing.html"
-title = "The Rust Reference — Testing Attributes (#[test], #[cfg(test)])"
+title = "The Rust Reference: Testing Attributes (#[test], #[cfg(test)])"
 
 [decision]
-question = "What position does the project take on: where do unit tests live in a Rust crate?"
+question = "Where do unit tests live relative to the code they test?"
 default = "cfg-test-mod-tests-inline-in-source-file"
 why = "The Rust Book (Ch 11.3) and Rust By Example codify the inline #[cfg(test)] mod tests pattern as the canonical Rust convention for unit tests. Placing tests in the same file as the code allows the test module to import private items via 'use super::*;', which is the primary reason unit tests are colocated with production code in Rust rather than a separate file. The #[cfg(test)] attribute ensures the test module is excluded from normal compilation and from the final binary, so colocating tests does not bloat production artifacts. A separate unit-test file (e.g., src/foo_test.rs) is possible but loses access to private items without extra indirection and diverges from the language-wide convention the entire ecosystem expects. A tests/ top-level directory is reserved for integration tests that exercise only the public API."
 
 [[option]]
 id = "cfg-test-mod-tests-inline-in-source-file"
 label = "Inline #[cfg(test)] mod tests block in the same source file"
-directive = "Unit tests live in a #[cfg(test)] mod tests { ... } block at the bottom of the same .rs file as the code being tested. The module uses 'use super::*;' to bring production items (including private ones) into scope. No #[cfg(test)] annotation is required on individual #[test] functions — only the enclosing module needs it."
+directive = "Unit tests live in a #[cfg(test)] mod tests { ... } block at the bottom of the same .rs file as the code being tested. The module uses 'use super::*;' to bring production items (including private ones) into scope. No #[cfg(test)] annotation is required on individual #[test] functions: only the enclosing module needs it."
 remediation = """
 Move the unit test into a #[cfg(test)] mod tests block at the bottom of the same source file as the code under test, using `use super::*;` to bring the production items into scope, out of a separate file or the top-level tests/ directory. Verify by confirming the test can reference private items in the module without needing them to be pub.
 """

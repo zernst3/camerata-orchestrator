@@ -1,5 +1,5 @@
 id = "PROCESS-CONVENTIONAL-COMMIT-1"
-version = 1
+version = 2
 title = "Commit subjects follow the conventional-commits shape"
 domain = "process"
 layer = "universal"
@@ -26,12 +26,12 @@ qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (
 
 [[sources]]
 url = "https://www.conventionalcommits.org/"
-title = "Conventional Commits — specification"
+title = "Conventional Commits: specification"
 linter = "commitlint"
 
 [[sources]]
 url = "https://commitlint.js.org/"
-title = "commitlint — lint commit messages against a convention (CI-wirable)"
+title = "commitlint: lint commit messages against a convention (CI-wirable)"
 linter = "commitlint"
 
 [decision]

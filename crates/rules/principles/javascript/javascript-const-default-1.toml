@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-CONST-DEFAULT-1"
-version = 1
+version = 2
 title = "const is the default binding; let only when the binding is reassigned"
 domain = "javascript"
 layer = "language"
@@ -16,7 +16,7 @@ title = "ESLint prefer-const rule"
 linter = "eslint: prefer-const"
 
 [decision]
-question = "What position does the project take on: const is the default binding; let only when the binding is reassigned?"
+question = "Which keyword does JavaScript code use by default to declare a binding?"
 default = "const-is-the-default-binding-let-only-when-the-binding-is-reassigned"
 why = "A const binding tells the reader, in one keyword at the declaration site, that this name will never be reassigned, so they can reason about the rest of the scope without scanning for a later mutation. let makes no such promise and forces the reader to keep watching. Defaulting to const and reaching for let only at an actual reassignment makes the exceptions visible: a let in the code is a signal that something is mutated, which is exactly where attention should go. Defaulting to let everywhere for uniformity erases that signal, so every binding now looks mutable whether it is or not, and the reader loses the cheap local guarantee const provides at no cost. (const constrains the binding, not the referenced object; a const-bound array or object can still have its contents mutated, which is a separate concern from rebinding.)"
 

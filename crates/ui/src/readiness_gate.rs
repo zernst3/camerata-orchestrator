@@ -237,9 +237,8 @@ pub fn ResolveModal(
                                             spawn(async move {
                                                 // The native folder picker (destination parent). If the
                                                 // user cancels, just clear busy — nothing happened.
-                                                let picked = rfd::AsyncFileDialog::new()
-                                                    .set_title("Choose a destination folder to clone into")
-                                                    .pick_folder()
+                                                let picked = camerata_ui::platform::current()
+                                                    .pick_folder("Choose a destination folder to clone into")
                                                     .await;
                                                 if picked.is_none() {
                                                     busy_repo.set(None);
@@ -267,15 +266,14 @@ pub fn ResolveModal(
                                             busy_repo.set(Some(rp.clone()));
                                             link_error.set(None);
                                             spawn(async move {
-                                                let picked = rfd::AsyncFileDialog::new()
-                                                    .set_title("Select the local clone folder")
-                                                    .pick_folder()
+                                                let picked = camerata_ui::platform::current()
+                                                    .pick_folder("Select the local clone folder")
                                                     .await;
                                                 let Some(folder) = picked else {
                                                     busy_repo.set(None);
                                                     return;
                                                 };
-                                                let path = folder.path().to_string_lossy().to_string();
+                                                let path = folder.to_string_lossy().to_string();
                                                 match link_repo(&pid, &rp, &path).await {
                                                     LinkOutcome::Linked(_) => {
                                                         busy_repo.set(None);

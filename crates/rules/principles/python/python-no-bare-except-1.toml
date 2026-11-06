@@ -1,5 +1,5 @@
 id = "PYTHON-NO-BARE-EXCEPT-1"
-version = 1
+version = 3
 title = "Exception handlers catch specific types; bare except is forbidden"
 domain = "python"
 layer = "language"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blind-except/"
-title = "Ruff — blind-except (BLE001)"
+title = "Ruff: blind-except (BLE001)"
 
 [[sources]]
 url = "https://peps.python.org/pep-0008/#programming-recommendations"
-title = "PEP 8 — Programming Recommendations (bare except discouraged)"
+title = "PEP 8: Programming Recommendations (bare except discouraged)"
 
 [decision]
 question = "What may an exception handler catch?"
@@ -26,7 +26,7 @@ why = "A bare `except:` catches everything, including KeyboardInterrupt and Syst
 [[option]]
 id = "catch-specific"
 label = "catch specific exception types only"
-directive = "Exception handlers name the specific exception type(s) they can recover from. Bare `except:` is forbidden everywhere. A blind `except Exception:` is permitted only at a process or request top-level boundary that logs the full traceback and re-raises or converts the error into a structured response; it must never silently swallow. Every handler either handles, re-raises, or chains with `raise ... from`."
+directive = "Exception handlers name the specific exception type(s) they can recover from. Bare `except:` is forbidden everywhere. A blind `except Exception:` is permitted only at a process or request top-level boundary that logs the full traceback and re-raises or converts the error into a structured response; it must never silently swallow. Every handler either handles, re-raises or chains with `raise ... from`."
 remediation = """
 Replace the bare except: (or unconditional except Exception:) with the specific exception type(s) the code can actually recover from. If a broad except Exception is genuinely needed, restrict it to a top-level process or request boundary that logs the full traceback and re-raises or converts it. Verify by triggering an unrelated exception type in the same block and confirming it now propagates instead of being silently caught.
 """
@@ -38,18 +38,18 @@ id = "allow-broad-catch"
 violates = true
 label = "allow bare except / blind except Exception anywhere"
 directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
-why = "A bare or broad except swallows KeyboardInterrupt, SystemExit, and genuine programming errors alongside the failure it was written for, so the process continues in a state the code never anticipated and the original fault never reaches a log or an error tracker. The code looks more robust while making its failures undiagnosable."
+why = "A bare or broad except swallows KeyboardInterrupt, SystemExit and genuine programming errors alongside the failure it was written for, so the process continues in a state the code never anticipated and the original fault never reaches a log or an error tracker. The code looks more robust while making its failures undiagnosable."
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/bare-except/"
-title = "Ruff E722 — bare-except"
+title = "Ruff E722: bare-except"
 linter = "Ruff: E722"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blind-exception/"
-title = "Ruff BLE001 — blind-exception (flake8-blind-except)"
+title = "Ruff BLE001: blind-exception (flake8-blind-except)"
 linter = "Ruff: BLE001"
 
 [[sources]]
 url = "https://peps.python.org/pep-0008/#exception-handling"
-title = "PEP 8 — Exception Handling (bare except clause)"
+title = "PEP 8: Exception Handling (bare except clause)"

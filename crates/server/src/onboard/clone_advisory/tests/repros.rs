@@ -369,7 +369,8 @@ fn a_full_batch_of_the_widest_candidates_stays_inside_the_stated_bound() {
     let single = serde_json::to_string(&one).unwrap().len();
     assert!(single <= 14_000, "{single} bytes for one candidate");
     let inputs = vec![one; BATCH_SIZE];
-    let (prompt, _) = batch_prompt("acme/shop", SINGLE, "the rule text", &inputs);
+    let nonce = crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef");
+    let (prompt, _) = batch_prompt("acme/shop", SINGLE, "the rule text", &inputs, &nonce);
     assert!(
         prompt.len() <= BATCH_SIZE * 14_000 + 1_000,
         "{} bytes for a batch of {BATCH_SIZE}",

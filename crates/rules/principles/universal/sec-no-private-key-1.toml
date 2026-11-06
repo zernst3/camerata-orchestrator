@@ -1,5 +1,5 @@
 id = "SEC-NO-PRIVATE-KEY-1"
-version = 1
+version = 3
 title = "PEM private-key blocks are never committed to the repository; ephemeral keys are generated at test runtime"
 domain = "universal"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/ENFORCEMENT.md"
-title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-PRIVATE-KEY-1 (enforced gate rule)"
+title = "docs/ENFORCEMENT.md: RULE_REGISTRY §SEC-NO-PRIVATE-KEY-1 (enforced gate rule)"
 
 [[sources]]
 url = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository"
-title = "GitHub Docs — Removing sensitive data from a repository"
+title = "GitHub Docs: Removing sensitive data from a repository"
 
 [decision]
 question = "Where do private key materials live, and how are they supplied to tests?"
@@ -28,12 +28,12 @@ id = "secrets-manager-or-generated"
 label = "Private keys live in a secrets manager or are generated at test runtime"
 directive = "Private key material (RSA, EC, DSA, OPENSSH, PGP, PKCS#8) is never committed to the repository in any branch or file. Tests that require a key generate it at runtime using the appropriate crypto library; integration tests retrieve it from a secrets manager or environment variable at test startup. Public keys and certificates may be committed. The gate enforces this by denying any file content containing a PEM private-key block header."
 remediation = """
-Remove the committed private-key file (or PEM block) from the repository and its git history, and change the test that needs a key to generate one at runtime with the appropriate crypto library, or fetch it from a secrets manager or environment variable at test startup. Rotate the key if it was ever a real credential rather than a clearly-fake test fixture. Verify by confirming a repository-wide secret scan finds no private-key material and the test still passes using a runtime-generated or externally-fetched key.
+Remove the committed private-key file (or PEM block) from the repository and its git history, and change the test that needs a key to generate one at runtime with the appropriate crypto library or fetch it from a secrets manager or environment variable at test startup. Rotate the key if it was ever a real credential rather than a clearly-fake test fixture. Verify by confirming a repository-wide secret scan finds no private-key material and the test still passes using a runtime-generated or externally-fetched key.
 """
 effort = "low"
 finding_headline = "Your `<path>` file contains a committed <secret-kind>."
 finding_detail = """
-A private key committed to source control lets anyone who can read this repository — now, or later from its git history — impersonate whatever system that key authenticates: TLS termination, SSH access, or a signing identity. `<path>` is <gitignore-status> and is <history-status>. Remove it from the repository and its history, then generate and deploy a replacement key, since the original must now be treated as compromised.
+A private key committed to source control lets anyone who can read this repository (now, or later from its git history) impersonate whatever system that key authenticates: TLS termination, SSH access or a signing identity. `<path>` is <gitignore-status> and is <history-status>. Remove it from the repository and its history, then generate and deploy a replacement key, since the original must now be treated as compromised.
 """
 why = "Git history is permanent: a committed private key is immediately mirrored to forks, pull-request caches, and CI artifact stores. Revocation after a commit is harder than preventing the commit. Runtime key generation is a one-liner in every major crypto library."
 
@@ -42,4 +42,4 @@ id = "commit-keys-for-tests"
 violates = true
 label = "Commit fake private keys for test fixtures"
 directive = "Test fixture private keys are committed alongside the tests that use them, clearly marked as non-production values"
-why = "Rejected: even clearly-labelled 'fake' PEM blocks trigger automated secret-scanning and CI failures, normalize the pattern of key material in the repo, and are occasionally real keys mislabelled as fake. Runtime generation eliminates the cost with no upside loss."
+why = "Rejected: even clearly-labelled 'fake' PEM blocks trigger automated secret-scanning and CI failures, normalize the pattern of key material in the repo and are occasionally real keys mislabelled as fake. Runtime generation eliminates the cost with no upside loss."

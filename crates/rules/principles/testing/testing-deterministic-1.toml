@@ -1,5 +1,5 @@
 id = "TESTING-DETERMINISTIC-1"
-version = 1
+version = 4
 title = "Tests are deterministic: same code always produces the same pass/fail outcome"
 domain = "testing"
 layer = "universal"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/practical-test-pyramid.html#WriteTests"
-title = "Ham Vocke / Martin Fowler — Practical Test Pyramid: avoid flaky tests"
+title = "Ham Vocke / Martin Fowler: Practical Test Pyramid: avoid flaky tests"
 
 [[sources]]
 url = "http://xunitpatterns.com/Erratic%20Test.html"
-title = "xUnit Test Patterns (Meszaros) — Erratic Test (flakiness root causes and fixes)"
+title = "xUnit Test Patterns (Meszaros): Erratic Test (flakiness root causes and fixes)"
 
 [[sources]]
 url = "https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html"
-title = "Google Testing Blog — Flaky Tests at Google and How We Mitigate Them"
+title = "Google Testing Blog: Flaky Tests at Google and How We Mitigate Them"
 
 [decision]
 question = "What behavior is required when the same test is run repeatedly on unchanged code?"
@@ -29,9 +29,9 @@ why = "A flaky test — one that sometimes passes and sometimes fails on the sam
 [[option]]
 id = "always-deterministic-no-flaky"
 label = "Tests are deterministic: same code, same outcome every run"
-directive = "A test must produce the same pass or fail outcome on every run against the same source code, regardless of run order, machine, time of day, or number of retries. Achieve this by: (1) injecting clocks and random-number generators so tests control time and randomness; (2) using in-process fakes or stubs instead of real network, filesystem, or external services; (3) isolating mutable state so each test starts from a clean baseline; (4) making test order irrelevant (no test depends on a side-effect left by a prior test). Never merge a test that is known to be flaky; fix the root cause before committing."
+directive = "A test must produce the same pass or fail outcome on every run against the same source code, regardless of run order, machine, time of day or number of retries. Achieve this by: (1) injecting clocks and random-number generators so tests control time and randomness; (2) using in-process fakes or stubs instead of real network, filesystem or external services; (3) isolating mutable state so each test starts from a clean baseline; (4) making test order irrelevant (no test depends on a side-effect left by a prior test). Never merge a test that is known to be flaky; fix the root cause before committing."
 remediation = """
-Remove the retry-on-failure logic or quarantine exemption for this test, and instead fix its actual source of non-determinism: inject a clock and random-number generator the test controls, and replace real I/O with an in-process fake. Verify by running the test many times in a row, in a randomized order, and confirming it always produces the same pass/fail outcome against unchanged code.
+Remove the retry-on-failure logic or quarantine exemption for this test, and instead fix its actual source of non-determinism: inject a clock and random-number generator the test controls, and replace real I/O with an in-process fake. Verify by running the test many times in a row, in a randomized order and confirming it always produces the same pass/fail outcome against unchanged code.
 """
 why = "A flaky test destroys trust in the suite; developers learn to ignore failures rather than investigate them, turning the suite from a safety net into noise."
 
@@ -47,4 +47,4 @@ id = "quarantine-flaky"
 violates = true
 label = "Quarantine known-flaky tests outside the main suite rather than fixing them"
 directive = "Tag or move tests known to be flaky into a separate quarantine suite that does not block CI; run it separately with relaxed expectations."
-why = "Keeps the main suite green without fixing root causes, which is useful as a short-term triage measure. The cost is that quarantined tests accumulate: the quarantine suite grows, nobody fixes the root causes because the main suite is green, and the tests that most likely cover recently-broken behavior stop blocking CI."
+why = "Quarantined tests accumulate: nobody fixes the root causes because the main suite is green, and the tests most likely to cover recently broken behavior stop blocking CI. Quarantine is useful only as short-term triage."

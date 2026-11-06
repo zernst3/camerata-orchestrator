@@ -299,11 +299,19 @@ async fn regenerate_sample_report() {
     assert_eq!(audited_rule_ids.len(), 22);
 
     let report = ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+ repos_not_inspected: Vec::new(),
+ recommendations_by_repo: Vec::new(),
+ patterns_across_services: Default::default(),
+ volume_by_repo: Default::default(),
         repos: vec![PORTAL.to_string(), EDGE.to_string()],
         stacks: Vec::new(),
         files_scanned: 214,
         test_file_count: 0,
         files_excluded: 1188,
+        excluded_noise_lines: Some(96_400),
         code_chars: 486_203,
         code_lines: 18_700,
         code_lines_by_language: vec![
@@ -331,16 +339,18 @@ async fn regenerate_sample_report() {
         actual_usage: None,
         deep: None,
         coverage_notes: vec![
-            CoverageNote {
+            CoverageNote { tool_failed: false,
+ repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Dependency scan covers the npm ecosystem via package-lock.json. No manifest was found for other ecosystems.".to_string(),
             },
-            CoverageNote {
+            CoverageNote { tool_failed: false,
+ repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Advisory data reflects the scan timestamp; re-run before remediation sign-off.".to_string(),
             },
         ],
-        provenance: ScanProvenance {
+        provenance: ScanProvenance { group_review_model: None,
             audited_refs: vec![
                 AuditedRef {
                     repo: PORTAL.to_string(),
@@ -367,6 +377,7 @@ async fn regenerate_sample_report() {
             audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
             camerata_version: "0.4.0".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -403,8 +414,10 @@ async fn regenerate_sample_report() {
     };
 
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );
@@ -440,9 +453,15 @@ async fn regenerate_sample_report() {
         .expect("write sample-report/data.json");
 
     // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
-    let xlsx =
-        xlsx_export::build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts)
-            .expect("build_workbook must succeed for the sample fixture");
+    let xlsx = xlsx_export::build_workbook(
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
+        Some(&corpus),
+        &opts,
+    )
+    .expect("build_workbook must succeed for the sample fixture");
     assert_eq!(
         &xlsx[0..2],
         b"PK",
@@ -488,8 +507,10 @@ async fn regenerate_sample_report() {
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
     // to eyeball) and the zip entry below come from this one call.
     let findings_export = xlsx_export::build_findings_export(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &json,
         &std::collections::HashMap::new(),
@@ -525,8 +546,7 @@ async fn regenerate_sample_report() {
     // csv/*, json/*, manifest.json, and the release gate's checks. Only the filename stem differs.
     let sealed_for_zip = report.clone().seal();
     let package = camerata_server::release_gate::build_product_package_with_stem(
-        &sealed_for_zip,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed_for_zip, &dispositions),
         Some(&corpus),
         &opts,
         "camerata-sample-audit",
@@ -565,10 +585,5 @@ fn fn_by_rule(findings: &[Finding], rule_id: &str) -> Finding {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }

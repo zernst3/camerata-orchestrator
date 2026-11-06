@@ -295,9 +295,10 @@ pub async fn guard(
 /// `AppState::runs` and stays there, not `done`, until it ends or is cancelled, so that store is
 /// the registry; a run parked on a question or a review is still open and counts.
 ///
-/// A run is attributed to a repo by its story id (`owner/repo#n`), the work item a draft story
-/// links to, and the repos a UoW put in scope at intake. A story that names no repo (a scripted
-/// demo story) is attributed to none.
+/// A run is attributed to a repo by its unit's own repository ([`crate::uow::UnitOfWork::repo`]:
+/// an issue's repository, a native unit's chosen one, a published draft's issue repository) and
+/// the repos the unit put in scope at intake. A story that names no repo (a scripted demo
+/// story) is attributed to none.
 fn governed_run_active_on(state: &AppState, repo: &str) -> bool {
     state
         .runs
@@ -307,11 +308,9 @@ fn governed_run_active_on(state: &AppState, repo: &str) -> bool {
 }
 
 fn story_touches_repo(state: &AppState, story_id: &str, repo: &str) -> bool {
-    let mut repos: Vec<String> = crate::repo_from_story_id(story_id).into_iter().collect();
-    if let Some(uow) = state.uow.get(story_id) {
-        repos.extend(uow.intake.repos.iter().map(|scope| scope.repo.clone()));
-        repos.extend(uow.work_item.as_deref().and_then(crate::repo_from_story_id));
-    }
+    let uow = state.uow.get_or_default(story_id);
+    let mut repos: Vec<String> = uow.repo().map(str::to_string).into_iter().collect();
+    repos.extend(uow.intake.repos.iter().map(|scope| scope.repo.clone()));
     repos.iter().any(|r| r.eq_ignore_ascii_case(repo.trim()))
 }
 

@@ -80,7 +80,7 @@ Two properties are load-bearing and architectural, not incidental:
   empty rule configuration fails closed onto the verified default rather than
   opening the gate. That is a property no probabilistic verifier can offer.
 - **The gate is intent-blind.** It evaluates the write, not the why. It does not care
-  whether a violation came from the model being lazy, the model hallucinating, or a
+  whether a violation came from the model being lazy, the model hallucinating or a
   human explicitly ordering it. That is the whole difference between enforcement and
   convention: convention (prompting, system prompts, the model's manners) is
   intent-sensitive and probabilistic, so you can talk a model into almost anything;
@@ -103,7 +103,7 @@ A second design choice is who specifies the work. Instead of an engineer editing
 YAML or a markdown "constitution," the non-technical user is interviewed before any
 code is written: a structured intake form, then a refinement conversation with an AI
 lead engineer that surfaces plain-language user stories, a climbing confidence score,
-proactive suggestions, and honest limits. The user occupies the requirements-owner
+proactive suggestions and honest limits. The user occupies the requirements-owner
 role (the Product Owner role, in agile terms) and is treated as one.
 
 The reasoning: a clarification-first interaction catches ambiguity at the cheapest
@@ -132,7 +132,7 @@ Stated directly, because omitting them would make this document less useful:
   enterprise surface is the most code and the most-tested crate, but its external
   adapters run against scripted fakes and have made no live API calls yet; the consumer
   surface's data-and-flow spine runs end to end while its default experience uses a
-  deterministic stub reviewer and a timed build narrative. The README's Status section
+  deterministic stub reviewer and a timed build narrative. The Status section of `PLATFORM.md`
   draws the proven-versus-staged line in full.
 
 ---

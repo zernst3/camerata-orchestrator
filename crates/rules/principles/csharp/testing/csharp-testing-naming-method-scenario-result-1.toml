@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-NAMING-METHOD-SCENARIO-RESULT-1"
-version = 1
+version = 2
 title = "Test methods follow MethodName_Scenario_ExpectedResult naming; test classes are named <ClassUnderTest>Tests"
 domain = "csharp:testing"
 layer = "language"
@@ -40,4 +40,4 @@ why = "Freeform names degrade test-suite readability and make failure diagnosis 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Follow test naming standards"
+title = "Best practices for writing unit tests: Follow test naming standards"

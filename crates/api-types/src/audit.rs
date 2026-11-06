@@ -1,5 +1,5 @@
 //! The five-kind finding taxonomy (Pass-1 W3, requirement A5.6 of
-//! `docs/plans/2026-10-09_audit-findings-tracker.md`).
+//! the audit findings tracker).
 //!
 //! The post-inspection table was built on a binary premise: a row is a violation or it is
 //! not. That premise no longer holds — an inspection now returns true violations, consistency

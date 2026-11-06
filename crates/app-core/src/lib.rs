@@ -6,7 +6,7 @@
 //! owns the stores (the `Arc<Mutex>` persistence) and drives these transitions to compute the next
 //! state, then persists it.
 //!
-//! Extraction from `camerata-server` is incremental (see `docs/plans/2026-07-01_backend-headless-core.md`);
+//! Extraction from `camerata-server` is incremental (see the backend headless-core notes);
 //! modules are promoted here as each surface's transition logic moves over. First beachhead: the
 //! already-pure `schedule` decision functions (`is_due` / `next_fire`).
 

@@ -1,5 +1,5 @@
 id = "PYTHON-TYPE-HINTS-1"
-version = 1
+version = 2
 title = "Public functions carry type hints and a type checker runs in CI"
 domain = "python"
 layer = "language"
@@ -41,14 +41,14 @@ why = "Without annotations a type error is discovered only when the offending li
 
 [[sources]]
 url = "https://peps.python.org/pep-0484/"
-title = "PEP 484 — Type Hints"
+title = "PEP 484: Type Hints"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/missing-type-function-argument/"
-title = "Ruff ANN001 — missing-type-function-argument"
+title = "Ruff ANN001: missing-type-function-argument"
 linter = "Ruff: ANN001"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/missing-return-type-undocumented-public-function/"
-title = "Ruff ANN201 — missing-return-type-undocumented-public-function"
+title = "Ruff ANN201: missing-return-type-undocumented-public-function"
 linter = "Ruff: ANN201"

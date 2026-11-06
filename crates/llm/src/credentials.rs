@@ -104,12 +104,75 @@ pub struct KeyringCredentialStore;
 
 const KEYRING_SERVICE: &str = "camerata";
 
+/// The seam that keeps a test away from the real keychain: when this env var is `1`, the
+/// production store ([`KeyringCredentialStore`]) holds credentials in process memory and never
+/// opens the OS keychain, so every credential resolves from its env var fallback alone.
+///
+/// Why it exists: a freshly built binary has a new code signature, so its first Keychain read
+/// makes macOS ask for permission and the process blocks on the dialog. Every test that spawns
+/// the real `camerata` binary sets this, and a scan test in `crates/cli/tests` fails when one
+/// does not.
+///
+/// It removes a credential source and adds none: a run under the seam can only have a key the
+/// environment gives it, so the client lock is exactly as strict with it as without it. It is
+/// read once, when the store is first used; the process says so on stderr once.
+pub const NO_KEYCHAIN_ENV: &str = "CAMERATA_NO_KEYCHAIN";
+
+/// Where the production store keeps credentials: the OS keychain, or process memory under
+/// [`NO_KEYCHAIN_ENV`].
+enum ProductionBacking {
+    Keychain(ServiceKeyringStore),
+    Memory(MemoryCredentialStore),
+}
+
+impl CredentialStore for ProductionBacking {
+    fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+        match self {
+            Self::Keychain(s) => s.set(name, value),
+            Self::Memory(s) => s.set(name, value),
+        }
+    }
+
+    fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+        match self {
+            Self::Keychain(s) => s.get(name),
+            Self::Memory(s) => s.get(name),
+        }
+    }
+
+    fn delete(&self, name: &str) -> Result<(), CredentialError> {
+        match self {
+            Self::Keychain(s) => s.delete(name),
+            Self::Memory(s) => s.delete(name),
+        }
+    }
+}
+
+/// Pure: the keychain is bypassed exactly when the seam's value is `1` (surrounding whitespace
+/// ignored). Unset, empty or anything else means the real keychain.
+fn production_backing(no_keychain: Option<&str>) -> ProductionBacking {
+    match no_keychain.map(str::trim) {
+        Some("1") => ProductionBacking::Memory(MemoryCredentialStore::new()),
+        _ => ProductionBacking::Keychain(ServiceKeyringStore::new(KEYRING_SERVICE)),
+    }
+}
+
 impl KeyringCredentialStore {
-    /// The one process-wide cached view of the `"camerata"` keychain service.
-    fn shared() -> &'static CachedCredentialStore<ServiceKeyringStore> {
-        static SHARED: std::sync::OnceLock<CachedCredentialStore<ServiceKeyringStore>> =
+    /// The one process-wide cached view of the `"camerata"` keychain service (or of the in-memory
+    /// stand-in under [`NO_KEYCHAIN_ENV`]).
+    fn shared() -> &'static CachedCredentialStore<ProductionBacking> {
+        static SHARED: std::sync::OnceLock<CachedCredentialStore<ProductionBacking>> =
             std::sync::OnceLock::new();
-        SHARED.get_or_init(|| CachedCredentialStore::new(ServiceKeyringStore::new(KEYRING_SERVICE)))
+        SHARED.get_or_init(|| {
+            let backing = production_backing(std::env::var(NO_KEYCHAIN_ENV).ok().as_deref());
+            if matches!(backing, ProductionBacking::Memory(_)) {
+                eprintln!(
+                    "[camerata-llm] {NO_KEYCHAIN_ENV}=1: the OS keychain is not read or written \
+                     in this process; a credential comes from its env var alone"
+                );
+            }
+            CachedCredentialStore::new(backing)
+        })
     }
 }
 
@@ -682,6 +745,40 @@ mod tests {
         assert_eq!(anthropic_api_key(s.as_ref()), None);
     }
 
+    // ── the no-keychain seam ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_seam_bypasses_the_keychain_only_when_set_to_one() {
+        for value in [Some("1"), Some(" 1 ")] {
+            assert!(
+                matches!(production_backing(value), ProductionBacking::Memory(_)),
+                "{value:?} must select the in-memory backing"
+            );
+        }
+        for value in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(
+                matches!(production_backing(value), ProductionBacking::Keychain(_)),
+                "{value:?} must leave the real keychain in place"
+            );
+        }
+    }
+
+    /// Under the seam the production backing is a plain in-memory store: it starts empty (so a
+    /// credential comes from its env var alone), round-trips a value without the keychain, and
+    /// hands a deleted credential back to the env fallback like the real store does.
+    #[test]
+    fn under_the_seam_the_production_backing_is_an_empty_memory_store() {
+        let backing = production_backing(Some("1"));
+        assert_eq!(backing.get(ANTHROPIC_API_KEY).unwrap(), None);
+        backing.set(ANTHROPIC_API_KEY, "sk-ant-memory").unwrap();
+        assert_eq!(
+            backing.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+            Some("sk-ant-memory")
+        );
+        backing.delete(ANTHROPIC_API_KEY).unwrap();
+        assert_eq!(backing.get(ANTHROPIC_API_KEY).unwrap(), None);
+    }
+
     // ── the production store must be a REAL keychain, never keyring's mock ────
 
     /// Compile-time proof that the current platform's real backend is compiled in: these
@@ -728,13 +825,14 @@ mod tests {
     /// A value written through the production keychain implementation must be readable back
     /// (keyring's mock hands every `Entry` its own empty credential, so a `get` after a `set`
     /// returns nothing). Uses a THROWAWAY service name, never the user's real `"camerata"`
-    /// entries, and deletes what it wrote. Runs by default on macOS; elsewhere it needs a live
-    /// Secret Service / Credential Manager session, so run it with `cargo test -- --ignored`.
+    /// entries, and deletes what it wrote. Opt-in on every platform (`cargo test -- --ignored`):
+    /// it is the one test that touches the real OS keychain, and on macOS a freshly built test
+    /// binary can block on a Keychain permission dialog, which would stall an unattended gate.
+    /// The two tests above still fail loudly, without any keychain, if the real backend is ever
+    /// compiled out.
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "needs a real OS keychain session; run with --ignored"
-    )]
+    #[ignore = "touches the real OS keychain and may wait on a permission dialog; run with \
+                --ignored in an attended session"]
     fn production_keyring_store_is_not_the_mock_round_trip() {
         const SERVICE: &str = "camerata-keychain-selftest-DELETE-ME";
         let name = format!("probe-{}", std::process::id());

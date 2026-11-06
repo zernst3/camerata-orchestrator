@@ -1,5 +1,5 @@
 id = "ORCH-REVIEWER-SPLIT-1"
-version = 1
+version = 4
 title = "The reviewer agent for any change is distinct from the author agent"
 domain = "agentic"
 layer = "universal"
@@ -11,27 +11,27 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from author agent)"
+title = "AGENTS.md: ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from author agent)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (reviewer-author separation principle)"
+title = "Decision: Cross-agent rules: the integration gate (reviewer-author separation principle)"
 
 [[sources]]
 url = "https://arxiv.org/abs/2404.13076"
-title = "Panickssery, Bowman, Feng — LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
+title = "Panickssery, Bowman, Feng: LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
 
 [decision]
-question = "What position does the project take on: The reviewer agent for any change is distinct from the author agent?"
+question = "Who reviews a change that an agent authored?"
 default = "the-reviewer-agent-for-any-change-is-distinct-from-the-author-agent"
 why = "An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time. A separate reviewer breaks that loop by bringing a different prompt or model context to the diff. Reading the diff against the commitments rather than against the author's reasoning forces the reviewer to evaluate the change as written, not as the author intended it to read, which is the only way the review catches the cases where intent and implementation drifted apart. Having the same agent review its own output is the failure mode this rule exists to prevent, since the author's blindspots transfer directly to the review. Using a different instance of the same model with the same prompt catches some blindspots but shares model-level priors, so subtle drift survives both passes anyway. Letting the reviewer read the author's reasoning trace alongside the diff lets the author's framing color the reviewer's evaluation and weakens the independence the rule exists to preserve."
 
 [[option]]
 id = "the-reviewer-agent-for-any-change-is-distinct-from-the-author-agent"
 label = "The reviewer agent for any change is distinct from the author agent"
-directive = "The agent that reviews a change is a separate agent from the one that authored it. Author and reviewer differ in some load-bearing configuration: a different prompt, a different principles set, a different model, or a combination of those. The reviewer reads the diff, the change's stated intent, and the codified architectural commitments. The reviewer does not read the author agent's reasoning trace. This separation holds across all orchestrated work regardless of whether author and reviewer share a model family."
+directive = "The agent that reviews a change is a separate agent from the one that authored it. Author and reviewer differ in some load-bearing configuration: a different prompt, a different principles set, a different model or a combination of those. The reviewer reads the diff, the change's stated intent and the codified architectural commitments. The reviewer does not read the author agent's reasoning trace. This separation holds across all orchestrated work regardless of whether author and reviewer share a model family."
 remediation = """
-Configure the pipeline so the agent that reviews a change is a separate agent instance from the one that authored it, differing in at least one load-bearing way (a different prompt, a different principles set, or a different model). Have the reviewer evaluate the diff, the stated intent, and the codified commitments on their own terms, without reading the author's reasoning trace. Verify by confirming the review step's configuration names a distinct reviewer identity from the author and that the reviewer's input excludes the author's internal reasoning.
+Configure the pipeline so the agent that reviews a change is a separate agent instance from the one that authored it, differing in at least one load-bearing way (a different prompt, a different principles set or a different model). Have the reviewer evaluate the diff, the stated intent and the codified commitments on their own terms, without reading the author's reasoning trace. Verify by confirming the review step's configuration names a distinct reviewer identity from the author and that the reviewer's input excludes the author's internal reasoning.
 """
 why = "An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time."
 

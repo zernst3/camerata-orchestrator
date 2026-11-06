@@ -1,0 +1,269 @@
+{
+  "about": "The inspection the review demo opens: one project, one run, 30 kept sites in four rules, 2 thrown-out sites and the group reviewer's stage 2 data (candidates, an outlier, a summary). Every site has an id that the overlays and the moved variant refer to. A site's key is worked out from its snippet when the seed runs, so nothing here names a key.",
+  "project": {
+    "name": "Acme Portal",
+    "client_name": "Acme Corporation",
+    "repos": ["acme/portal"]
+  },
+  "run": {
+    "started_at": "2026-11-02T10:00:00Z",
+    "finished_at": "2026-11-02T10:05:00Z",
+    "code_lines": 10000
+  },
+  "sites": [
+    {
+      "id": "sql-01", "path": "src/orders/repo.rs", "line": 42,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Order lookup builds SQL from the order id",
+      "body": "The query text is assembled with format! from a value the caller supplies.",
+      "snippet": "format!(\"SELECT * FROM orders WHERE id = {}\", order_id)",
+      "effort": "low", "confidence": "high", "category": "injection",
+      "stage1": { "real": "yes", "reason": "the id comes straight from the request path" }
+    },
+    {
+      "id": "sql-02", "path": "src/orders/repo.rs", "line": 77,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Order search builds SQL from the customer name",
+      "body": "The customer name is placed inside the query text between quotes.",
+      "snippet": "format!(\"SELECT * FROM orders WHERE customer = '{}'\", name)",
+      "evidence_unverified": "the quoted code was not found near the cited line",
+      "duplicate_of": { "site": "sql-01", "hint": "same_file" }
+    },
+    {
+      "id": "sql-03", "path": "src/orders/search.rs", "line": 19,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Search filter builds SQL from the status",
+      "body": "The status filter is concatenated into the where clause.",
+      "snippet": "let q = format!(\"SELECT id FROM orders WHERE status = '{}'\", status);"
+    },
+    {
+      "id": "sql-04", "path": "src/orders/search.rs", "line": 58,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Search sort builds SQL from the sort column",
+      "body": "The sort column is placed in the order by clause from the request.",
+      "snippet": "q.push_str(&format!(\" ORDER BY {}\", sort_col));"
+    },
+    {
+      "id": "sql-05", "path": "src/orders/export.rs", "line": 31,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "medium",
+      "title": "Export builds a table name from a setting",
+      "body": "The table name comes from a deployment setting, not from a request.",
+      "snippet": "format!(\"SELECT * FROM {}\", cfg.export_table)"
+    },
+    {
+      "id": "sql-06", "path": "src/reports/daily.rs", "line": 12,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Daily report builds SQL from the report date",
+      "body": "The date string is placed inside the query text.",
+      "snippet": "format!(\"SELECT * FROM sales WHERE day = '{}'\", day)"
+    },
+    {
+      "id": "sql-07", "path": "src/reports/daily.rs", "line": 40,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Daily report builds SQL from the region code",
+      "body": "The region code is placed inside the query text.",
+      "snippet": "format!(\"SELECT * FROM sales WHERE region = '{}'\", region)"
+    },
+    {
+      "id": "sql-08", "path": "src/reports/weekly.rs", "line": 25,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Weekly report builds SQL from the week number",
+      "body": "The week number is placed inside the query text.",
+      "snippet": "format!(\"SELECT * FROM sales WHERE week = {}\", week)"
+    },
+    {
+      "id": "sql-09", "path": "src/reports/weekly.rs", "line": 63,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Weekly total builds SQL from the week number",
+      "body": "The same week number is placed inside a second query text.",
+      "snippet": "format!(\"SELECT SUM(total) FROM sales WHERE week = {}\", week)"
+    },
+    {
+      "id": "sql-10", "path": "src/reports/monthly.rs", "line": 18,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Monthly report builds SQL from the month",
+      "body": "The month is placed inside the query text.",
+      "snippet": "format!(\"SELECT * FROM sales WHERE month = {}\", month)",
+      "merged_into": "sql-08"
+    },
+    {
+      "id": "sql-11", "path": "src/customers/lookup.rs", "line": 27,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Customer lookup builds SQL from the email address",
+      "body": "The email address is placed inside the query text between quotes.",
+      "snippet": "format!(\"SELECT * FROM customers WHERE email = '{}'\", email)",
+      "flagged_by": [
+        { "rule_id": "eslint/no-sql-concat", "tool": "eslint", "path": "src/customers/lookup.rs", "line": 27 }
+      ]
+    },
+    {
+      "id": "sql-12", "path": "src/customers/lookup.rs", "line": 91,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Customer lookup builds SQL from the phone number",
+      "body": "I cannot assist with describing this further.",
+      "snippet": "format!(\"SELECT * FROM customers WHERE phone = '{}'\", phone)"
+    },
+    {
+      "id": "auth-01", "path": "src/api/admin.rs", "line": 14,
+      "rule_id": "SEC-AUTHZ-4", "severity": "critical",
+      "title": "Admin export route has no sign-in check",
+      "body": "The handler reads every user record and never asks who is calling.",
+      "snippet": "pub async fn export_users(State(db): State<Db>) -> Json<Vec<User>> {"
+    },
+    {
+      "id": "auth-02", "path": "src/api/admin.rs", "line": 48,
+      "rule_id": "SEC-AUTHZ-4", "severity": "critical",
+      "title": "Admin purge route has no role check",
+      "body": "Any signed-in user can delete the audit table.",
+      "snippet": "pub async fn purge_audit(State(db): State<Db>, _user: User) -> StatusCode {"
+    },
+    {
+      "id": "auth-03", "path": "src/api/billing.rs", "line": 22,
+      "rule_id": "SEC-AUTHZ-4", "severity": "critical",
+      "title": "Invoice route reads any tenant's invoice",
+      "body": "The invoice id is looked up without checking it belongs to the caller's tenant.",
+      "snippet": "let invoice = db.invoice(invoice_id).await?;"
+    },
+    {
+      "id": "auth-04", "path": "src/api/billing.rs", "line": 71,
+      "rule_id": "SEC-AUTHZ-4", "severity": "high",
+      "title": "Refund route checks the role after the refund",
+      "body": "The role check runs after the refund is queued.",
+      "snippet": "queue.push(Refund::new(order_id)); require_role(&user, Role::Finance)?;"
+    },
+    {
+      "id": "auth-05", "path": "src/api/profile.rs", "line": 33,
+      "rule_id": "SEC-AUTHZ-4", "severity": "medium",
+      "title": "Profile update trusts the user id in the body",
+      "body": "The user id to update is read from the request body.",
+      "snippet": "db.update_profile(body.user_id, body.fields).await?;"
+    },
+    {
+      "id": "auth-06", "path": "src/api/profile.rs", "line": 90,
+      "rule_id": "SEC-AUTHZ-4", "severity": "medium",
+      "title": "Avatar route has no owner check",
+      "body": "Any signed-in user can replace another user's avatar.",
+      "snippet": "storage.put(avatar_key(user_id), bytes).await?;"
+    },
+    {
+      "id": "sec-01", "path": "src/config/payments.rs", "line": 9,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "critical",
+      "title": "Payment provider key is in the source",
+      "body": "A live-looking provider key is assigned to a constant.",
+      "snippet": "const PROVIDER_KEY: &str = \"pk_live_EXAMPLEONLY000000\";"
+    },
+    {
+      "id": "sec-02", "path": "src/config/mail.rs", "line": 14,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "critical",
+      "title": "Mail password is in the source",
+      "body": "The SMTP password is assigned to a constant.",
+      "snippet": "const SMTP_PASSWORD: &str = \"example-only-password\";"
+    },
+    {
+      "id": "sec-03", "path": "src/config/storage.rs", "line": 6,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "high",
+      "title": "Storage access key is in the source",
+      "body": "The storage access key is assigned to a constant.",
+      "snippet": "const STORAGE_ACCESS_KEY: &str = \"AKIAEXAMPLEONLY00000\";"
+    },
+    {
+      "id": "sec-04", "path": "src/config/sentry.rs", "line": 4,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "low",
+      "title": "Error tracker DSN is in the source",
+      "body": "The error tracker address is assigned to a constant. It only accepts events.",
+      "snippet": "const SENTRY_DSN: &str = \"https://example@o0.ingest.example.invalid/1\";"
+    },
+    {
+      "id": "sec-05", "path": "tests/fixtures/keys.rs", "line": 3,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "low",
+      "title": "A test fixture holds a key",
+      "body": "A fixture file assigns a key to a constant. It is test code.",
+      "snippet": "pub const TEST_KEY: &str = \"test-only-key-not-real\";"
+    },
+    {
+      "id": "sec-06", "path": "src/config/search.rs", "line": 11,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "medium",
+      "title": "Search service token is in the source",
+      "body": "The search service token is assigned to a constant.",
+      "snippet": "const SEARCH_TOKEN: &str = \"example-search-token-00000\";"
+    },
+    {
+      "id": "html-01", "path": "web/src/comments.js", "line": 17,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "high",
+      "title": "Comment list writes user text with innerHTML",
+      "body": "The comment text is assigned to innerHTML without escaping.",
+      "snippet": "node.innerHTML = comment.text;"
+    },
+    {
+      "id": "html-02", "path": "web/src/comments.js", "line": 52,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "high",
+      "title": "Comment preview writes user text with innerHTML",
+      "body": "The preview text is assigned to innerHTML without escaping.",
+      "snippet": "preview.innerHTML = draft.value;"
+    },
+    {
+      "id": "html-03", "path": "web/src/profile.js", "line": 28,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "high",
+      "title": "Profile page writes the bio with innerHTML",
+      "body": "The bio text is assigned to innerHTML without escaping.",
+      "snippet": "bio.innerHTML = user.bio;"
+    },
+    {
+      "id": "html-04", "path": "web/src/profile.js", "line": 61,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "medium",
+      "title": "Profile page writes the display name with innerHTML",
+      "body": "The display name is assigned to innerHTML without escaping.",
+      "snippet": "title.innerHTML = user.displayName;"
+    },
+    {
+      "id": "html-05", "path": "web/src/search.js", "line": 36,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "medium",
+      "title": "Search results write the query with innerHTML",
+      "body": "The search query is echoed into the page with innerHTML.",
+      "snippet": "banner.innerHTML = `Results for ${query}`;"
+    },
+    {
+      "id": "html-06", "path": "web/src/search.js", "line": 74,
+      "rule_id": "SEC-NO-UNSAFE-HTML-SINK-1", "severity": "medium",
+      "title": "Search results write the snippet with innerHTML",
+      "body": "The result snippet is assigned to innerHTML without escaping.",
+      "snippet": "item.innerHTML = hit.snippet;"
+    }
+  ],
+  "thrown_out": [
+    {
+      "id": "thrown-01", "path": "src/orders/repo.rs", "line": 110,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Order count builds SQL from a constant",
+      "body": "The table name in the query is a constant.",
+      "snippet": "format!(\"SELECT COUNT(*) FROM {}\", TABLE)",
+      "reason": "its headline is a placeholder"
+    },
+    {
+      "id": "thrown-02", "path": "src/reports/monthly.rs", "line": 44,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1", "severity": "high",
+      "title": "Monthly total builds SQL from a constant",
+      "body": "The column name in the query is a constant.",
+      "snippet": "format!(\"SELECT SUM({}) FROM sales\", COLUMN)",
+      "reason": "its rule id names a placeholder"
+    }
+  ],
+  "stage2": {
+    "group_reviewed": true,
+    "candidates": [
+      { "site": "auth-01", "reason": "unauthenticated_reach", "severity": "critical", "why": "reachable without signing in" },
+      { "site": "auth-02", "reason": "data_loss", "severity": "critical", "why": "one call empties the audit table" },
+      { "site": "auth-03", "reason": "cross_tenant", "severity": "critical", "why": "any tenant's invoice can be read" },
+      { "site": "sec-02", "reason": "secret_exposure", "severity": "critical", "why": "a mail password is in the repository" },
+      { "site": "auth-04", "reason": "likely_false_alarm_at_high_severity", "severity": "high", "why": "the refund is queued, not paid, until the role check passes" },
+      { "site": "sec-05", "reason": "rule_misfit", "severity": "low", "why": "test fixture, not shipped code" }
+    ],
+    "summaries": [
+      { "subgroup_of": "sql-01", "text": "Every query in this group builds SQL text from a request value." },
+      { "subgroup_of": "html-01", "text": "Every row in this group writes user text into the page with innerHTML." }
+    ],
+    "outliers": [
+      { "site": "sql-05", "reason": "different_object", "by": "model", "why": "this one builds a table name from a deployment setting, not a value from a request" }
+    ]
+  }
+}

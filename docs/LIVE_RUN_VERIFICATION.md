@@ -34,7 +34,7 @@ builds the `Backend` role at runtime via
 `camerata_rules::role_from_corpus(DEFAULT_CORPUS_PATH, "Backend", ["rust",
 "rust:seaorm", "rust:dioxus", "sql", "agentic"], [])`. That loader walks the
 107-file camerata-ai corpus at
-`/Users/zacharyernst/Documents/Repos/camerata-ai/principles`, selects every
+`/Users/auditor/Documents/Repos/camerata-ai/principles`, selects every
 universal (`domain = "*"`) rule plus every rule in the requested domains, and
 returns them as the role's `rule_subset`.
 
@@ -122,7 +122,7 @@ and `--disallowedTools "Bash Write Edit MultiEdit NotebookEdit"` with
 {
   "mcpServers": {
     "camerata": {
-      "command": "/Users/zacharyernst/Documents/Repos/camerata-orchestrator/target/release/camerata-gateway",
+      "command": "/Users/auditor/Documents/Repos/camerata-orchestrator/target/release/camerata-gateway",
       "args": [],
       "env": {
         "CAMERATA_RULES_FILE": ".../deny-session/rules.json"
@@ -153,7 +153,7 @@ and `--disallowedTools "Bash Write Edit MultiEdit NotebookEdit"` with
 The orchestrator printed the full delivered subset at the head of the run:
 
 ```
-corpus: /Users/zacharyernst/Documents/Repos/camerata-ai/principles
+corpus: /Users/auditor/Documents/Repos/camerata-ai/principles
 corpus-derived role: Backend (70 rules over domains ["rust", "rust:seaorm", "rust:dioxus", "sql", "agentic"])
 delivered rule-subset: GOV-1, ARCH-EXPAND-CONTRACT-1, ARCH-NO-SECRETS-IN-URL-1, ORCH-AUTOCALLS-LEDGER-1, ... (70 ids) ..., SQL-DB-INDEX-1, SQL-DB-INDEX-2, SQL-DB-NPLUSONE-1
 ```
@@ -176,7 +176,7 @@ The gateway loads and evaluates against all 70 (stderr from the child process):
 governed tool (agent is locked to this): mcp__camerata__gated_write
 gateway binary: .../target/release/camerata-gateway
 sandbox: .../camerata-live-41708/sandbox
-corpus: /Users/zacharyernst/Documents/Repos/camerata-ai/principles
+corpus: /Users/auditor/Documents/Repos/camerata-ai/principles
 corpus-derived role: Backend (70 rules over domains ["rust", "rust:seaorm", "rust:dioxus", "sql", "agentic"])
 delivered rule-subset: GOV-1, ARCH-EXPAND-CONTRACT-1, ... (70 ids) ..., SQL-DB-NPLUSONE-1
 

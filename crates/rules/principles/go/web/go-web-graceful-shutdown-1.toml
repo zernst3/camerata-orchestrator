@@ -1,5 +1,5 @@
 id = "GO-WEB-GRACEFUL-SHUTDOWN-1"
-version = 1
+version = 2
 title = "Server shutdown is graceful: in-flight requests are allowed to complete; new requests are rejected after shutdown is signaled"
 domain = "go:web"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://pkg.go.dev/net/http#Server.Shutdown"
-title = "pkg.go.dev — net/http Server.Shutdown"
+title = "pkg.go.dev: net/http Server.Shutdown"
 
 [decision]
 question = "How should the HTTP server handle shutdown when a stop signal (SIGTERM, interrupt) is received?"

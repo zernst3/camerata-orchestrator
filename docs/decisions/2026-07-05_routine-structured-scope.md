@@ -5,7 +5,7 @@ Status: Accepted; BUILT on `fix/gap8-routine-scope`.
 Deciders: Zach (architect), Claude (architect)
 
 Companion docs: ADR [`routine_dashboard`](2026-06-15_routine_dashboard.md),
-plan [`escalation-decisions`](../plans/2026-07-05_escalation-decisions.md) (GAP-8).
+the escalation-decisions plan (GAP-8, private working notes).
 
 ## Context
 

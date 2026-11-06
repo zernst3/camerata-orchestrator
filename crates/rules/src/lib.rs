@@ -20,6 +20,12 @@ use camerata_core::RuleId;
 use serde::Deserialize;
 use thiserror::Error;
 
+pub mod applies_to;
+pub use applies_to::AppliesTo;
+
+pub mod candidates;
+pub use candidates::{CandidateLocator, Candidates};
+
 mod lock;
 pub use lock::{
     check_lock, corpus_lock_path, corpus_version, CorpusLock, LockEntry, LockError, LockProblem,
@@ -27,6 +33,7 @@ pub use lock::{
 };
 
 mod freshness;
+pub mod severity_bounds;
 pub use freshness::{
     client_rules_last_reviewed, confirm_domain, confirm_in_text, corpus_freshness_path,
     days_from_civil, effective_review_date, format_staleness_nag, parse_ymd, CorpusFreshness,
@@ -139,7 +146,7 @@ impl std::fmt::Display for EnforcementKind {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Rule kind (Pass-1 W2 — A5.1, `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// Rule kind (Pass-1 W2 — A5.1, the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 
 /// The FOUR-WAY classification of how a multi-option rule's alternatives relate to the
@@ -418,8 +425,9 @@ pub enum Verification {
     /// [`Rule::is_auto_recommended`] returns `true` for
     /// `Grounded | Verified | Policy` (see its body), so a `policy` rule is
     /// pre-checked in the onboarding proposal and IS selected by an unattended
-    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. 21 corpus
-    /// rules carry this value and all 21 arm.
+    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. Every corpus
+    /// rule carrying this value arms (the count moves as rules gain outside
+    /// sources; `req_w17_every_policy_rule_in_the_corpus_arms` enforces it).
     ///
     /// W17 corrected a stale claim here. This comment used to read "kept out of
     /// the armed ruleset like `draft`, but labeled honestly rather than as
@@ -681,7 +689,7 @@ struct RuleToml {
     #[serde(default)]
     inspectable: Option<bool>,
     /// A ceiling on the severity this rule may ever export, e.g. `"high"` — see [`Rule::
-    /// max_severity`]'s doc comment and E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`).
+    /// max_severity`]'s doc comment and E2 (the audit findings tracker).
     /// Free-form lowercase severity string (`"critical"` | `"high"` | `"medium"` | `"low"`),
     /// matching the vocabulary `Finding::severity`/`report_export::normalize_severity` already
     /// use elsewhere — NOT a new enum, for the same reason `Finding::severity` itself isn't
@@ -692,13 +700,13 @@ struct RuleToml {
     max_severity: Option<String>,
     /// A FLOOR on the severity this rule may ever export, e.g. `"high"` — see
     /// [`Rule::min_severity`]'s doc comment and W5-Q2's ruling
-    /// (`docs/plans/2026-10-09_audit-findings-tracker.md`: *"Floor, it's the minimum
+    /// (the audit findings tracker: *"Floor, it's the minimum
     /// rating."*). Same free-form lowercase severity vocabulary as `max_severity`, for the
     /// same reason. `None` (the overwhelming majority of rules) means no floor — the rule's
     /// severity is whatever the calibration pipeline produces.
     #[serde(default)]
     min_severity: Option<String>,
-    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// A5.2 (the audit findings tracker): the severity ceiling for a
     /// CONSISTENCY DEVIATION reported under this rule — see [`Rule::deviation_ceiling`]'s doc
     /// comment. Same free-form lowercase severity vocabulary as `max_severity`. `None` (the
     /// overwhelming majority) means the pipeline's default deviation ceiling (`"medium"`)
@@ -740,6 +748,19 @@ struct RuleToml {
     /// domain sweeps. Optional. See [`Rule::last_reviewed`].
     #[serde(default)]
     last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: which files this rule can apply to, so the scan sends it only
+    /// with those (`applies_to = { paths = ["**/*.sql"], languages = ["rust"] }`). Absent means
+    /// every file. Validated at load by `AppliesTo`'s `Deserialize`: an unknown language or key,
+    /// or a glob form the matcher does not implement, fails the file's load. See [`Rule::applies_to`].
+    #[serde(default)]
+    applies_to: Option<AppliesTo>,
+    /// Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites,
+    /// so the scan sends the rule those sites with context instead of whole files
+    /// (`candidates = { locator = "sql_routines" }`). Absent means whole files. Validated at load
+    /// by `Candidates`' `Deserialize`: an unknown locator or key fails the file's load. See
+    /// [`Rule::candidates`].
+    #[serde(default)]
+    candidates: Option<Candidates>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -800,7 +821,8 @@ struct StackExceptionToml {
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
-    /// The decision this rule frames (e.g. "What position does the project take on …?").
+    /// The decision this rule frames, asked of the client's code (e.g. "How does the API
+    /// deduplicate retried mutations?"). See `docs/RULE_AUTHORING.md`, `[decision].question`.
     #[serde(default)]
     question: Option<String>,
     #[serde(default)]
@@ -881,8 +903,8 @@ pub struct RuleOption {
     /// finding at render time (see `report_export::resolve_fix`).
     pub remediation: Option<String>,
     /// Authored, client-facing HEADLINE for a DETERMINISTIC FLOOR finding evaluated against
-    /// this option (P4 — floor findings get finding-level treatment: `docs/plans/
-    /// 2026-09-29_codebase-inspection-hardening.md` §P4). A short, specific sentence naming
+    /// this option (P4 — floor findings get finding-level treatment: the codebase-inspection
+    /// hardening notes §P4). A short, specific sentence naming
     /// what's wrong IN THIS REPO — never the gate's own "Deny…" enforcement phrasing
     /// (`camerata_gateway::RULE_REGISTRY`'s `description` is an internal directive the AGENT
     /// reads, not client prose; leaking it into a report is exactly the defect this field
@@ -917,7 +939,7 @@ pub struct RuleOption {
     /// not yet authored for this option; the report then renders its pre-existing honest gap
     /// rather than fabricating a number.
     pub effort: Option<String>,
-    /// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): `true` when
+    /// Pass-1 W2 (A5.4, the audit findings tracker): `true` when
     /// CHOOSING this option describes the ABSENCE or a DEGENERATE FORM of the rule's own
     /// requirement — this option IS the defect, authored as an `[[option]]` only because the
     /// corpus convention pairs the rule's correct behavior with the behavior(s) it was
@@ -1074,8 +1096,8 @@ pub struct Rule {
     ///   fail-safe direction for an undeclared rule is to keep looking, not to go quiet — and
     ///   because fixture corpora in other crates legitimately omit the key.
     pub inspectable: Option<bool>,
-    /// A ceiling on the severity this rule may ever export (E2, `docs/plans/
-    /// 2026-10-09_audit-findings-tracker.md`) — `report_export`'s severity pipeline clamps
+    /// A ceiling on the severity this rule may ever export (E2, the audit findings tracker) —
+    /// `report_export`'s severity pipeline clamps
     /// DOWN to this value whenever the finding's own (possibly floor-raised) severity would
     /// otherwise rank above it; it never RAISES a lower severity. `None` (the overwhelming
     /// majority of rules) means no ceiling. Free-form lowercase string in the same vocabulary
@@ -1118,7 +1140,7 @@ pub struct Rule {
     /// it is applied BEFORE every downstream integrity downgrade and ceiling, so neither the
     /// null-location safety net nor `max_severity` can be defeated by an authored floor.
     pub min_severity: Option<String>,
-    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// A5.2 (the audit findings tracker): the severity ceiling for a
     /// CONSISTENCY DEVIATION (`FindingKind::Deviation`) reported under this rule. Deviations
     /// cap at `"medium"` BY DEFAULT — the cost of inconsistency is forward drift on future
     /// features, not current risk — but a rule whose drift cost is genuinely high can author
@@ -1153,9 +1175,23 @@ pub struct Rule {
     /// of the two, see [`effective_review_date`]). Excluded from [`Rule::content_hash`]: a review
     /// is not a change to the rule.
     pub last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: the files this rule can apply to. `None` (the default, and the
+    /// state of every rule that has not been scoped) means every file, so the scan routes it
+    /// exactly as before. When set, the scan sends the rule only with files that match one of
+    /// the declared globs or are in one of the declared languages (a file whose language cannot
+    /// be determined is sent too: routing must never cost a finding). Part of
+    /// [`Rule::content_hash`], so scoping a rule is a revision of it.
+    pub applies_to: Option<AppliesTo>,
+    /// Token-efficiency rank 8: the locator that finds this rule's candidate sites. `None` (the
+    /// default) means the scan sends the rule whole files, exactly as before. When set, the scan
+    /// sends the rule only the sites the locator finds in a chunk (with context) plus the repo
+    /// map; a chunk the locator cannot fully read (an error, a timeout, a file it cannot parse)
+    /// gets the whole files instead. Part of [`Rule::content_hash`], so adding a locator is a
+    /// revision of the rule.
+    pub candidates: Option<Candidates>,
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
+/// P7 (the codebase-inspection hardening notes): a GENERAL mechanism for a
 /// rule whose premise conflicts with an idiomatic pattern of a DETECTED platform to be
 /// suppressed for that stack, rather than firing a false violation. Declared per-rule in the
 /// corpus TOML as `[[stack_exception]]` blocks — a rule can carry any number of them (one per
@@ -1401,9 +1437,25 @@ pub struct RuleSet {
     by_id: HashMap<String, usize>,
     /// Fast lookup: domain string → list of indices into `rules`.
     by_domain: HashMap<String, Vec<usize>>,
+    /// Memo for [`corpus_version`]: the digest hashes every rule's canonical form, and the set
+    /// only changes through [`RuleSet::push`], which clears it. Every report build asks for it,
+    /// so recomputing it per build dominated the export tests' runtime.
+    corpus_digest: std::sync::OnceLock<String>,
 }
 
 impl RuleSet {
+    /// The memoised corpus digest, computing it with `compute` on first use.
+    pub(crate) fn corpus_digest_or_init(&self, compute: impl FnOnce() -> String) -> &str {
+        self.corpus_digest.get_or_init(compute)
+    }
+
+    /// Whether [`corpus_version`] has already been computed for this exact set (test support
+    /// for the memo; not a production API).
+    #[doc(hidden)]
+    pub fn corpus_version_is_cached(&self) -> bool {
+        self.corpus_digest.get().is_some()
+    }
+
     /// Number of rules in this set.
     pub fn len(&self) -> usize {
         self.rules.len()
@@ -1459,6 +1511,7 @@ impl RuleSet {
     /// general escape hatch for a test that needs a rule with arbitrary fields (e.g. a
     /// `stack_exceptions` list) without going through the async file-based corpus loader.
     pub fn push(&mut self, rule: Rule) {
+        self.corpus_digest = std::sync::OnceLock::new();
         let idx = self.rules.len();
         self.by_domain
             .entry(rule.domain.clone())
@@ -1507,6 +1560,8 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
+        candidates: None,
     }
 }
 
@@ -1569,6 +1624,8 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
+        candidates: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1588,8 +1645,13 @@ pub const DEFAULT_CORPUS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/prin
 /// The corpus directory to load: the `CAMERATA_CORPUS_PATH` env override if set and
 /// non-empty, else the bundled [`DEFAULT_CORPUS_PATH`].
 pub fn corpus_path() -> std::path::PathBuf {
-    std::env::var("CAMERATA_CORPUS_PATH")
-        .ok()
+    corpus_path_from(std::env::var("CAMERATA_CORPUS_PATH").ok())
+}
+
+/// [`corpus_path`] given the override's value: a non-blank override wins, anything else is the
+/// bundled corpus. Split out so it is testable without mutating the process environment.
+fn corpus_path_from(override_value: Option<String>) -> std::path::PathBuf {
+    override_value
         .filter(|p| !p.trim().is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_CORPUS_PATH))
@@ -1838,11 +1900,13 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
         version: raw.version,
         last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+        applies_to: raw.applies_to,
+        candidates: raw.candidates,
     })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Corpus-load gate (Pass-1 W2, item 4 — `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// Corpus-load gate (Pass-1 W2, item 4 — the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 //
 // Mirrors the EXISTING precedent `camerata_server::mechanical_gate` set for the W1-item-4
@@ -1925,7 +1989,7 @@ pub fn rules_declaring_emit_only(set: &RuleSet) -> Vec<String> {
 /// (`camerata_cli::inspect_cmd::curated_rule_selection`) filters on. Sorted for stable output.
 ///
 /// This is the verification half of requirement H1 (Pass-1 W4,
-/// `docs/plans/2026-10-09_audit-findings-tracker.md`): "every rule must be CAPABLE of running.
+/// the audit findings tracker): "every rule must be CAPABLE of running.
 /// A rule that does not run because it is irrelevant to the scanned stack is CORRECT. A rule
 /// that could never run for ANY stack is a DEFECT." A `verification` value is a REPO-INDEPENDENT
 /// fact, so a rule disarmed by it is disarmed everywhere, forever — exactly the defect class
@@ -1986,7 +2050,7 @@ pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
 
 // ────────────────────────────────────────────────────────────────────────────
 // W14 corpus-load gates: flag/prose agreement, the decision-kind invariant, and
-// the schema-vocabulary gate (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+// the schema-vocabulary gate (the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 //
 // Same build-time-gate philosophy as `rules_missing_kind` above and the same reason: these
@@ -2087,7 +2151,7 @@ pub fn options_with_rejected_prose_but_no_violates_flag(set: &RuleSet) -> Vec<St
 /// "decision"`, zero `violates` flags, 2 options, one opening `Rejected:`) that saw 19 security
 /// rules reclassified to `defect`. Resolving it means CHANGING a rule's `kind`, and 39 rules sit
 /// on the owner's paused A5.7 classification hold — 6 of the 7 rules this function reports are on
-/// that hold list (`docs/plans/2026-10-09_rule-kind-classification.md`, "NEEDS OWNER DECISION").
+/// that hold list (the rule-kind classification notes, "NEEDS OWNER DECISION").
 /// Failing the build would force a reclassification the owner has explicitly paused. The
 /// requirement a gate can honestly carry here is that the population cannot GROW silently, which
 /// is what `req_w14_decision_kind_rules_with_rejected_prose_match_the_known_roster` pins.
@@ -2235,6 +2299,10 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     // per-rule review date.
     "version",
     "last_reviewed",
+    // Token-efficiency rank 7: where the rule can apply (routing metadata).
+    "applies_to",
+    // Token-efficiency rank 8: where in a file the rule's subject sits (prompt metadata).
+    "candidates",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -3346,6 +3414,22 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
+            candidates: None,
+        }
+    }
+
+    #[test]
+    fn corpus_path_honours_a_non_blank_override_and_ignores_a_blank_one() {
+        assert_eq!(
+            corpus_path_from(Some("/override/corpus".to_owned())),
+            std::path::PathBuf::from("/override/corpus")
+        );
+        for blank in [None, Some(String::new()), Some("   ".to_owned())] {
+            assert_eq!(
+                corpus_path_from(blank),
+                std::path::PathBuf::from(DEFAULT_CORPUS_PATH)
+            );
         }
     }
 
@@ -3436,6 +3520,8 @@ mod tests {
             current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
             version: raw.version,
             last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+            applies_to: raw.applies_to,
+            candidates: raw.candidates,
         }
     }
 
@@ -5455,7 +5541,7 @@ mod tests {
     }
 
     // ── Pass-1 W2: rule kind / violates / max_severity schema ──────────────────────────────
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`, A5.1 + the corpus-load gate)
+    // (the audit findings tracker, A5.1 + the corpus-load gate)
 
     /// req_a5_1: EVERY [`RuleKind`] variant round-trips through TOML in both directions — the
     /// wire string parses to the right variant, and an ABSENT `kind` field parses to
@@ -5745,7 +5831,7 @@ mod tests {
         );
     }
 
-    /// req_h1 (Pass-1 W4, `docs/plans/2026-10-09_audit-findings-tracker.md`): no rule in the
+    /// req_h1 (Pass-1 W4, the audit findings tracker): no rule in the
     /// REAL shipped corpus may sit at a [`Verification`] value that makes it unselectable on
     /// every repo. A `verification` value is repo-independent, so a rule disarmed by it is
     /// disarmed EVERYWHERE — the exact "could never run for ANY stack" defect H1 names.
@@ -6195,6 +6281,9 @@ mod tests {
             "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
             "ARCH-NO-PAN-STORAGE-1",
             "SUPABASE-AUTH-USERS-EXPOSED-1",
+            // "either shape means the secret reaches every visitor's browser, which is the
+            // single most severe finding class this audit produces" (default option `why`).
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-RLS-USER-METADATA-1",
@@ -6623,7 +6712,7 @@ mod tests {
             return;
         }
         // The 58 rules whose classification review is ON HOLD
-        // (`docs/plans/2026-10-09_rule-kind-classification.md`).
+        // (the rule-kind classification notes).
         const HELD: [&str; 58] = [
             "ARCH-OBSERVABILITY-CORRELATION-ID-1",
             "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
@@ -6687,7 +6776,7 @@ mod tests {
         // Held rules whose OWN prose names a severity for their OWN flagged condition, with the
         // construction transcribed. Every entry is quoted in
         // `req_w8_named_rules_carry_the_floors_their_prose_authored`'s comments.
-        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 17] = [
+        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 18] = [
             "SQL-PRIVILEGED-WRITE-AUDIT-1",
             "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
             "SUPABASE-AUTH-GETSESSION-SERVER-1",
@@ -6697,6 +6786,11 @@ mod tests {
             "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
             "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            // Item 19 (2026-10-28), corpus-audit Group 1 note: "no severity bound while its
+            // prose says 'unconditionally critical' twice". That prose was later revoiced; the
+            // default option's `why` still names the severity: "the single most severe finding
+            // class this audit produces".
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-INITPLAN-1",
             "SUPABASE-RLS-NO-POLICY-1",
@@ -6752,7 +6846,7 @@ mod tests {
     }
 
     /// HARD CONSTRAINT check: a rule in the `NEEDS OWNER DECISION (58 rules)` hold list
-    /// (`docs/plans/2026-10-09_rule-kind-classification.md`) may carry a `deviation_ceiling`
+    /// (the rule-kind classification notes) may carry a `deviation_ceiling`
     /// ONLY where the owner named it himself. INFERRING one is still banned, because inferring
     /// presumes the kind classification he explicitly paused ("pause the rule review for me for
     /// when I can sit down and look at these"). Transcribing an explicit prose `max_severity` on
@@ -6975,5 +7069,100 @@ mod tests {
             "a held rule's ceiling is authorized only as INHERITANCE from a spine rule that \
              carries the ceiling itself; these exemptions have no origin: {originless:?}"
         );
+    }
+
+    // ── applies_to (token-efficiency rank 7) ──────────────────────────────────
+
+    /// Write one rule file with `extra` top-level TOML lines and load the folder leniently.
+    async fn load_with_extra(extra: &str) -> (RuleSet, Vec<(PathBuf, RulesError)>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("universal");
+        std::fs::create_dir_all(&dir).expect("create dirs");
+        std::fs::write(
+            dir.join("scoped.toml"),
+            format!(
+                "id = \"SCOPED-TEST-1\"\ntitle = \"Scoped\"\nenforcement = \"prose\"\n{extra}\n"
+            ),
+        )
+        .expect("write toml");
+        load_corpus_lenient(tmp.path()).await
+    }
+
+    #[tokio::test]
+    async fn a_rule_without_applies_to_applies_everywhere() {
+        let (set, errors) = load_with_extra("").await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(set.get_by_id("SCOPED-TEST-1").unwrap().applies_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_declared_applies_to_loads_onto_the_rule() {
+        let (set, errors) =
+            load_with_extra(r#"applies_to = { paths = ["**/*.sql"], languages = ["rust"] }"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        let a = set
+            .get_by_id("SCOPED-TEST-1")
+            .unwrap()
+            .applies_to
+            .clone()
+            .expect("declared");
+        assert_eq!(a.paths, vec!["**/*.sql"]);
+        assert_eq!(a.languages, vec!["rust"]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_applies_to_value_fails_the_rules_load() {
+        for bad in [
+            r#"applies_to = { languages = ["cobol"] }"#,
+            r#"applies_to = { frameworks = ["next"] }"#,
+            r#"applies_to = { paths = ["src/*.{sql,toml}"] }"#,
+            r#"applies_to = {}"#,
+            r#"applies_to = "sql""#,
+        ] {
+            let (set, errors) = load_with_extra(bad).await;
+            assert!(
+                set.get_by_id("SCOPED-TEST-1").is_none(),
+                "`{bad}` must not load as a rule that silently matches nothing"
+            );
+            assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
+        }
+    }
+
+    // ── candidates (token-efficiency rank 8) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_rule_without_candidates_is_sent_whole_files() {
+        let (set, errors) = load_with_extra("").await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(set.get_by_id("SCOPED-TEST-1").unwrap().candidates.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_declared_candidates_block_loads_onto_the_rule() {
+        let (set, errors) = load_with_extra(r#"candidates = { locator = "sql_policies" }"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        let c = set
+            .get_by_id("SCOPED-TEST-1")
+            .unwrap()
+            .candidates
+            .expect("declared");
+        assert_eq!(c.locator, CandidateLocator::SqlPolicies);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_candidates_block_fails_the_rules_load() {
+        for bad in [
+            r#"candidates = { locator = "tree_sitter" }"#,
+            r#"candidates = { locator = "sql_routines", context = 3 }"#,
+            r#"candidates = {}"#,
+            r#"candidates = "sql_routines""#,
+        ] {
+            let (set, errors) = load_with_extra(bad).await;
+            assert!(
+                set.get_by_id("SCOPED-TEST-1").is_none(),
+                "`{bad}` must not load as a rule whose locator silently finds nothing"
+            );
+            assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
+        }
     }
 }

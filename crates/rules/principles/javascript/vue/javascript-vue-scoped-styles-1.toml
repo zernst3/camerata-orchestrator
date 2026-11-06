@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-SCOPED-STYLES-1"
-version = 1
+version = 3
 title = "Use scoped styles to encapsulate component styling and prevent CSS leaks"
 domain = "javascript:vue"
 layer = "framework"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://vuejs.org/style-guide/rules-essential#component-style-scoping"
-title = "Vue.js Style Guide Priority A — Component-Scoped Styling"
+title = "Vue.js Style Guide Priority A: Component-Scoped Styling"
 
 [[sources]]
 url = "https://eslint.vuejs.org/rules/enforce-style-attribute.html"
-title = "eslint-plugin-vue — vue/enforce-style-attribute"
+title = "eslint-plugin-vue: vue/enforce-style-attribute"
 linter = "eslint-plugin-vue: vue/enforce-style-attribute"
 
 [decision]
-question = "What position does the project take on: Scoped styles?"
+question = "How are Vue component styles kept from leaking into other components?"
 default = "use-scoped-styles"
 why = "Vue's scoped styles (a <style scoped> tag) automatically add a unique attribute to component elements and scope CSS rules to that component only. This prevents CSS rules in one component from affecting other components with the same class names. Without scoped styles, CSS is global: if a component defines .button with specific styles and another component elsewhere in the app also defines .button, they conflict, and whichever is loaded last wins. Using a strict naming convention (e.g., BEM) can reduce conflicts, but it is verbose and requires discipline. Scoped styles make this automatic and safe. The only exception is global styles (app-wide resets, typography, theme colors) which live in global stylesheets, not in component <style> tags."
 

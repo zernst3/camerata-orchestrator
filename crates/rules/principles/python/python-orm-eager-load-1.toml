@@ -1,5 +1,5 @@
 id = "PYTHON-ORM-EAGER-LOAD-1"
-version = 1
+version = 2
 title = "ORM relationships accessed in loops are eager-loaded; no N+1"
 domain = "python"
 layer = "library"
@@ -32,4 +32,4 @@ why = "Simpler at the call site but reintroduces N+1: one query per item, fine i
 
 [[sources]]
 url = "https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html"
-title = "SQLAlchemy — Relationship Loading Techniques (selectinload, joinedload, N+1 problem)"
+title = "SQLAlchemy: Relationship Loading Techniques (selectinload, joinedload, N+1 problem)"

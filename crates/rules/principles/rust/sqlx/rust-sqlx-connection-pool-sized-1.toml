@@ -1,5 +1,5 @@
 id = "RUST-SQLX-CONNECTION-POOL-SIZED-1"
-version = 1
+version = 4
 title = "Use a connection pool with explicit size configuration and reuse connections"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,23 +10,23 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Connection pool sizing?"
+question = "How is the database connection pool sized and configured?"
 default = "configure-sized-connection-pool"
 why = "A database connection is expensive to create (involves a network round trip, authentication, and resource allocation on the server). Creating a new connection for every query is wasteful. A connection pool maintains a set of open connections and reuses them across queries. When a query needs a connection, it borrows one from the pool; when done, it returns it. sqlx provides PgPoolOptions to configure the pool size (min_connections, max_connections, acquire timeout, idle timeout, and test-on-acquire). Sizing the pool is NOT a matter of matching expected request concurrency one-to-one: a pool should generally be much smaller than the number of concurrent requests it serves, because excess concurrent requests should queue briefly at acquire() rather than each getting a dedicated connection. Databases, Postgres in particular, perform worse as the number of concurrent connections grows large: each connection carries a memory and process/thread cost on the server, and high connection counts increase context-switching and lock contention, often making the database slower overall than a smaller pool with some queuing would be. A commonly cited rule of thumb (the same principle underlies HikariCP's pool-sizing guidance for Java, even though it targets a different ecosystem) is to size the pool around the number of available CPU cores times a small multiplier, up to a few dozen connections, and only grow it after observing actual saturation (requests waiting on acquire() under real load), not by projecting expected request concurrency directly onto pool size. Configuring the pool explicitly (not just using defaults) still matters for setting a sane max_connections ceiling, acquire timeout, and idle timeout, but 'size the pool to match concurrent requests' is the anti-pattern to avoid."
 
 [[option]]
 id = "configure-sized-connection-pool"
 label = "Configure an explicit connection pool with size"
-directive = "A connection pool is created via sqlx::PgPoolOptions (or the respective DB engine's equivalent) with explicit min_connections, max_connections, acquire timeout, and idle timeout settings. All queries use this pool. Pool size is set well below expected request concurrency, as a rule of thumb in the range of the number of CPU cores available to the database times a small multiplier, up to a few dozen connections, not scaled 1:1 with the number of concurrent requests the application expects to serve; the goal is a small, saturated pool with requests briefly queuing at acquire() under load, not one connection per in-flight request. The chosen size is validated against observed acquire() wait times and adjusted upward only if requests are queuing longer than acceptable."
+directive = "A connection pool is created via sqlx::PgPoolOptions (or the respective DB engine's equivalent) with explicit min_connections, max_connections, acquire timeout and idle timeout settings. All queries use this pool. Pool size is set well below expected request concurrency, as a rule of thumb in the range of the number of CPU cores available to the database times a small multiplier, up to a few dozen connections, not scaled 1:1 with the number of concurrent requests the application expects to serve; the goal is a small, saturated pool with requests briefly queuing at acquire() under load, not one connection per in-flight request. The chosen size is validated against observed acquire() wait times and adjusted upward only if requests are queuing longer than acceptable."
 remediation = """
-Replace the per-query connection creation with a sqlx::PgPoolOptions-configured pool that sets explicit min_connections, max_connections, acquire timeout, and idle timeout, sized below expected request concurrency, and route every query through that pool. Verify by running a load test and confirming the database connection count stays bounded at the configured pool size instead of growing with request volume.
+Replace the per-query connection creation with a sqlx::PgPoolOptions-configured pool that sets explicit min_connections, max_connections, acquire timeout and idle timeout, sized below expected request concurrency, and route every query through that pool. Verify by running a load test and confirming the database connection count stays bounded at the configured pool size instead of growing with request volume.
 """
 why = "A configured pool reuses connections and prevents resource exhaustion; keeping the pool small relative to request concurrency avoids overloading the database with connection counts it handles poorly, while acquire()-time queuing absorbs bursts safely."
 
 [[option]]
 id = "create-connection-per-query"
 label = "Create a new connection for each query"
-directive = "Each query creates a new database connection, uses it, and closes it, without connection pooling."
+directive = "Each query creates a new database connection, uses it and closes it, without connection pooling."
 why = "A database connection involves a network round trip, authentication, and resource allocation on the server; creating one per query multiplies that overhead by the number of queries per second, which exhausts database connection limits under load and degrades latency in proportion to query volume."
 
 [[option]]
@@ -37,8 +37,8 @@ why = "Lower effort than hand-tuning a pool size upfront, and avoids the common 
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.Pool.html"
-title = "sqlx::Pool — Connection pool: reduces connection overhead, limits per-server connections"
+title = "sqlx::Pool: Connection pool: reduces connection overhead, limits per-server connections"
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolOptions.html"
-title = "sqlx::PoolOptions — max_connections, min_connections, acquire_timeout, idle_timeout"
+title = "sqlx::PoolOptions: max_connections, min_connections, acquire_timeout, idle_timeout"

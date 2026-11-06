@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-DTOS-VALIDATION-PIPE-1"
-version = 1
+version = 4
 title = "Use DTOs with class-validator and ValidationPipe to validate incoming requests"
 domain = "javascript:nest"
 layer = "framework"
@@ -11,14 +11,14 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/pipes#class-validator"
-title = "NestJS Docs — Pipes: ValidationPipe with class-validator"
+title = "NestJS Docs: Pipes: ValidationPipe with class-validator"
 
 [[sources]]
 url = "https://docs.nestjs.com/techniques/validation"
-title = "NestJS Docs — Validation techniques: DTOs with class-validator"
+title = "NestJS Docs: Validation techniques: DTOs with class-validator"
 
 [decision]
-question = "What position does the project take on: DTOs and validation?"
+question = "How does the NestJS application validate incoming request payloads?"
 default = "dtos-with-validation-pipe"
 why = "NestJS allows defining Data Transfer Objects (DTOs) with validation decorators from class-validator (@IsString, @IsEmail, @Min, etc.). The global ValidationPipe automatically validates incoming payloads against the DTO shape before the controller is invoked. If validation fails, the pipe rejects the request with a 400 error containing validation error details. When DTOs and validation are not used, the controller must manually check the request shape and field types, and duplicate validation logic appears in every controller. DTOs make the expected shape explicit and machine-readable, and ValidationPipe ensures consistency. Controllers receive validated, typed data and can assume the input is correct."
 
@@ -34,5 +34,5 @@ why = "DTOs and ValidationPipe centralize input validation and ensure consistenc
 [[option]]
 id = "manual-validation-in-controllers"
 label = "Manually validate in controllers"
-directive = "Controllers receive raw request data and manually check the shape, types, and constraints before processing."
+directive = "Controllers receive raw request data and manually check the shape, types and constraints before processing."
 why = "Manually validating the request shape inside each controller method duplicates the same type and constraint checks across every route, with each controller responsible for remembering all validation rules for its inputs. This approach is inconsistent across routes (different controllers format errors differently), verbose, and untested by default since the validation is buried in imperative code rather than declared in a DTO that the framework validates automatically."

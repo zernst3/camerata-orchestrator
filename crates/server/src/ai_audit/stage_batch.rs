@@ -1,0 +1,2299 @@
+//! The shared batch runner for every post-scan stage (design 2026-11-02, section 6; M2).
+//!
+//! Stage 1 and stage 2 calibration, detail regeneration, fix generation and alternatives all do
+//! the same thing: build one model request per item, send them all, absorb each reply into the
+//! stage's own result, and account for every item that did not come back. This module is that
+//! loop, written once. A stage implements [`StageItems`] (its requests, how it absorbs a reply,
+//! how it re-asks after a reply it turned down) and calls [`run_stage`].
+//!
+//! * [`StageMode::Batch`] generalises [`super::batch_mode::submit_round`]: the items are split by
+//!   request-body bytes and item count ([`super::batch_mode::plan_item_ranges`]), each
+//!   sub-batch is gated by the spend limit and the outage stop before it is submitted, then
+//!   polled and fetched. Every poll tick touches the job and sets the stage's progress.
+//! * [`StageMode::Parallel`] is the fallback where there is no batch API (the CLI backend, a
+//!   run forced to real time): a bounded number of requests in flight, with additive-increase,
+//!   multiplicative-decrease pacing. A 429 or an overloaded answer halves the permits (never
+//!   below one) and holds every new request for the provider's `retry-after`; fifty successes
+//!   give one permit back, up to the configured maximum (never above [`MAX_IN_FLIGHT_CAP`]).
+//!   A rate-limited item is sent again, not failed: only when the stage has been rate limited
+//!   with no success for the whole [`StageSettings::rate_limit_deadline`] (six hours by default)
+//!   does it become a failed part.
+//!
+//! RUN TO COMPLETION: every item ends absorbed, resumed (absorbed by an earlier process) or in
+//! [`StageOutcome::failed`] with its class and reason. Nothing is skipped silently. An item that
+//! failed in a way sending it again can fix (a transport failure, a row the batch left out) is
+//! sent once more; a reply the stage turned down is re-asked once through [`StageItems::retry`].
+//!
+//! EVERY REQUEST IS SIZE-CHECKED (design amendment A7): each item, and each retry request, passes
+//! [`super::request_budget::ensure_request_fits`] before anything is submitted or sent. One that
+//! does not fit is recorded as a failed part with the reason; it is never sent and never cut. A
+//! stage that can split an oversized item does so in [`StageItems::items`].
+//!
+//! RESUME (design 6.2): with a [`StageCheckpoint`] the runner appends every absorbed item (its
+//! usage and reply) and every submitted batch as it goes. On the next run an absorbed item is
+//! not sent again (its usage is written to the meter so the ledger is never a zero-token stage,
+//! and its reply is handed to [`StageItems::absorb`] unless the stage reports it already holds
+//! the item); a batch that has not settled is polled and fetched by id, never submitted again;
+//! only an item with no result and no live batch is sent.
+//!
+//! A stage whose item is one call about SEVERAL findings (detail regeneration, fix generation)
+//! cannot be resumed by item key: the resumed run need not build the same calls. It writes each
+//! item's findings into the checkpoint ([`StageItems::members`]) and resumes through
+//! [`resume_held`] before its first round: every stored reply, and every row of a batch that was
+//! live when the process stopped, is read finding by finding by site key, so a reply reaches the
+//! findings it was written for whatever calls the new run builds. A finding already done keeps
+//! its result; a row for a finding that is gone is put on the ledger as wasted and written
+//! nowhere. The alternatives pass asks about rule groups, not findings (its item is named by the
+//! rule ids, with no finding to settle a row into), so it keeps the key match.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
+
+use camerata_llm::failure::{self, AttemptRecord, FailureClass};
+use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
+use sha2::{Digest, Sha256};
+use tokio::time::Instant;
+
+use super::batch_mode::{
+    batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
+    plan_item_ranges, poll_and_fetch, BatchApi, BatchSeam, JobCancelled, PollProgress,
+    RoundContext,
+};
+use super::repo_map::estimate_tokens;
+use super::request_budget::ensure_request_fits;
+use super::*;
+use crate::checkpoint::{AbsorbedLine, BatchMember, BatchRecord, StageCheckpoint, SubmitIntent};
+use crate::jobs::JobStore;
+use crate::llm::{BatchItem, BatchResultRow, CacheTtl, LlmPort, LlmRequest, LlmResponse};
+
+/// Requests in flight at once in the parallel fallback, on the API backend.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 8;
+
+/// Requests in flight at once on the CLI backend, which spawns a process per request.
+pub const CLI_MAX_IN_FLIGHT: usize = 2;
+
+/// The most requests the parallel fallback ever has in flight, whatever it is asked for.
+pub const MAX_IN_FLIGHT_CAP: usize = 16;
+
+/// The fewest requests in flight: a halving never goes below this.
+pub const MIN_IN_FLIGHT: usize = 1;
+
+/// Successes in a row (since the last throttle) that give one permit back.
+pub const SUCCESSES_PER_PERMIT: u32 = 50;
+
+/// How long every new request is held after a 429 or an overload that came with no `retry-after`.
+pub const DEFAULT_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(30);
+
+/// How long a stage may be rate limited, with no success at all in between, before the items it
+/// could not send become failed parts: six hours.
+pub const DEFAULT_RATE_LIMIT_DEADLINE: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Why a stage turned down a model reply (a fix that named something not in the evidence, a
+/// verdict for the wrong site, an unparseable body). The reason is kept on the failed part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemReject {
+    pub reason: String,
+}
+
+impl ItemReject {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ItemReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+/// What a post-scan stage hands the runner. Items are keyed by [`Self::Id`]; its `Display` is the
+/// stable key the checkpoint files and the batch mapping use (a site key, a rule-group id).
+pub trait StageItems {
+    type Id: Clone + Ord + std::fmt::Display + Send + Sync + 'static;
+
+    /// Every request the stage needs, one per id. Ids must be unique: a repeated id is recorded
+    /// as a failed part.
+    fn items(&self) -> Vec<(Self::Id, LlmRequest)>;
+
+    /// Take the model's reply for `id`. `Err` turns the reply down (the runner asks
+    /// [`Self::retry`] once). An `Ok` is final: the item is absorbed and never paid for again.
+    fn absorb(&mut self, id: &Self::Id, resp: LlmResponse) -> Result<(), ItemReject>;
+
+    /// A replacement request after `reject`, or `None` to give the item up as a failed part. At
+    /// most one retry per item (M4): a second rejection is final.
+    fn retry(&self, id: &Self::Id, reject: &ItemReject) -> Option<LlmRequest>;
+
+    /// True when the stage already holds `id`'s result from before a restart (it persisted its
+    /// own state). On resume the runner then skips the item without handing its stored reply to
+    /// [`Self::absorb`] a second time. The default, `false`, replays the stored reply.
+    fn already_absorbed(&self, _id: &Self::Id) -> bool {
+        false
+    }
+
+    /// Whether the runner sends an item once more after a failure sending again can fix (a
+    /// transport failure, a row a batch left out). The default is yes. A stage that runs its own
+    /// rounds and its own end-of-run second try (detail regeneration, fix generation) says no, so
+    /// its tries are counted by the stage and not twice.
+    fn resends(&self) -> bool {
+        true
+    }
+
+    /// How many requests the runner may hold built at once. `0`, the default, is an EAGER stage:
+    /// it lists every request in [`Self::items`] and the runner keeps them all. A stage with
+    /// thousands of items (stage 1 at 30,000 sites) overrides this together with [`Self::ids`]
+    /// and [`Self::items_for`]: the runner then asks for the requests of at most this many items
+    /// at a time and lets go of a request as soon as its item has ended, so memory is bounded by
+    /// a range, and by [`Self::batch_window`] on the batch path, whatever the item count.
+    fn build_range(&self) -> usize {
+        0
+    }
+
+    /// A lazy stage: the id of every item, in the order they are sent, without building any
+    /// request. Ids must be unique, as for [`Self::items`].
+    fn ids(&self) -> Vec<Self::Id> {
+        Vec::new()
+    }
+
+    /// A lazy stage: the requests for `ids`, at most [`Self::build_range`] of them. An id the
+    /// answer leaves out is one the stage decided not to send (it disclosed that itself, as stage
+    /// 1 does for a site whose request does not fit); the runner records it as a failed part.
+    fn items_for(&self, _ids: &[Self::Id]) -> Vec<(Self::Id, LlmRequest)> {
+        Vec::new()
+    }
+
+    /// The findings item `id` is one call about, for a stage whose item is a call about several
+    /// findings (detail regeneration, fix generation). They are written into the checkpoint with
+    /// the item, so a resume reads a returned reply finding by finding ([`HeldRows`]) and does
+    /// not depend on the next run building the same call. The default, none, is a stage whose
+    /// item is one thing, matched on resume by its key.
+    fn members(&self, _id: &Self::Id) -> Vec<BatchMember> {
+        Vec::new()
+    }
+
+    /// A lazy stage on the batch path: the most items submitted before the next ones are built,
+    /// so no more than a window of requests is ever held. Each window is submitted, polled and
+    /// settled on its own (and split further by the body-size limit). The default, no limit, is
+    /// one window.
+    fn batch_window(&self) -> usize {
+        usize::MAX
+    }
+}
+
+/// How the runner sends a stage's requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageMode {
+    /// Message Batches: half price, answers in minutes to hours. Needs [`StageCtx::batch`]; a
+    /// run without it falls back to [`Self::parallel_default`] and says so on the meter.
+    Batch,
+    /// Real-time requests, at most `max_in_flight` at once (clamped to
+    /// [`MIN_IN_FLIGHT`]..=[`MAX_IN_FLIGHT_CAP`]).
+    Parallel { max_in_flight: usize },
+}
+
+impl StageMode {
+    /// The parallel fallback with its default width: [`DEFAULT_MAX_IN_FLIGHT`] on the API,
+    /// [`CLI_MAX_IN_FLIGHT`] on the CLI backend.
+    pub fn parallel_default(cli_backend: bool) -> Self {
+        Self::Parallel {
+            max_in_flight: if cli_backend {
+                CLI_MAX_IN_FLIGHT
+            } else {
+                DEFAULT_MAX_IN_FLIGHT
+            },
+        }
+    }
+}
+
+/// The tunables of one run. The defaults are the named constants above.
+#[derive(Debug, Clone)]
+pub struct StageSettings {
+    /// Time between batch polls (`CAMERATA_BATCH_POLL_SECS`, 10s by default).
+    pub poll_interval: Duration,
+    /// See [`DEFAULT_RATE_LIMIT_DEADLINE`].
+    pub rate_limit_deadline: Duration,
+    /// See [`DEFAULT_RATE_LIMIT_PAUSE`].
+    pub rate_limit_pause: Duration,
+    /// The most request-body bytes one batch submission carries.
+    pub max_body_bytes: usize,
+    /// The projected input dollars of one item, for the spend-limit gate on a batch.
+    pub per_item_usd: Option<f64>,
+}
+
+impl Default for StageSettings {
+    fn default() -> Self {
+        Self {
+            poll_interval: batch_poll_interval(),
+            rate_limit_deadline: DEFAULT_RATE_LIMIT_DEADLINE,
+            rate_limit_pause: DEFAULT_RATE_LIMIT_PAUSE,
+            max_body_bytes: max_batch_body_bytes(),
+            per_item_usd: None,
+        }
+    }
+}
+
+/// How a post-scan stage (detail rewrites, fix generation, alternatives) sends a round, and the
+/// job it reports to. `batch` is the run's choice (its scan mode is Batch); whether the round
+/// really goes out as a batch is decided per round by [`mode_and_api`], exactly as stage 1 does.
+#[derive(Clone, Copy, Default)]
+pub struct StageRoute<'a> {
+    /// The run asked for batches. A real-time run leaves this `false` and nothing is submitted.
+    pub batch: bool,
+    /// The job whose progress line and activity the runner keeps, and whose cancel it honors.
+    pub job: Option<(&'a JobStore, &'a str)>,
+}
+
+/// The mode a stage round runs in, and the batch API it can use: [`StageMode::Batch`] when the
+/// run asked for batches and the model seam carries a [`BatchApi`], else real time with
+/// `max_in_flight` requests at once. The seam is the only source of a batch API (the real client
+/// reaches it through the run journal's seam), so a plain real-time completer stays real time.
+pub fn mode_and_api(
+    llm: &dyn LlmPort,
+    batch_wanted: bool,
+    max_in_flight: usize,
+) -> (StageMode, Option<&dyn BatchApi>) {
+    let api = llm.as_any().downcast_ref::<BatchSeam>().map(BatchSeam::api);
+    let mode = if batch_wanted && api.is_some() {
+        StageMode::Batch
+    } else {
+        StageMode::Parallel {
+            max_in_flight: max_in_flight.max(1),
+        }
+    };
+    (mode, api)
+}
+
+/// Everything a run needs besides the stage's items.
+pub struct StageCtx<'a> {
+    /// The repo the stage runs on, for the not-run records the spend cap and the outage stop make.
+    pub repo: &'a str,
+    /// The model the stage's requests name; batch results are priced as this when the API echoes
+    /// an id the registry does not price.
+    pub model: &'a str,
+    /// The real-time port: the parallel fallback sends through it.
+    pub realtime: &'a dyn LlmPort,
+    /// The Message Batches API; `None` where there is none (the CLI backend).
+    pub batch: Option<&'a dyn BatchApi>,
+    pub meter: Option<&'a UsageMeter>,
+    pub job: Option<(&'a JobStore, &'a str)>,
+    /// Where to keep resume state; `None` runs without it.
+    pub checkpoint: Option<&'a StageCheckpoint>,
+    pub settings: StageSettings,
+}
+
+/// An item that did not come back, with everything the failed-part report needs.
+#[derive(Debug, Clone)]
+pub struct FailedItem<Id> {
+    pub id: Id,
+    /// What kind of failure it was, which decides what the run does about it.
+    pub class: FailureClass,
+    /// A plain sentence, scrubbed and capped; never a response body.
+    pub reason: String,
+    /// What the transport said on each attempt, oldest first.
+    pub attempts: Vec<AttemptRecord>,
+    /// The batch that carries this item when it was accepted but its results could not be
+    /// retrieved. The item was NOT sent again (it may still be running and billed); a resume
+    /// polls this batch.
+    pub live_batch: Option<String>,
+}
+
+/// How the parallel fallback paced itself, for the log and for the tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacingReport {
+    /// The permits the run started with.
+    pub start_limit: usize,
+    /// The fewest permits it ever had.
+    pub min_limit: usize,
+    /// The permits it ended with.
+    pub final_limit: usize,
+    /// Times the permits were halved.
+    pub throttles: u32,
+}
+
+/// What a run came to. Every item the stage listed is in exactly one of the three lists.
+#[derive(Debug, Clone)]
+pub struct StageOutcome<Id> {
+    /// Items absorbed by this run, in the order they were absorbed.
+    pub absorbed: Vec<Id>,
+    /// Items an earlier process had absorbed; skipped, not paid for again.
+    pub resumed: Vec<Id>,
+    /// Items with no result, each with its reason.
+    pub failed: Vec<FailedItem<Id>>,
+    pub pacing: PacingReport,
+    /// Set when the job was cancelled before the stage finished. A cancelled stage is neither
+    /// failed nor an outage: its unsent items are listed here and are sent by a later run.
+    pub cancelled: Option<StageCancelled<Id>>,
+}
+
+/// What a cancel left undone.
+#[derive(Debug, Clone)]
+pub struct StageCancelled<Id> {
+    /// Items that were neither absorbed nor failed: never sent, or sent in a batch that was
+    /// cancelled. A resume sends them (a cancelled batch is polled first, so what it finished
+    /// is absorbed and not paid for twice).
+    pub not_sent: Vec<Id>,
+    /// Provider batches the runner asked to cancel.
+    pub batches_cancelled: Vec<String>,
+}
+
+impl<Id> StageOutcome<Id> {
+    /// True when every item is absorbed or resumed and the stage was not cancelled: the stage
+    /// has nothing left to report.
+    pub fn is_complete(&self) -> bool {
+        self.failed.is_empty() && self.cancelled.is_none()
+    }
+}
+
+/// One item waiting to be sent.
+struct Work<Id> {
+    id: Id,
+    /// The request; `None` for an item of a lazy stage whose request is not built yet (see
+    /// [`materialize`]).
+    req: Option<Arc<LlmRequest>>,
+}
+
+impl<Id: Clone> Clone for Work<Id> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            req: self.req.clone(),
+        }
+    }
+}
+
+/// The ledger of one run: which item ended how.
+struct Book<Id> {
+    total: usize,
+    absorbed: Vec<Id>,
+    resumed: Vec<Id>,
+    failed: BTreeMap<Id, FailedItem<Id>>,
+    done: BTreeSet<Id>,
+    /// Items whose reply was turned down once already (the retry is spent).
+    retried: BTreeSet<Id>,
+    /// Items sent a second time after a failure sending can fix (the resend is spent).
+    resent: BTreeSet<Id>,
+    /// Attempt records gathered for an item so far.
+    trails: BTreeMap<Id, Vec<AttemptRecord>>,
+    pacing: PacingReport,
+    /// The job was cancelled: nothing more is dispatched.
+    cancelled: bool,
+    /// Provider batches the runner asked to cancel.
+    batches_cancelled: Vec<String>,
+    /// Items neither absorbed nor failed when the stage ended cancelled.
+    not_sent: Vec<Id>,
+    /// Whether a failure sending again can fix is sent once more by the runner.
+    resends: bool,
+}
+
+/// The most attempt records one failed part keeps (a long rate limit would otherwise grow it for
+/// hours): the first few and the last ones.
+const MAX_TRAIL: usize = 12;
+
+impl<Id: Clone + Ord> Book<Id> {
+    fn new() -> Self {
+        Self {
+            total: 0,
+            absorbed: Vec::new(),
+            resumed: Vec::new(),
+            failed: BTreeMap::new(),
+            done: BTreeSet::new(),
+            retried: BTreeSet::new(),
+            resent: BTreeSet::new(),
+            trails: BTreeMap::new(),
+            pacing: PacingReport::default(),
+            cancelled: false,
+            batches_cancelled: Vec::new(),
+            not_sent: Vec::new(),
+            resends: true,
+        }
+    }
+
+    fn finished(&self) -> usize {
+        self.done.len()
+    }
+
+    fn note_attempts(&mut self, id: &Id, attempts: Vec<AttemptRecord>) {
+        let trail = self.trails.entry(id.clone()).or_default();
+        trail.extend(attempts);
+        if trail.len() > MAX_TRAIL {
+            let drop = trail.len() - MAX_TRAIL;
+            trail.drain(MAX_TRAIL / 3..MAX_TRAIL / 3 + drop);
+        }
+    }
+
+    fn fail(&mut self, id: &Id, class: FailureClass, reason: &str, live_batch: Option<String>) {
+        let attempts = self.trails.remove(id).unwrap_or_default();
+        self.done.insert(id.clone());
+        self.failed.insert(
+            id.clone(),
+            FailedItem {
+                id: id.clone(),
+                class,
+                reason: failure::scrub_message(
+                    &disclosable_error(reason),
+                    failure::MAX_RECORD_MESSAGE_CHARS,
+                ),
+                attempts,
+                live_batch,
+            },
+        );
+    }
+
+    fn into_outcome(self) -> StageOutcome<Id> {
+        StageOutcome {
+            absorbed: self.absorbed,
+            resumed: self.resumed,
+            failed: self.failed.into_values().collect(),
+            pacing: self.pacing,
+            cancelled: self.cancelled.then_some(StageCancelled {
+                not_sent: self.not_sent,
+                batches_cancelled: self.batches_cancelled,
+            }),
+        }
+    }
+}
+
+/// Run one stage to completion. See the module docs.
+///
+/// `stage` names the usage row the calls are recorded under and the progress line on the job.
+pub async fn run_stage<S>(
+    stage: Stage,
+    s: &mut S,
+    mode: StageMode,
+    ctx: &StageCtx<'_>,
+) -> StageOutcome<S::Id>
+where
+    S: StageItems + Send,
+{
+    let mut book: Book<S::Id> = Book::new();
+    book.resends = s.resends();
+    let lazy = s.build_range() > 0;
+    let mut by_key: BTreeMap<String, S::Id> = BTreeMap::new();
+    let mut reqs: BTreeMap<S::Id, Arc<LlmRequest>> = BTreeMap::new();
+    // The ids in the order they are sent: the stage's own order for a lazy stage, the id order
+    // for an eager one.
+    let mut order: Vec<S::Id> = Vec::new();
+    if lazy {
+        let listed = s.ids();
+        book.total = listed.len();
+        for id in listed {
+            if by_key.insert(id.to_string(), id.clone()).is_some() {
+                book.fail(
+                    &id,
+                    FailureClass::Content,
+                    "the stage listed this item id twice, so the second request was not sent",
+                    None,
+                );
+                continue;
+            }
+            order.push(id);
+        }
+    } else {
+        let items = s.items();
+        book.total = items.len();
+        for (id, req) in items {
+            if reqs.contains_key(&id) {
+                book.fail(
+                    &id,
+                    FailureClass::Content,
+                    "the stage listed this item id twice, so the second request was not sent",
+                    None,
+                );
+                continue;
+            }
+            by_key.insert(id.to_string(), id.clone());
+            reqs.insert(id, Arc::new(req));
+        }
+        order = reqs.keys().cloned().collect();
+    }
+
+    replay_checkpoint(stage, s, ctx, &mut book, &by_key);
+
+    // A7: no request is submitted or sent without passing the size check. An eager stage's
+    // requests are checked here; a lazy stage's are checked as they are built ([`materialize`]).
+    for (id, req) in &reqs {
+        if book.done.contains(id) {
+            continue;
+        }
+        if let Err(too_large) = ensure_request_fits(req) {
+            book.fail(id, FailureClass::Content, &too_large.to_string(), None);
+        }
+    }
+    report_progress(ctx, stage, &book);
+
+    // A job cancelled before the stage starts sends nothing. What an earlier process absorbed
+    // was replayed above and stays absorbed.
+    if cancel_requested(ctx) {
+        book.cancelled = true;
+    }
+    disclose_orphaned_submissions(stage, ctx);
+    let mut follow: BTreeMap<S::Id, Work<S::Id>> = BTreeMap::new();
+    if !book.cancelled && ctx.batch.is_some() {
+        follow = resume_batches(stage, s, ctx, &mut book, &by_key, &reqs).await;
+    }
+    let pending: Vec<Work<S::Id>> = order
+        .iter()
+        .filter(|id| !book.done.contains(*id))
+        .map(|id| {
+            follow.remove(id).unwrap_or_else(|| Work {
+                id: id.clone(),
+                req: reqs.get(id).cloned(),
+            })
+        })
+        .collect();
+
+    if !pending.is_empty() && !book.cancelled {
+        match (mode, ctx.batch) {
+            (StageMode::Batch, Some(api)) => {
+                run_batch(stage, s, ctx, api, &mut book, pending).await;
+            }
+            (StageMode::Batch, None) => {
+                let fallback = StageMode::parallel_default(true);
+                if let Some(m) = ctx.meter {
+                    m.record_note(format!(
+                        "The {} stage was asked to run as a batch but there is no batch API on \
+                         this backend, so it ran in real time instead ({fallback:?}).",
+                        stage.label()
+                    ));
+                }
+                let StageMode::Parallel { max_in_flight } = fallback else {
+                    unreachable!("parallel_default is Parallel")
+                };
+                run_parallel(stage, s, ctx, &mut book, pending, max_in_flight).await;
+            }
+            (StageMode::Parallel { max_in_flight }, _) => {
+                run_parallel(stage, s, ctx, &mut book, pending, max_in_flight).await;
+            }
+        }
+    }
+    if book.cancelled {
+        book.not_sent = order
+            .iter()
+            .filter(|id| !book.done.contains(*id))
+            .cloned()
+            .collect();
+    }
+    if let Some((jobs, id)) = ctx.job {
+        jobs.clear_stage_progress(id);
+    }
+    book.into_outcome()
+}
+
+/// The name the spend limit and the ledger know a stage by when it is refused (the name the stage's
+/// own loop admitted under before it ran on the runner).
+fn admission_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Calibration => super::STAGE_CALIBRATION,
+        Stage::Alternatives => super::STAGE_ALTERNATIVES,
+        Stage::DetailRegeneration => super::STAGE_DETAIL,
+        Stage::FixGeneration => super::STAGE_FIX,
+        other => other.label(),
+    }
+}
+
+// ── lazy requests ───────────────────────────────────────────────────────────────────────────────
+
+/// Build the requests of the items in `works` that have none yet (a lazy stage's), at most
+/// [`StageItems::build_range`] at a time, and return the works that now have one, in order. Each
+/// request passes the size check (A7) as it is built. An item the stage built no request for, or
+/// whose request does not fit, ends as a failed part with the reason and is not returned.
+fn materialize<S: StageItems>(
+    stage: Stage,
+    s: &S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    works: Vec<Work<S::Id>>,
+) -> Vec<Work<S::Id>> {
+    let range = s.build_range().max(1);
+    let missing: Vec<S::Id> = works
+        .iter()
+        .filter(|w| w.req.is_none() && !book.done.contains(&w.id))
+        .map(|w| w.id.clone())
+        .collect();
+    if missing.is_empty() {
+        return works;
+    }
+    let mut built: BTreeMap<S::Id, Arc<LlmRequest>> = BTreeMap::new();
+    for chunk in missing.chunks(range) {
+        for (id, req) in s.items_for(chunk) {
+            if !chunk.contains(&id) {
+                continue;
+            }
+            match ensure_request_fits(&req) {
+                Ok(()) => {
+                    built.insert(id, Arc::new(req));
+                }
+                Err(too_large) => {
+                    book.fail(&id, FailureClass::Content, &too_large.to_string(), None);
+                }
+            }
+        }
+        for id in chunk {
+            if !built.contains_key(id) && !book.done.contains(id) {
+                book.fail(
+                    id,
+                    FailureClass::Content,
+                    "the stage built no request for this item, so nothing was sent for it",
+                    None,
+                );
+            }
+        }
+    }
+    report_progress(ctx, stage, book);
+    works
+        .into_iter()
+        .filter_map(|mut w| {
+            if book.done.contains(&w.id) {
+                return None;
+            }
+            if w.req.is_none() {
+                w.req = built.remove(&w.id);
+            }
+            w.req.is_some().then_some(w)
+        })
+        .collect()
+}
+
+// ── job liveness ────────────────────────────────────────────────────────────────────────────────
+
+/// Touch the job and set the stage's progress: called whenever an item ends.
+fn report_progress<Id: Clone + Ord>(ctx: &StageCtx<'_>, stage: Stage, book: &Book<Id>) {
+    if let Some((jobs, id)) = ctx.job {
+        jobs.touch_activity(id);
+        jobs.set_stage_progress(id, stage, book.finished(), book.total);
+    }
+}
+
+// ── cancel ──────────────────────────────────────────────────────────────────────────────────────
+
+/// True once the job this stage runs for has been cancelled. A run with no job is never cancelled.
+fn cancel_requested(ctx: &StageCtx<'_>) -> bool {
+    ctx.job
+        .is_some_and(|(jobs, id)| jobs.is_cancel_requested(id))
+}
+
+/// Wait `dur`, looking at the cancel flag at least once per poll interval. Returns `true` as soon
+/// as the job is cancelled, so a long `retry-after` never holds a cancelled job. Every tick also
+/// touches the job ("paused: rate limited"), so a long hold never reads as a stalled job.
+async fn sleep_or_cancel(ctx: &StageCtx<'_>, dur: Duration) -> bool {
+    let end = Instant::now() + dur;
+    loop {
+        if cancel_requested(ctx) {
+            return true;
+        }
+        if let Some((jobs, id)) = ctx.job {
+            jobs.note_paused(id);
+        }
+        let now = Instant::now();
+        if now >= end {
+            return false;
+        }
+        tokio::time::sleep((end - now).min(ctx.settings.poll_interval)).await;
+    }
+}
+
+/// Ask the provider to cancel a batch the job no longer wants, so it stops spending. The batch
+/// stays on the checkpoint's list unsettled: whatever it finished before the cancel is fetched
+/// and absorbed by the next run, never paid for twice.
+async fn cancel_live_batch<Id>(
+    ctx: &StageCtx<'_>,
+    api: &dyn BatchApi,
+    book: &mut Book<Id>,
+    batch_id: &str,
+) {
+    book.cancelled = true;
+    book.batches_cancelled.push(batch_id.to_string());
+    cancel_at_provider(ctx, api, batch_id).await;
+}
+
+/// Ask the provider to cancel `batch_id`; when it cannot be cancelled, say so on the ledger.
+async fn cancel_at_provider(ctx: &StageCtx<'_>, api: &dyn BatchApi, batch_id: &str) {
+    if let Err(e) = api.cancel_batch(batch_id).await {
+        let note = format!(
+            "The job was cancelled but batch {batch_id} could not be cancelled at the provider \
+             ({}); it may still run and be billed. Cancel it in the Anthropic console.",
+            disclosable_error(&format!("{e:#}"))
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+}
+
+// ── checkpoint ──────────────────────────────────────────────────────────────────────────────────
+
+fn custom_id_for(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    let hex: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
+    format!("s{hex}")
+}
+
+fn ttl_name(ttl: CacheTtl) -> &'static str {
+    match ttl {
+        CacheTtl::FiveMinutes => "5m",
+        CacheTtl::OneHour => "1h",
+    }
+}
+
+fn ttl_from_name(name: &str) -> CacheTtl {
+    if name == "5m" {
+        CacheTtl::FiveMinutes
+    } else {
+        CacheTtl::OneHour
+    }
+}
+
+fn line_for(key: &str, resp: &LlmResponse) -> AbsorbedLine {
+    AbsorbedLine {
+        key: key.to_string(),
+        model: resp.model.clone(),
+        backend: resp.backend.clone(),
+        cost_usd: resp.cost_usd,
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
+        text: resp.text.clone(),
+        members: Vec::new(),
+        batch_id: None,
+    }
+}
+
+fn response_from(line: &AbsorbedLine) -> LlmResponse {
+    LlmResponse {
+        text: line.text.clone(),
+        model: line.model.clone(),
+        backend: line.backend.clone(),
+        cost_usd: line.cost_usd,
+        input_tokens: line.input_tokens,
+        output_tokens: line.output_tokens,
+        cache_read_input_tokens: line.cache_read_input_tokens,
+        cache_creation_input_tokens: line.cache_creation_input_tokens,
+        or_cache_discount: None,
+        truncated: false,
+    }
+}
+
+/// A reply's usage without its text, for marking a turned-down reply as wasted spend.
+fn usage_only(resp: &LlmResponse) -> LlmResponse {
+    LlmResponse {
+        text: String::new(),
+        model: resp.model.clone(),
+        backend: resp.backend.clone(),
+        cost_usd: resp.cost_usd,
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
+        or_cache_discount: resp.or_cache_discount,
+        truncated: resp.truncated,
+    }
+}
+
+fn checkpoint_trouble(ctx: &StageCtx<'_>, what: &str, err: &std::io::Error) {
+    let note = format!(
+        "A stage checkpoint could not be written ({what}: {err}); a resume of this stage will send \
+         the items it covers again."
+    );
+    eprintln!("[camerata-server] {note}");
+    if let Some(m) = ctx.meter {
+        m.record_note(note);
+    }
+}
+
+/// Resume, first half: every item the checkpoint lists as absorbed is skipped. Its usage goes to
+/// the meter (this process's meter starts empty, so without it a resumed stage reads as zero
+/// tokens), and its reply goes to the stage unless the stage already holds it. A reply the stage
+/// now turns down is not trusted: the item is sent again.
+fn replay_checkpoint<S: StageItems>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    by_key: &BTreeMap<String, S::Id>,
+) {
+    let Some(cp) = ctx.checkpoint else { return };
+    for line in cp.absorbed() {
+        // A reply read finding by finding is replayed the same way (see [`resume_held`]).
+        if !line.members.is_empty() {
+            continue;
+        }
+        let Some(id) = by_key.get(&line.key) else {
+            continue;
+        };
+        if book.done.contains(id) {
+            continue;
+        }
+        let resp = response_from(&line);
+        if let Some(m) = ctx.meter {
+            m.record_stage(stage, &resp);
+        }
+        if s.already_absorbed(id) || s.absorb(id, resp).is_ok() {
+            book.done.insert(id.clone());
+            book.resumed.push(id.clone());
+        } else {
+            eprintln!(
+                "[camerata-server] stage {}: the stored reply for {id} was turned down on resume; \
+                 sending the item again",
+                stage.label()
+            );
+        }
+    }
+}
+
+// ── one reply ───────────────────────────────────────────────────────────────────────────────────
+
+enum Settled<Id> {
+    Absorbed,
+    /// The reply was turned down and the stage supplied a replacement request.
+    Retry(Work<Id>),
+    Failed,
+}
+
+/// Hand a reply to the stage. Usage was already recorded on the meter by the caller.
+fn settle_reply<S: StageItems>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    work: &Work<S::Id>,
+    resp: LlmResponse,
+    batch_id: Option<&str>,
+) -> Settled<S::Id> {
+    let id = &work.id;
+    let wasted = usage_only(&resp);
+    let line = ctx.checkpoint.map(|_| {
+        let mut line = line_for(&id.to_string(), &resp);
+        line.members = s.members(id);
+        line.batch_id = batch_id.map(str::to_string);
+        line
+    });
+    match s.absorb(id, resp) {
+        Ok(()) => {
+            if let (Some(cp), Some(line)) = (ctx.checkpoint, line) {
+                if let Err(e) = cp.record_absorbed(&line) {
+                    checkpoint_trouble(ctx, "absorbed item", &e);
+                }
+            }
+            book.done.insert(id.clone());
+            book.absorbed.push(id.clone());
+            report_progress(ctx, stage, book);
+            Settled::Absorbed
+        }
+        Err(reject) => {
+            if let Some(m) = ctx.meter {
+                m.record_wasted(stage, &wasted);
+            }
+            let reason = format!("the reply was turned down: {}", reject.reason);
+            if book.retried.contains(id) {
+                book.fail(
+                    id,
+                    FailureClass::Content,
+                    &format!("{reason} (and again on the retry)"),
+                    None,
+                );
+                report_progress(ctx, stage, book);
+                return Settled::Failed;
+            }
+            book.retried.insert(id.clone());
+            let Some(req) = s.retry(id, &reject) else {
+                book.fail(id, FailureClass::Content, &reason, None);
+                report_progress(ctx, stage, book);
+                return Settled::Failed;
+            };
+            if let Err(too_large) = ensure_request_fits(&req) {
+                book.fail(
+                    id,
+                    FailureClass::Content,
+                    &format!("{reason}; the retry request was not sent: {too_large}"),
+                    None,
+                );
+                report_progress(ctx, stage, book);
+                return Settled::Failed;
+            }
+            Settled::Retry(Work {
+                id: id.clone(),
+                req: Some(Arc::new(req)),
+            })
+        }
+    }
+}
+
+/// A call failed. When sending the same request again can fix it (a transport failure, a rate
+/// limit that outlasted the retries, a row a batch left out) and the one resend is unspent, the
+/// item is returned to be sent again; otherwise it becomes a failed part.
+fn resend_or_fail<Id: Clone + Ord>(
+    ctx: &StageCtx<'_>,
+    book: &mut Book<Id>,
+    work: &Work<Id>,
+    class: FailureClass,
+    reason: &str,
+    attempts: Vec<AttemptRecord>,
+) -> Option<Work<Id>> {
+    // Every try is on the record: a failure that carried no attempt record of its own gets one
+    // describing it, and the second send is marked as the second try.
+    let mut attempts = attempts;
+    if attempts.is_empty() {
+        attempts.push(super::StageTrail::describe(class, reason));
+    }
+    let second = book.resent.contains(&work.id);
+    for r in &mut attempts {
+        r.second_try = second;
+        if r.model.is_empty() {
+            r.model = super::resolve_audit_model(None);
+        }
+    }
+    book.note_attempts(&work.id, attempts);
+    let outage = ctx.meter.is_some_and(UsageMeter::outage_stopped);
+    if book.resends && class.is_retried_at_end() && !book.resent.contains(&work.id) && !outage {
+        book.resent.insert(work.id.clone());
+        return Some(work.clone());
+    }
+    let class = if outage && class.is_retried_at_end() {
+        FailureClass::OutageStop
+    } else {
+        class
+    };
+    book.fail(&work.id, class, reason, None);
+    None
+}
+
+/// Why a part was not sent: the outage stop or the spend limit.
+fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, &'static str) {
+    if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
+        (
+            FailureClass::OutageStop,
+            "the run stopped because the model provider could not be reached before this item was sent",
+        )
+    } else {
+        (
+            FailureClass::SpendLimit,
+            "the spend limit stopped the run before this item was sent",
+        )
+    }
+}
+
+// ── pacing ──────────────────────────────────────────────────────────────────────────────────────
+
+/// Tracks how long a stage has been rate limited with no success in between.
+#[derive(Debug, Clone, Copy)]
+struct RateClock {
+    since: Option<Instant>,
+    deadline: Duration,
+}
+
+impl RateClock {
+    fn new(deadline: Duration) -> Self {
+        Self {
+            since: None,
+            deadline,
+        }
+    }
+
+    fn limited(&mut self, now: Instant) {
+        self.since.get_or_insert(now);
+    }
+
+    fn cleared(&mut self) {
+        self.since = None;
+    }
+
+    fn passed(&self, now: Instant) -> bool {
+        self.since
+            .is_some_and(|since| now.saturating_duration_since(since) >= self.deadline)
+    }
+}
+
+/// Additive increase, multiplicative decrease over the number of requests in flight.
+#[derive(Debug)]
+pub(crate) struct Aimd {
+    ceiling: usize,
+    limit: usize,
+    min_seen: usize,
+    throttles: u32,
+    successes: u32,
+    pause_until: Option<Instant>,
+    clock: RateClock,
+}
+
+impl Aimd {
+    pub(crate) fn new(max_in_flight: usize, deadline: Duration) -> Self {
+        let ceiling = max_in_flight.clamp(MIN_IN_FLIGHT, MAX_IN_FLIGHT_CAP);
+        Self {
+            ceiling,
+            limit: ceiling,
+            min_seen: ceiling,
+            throttles: 0,
+            successes: 0,
+            pause_until: None,
+            clock: RateClock::new(deadline),
+        }
+    }
+
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// A reply came back. Fifty of them since the last throttle give one permit back.
+    pub(crate) fn on_success(&mut self) {
+        self.clock.cleared();
+        self.successes += 1;
+        if self.successes >= SUCCESSES_PER_PERMIT {
+            self.successes = 0;
+            if self.limit < self.ceiling {
+                self.limit += 1;
+            }
+        }
+    }
+
+    /// The provider said to slow down: halve the permits (floor one) and hold every new request
+    /// for `wait`. A second signal while already holding extends the hold but does not halve
+    /// again: a burst of simultaneous 429s is one event. `rate_limited` starts the deadline clock;
+    /// every caller passes `true` now that an overload is the same kind of pause as a 429.
+    pub(crate) fn on_throttle(&mut self, wait: Duration, now: Instant, rate_limited: bool) {
+        let already_holding = self.pause_until.is_some_and(|until| now < until);
+        if !already_holding {
+            self.limit = (self.limit / 2).max(MIN_IN_FLIGHT);
+            self.min_seen = self.min_seen.min(self.limit);
+            self.throttles += 1;
+            self.successes = 0;
+        }
+        let until = now + wait;
+        self.pause_until = Some(self.pause_until.map_or(until, |cur| cur.max(until)));
+        if rate_limited {
+            self.clock.limited(now);
+        }
+    }
+
+    /// When the hold ends, if it has not.
+    pub(crate) fn held_until(&self, now: Instant) -> Option<Instant> {
+        self.pause_until.filter(|until| now < *until)
+    }
+
+    pub(crate) fn deadline_passed(&self, now: Instant) -> bool {
+        self.clock.passed(now)
+    }
+
+    pub(crate) fn report(&self, start: usize) -> PacingReport {
+        PacingReport {
+            start_limit: start,
+            min_limit: self.min_seen,
+            final_limit: self.limit,
+            throttles: self.throttles,
+        }
+    }
+}
+
+// ── the parallel fallback ───────────────────────────────────────────────────────────────────────
+
+enum Called {
+    /// Not admitted: the spend cap or the outage stop refused the call.
+    Refused,
+    Done(Result<LlmResponse, anyhow::Error>),
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_parallel<S>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    pending: Vec<Work<S::Id>>,
+    max_in_flight: usize,
+) where
+    S: StageItems + Send,
+{
+    let mut aimd = Aimd::new(max_in_flight, ctx.settings.rate_limit_deadline);
+    let start_limit = aimd.limit();
+    let mut queue: VecDeque<Work<S::Id>> = pending.into();
+    let mut second_try: Vec<Work<S::Id>> = Vec::new();
+    let mut in_flight: FuturesUnordered<BoxFuture<'_, (Work<S::Id>, Called)>> =
+        FuturesUnordered::new();
+    let label = admission_name(stage);
+
+    loop {
+        // A cancelled job dispatches nothing more; requests already in flight finish and are
+        // absorbed, and everything still queued is reported as not sent.
+        if !book.cancelled && cancel_requested(ctx) {
+            book.cancelled = true;
+        }
+        // Launch as many as the permits allow, unless the provider asked us to hold.
+        loop {
+            let now = Instant::now();
+            if book.cancelled || in_flight.len() >= aimd.limit() || aimd.held_until(now).is_some() {
+                break;
+            }
+            if queue.front().is_some_and(|w| w.req.is_none()) {
+                // A lazy stage: build the next range of requests now, not all of them up front.
+                let range = s.build_range().max(1).min(queue.len());
+                let chunk: Vec<Work<S::Id>> = queue.drain(..range).collect();
+                for w in materialize(stage, &*s, ctx, book, chunk).into_iter().rev() {
+                    queue.push_front(w);
+                }
+            }
+            let Some(work) = queue.pop_front() else { break };
+            if aimd.deadline_passed(now) {
+                book.fail(
+                    &work.id,
+                    FailureClass::RateLimited,
+                    "the provider kept rate limiting this stage and no request succeeded within \
+                     the wait limit, so the item was not sent",
+                    None,
+                );
+                report_progress(ctx, stage, book);
+                continue;
+            }
+            if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
+                let (class, why) = refusal_class(ctx);
+                book.fail(&work.id, class, why, None);
+                if let Some(m) = ctx.meter {
+                    m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+                }
+                report_progress(ctx, stage, book);
+                continue;
+            }
+            let realtime = ctx.realtime;
+            let meter = ctx.meter;
+            let repo = ctx.repo;
+            let Some(req) = work.req.clone() else {
+                book.fail(
+                    &work.id,
+                    FailureClass::Content,
+                    "the item had no request to send",
+                    None,
+                );
+                continue;
+            };
+            in_flight.push(
+                async move {
+                    let permit = match meter {
+                        Some(m) => match m.admit_for_stage(repo, label).await {
+                            Ok(permit) => Some(permit),
+                            Err(_) => return (work, Called::Refused),
+                        },
+                        None => None,
+                    };
+                    if let Some(m) = meter {
+                        m.note_request(&req);
+                    }
+                    // The streaming transport, as every aggregate stage always used it: the CLI
+                    // leg's heartbeat and partial-output salvage apply, a flat deadline does not.
+                    let mut on_delta = |_: &str| {};
+                    let result = realtime
+                        .complete_streaming(req.as_ref().clone(), &mut on_delta)
+                        .await;
+                    if let Some(m) = meter {
+                        match &result {
+                            Ok(resp) => m.record_stage(stage, resp),
+                            Err(e) => m.record_failed(stage, e),
+                        }
+                    }
+                    drop(permit);
+                    (work, Called::Done(result))
+                }
+                .boxed(),
+            );
+        }
+
+        if in_flight.is_empty() {
+            if book.cancelled {
+                break;
+            }
+            if !queue.is_empty() {
+                // Held with nothing in flight: wait the hold out, unless the job is cancelled.
+                let now = Instant::now();
+                if let Some(until) = aimd.held_until(now) {
+                    sleep_or_cancel(ctx, until.saturating_duration_since(now)).await;
+                }
+                continue;
+            }
+            if !second_try.is_empty() {
+                queue.extend(second_try.drain(..));
+                continue;
+            }
+            break;
+        }
+
+        let now = Instant::now();
+        let completed = match aimd.held_until(now).filter(|_| !queue.is_empty()) {
+            // Wake when the hold ends, so waiting work can start while others are in flight.
+            Some(until) => tokio::select! {
+                done = in_flight.next() => done,
+                () = tokio::time::sleep_until(until) => continue,
+            },
+            None => in_flight.next().await,
+        };
+        let Some((work, called)) = completed else {
+            continue;
+        };
+
+        match called {
+            Called::Refused => {
+                let (class, why) = refusal_class(ctx);
+                book.fail(&work.id, class, why, None);
+                report_progress(ctx, stage, book);
+            }
+            Called::Done(Ok(resp)) => {
+                aimd.on_success();
+                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp, None)
+                {
+                    queue.push_front(again);
+                }
+            }
+            Called::Done(Err(e)) => {
+                let class = classify_pass_error(&e);
+                let attempts = failure::attempts_of(&e);
+                let wait = failure::retry_after_of(&e).unwrap_or(ctx.settings.rate_limit_pause);
+                let now = Instant::now();
+                if class == FailureClass::RateLimited {
+                    aimd.on_throttle(wait, now, true);
+                    book.note_attempts(&work.id, attempts);
+                    if aimd.deadline_passed(now) {
+                        book.fail(
+                            &work.id,
+                            FailureClass::RateLimited,
+                            &format!(
+                                "the provider kept rate limiting this stage and no request \
+                                 succeeded within the wait limit (last: {})",
+                                disclosable_error(&format!("{e:#}"))
+                            ),
+                            None,
+                        );
+                        report_progress(ctx, stage, book);
+                    } else {
+                        queue.push_front(work);
+                    }
+                } else {
+                    // A failure a caller classified by hand as transport but that says the provider
+                    // is overloaded still slows the stage down like a 429.
+                    if failure::is_overloaded(&e) {
+                        aimd.on_throttle(wait, now, true);
+                    }
+                    let reason = disclosable_error(&format!("{e:#}"));
+                    match resend_or_fail(ctx, book, &work, class, &reason, attempts) {
+                        Some(again) => second_try.push(again),
+                        None => report_progress(ctx, stage, book),
+                    }
+                }
+            }
+        }
+    }
+    book.pacing = aimd.report(start_limit);
+}
+
+// ── the batch path ──────────────────────────────────────────────────────────────────────────────
+
+/// The batch's price basis and the notes about ids the registry does not price, applied to every
+/// row the same way `submit_round` does it.
+struct Repricer<'a> {
+    model: &'a str,
+    basis: crate::llm::PriceBasis,
+    echoed: BTreeMap<String, usize>,
+}
+
+impl<'a> Repricer<'a> {
+    fn new(model: &'a str, ttl: CacheTtl) -> Self {
+        Self {
+            model,
+            basis: crate::llm::PriceBasis::batch(ttl),
+            echoed: BTreeMap::new(),
+        }
+    }
+
+    fn apply(&mut self, resp: &mut LlmResponse) {
+        if let Some(echoed) = crate::llm::price_as_requested(resp, self.model, self.basis) {
+            *self.echoed.entry(echoed).or_insert(0) += 1;
+        }
+    }
+
+    fn note(self, meter: Option<&UsageMeter>) {
+        for (echoed, n) in self.echoed {
+            let note = format!(
+                "{n} batch result row(s) came back as model `{echoed}`, an id the model registry \
+                 does not price; each was priced as the model the request named, `{}`, so the \
+                 spend limit could count it.",
+                self.model
+            );
+            eprintln!("[camerata-server] {note}");
+            if let Some(m) = meter {
+                m.record_note(note);
+            }
+        }
+    }
+}
+
+/// Which batch a set of fetched rows came from, and how its usage is priced.
+#[derive(Clone, Copy)]
+struct BatchOrigin<'a> {
+    batch_id: &'a str,
+    ttl: CacheTtl,
+}
+
+/// Deal with every row of one fetched batch. `members` lists the batch's items as
+/// `(custom id, work)`. Returns the work to send in a follow-up submission: items the batch left
+/// out or errored (sent once more) and items whose reply the stage turned down and re-asked.
+fn settle_rows<S: StageItems>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    rows: Vec<BatchResultRow>,
+    members: Vec<(String, Work<S::Id>)>,
+    origin: &BatchOrigin<'_>,
+) -> Vec<Work<S::Id>> {
+    let BatchOrigin { batch_id, ttl } = *origin;
+    let mut by_id: HashMap<String, BatchResultRow> =
+        rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
+    let mut repricer = Repricer::new(ctx.model, ttl);
+    let mut follow = Vec::new();
+    for (cid, work) in members {
+        if book.done.contains(&work.id) {
+            continue;
+        }
+        match by_id.remove(&cid) {
+            Some(BatchResultRow {
+                response: Some(mut resp),
+                ..
+            }) => {
+                repricer.apply(&mut resp);
+                if let Some(m) = ctx.meter {
+                    m.record_stage(stage, &resp);
+                }
+                if let Settled::Retry(again) =
+                    settle_reply(stage, s, ctx, book, &work, resp, Some(batch_id))
+                {
+                    follow.push(again);
+                }
+            }
+            Some(BatchResultRow {
+                error: Some(error),
+                billed,
+                ..
+            }) => {
+                // A failed item that was still billed (a model refusal) counts toward the spend
+                // limit, and the model answered, so it is a content failure: not sent again.
+                let refused = billed.is_some();
+                if let (Some(m), Some(mut billed)) = (ctx.meter, billed) {
+                    repricer.apply(&mut billed);
+                    m.record_stage(stage, &billed);
+                }
+                if refused {
+                    book.fail(&work.id, FailureClass::Content, &error, None);
+                    report_progress(ctx, stage, book);
+                } else if let Some(again) = resend_or_fail(
+                    ctx,
+                    book,
+                    &work,
+                    FailureClass::Transport,
+                    &error,
+                    Vec::new(),
+                ) {
+                    follow.push(again);
+                } else {
+                    report_progress(ctx, stage, book);
+                }
+            }
+            Some(_) | None => {
+                if let Some(again) = resend_or_fail(
+                    ctx,
+                    book,
+                    &work,
+                    FailureClass::Transport,
+                    "the batch returned no result for this item",
+                    Vec::new(),
+                ) {
+                    follow.push(again);
+                } else {
+                    report_progress(ctx, stage, book);
+                }
+            }
+        }
+    }
+    repricer.note(ctx.meter);
+    follow
+}
+
+fn round_ctx<'a>(stage: Stage, ctx: &'a StageCtx<'a>, api: &'a dyn BatchApi) -> RoundContext<'a> {
+    RoundContext {
+        api,
+        repo: ctx.repo,
+        label: stage.label(),
+        model: ctx.model,
+        n_c: 0,
+        n_b: 0,
+        chunks: &[],
+        batches: &[],
+        job: ctx.job,
+        meter: ctx.meter,
+        per_item_usd: ctx.settings.per_item_usd,
+        max_body_bytes: ctx.settings.max_body_bytes,
+        fatal_errors: false,
+    }
+}
+
+/// The projected input dollars of submitting `sub`, from the bytes of the requests the runner is
+/// about to send (each estimated as the size check does, at the batch price of the stage's model),
+/// so a window of large items cannot outrun the spend limit on a low guess. Only when a request is
+/// not built, or the model is not in the price table, does the stage's own per-item figure
+/// ([`StageSettings::per_item_usd`]) stand in; with neither there is no projection at all and the
+/// gate refuses (a limit that cannot be enforced admits nothing).
+fn projected_input_usd<Id>(ctx: &StageCtx<'_>, sub: &[Work<Id>]) -> Option<f64> {
+    let fallback = |n: usize| ctx.settings.per_item_usd.map(|p| p * n as f64);
+    let mut total = 0.0;
+    let mut unbuilt = 0usize;
+    for w in sub {
+        let Some(req) = w.req.as_deref() else {
+            unbuilt += 1;
+            continue;
+        };
+        let tokens = estimate_tokens(super::request_budget::request_bytes(req)) as u64;
+        let Some(usd) = crate::llm::input_cost_usd(
+            ctx.model,
+            tokens,
+            crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
+        ) else {
+            // An unpriced model prices no request: the stage's figure covers the whole window.
+            return fallback(sub.len());
+        };
+        total += usd;
+    }
+    if unbuilt > 0 {
+        total += fallback(unbuilt)?;
+    }
+    Some(total)
+}
+
+/// Clear the submission intent: the submit ended (its id is saved, or it failed or was cancelled
+/// and nothing was accepted).
+fn clear_submit_intent(ctx: &StageCtx<'_>) {
+    if let Some(cp) = ctx.checkpoint {
+        if let Err(e) = cp.save_intents(&[]) {
+            checkpoint_trouble(ctx, "submit intent", &e);
+        }
+    }
+}
+
+/// Resume, between the halves: a submission intent no saved batch carries the nonce of is a
+/// batch that may have been accepted by the provider while its id was never saved (the process
+/// was killed between `submit` returning and the batch list being written). It cannot be polled
+/// or cancelled from here, so the possible spend is put on the ledger, not hidden; its items that
+/// have no result are sent again by the rounds that follow. The intents are cleared once told.
+fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
+    let Some(cp) = ctx.checkpoint else {
+        return;
+    };
+    let intents = cp.intents();
+    if intents.is_empty() {
+        return;
+    }
+    let saved: BTreeSet<String> = cp.batches().into_iter().filter_map(|r| r.nonce).collect();
+    for intent in intents.iter().filter(|i| !saved.contains(&i.nonce)) {
+        let note = format!(
+            "A batch of {} item(s) of the {} stage may have been submitted and orphaned: the \
+             earlier process stopped after asking the provider to accept it and before saving \
+             its id, so it cannot be polled or cancelled from here, and what it was charged, \
+             if anything, is not in this ledger. Check the Anthropic console. The items of it \
+             that have no result were submitted again.",
+            intent.items.len(),
+            stage.label()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+    if let Err(e) = cp.save_intents(&[]) {
+        checkpoint_trouble(ctx, "submit intent", &e);
+    }
+}
+
+/// True when the provider says the batch is gone for good: not found (404) or expired (410, or a
+/// `not_found_error`). Read from the typed failure's HTTP status and error type when the
+/// transport produced one, else from the text of the error (a stub, a wrapped message). A
+/// transient failure (a 5xx, a timeout, a rate limit) is NOT gone: the batch may still be there.
+fn batch_is_gone(e: &anyhow::Error) -> bool {
+    if let Some(f) = failure::call_failure_of(e) {
+        let typed = f.http.as_ref().is_some_and(|(status, body)| {
+            matches!(*status, 404 | 410) || body.contains("not_found_error")
+        }) || f
+            .attempts
+            .iter()
+            .any(|a| matches!(a.http_status, Some(404 | 410)));
+        if typed {
+            return true;
+        }
+    }
+    let text = format!("{e:#}");
+    text.contains("HTTP 404") || text.contains("HTTP 410") || text.contains("not_found_error")
+}
+
+/// Resume, second half: batches an earlier process submitted and did not settle are polled and
+/// fetched by id (never submitted again). Returns the follow-up work their rows produced, to
+/// replace those items' requests in the first round.
+async fn resume_batches<S>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    book: &mut Book<S::Id>,
+    by_key: &BTreeMap<String, S::Id>,
+    reqs: &BTreeMap<S::Id, Arc<LlmRequest>>,
+) -> BTreeMap<S::Id, Work<S::Id>>
+where
+    S: StageItems + Send,
+{
+    let mut out = BTreeMap::new();
+    let (Some(cp), Some(api)) = (ctx.checkpoint, ctx.batch) else {
+        return out;
+    };
+    let mut records = cp.batches();
+    for i in 0..records.len() {
+        // A batch that records its findings is read finding by finding by [`resume_held`].
+        if records[i].settled || !records[i].members.is_empty() {
+            continue;
+        }
+        if cancel_requested(ctx) {
+            book.cancelled = true;
+            break;
+        }
+        let record = records[i].clone();
+        let members: Vec<(String, Work<S::Id>)> = record
+            .items
+            .iter()
+            .filter_map(|(cid, key)| {
+                let id = by_key.get(key)?;
+                if book.done.contains(id) {
+                    return None;
+                }
+                Some((
+                    cid.clone(),
+                    Work {
+                        id: id.clone(),
+                        req: reqs.get(id).cloned(),
+                    },
+                ))
+            })
+            .collect();
+        let ttl = ttl_from_name(&record.ttl);
+        let rctx = round_ctx(stage, ctx, api);
+        let progress = PollProgress {
+            stage,
+            done_before: book.finished(),
+            total: Some(book.total),
+        };
+        eprintln!(
+            "[camerata-server] stage {}: resuming batch {} ({} items) by polling it, not \
+             submitting it again",
+            stage.label(),
+            record.batch_id,
+            members.len()
+        );
+        match poll_and_fetch(
+            &rctx,
+            &record.batch_id,
+            ttl,
+            ctx.settings.poll_interval,
+            Some(progress),
+            false,
+            true,
+        )
+        .await
+        {
+            Ok(rows) => {
+                let origin = BatchOrigin {
+                    batch_id: &record.batch_id,
+                    ttl,
+                };
+                for work in settle_rows(stage, s, ctx, book, rows, members, &origin) {
+                    out.insert(work.id.clone(), work);
+                }
+                records[i].settled = true;
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_live_batch(ctx, api, book, &record.batch_id).await;
+                break;
+            }
+            Err(failed) if batch_is_gone(&failed.error) => {
+                // The provider answers not found or expired for this id, now and on every later
+                // try: nothing can ever be fetched from it, so polling it again would fail the
+                // same items on every resume. It is settled as gone, and the members it still
+                // owed are sent again once, in this run's first round. Nothing was absorbed from
+                // it, so none of them is paid for twice here; what the provider may have charged
+                // for the gone batch is not in this ledger, and the note says so.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let note = format!(
+                    "Batch {} no longer exists at the provider ({error}), so its results can \
+                     never be fetched. It was settled as gone and its {} unfinished item(s) were \
+                     submitted again. What the provider charged for the gone batch, if anything, \
+                     is not in this ledger.",
+                    record.batch_id,
+                    members.len()
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                for (_, work) in members {
+                    out.insert(work.id.clone(), work);
+                }
+                records[i].settled = true;
+            }
+            Err(failed) => {
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                for (_, work) in &members {
+                    book.fail(
+                        &work.id,
+                        classify_pass_error(&failed.error),
+                        &format!(
+                            "batch {} is still not retrievable ({error}); it may be running and \
+                             billed, so it was not submitted again",
+                            record.batch_id
+                        ),
+                        Some(record.batch_id.clone()),
+                    );
+                }
+            }
+        }
+        if let Err(e) = cp.save_batches(&records) {
+            checkpoint_trouble(ctx, "batch list", &e);
+        }
+    }
+    out
+}
+
+// ── resume, finding by finding ──────────────────────────────────────────────────────────────────
+
+/// Where a finding a stored reply was written for stands in the run being resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberState {
+    /// In the run and still without a result: the reply is read for it.
+    Open,
+    /// In the run and already done (another reply wrote it): it stays as it is.
+    Done,
+    /// No longer in the run: nothing is written for it.
+    Gone,
+}
+
+/// A stored reply, as a [`HeldRows`] stage is handed it.
+pub struct HeldReply<'a> {
+    /// The findings the reply is read for. The stage reads the reply's entries for these.
+    pub open: &'a [BatchMember],
+    /// The findings the reply also answered that are done or gone: their entries are ignored,
+    /// never counted against the open ones and never written into them.
+    pub ignore: &'a [BatchMember],
+    /// How many findings the call asked about in all, for pro rata waste.
+    pub asked: usize,
+}
+
+/// A stage whose items are calls about several findings. On resume the runner hands it every
+/// stored reply (an absorbed one from an earlier process, or a row of a batch that was live when
+/// that process stopped) with the findings it was written for, and the stage settles it finding
+/// by finding. A reply therefore reaches its findings whatever calls the resumed run would
+/// build, and is read once.
+pub trait HeldRows {
+    /// Where the finding `member` names stands now: a finding with that site key at the line it
+    /// was asked at. A key that now names a finding at another line is [`MemberState::Gone`].
+    fn member_state(&self, member: &BatchMember) -> MemberState;
+
+    /// Read `resp` for the open findings of `held`, exactly as a fresh reply for them is read.
+    fn absorb_held(&mut self, held: HeldReply<'_>, resp: LlmResponse);
+}
+
+/// Findings whose batch is accepted but could not be fetched now: they are not sent again.
+#[derive(Debug, Clone)]
+pub struct LiveHeld {
+    pub batch_id: String,
+    /// The site keys of the findings of the batch that are still open.
+    pub keys: Vec<String>,
+    pub class: FailureClass,
+    pub reason: String,
+    pub attempts: Vec<AttemptRecord>,
+}
+
+/// What reading the stored replies left for the stage to do.
+#[derive(Debug, Default)]
+pub struct HeldResume {
+    /// Batches that could not be fetched: their open findings wait for a later resume.
+    pub live: Vec<LiveHeld>,
+    /// The job was cancelled while a batch was being polled.
+    pub cancelled: bool,
+}
+
+/// Hand one stored reply to the stage. `source` names it for the ledger.
+fn read_held_reply<H: HeldRows>(
+    stage: Stage,
+    h: &mut H,
+    ctx: &StageCtx<'_>,
+    source: &str,
+    members: &[BatchMember],
+    resp: LlmResponse,
+) {
+    let mut open = Vec::new();
+    let mut ignore = Vec::new();
+    let mut gone = 0usize;
+    for member in members {
+        match h.member_state(member) {
+            MemberState::Open => open.push(member.clone()),
+            MemberState::Done => ignore.push(member.clone()),
+            MemberState::Gone => {
+                gone += 1;
+                ignore.push(member.clone());
+            }
+        }
+    }
+    if gone > 0 {
+        let note = format!(
+            "{source} answered {gone} of {} finding(s) that are no longer in this run. Nothing \
+             was written for them, and their share of what the reply cost was wasted.",
+            members.len()
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+            m.record_wasted_share(stage, &resp, gone as f64 / members.len() as f64);
+        }
+    }
+    if open.is_empty() {
+        return;
+    }
+    h.absorb_held(
+        HeldReply {
+            open: &open,
+            ignore: &ignore,
+            asked: members.len(),
+        },
+        resp,
+    );
+}
+
+/// Resume, for a stage whose items are calls about several findings ([`HeldRows`]), before the
+/// round is built. Every reply an earlier process absorbed is read again for its findings (its
+/// usage goes to the meter), then each batch that process submitted and did not settle is polled
+/// and fetched, never submitted again, and its rows are read for their findings by site key. A
+/// row for a finding that is gone is told on the ledger; one for a finding done by another reply
+/// changes nothing; each row is read once (a reply already stored is not read again from its
+/// batch). A batch that cannot be fetched now is reported in [`HeldResume::live`] and stays
+/// unsettled for a later resume; one the provider no longer has is settled as gone and its open
+/// findings are left for the round to ask once more. A reply the stage turned down writes no line,
+/// so a process killed before its follow-up batch reads that row again on resume and the round asks
+/// it again: counted once on each process's meter, nothing dropped or hidden.
+pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_>) -> HeldResume {
+    let mut out = HeldResume::default();
+    let Some(cp) = ctx.checkpoint else {
+        return out;
+    };
+    // (key, batch id) of every live row an earlier process already read: a key alone is reused
+    // by every process (rounds restart at r0), so it does not say the row was read.
+    let mut replayed: BTreeSet<(String, String)> = BTreeSet::new();
+    for line in cp.absorbed_in_order() {
+        if line.members.is_empty() {
+            continue;
+        }
+        let resp = response_from(&line);
+        if let Some(m) = ctx.meter {
+            m.record_stage(stage, &resp);
+        }
+        read_held_reply(
+            stage,
+            h,
+            ctx,
+            "A reply stored by an earlier process",
+            &line.members,
+            resp,
+        );
+        if let Some(batch_id) = line.batch_id {
+            replayed.insert((line.key, batch_id));
+        }
+    }
+    let Some(api) = ctx.batch else {
+        return out;
+    };
+    let mut records = cp.batches();
+    for i in 0..records.len() {
+        if records[i].settled || records[i].members.is_empty() {
+            continue;
+        }
+        if cancel_requested(ctx) {
+            out.cancelled = true;
+            break;
+        }
+        let record = records[i].clone();
+        let open_keys = |h: &H| -> Vec<String> {
+            record
+                .members
+                .values()
+                .flatten()
+                .filter(|m| h.member_state(m) == MemberState::Open)
+                .map(|m| m.key.clone())
+                .collect()
+        };
+        let ttl = ttl_from_name(&record.ttl);
+        let rctx = round_ctx(stage, ctx, api);
+        let progress = PollProgress {
+            stage,
+            done_before: 0,
+            total: None,
+        };
+        eprintln!(
+            "[camerata-server] stage {}: resuming batch {} ({} calls) by polling it, not \
+             submitting it again",
+            stage.label(),
+            record.batch_id,
+            record.members.len()
+        );
+        match poll_and_fetch(
+            &rctx,
+            &record.batch_id,
+            ttl,
+            ctx.settings.poll_interval,
+            Some(progress),
+            false,
+            true,
+        )
+        .await
+        {
+            Ok(rows) => {
+                read_held_rows(stage, h, ctx, &record, rows, ttl, &replayed);
+                records[i].settled = true;
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_at_provider(ctx, api, &record.batch_id).await;
+                out.cancelled = true;
+                break;
+            }
+            Err(failed) if batch_is_gone(&failed.error) => {
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let note = format!(
+                    "Batch {} no longer exists at the provider ({error}), so its results can \
+                     never be fetched. It was settled as gone and its {} unfinished finding(s) \
+                     were asked again. What the provider charged for the gone batch, if \
+                     anything, is not in this ledger.",
+                    record.batch_id,
+                    open_keys(h).len()
+                );
+                eprintln!("[camerata-server] {note}");
+                if let Some(m) = ctx.meter {
+                    m.record_note(note);
+                }
+                records[i].settled = true;
+            }
+            Err(failed) => {
+                // Accepted and running, or finished, at the provider. It is NOT submitted
+                // again: that would pay for the same findings twice. The record stays unsettled
+                // so a later resume polls it.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let keys = open_keys(h);
+                if let Some(m) = ctx.meter {
+                    m.record_note(format!(
+                        "batch {} ({} finding(s)) was submitted and its results could not be \
+                         retrieved: {error}. It was NOT submitted again, because it may still be \
+                         running and billed; a resume polls it.",
+                        record.batch_id,
+                        keys.len()
+                    ));
+                }
+                out.live.push(LiveHeld {
+                    batch_id: record.batch_id.clone(),
+                    keys,
+                    class: classify_pass_error(&failed.error),
+                    reason: format!(
+                        "batch {} was submitted but its results could not be retrieved \
+                         ({error}); it may still be running and billed, so it was not \
+                         submitted again",
+                        record.batch_id
+                    ),
+                    attempts: failure::attempts_of(&failed.error),
+                });
+            }
+        }
+        if let Err(e) = cp.save_batches(&records) {
+            checkpoint_trouble(ctx, "batch list", &e);
+        }
+    }
+    out
+}
+
+/// Read the rows of a fetched batch for the findings its record lists, each call once.
+fn read_held_rows<H: HeldRows>(
+    stage: Stage,
+    h: &mut H,
+    ctx: &StageCtx<'_>,
+    record: &BatchRecord,
+    rows: Vec<BatchResultRow>,
+    ttl: CacheTtl,
+    replayed: &BTreeSet<(String, String)>,
+) {
+    let mut by_cid: HashMap<String, BatchResultRow> =
+        rows.into_iter().map(|r| (r.custom_id.clone(), r)).collect();
+    let mut repricer = Repricer::new(ctx.model, ttl);
+    let mut unanswered = 0usize;
+    for (cid, members) in &record.members {
+        let key = record.items.get(cid).cloned().unwrap_or_default();
+        let row = by_cid.remove(cid);
+        // A row an earlier process read from this batch was read above; reading it again would
+        // absorb it twice. Another process's reply under the same key is not this row.
+        if replayed.contains(&(key.clone(), record.batch_id.clone())) {
+            continue;
+        }
+        match row {
+            Some(BatchResultRow {
+                response: Some(mut resp),
+                ..
+            }) => {
+                repricer.apply(&mut resp);
+                if let Some(m) = ctx.meter {
+                    m.record_stage(stage, &resp);
+                }
+                if let Some(cp) = ctx.checkpoint {
+                    let mut line = line_for(&key, &resp);
+                    line.members.clone_from(members);
+                    line.batch_id = Some(record.batch_id.clone());
+                    if let Err(e) = cp.record_absorbed(&line) {
+                        checkpoint_trouble(ctx, "absorbed item", &e);
+                    }
+                }
+                read_held_reply(
+                    stage,
+                    h,
+                    ctx,
+                    &format!("Batch {}", record.batch_id),
+                    members,
+                    resp,
+                );
+            }
+            other => {
+                if let Some(BatchResultRow {
+                    billed: Some(mut billed),
+                    ..
+                }) = other
+                {
+                    repricer.apply(&mut billed);
+                    if let Some(m) = ctx.meter {
+                        m.record_stage(stage, &billed);
+                    }
+                }
+                unanswered += members
+                    .iter()
+                    .filter(|m| h.member_state(m) == MemberState::Open)
+                    .count();
+            }
+        }
+    }
+    repricer.note(ctx.meter);
+    if unanswered > 0 {
+        let note = format!(
+            "Batch {} returned no usable result for {unanswered} finding(s); they are asked \
+             again in this run's rounds.",
+            record.batch_id
+        );
+        eprintln!("[camerata-server] {note}");
+        if let Some(m) = ctx.meter {
+            m.record_note(note);
+        }
+    }
+}
+
+/// Submit, poll and settle the stage's items as Message Batches, sending once more what a
+/// batch could not answer, until every item has ended.
+async fn run_batch<S>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    api: &dyn BatchApi,
+    book: &mut Book<S::Id>,
+    pending: Vec<Work<S::Id>>,
+) where
+    S: StageItems + Send,
+{
+    let mut clock = RateClock::new(ctx.settings.rate_limit_deadline);
+    let mut work = pending;
+    // A lazy stage builds and submits a window of items at a time; an eager one is one window.
+    let window = s.batch_window().max(1);
+    while !work.is_empty() && !book.cancelled {
+        let mut follow: Vec<Work<S::Id>> = Vec::new();
+        let mut rest = std::mem::take(&mut work).into_iter().peekable();
+        while rest.peek().is_some() && !book.cancelled {
+            let chunk: Vec<Work<S::Id>> = rest.by_ref().take(window).collect();
+            let ready = materialize(stage, &*s, ctx, book, chunk);
+            if ready.is_empty() {
+                continue;
+            }
+            follow.extend(batch_round(stage, s, ctx, api, book, ready, &mut clock).await);
+        }
+        work = follow;
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn batch_round<S>(
+    stage: Stage,
+    s: &mut S,
+    ctx: &StageCtx<'_>,
+    api: &dyn BatchApi,
+    book: &mut Book<S::Id>,
+    work: Vec<Work<S::Id>>,
+    clock: &mut RateClock,
+) -> Vec<Work<S::Id>>
+where
+    S: StageItems + Send,
+{
+    let eff = efficiency_of(ctx.meter);
+    let cids: Vec<String> = work
+        .iter()
+        .map(|w| custom_id_for(&w.id.to_string()))
+        .collect();
+    let ranges = plan_item_ranges(
+        cids.iter()
+            .map(String::as_str)
+            .zip(work.iter().filter_map(|w| w.req.as_deref())),
+        ctx.model,
+        ctx.settings.max_body_bytes,
+    );
+    if ranges.len() > 1 {
+        eprintln!(
+            "[camerata-server] stage {}: {} items do not fit one batch submission, splitting into \
+             {} sub-batches",
+            stage.label(),
+            work.len(),
+            ranges.len()
+        );
+    }
+    let mut follow: Vec<Work<S::Id>> = Vec::new();
+    for range in ranges {
+        let sub = &work[range.clone()];
+        let sub_cids = &cids[range];
+
+        // Nothing more is submitted once the job is cancelled.
+        if book.cancelled || cancel_requested(ctx) {
+            book.cancelled = true;
+            break;
+        }
+        // Nothing more is submitted after an outage stop or past the spend limit.
+        if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
+            let (class, why) = refusal_class(ctx);
+            for w in sub {
+                book.fail(&w.id, class, why, None);
+            }
+            if let Some(m) = ctx.meter {
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+            }
+            continue;
+        }
+        if let Some(m) = ctx.meter {
+            if let Some(why) = m.batch_refusal_reason(projected_input_usd(ctx, sub)) {
+                eprintln!("[camerata-server] {why}");
+                m.record_note(why.clone());
+                m.record_stage_not_run(ctx.repo, admission_name(stage), true);
+                for w in sub {
+                    book.fail(&w.id, FailureClass::SpendLimit, &why, None);
+                }
+                continue;
+            }
+        }
+
+        let ttl = batch_cache_ttl(eff, sub.len());
+        // The intent goes to the checkpoint BEFORE the submit: a kill after the provider accepts
+        // the batch and before its id is saved leaves this behind, and the resume says so.
+        let nonce = crate::checkpoint::new_submit_nonce();
+        if let Some(cp) = ctx.checkpoint {
+            let intent = SubmitIntent {
+                nonce: nonce.clone(),
+                items: sub_cids
+                    .iter()
+                    .zip(sub)
+                    .map(|(cid, w)| (cid.clone(), w.id.to_string()))
+                    .collect(),
+            };
+            if let Err(e) = cp.save_intents(&[intent]) {
+                checkpoint_trouble(ctx, "submit intent", &e);
+            }
+        }
+        let submitted: Result<String, anyhow::Error> = loop {
+            let items: Vec<BatchItem> = sub
+                .iter()
+                .zip(sub_cids)
+                .filter_map(|(w, cid)| {
+                    let req = w.req.as_deref()?;
+                    Some(crate::llm::build_batch_item(
+                        cid.clone(),
+                        req,
+                        ctx.model,
+                        ttl,
+                    ))
+                })
+                .collect();
+            let attempt = api.submit(items).await;
+            note_batch_call(ctx.meter, &attempt);
+            match attempt {
+                Ok(id) => {
+                    clock.cleared();
+                    break Ok(id);
+                }
+                Err(e) if classify_pass_error(&e) == FailureClass::RateLimited => {
+                    // Nothing was accepted: wait the provider's retry-after and submit again,
+                    // until the stage has been rate limited for the whole deadline.
+                    let now = Instant::now();
+                    clock.limited(now);
+                    if clock.passed(now) {
+                        break Err(e);
+                    }
+                    let wait = failure::retry_after_of(&e).unwrap_or(ctx.settings.rate_limit_pause);
+                    eprintln!(
+                        "[camerata-server] stage {}: batch submission rate limited, waiting {wait:?}",
+                        stage.label()
+                    );
+                    if let Some((jobs, id)) = ctx.job {
+                        jobs.touch_activity(id);
+                    }
+                    if sleep_or_cancel(ctx, wait).await {
+                        break Err(anyhow::Error::new(JobCancelled));
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+
+        let batch_id = match submitted {
+            Ok(id) => id,
+            Err(e) if e.is::<JobCancelled>() => {
+                clear_submit_intent(ctx);
+                book.cancelled = true;
+                break;
+            }
+            Err(e) => {
+                // Nothing was accepted, so nothing can be running: safe to send again.
+                clear_submit_intent(ctx);
+                let class = classify_pass_error(&e);
+                let attempts = failure::attempts_of(&e);
+                let reason = format!(
+                    "batch submission failed ({})",
+                    disclosable_error(&format!("{e:#}"))
+                );
+                for w in sub {
+                    if let Some(again) =
+                        resend_or_fail(ctx, book, w, class, &reason, attempts.clone())
+                    {
+                        follow.push(again);
+                    } else {
+                        report_progress(ctx, stage, book);
+                    }
+                }
+                continue;
+            }
+        };
+        eprintln!(
+            "[camerata-server] stage {}: submitted batch {batch_id} ({} items)",
+            stage.label(),
+            sub.len()
+        );
+        if let Some((jobs, id)) = ctx.job {
+            jobs.set_batch_id(id, &batch_id);
+        }
+        let mut record = BatchRecord {
+            batch_id: batch_id.clone(),
+            ttl: ttl_name(ttl).to_string(),
+            items: sub_cids
+                .iter()
+                .zip(sub)
+                .map(|(cid, w)| (cid.clone(), w.id.to_string()))
+                .collect(),
+            members: sub_cids
+                .iter()
+                .zip(sub)
+                .filter_map(|(cid, w)| {
+                    let members = s.members(&w.id);
+                    (!members.is_empty()).then(|| (cid.clone(), members))
+                })
+                .collect(),
+            settled: false,
+            nonce: Some(nonce),
+        };
+        let mut records = ctx
+            .checkpoint
+            .map(StageCheckpoint::batches)
+            .unwrap_or_default();
+        records.push(record.clone());
+        if let Some(cp) = ctx.checkpoint {
+            match cp.save_batches(&records) {
+                // The id is on file: the intent has done its job.
+                Ok(()) => clear_submit_intent(ctx),
+                Err(e) => checkpoint_trouble(ctx, "batch list", &e),
+            }
+        }
+
+        let rctx = round_ctx(stage, ctx, api);
+        let progress = PollProgress {
+            stage,
+            done_before: book.finished(),
+            total: Some(book.total),
+        };
+        match poll_and_fetch(
+            &rctx,
+            &batch_id,
+            ttl,
+            ctx.settings.poll_interval,
+            Some(progress),
+            false,
+            true,
+        )
+        .await
+        {
+            Ok(rows) => {
+                let members: Vec<(String, Work<S::Id>)> =
+                    sub_cids.iter().cloned().zip(sub.iter().cloned()).collect();
+                let origin = BatchOrigin {
+                    batch_id: &batch_id,
+                    ttl,
+                };
+                follow.extend(settle_rows(stage, s, ctx, book, rows, members, &origin));
+                record.settled = true;
+                if let Some(last) = records.last_mut() {
+                    last.settled = true;
+                }
+                if let Some(cp) = ctx.checkpoint {
+                    if let Err(e) = cp.save_batches(&records) {
+                        checkpoint_trouble(ctx, "batch list", &e);
+                    }
+                }
+            }
+            Err(failed) if failed.error.is::<JobCancelled>() => {
+                cancel_live_batch(ctx, api, book, &batch_id).await;
+                break;
+            }
+            Err(failed) => {
+                // The batch was accepted and is running or finished server-side. It is NOT
+                // submitted again: that would pay for the same items twice and orphan this id.
+                // The record stays unsettled so a resume polls it.
+                let error = disclosable_error(&format!("{:#}", failed.error));
+                let class = classify_pass_error(&failed.error);
+                if let Some(m) = ctx.meter {
+                    m.record_note(format!(
+                        "batch {batch_id} ({} item(s)) was submitted but its results could not be \
+                         retrieved: {error}. It was NOT submitted again, because it may still be \
+                         running and billed; a resume polls it.",
+                        sub.len()
+                    ));
+                }
+                for w in sub {
+                    book.fail(
+                        &w.id,
+                        class,
+                        &format!(
+                            "batch {batch_id} was submitted but its results could not be \
+                             retrieved ({error}); it may still be running and billed, so it was \
+                             not submitted again"
+                        ),
+                        Some(batch_id.clone()),
+                    );
+                    report_progress(ctx, stage, book);
+                }
+            }
+        }
+    }
+    follow
+}

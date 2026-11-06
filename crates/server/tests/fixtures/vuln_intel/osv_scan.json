@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0",
+  "results": [
+    {
+      "source": {"path": "/r/package-lock.json", "type": "lockfile"},
+      "packages": [
+        {
+          "package": {"name": "log4j-core", "version": "2.14.1", "ecosystem": "Maven"},
+          "vulnerabilities": [
+            {
+              "id": "GHSA-jfh8-c2jp-5v3q",
+              "aliases": ["CVE-2021-44228"],
+              "summary": "Remote code injection in Log4j",
+              "database_specific": {"severity": "MODERATE"},
+              "affected": [{"ranges": [{"events": [{"introduced": "2.0.0"}, {"fixed": "2.15.0"}]}]}]
+            }
+          ]
+        },
+        {
+          "package": {"name": "semver", "version": "7.5.1", "ecosystem": "npm"},
+          "vulnerabilities": [
+            {
+              "id": "GHSA-c2qf-rxjj-qqgw",
+              "aliases": ["CVE-2022-25883"],
+              "summary": "semver vulnerable to Regular Expression Denial of Service",
+              "database_specific": {"severity": "MODERATE"},
+              "affected": [{"ranges": [{"events": [{"introduced": "7.0.0"}, {"fixed": "7.5.2"}]}]}]
+            }
+          ]
+        },
+        {
+          "package": {"name": "time", "version": "0.1.45", "ecosystem": "crates.io"},
+          "vulnerabilities": [
+            {
+              "id": "RUSTSEC-2020-0071",
+              "aliases": [],
+              "summary": "Potential segfault in the time crate",
+              "database_specific": {"severity": "HIGH"}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

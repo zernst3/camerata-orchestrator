@@ -616,7 +616,7 @@ struct RegistryResp {
     models: Vec<RegistryEntryWire>,
 }
 
-async fn fetch_models() -> Option<ModelsResp> {
+pub(crate) async fn fetch_models() -> Option<ModelsResp> {
     let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::bff_base()))
         .await
         .ok()?

@@ -1,5 +1,5 @@
 id = "RUST-SQLX-MIGRATIONS-CHECKED-IN-1"
-version = 1
+version = 4
 title = "Check database migrations into version control; run migrations as part of application startup"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,16 +10,16 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Database migrations?"
+question = "How are database migrations stored and applied to the database?"
 default = "version-control-migrations-on-startup"
 why = "sqlx::migrate! allows migrations to be written as SQL files, checked into the repository, and applied via sqlx CLI during development or at application startup. When migrations are in version control, every code change that touches the database schema is paired with the migration, so reviewers see both together. If migrations are applied manually or stored outside version control, it is easy to miss a migration or to deploy code that assumes a schema that has not been applied. Running migrations at application startup (via sqlx::migrate!().run()) ensures the database is in the correct state before the application starts accepting requests. If a migration fails, the application can fail fast and log the error."
 
 [[option]]
 id = "version-control-migrations-on-startup"
 label = "Check in migrations; run at startup"
-directive = "Database migrations are written as SQL files in a migrations/ directory, checked into the repository, and executed at application startup via sqlx::migrate!().run() or an explicit migration runner. A missing or failed migration causes the application to fail to start."
+directive = "Database migrations are written as SQL files in a migrations/ directory, checked into the repository and executed at application startup via sqlx::migrate!().run() or an explicit migration runner. A missing or failed migration causes the application to fail to start."
 remediation = """
-Write the schema change as a SQL migration file under migrations/, commit it to the repository, and confirm sqlx::migrate!().run() (or the project's migration runner) executes it at application startup rather than applying it manually against the database. Verify by starting the application against a fresh database and confirming it applies the migration automatically and fails to start if a migration fails.
+Write the schema change as a SQL migration file under migrations/, commit it to the repository and confirm sqlx::migrate!().run() (or the project's migration runner) executes it at application startup rather than applying it manually against the database. Verify by starting the application against a fresh database and confirming it applies the migration automatically and fails to start if a migration fails.
 """
 why = "Version-controlled migrations keep schema changes paired with code and ensure consistency at deployment."
 
@@ -31,4 +31,4 @@ why = "Easy to miss: a code change that assumes a new schema can be deployed bef
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.migrate.html"
-title = "sqlx::migrate! — Embeds SQL migration files into the binary as a static Migrator"
+title = "sqlx::migrate!: Embeds SQL migration files into the binary as a static Migrator"

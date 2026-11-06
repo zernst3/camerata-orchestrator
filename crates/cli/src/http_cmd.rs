@@ -1,5 +1,5 @@
 //! HTTP-adapter subcommand handlers (Phase F, GAP-7; see
-//! `docs/plans/2026-07-01_backend-headless-core.md`).
+//! the backend headless-core notes).
 //!
 //! These are the CLI's own first-rung verbs over `camerata-client` — the SAME typed
 //! HTTP client the MCP adapter (`crates/mcp`, Phase E) and the Dioxus cockpit

@@ -1,7 +1,7 @@
 //! `QueryGrammarInjectionChecker`: LEXICAL (comment-aware, not a bare regex) detection of
 //! `SEC-NO-QUERY-GRAMMAR-INJECTION-1` — user-controlled data CONCATENATED or INTERPOLATED
 //! into a query/filter/expression GRAMMAR string, rather than passed as a bound argument. See
-//! `docs/plans/2026-09-29_codebase-inspection-hardening.md` D3 and
+//! the codebase-inspection hardening notes D3 and
 //! `crates/rules/principles/universal/sec-no-query-grammar-injection-1.toml` (P3 already
 //! grounded this rule id with CWE-943/74 + the PostgREST operators docs — this checker emits
 //! under that SAME id rather than inventing a new one, exactly as D1/D2 reuse their own
@@ -921,7 +921,7 @@ mod tests {
         assert!(rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).is_empty());
     }
 
-    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+    // ── mutation-gap tests (the master sequence plan section 2b) ────────
 
     /// The scan gates each checker on its interest globs: if they stopped matching, the checker
     /// would silently never run on any repo.

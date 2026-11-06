@@ -53,7 +53,7 @@ pub mod prompt;
 mod tests;
 
 pub use cache::{cache_key, CachedVerdict, VerdictCache, MAX_CACHED_VERDICTS};
-use prompt::{batch_prompt, parse_verdicts, system_prompt, Verdict};
+use prompt::{batch_prompt, candidate_json, parse_verdicts, system_prompt, Verdict};
 
 /// Candidates per model call.
 pub const BATCH_SIZE: usize = 16;
@@ -64,20 +64,15 @@ const TOKENS_PER_CANDIDATE: u32 = 80;
 /// The pass name a failed batch is disclosed under (`FailedPass::pass`).
 pub const FAILED_PASS_NAME: &str = "clone-candidate judgment";
 
-/// Resolve the model the clone judge runs on: the caller's explicit pick, else
-/// `CAMERATA_CLONE_JUDGE_MODEL`, else the project's fast tier primary
-/// (`camerata_fleet::tier::default_fast_model`). Never the audit model by default: this is
+/// Resolve the model the clone judge runs on: the caller's explicit pick, else the fast tier's
+/// built-in primary (`camerata_fleet::tier::default_fast_model`, Haiku 5.5). Never the
+/// environment. Never the audit model by default: this is
 /// classification over bounded structured input, the fast band of the tier map
 /// (`docs/decisions/2026-06-20_deterministic_model_tiering.md`).
 pub fn resolve_clone_judge_model(caller_pick: Option<&str>) -> String {
     caller_pick
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_CLONE_JUDGE_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
         .unwrap_or_else(camerata_fleet::tier::default_fast_model)
 }
 
@@ -112,7 +107,8 @@ impl JudgeCounts {
 /// What a judged scan hands back.
 #[derive(Debug, Clone, Default)]
 pub struct JudgeOutcome {
-    /// One finding per confirmed candidate.
+    /// One finding per site of each confirmed candidate (a candidate written in four places
+    /// is four rows).
     pub findings: Vec<Finding>,
     /// At most one `not_assessed` row per rule that left candidates undecided.
     pub not_assessed: Vec<Finding>,
@@ -185,6 +181,21 @@ pub async fn judge_clone_candidates(
         ui_files: req.set.index.ui_files,
         ..JudgeOutcome::default()
     };
+    // One delimiter token for the whole judge run (every rule, every batch), drawn so that it
+    // occurs in none of the excerpts it will frame. The verdict cache key does not include it.
+    let nonce = if llm.is_some() {
+        let texts: Vec<String> = req
+            .set
+            .by_rule
+            .values()
+            .flatten()
+            .map(|c| candidate_json(&judge_input(c, req.files)))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        crate::prompt_frame::FrameNonce::generate_avoiding(&refs)
+    } else {
+        crate::prompt_frame::FrameNonce::generate()
+    };
     for rule in CloneRule::ALL {
         let Some(candidates) = req.set.by_rule.get(&rule) else {
             continue; // not armed
@@ -210,6 +221,7 @@ pub async fn judge_clone_candidates(
         let judged = judge_rule(
             llm,
             &req,
+            &nonce,
             rule,
             candidates,
             cache,
@@ -226,7 +238,7 @@ pub async fn judge_clone_candidates(
             if let Some(verdict) = judged.get(&candidate.id) {
                 if verdict.word == rule.affirmative_word() {
                     counts.confirmed += 1;
-                    outcome.findings.push(findings::confirmed_finding(
+                    outcome.findings.extend(findings::confirmed_findings(
                         req.repo,
                         candidate,
                         &verdict.concept,
@@ -260,6 +272,7 @@ pub async fn judge_clone_candidates(
 async fn judge_rule(
     llm: Option<&dyn LlmPort>,
     req: &JudgeRequest<'_>,
+    nonce: &crate::prompt_frame::FrameNonce,
     rule: CloneRule,
     candidates: &[Candidate],
     cache: &mut VerdictCache,
@@ -291,18 +304,25 @@ async fn judge_rule(
             _ => pending.push(candidate),
         }
     }
-    let system = system_prompt(rule);
+    let system = crate::prompt_frame::with_untrusted_clause(system_prompt(rule), nonce);
     let text = rule_text(rule, req.corpus);
     let mut first_failure: Option<String> = None;
     for batch in pending.chunks(BATCH_SIZE) {
         let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
-        let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs);
-        let mut request = LlmRequest::new(prompt)
+        let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
+        // The judge always names its model (the transport refuses a request that names none).
+        let request = LlmRequest::new(prompt)
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
-            .with_cache_prefix_len(prefix_len);
-        if !req.judge_model.is_empty() {
-            request = request.with_model(req.judge_model.to_string());
+            .with_cache_prefix_len(prefix_len)
+            .with_model(req.judge_model.to_string());
+        // Design A7: every model request passes the size check before it is sent. One that does
+        // not fit the model's window is refused here, never cut and never sent; it is disclosed
+        // as the failed part below and its candidates stay undecided (not assessed, not clean).
+        if let Err(too_large) = crate::ai_audit::request_budget::ensure_request_fits(&request) {
+            first_failure.get_or_insert_with(|| too_large.to_string());
+            append(feedback, session, &format!("batch not sent: {too_large}"));
+            continue;
         }
         // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
         let mut on_delta = |_: &str| {};
@@ -348,6 +368,11 @@ async fn judge_rule(
             repo: req.repo.to_string(),
             pass: FAILED_PASS_NAME.to_string(),
             reason: format!("{}: {reason}", rule.id()),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         });
     }
     judged
@@ -522,18 +547,19 @@ fn finish_transcript(
 /// A rule is `ran` only when every candidate the producer found got a definite verdict (a rule
 /// with nothing found ran clean). Otherwise it is recorded as not run with the reason, and the
 /// matching coverage note is queued so the disclosure survives whichever later pass settles
-/// `ran` (the semantic pass reads every rule too). Findings counted are the confirmed ones.
-pub fn record_in_ledger(ledger: &mut ScanLedger, outcome: &JudgeOutcome) {
+/// `ran` (the semantic pass reads every rule too). Findings counted are the rows emitted, one
+/// per site of each confirmed candidate, so the count agrees with the rows the report holds.
+pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutcome) {
     for (rule, counts) in &outcome.counts {
         let id = rule.id();
         let fully = counts.fully_assessed() && (outcome.model_available || counts.found == 0);
         let skip_reason = if fully {
             None
         } else if !outcome.model_available {
-            ledger.note_advisory_unavailable_rule(id);
+            ledger.note_advisory_unavailable_rule(repo, id);
             Some(crate::scan_ledger::ADVISORY_UNAVAILABLE_NOTE.to_string())
         } else {
-            ledger.note_advisory_partial_rule(id);
+            ledger.note_advisory_partial_rule(repo, id);
             Some(format!(
                 "{FAILED_PASS_NAME} incomplete: {} of {} candidate sites were not assessed this \
                  scan",
@@ -541,13 +567,15 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, outcome: &JudgeOutcome) {
                 counts.found
             ))
         };
+        let rows = outcome.findings.iter().filter(|f| f.rule_id == id).count();
         ledger.record_rule(
+            repo,
             id,
             RuleTier::Architectural,
             fully,
             skip_reason,
             outcome.files_read as usize,
-            counts.confirmed as usize,
+            rows,
         );
     }
 }

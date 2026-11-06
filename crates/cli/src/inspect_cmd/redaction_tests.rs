@@ -36,7 +36,7 @@ fn load_prior_manifest_rejects_v1_and_deletes_it() {
     let repo = tempfile::tempdir().expect("repo dir");
 
     let p = planted(SecretShape::SupabaseSecretKey);
-    save_manifest(repo.path(), &v1_manifest(&p.text));
+    save_manifest(&manifest_cache_path(repo.path()), &v1_manifest(&p.text));
     let cache = manifest_cache_path(repo.path());
     assert!(
         std::fs::read_to_string(&cache)
@@ -46,7 +46,7 @@ fn load_prior_manifest_rejects_v1_and_deletes_it() {
     );
 
     assert!(
-        load_prior_manifest(repo.path()).is_none(),
+        load_prior_manifest(&manifest_cache_path(repo.path())).is_none(),
         "a v1 manifest is never reused"
     );
     assert!(
@@ -64,7 +64,7 @@ fn load_prior_manifest_keeps_a_current_manifest() {
     let repo = tempfile::tempdir().expect("repo dir");
 
     let current = camerata_server::scan_cache::ManifestBuilder::new().finish();
-    save_manifest(repo.path(), &current);
-    assert!(load_prior_manifest(repo.path()).is_some());
+    save_manifest(&manifest_cache_path(repo.path()), &current);
+    assert!(load_prior_manifest(&manifest_cache_path(repo.path())).is_some());
     assert!(manifest_cache_path(repo.path()).exists());
 }

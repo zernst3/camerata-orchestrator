@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-2"
-version = 1
+version = 3
 title = "No serde derives on the SeaORM Model (load-bearing)"
 domain = "rust:seaorm"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: No serde derives on the SeaORM Model (load-bearing)?"
+question = "How do SeaORM Models relate to Serialize and Deserialize when data is encoded to JSON?"
 default = "no-serde-derives-on-the-seaorm-model-load-bearing"
 why = "The compiler then enforces the hexagonal boundary at compile time: code physically cannot JSON-encode a Model directly. Deriving serde on the Models removes that compile-time enforcement and lets code encode Models directly to JSON, which breaks the hexagonal boundary the rule is paying for. Allowing per-entity opt-in to serde derives moves the decision to the wrong level: whether a payload shape gets serialized is a per-endpoint DTO question, not a per-Model question, and the per-Model opt-in collapses those two decisions into one."
 
@@ -37,4 +37,4 @@ why = "Moves the decision to the wrong level: whether a payload shape gets seria
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — Entity Model definition; no Serialize/Deserialize by default"
+title = "sea_orm::DeriveEntityModel: Entity Model definition; no Serialize/Deserialize by default"

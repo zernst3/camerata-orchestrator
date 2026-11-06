@@ -22,12 +22,7 @@ use camerata_server::report_export::{
 use serde_json::Value;
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// One high-severity finding per fixture shape, each carrying its secret in the snippet, the
@@ -52,11 +47,19 @@ fn report_with_one_finding_per_shape() -> SealedReport {
         })
         .collect();
     ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -75,6 +78,7 @@ fn report_with_one_finding_per_shape() -> SealedReport {
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "acme/portal".to_string(),
                 sha: Some("abcdef1234567890".to_string()),
@@ -92,6 +96,7 @@ fn report_with_one_finding_per_shape() -> SealedReport {
             audited_rule_ids: vec!["SEC-NO-VENDOR-TOKEN-1".to_string()],
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: None,
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -101,6 +106,14 @@ fn report_with_one_finding_per_shape() -> SealedReport {
         ledger: camerata_server::scan_ledger::ScanLedger::new(),
     }
     .seal()
+}
+
+/// Report options naming the synthetic client every export needs.
+fn client_options() -> ReportOptions {
+    ReportOptions {
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    }
 }
 
 /// Whether any line of `value` is present in `text` (a PEM body leaks if any one line does).
@@ -115,9 +128,13 @@ async fn pdf_text_contains_the_redacted_form_and_never_the_value() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &ReportOptions::default())
-        .await
-        .expect("the package assembles");
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
     let pdf = package.pdf.clone();
     let released = release(package).expect("redacted findings clear the gate");
 
@@ -166,7 +183,11 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
     // extraction approach CAN fail (a check that can never fail proves nothing), and that the
     // data.json check is the load-bearing one: a raw value in data.json is a raw value in the PDF.
     let sealed = report_with_one_finding_per_shape();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
     let mut data: Value =
         serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
     let raw =
@@ -226,9 +247,13 @@ async fn the_rendered_pdf_text_names_no_review_time_data() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &ReportOptions::default())
-        .await
-        .expect("the package assembles");
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
     let text = pdf_extract::extract_text_from_mem(&package.pdf).expect("the PDF's text extracts");
     assert!(
         text.len() > 200,
@@ -250,7 +275,11 @@ async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
+    let json = build_report_json(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &ReportOptions::default(),
+    );
     let mut data: Value =
         serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
     set_every_snippet(&mut data, "reviewed_by");
@@ -261,5 +290,48 @@ async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
     assert!(
         internal_terms_in(&text).contains(&"reviewed_by"),
         "a listed name rendered into the PDF must be found in its text"
+    );
+}
+
+/// Confidentiality (2026-10-24 decision): every rendered page carries "Confidential, prepared
+/// for <client> on <date>", and the first page carries the handling note. Read from the
+/// rendered text, page by page, so a footer that stops rendering on some pages is caught.
+#[tokio::test]
+async fn every_rendered_page_carries_the_confidentiality_line() {
+    if !typst_on_path() {
+        eprintln!("skipping every_rendered_page_carries_the_confidentiality_line: no typst");
+        return;
+    }
+    let sealed = report_with_one_finding_per_shape();
+    let package = build_product_package(
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &client_options(),
+    )
+    .await
+    .expect("the package assembles");
+    let line = package.report_json.confidentiality.line.clone();
+    assert_eq!(
+        line,
+        "Confidential, prepared for Example Client Ltd on 21 October 2026"
+    );
+    let pages =
+        pdf_extract::extract_text_from_mem_by_pages(&package.pdf).expect("the PDF's text extracts");
+    assert!(pages.len() > 3, "anti-vacuity: a multi-page report");
+    // Extraction may break a long footer line or drop its spaces; compare without whitespace.
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    for (i, page) in pages.iter().enumerate() {
+        assert!(
+            squash(page).contains(&squash(&line)),
+            "page {} lacks the confidentiality line: {page:?}",
+            i + 1
+        );
+    }
+    assert!(
+        squash(&pages[0]).contains(&squash(
+            "This report is confidential and was prepared for Example Client Ltd only."
+        )),
+        "the first page lacks the handling note: {:?}",
+        pages[0]
     );
 }

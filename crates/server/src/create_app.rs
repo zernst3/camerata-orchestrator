@@ -1,5 +1,5 @@
 //! `POST /api/apps` — Part 2 of the Rust-fullstack scaffolder
-//! (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`): make `camerata-scaffold`
+//! (the product-owner vibe-mode design notes): make `camerata-scaffold`
 //! (Part 1) invokable, and auto-create the GitHub repo for the scaffolded app.
 //!
 //! Flow ([`run_create_app`]):
@@ -46,17 +46,28 @@ pub struct CreatedRepo {
 /// remote: turn the scaffolded directory into a git repo, commit everything, and push
 /// it. A seam separate from the GitHub HTTP call because these are real
 /// subprocess/filesystem effects an HTTP fake can't intercept.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait RepoPusher: Send + Sync {
     /// Initialize `local_dir` as a git repo (if it isn't already one), commit
     /// everything, point `origin` at `repo_full_name`'s tokenless URL, and push
     /// `main` using `token` for the transient authenticated push only.
-    async fn init_commit_and_push(
-        &self,
-        local_dir: &Path,
-        repo_full_name: &str,
-        token: &str,
-    ) -> anyhow::Result<()>;
+    fn init_commit_and_push<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+        &'life0 self,
+        local_dir: &'life1 Path,
+        repo_full_name: &'life2 str,
+        token: &'life3 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// The live git pusher: shells out to the system `git` via `crate::workspace`'s

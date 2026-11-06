@@ -1,5 +1,5 @@
 id = "FIREBASE-STORAGE-RULES-OPEN-1"
-version = 2
+version = 3
 title = "Storage rules let only the owner or an authorised role read and write private files, and public files sit under an explicit public path"
 domain = "firebase"
 layer = "platform"
@@ -31,7 +31,7 @@ why = "A Storage rule that does not consider request.auth is a public rule, in F
 id = "private-files-are-readable-only-by-authorized-users"
 label = "Storage rules grant reads and writes on private files only to the owner or an authorized role, and public files sit under an explicit public path"
 directive = "Storage rules for private files check the caller against the owner (request.auth.uid == userId) or a role. Files that are meant to be public sit under an explicit public folder with its own rule, and no rule outside that folder reads or writes on an unconditional or signed in only condition."
-remediation = "On `<path>`, replace the unconditional or signed in only condition with an owner check (`request.auth.uid == userId`) for the folder that holds per user files, and move files that really are public under an explicit public folder with its own rule. Deploy and confirm that an unauthenticated request and a second signed in user cannot fetch or upload to `<path>`."
+remediation = "On `<path>`, replace the unconditional or signed in only condition with an owner check (`request.auth.uid == userId`) for the folder that holds per user files and move files that really are public under an explicit public folder with its own rule. Deploy and confirm that an unauthenticated request and a second signed in user cannot fetch or upload to `<path>`."
 effort = "low"
 why = "Owner checks keep private uploads private, and an explicit public folder makes the intent of every open rule visible."
 

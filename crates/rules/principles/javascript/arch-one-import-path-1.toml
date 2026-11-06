@@ -1,6 +1,6 @@
 id = "ARCH-ONE-IMPORT-PATH-1"
-version = 1
-title = "A symbol has one import path — code outside a barrel imports it from one home, not from both the barrel and the file that defines it"
+version = 4
+title = "A symbol has one import path: code outside a barrel imports it from one home, not from both the barrel and the file that defines it"
 domain = "javascript"
 layer = "language"
 enforcement = "architectural"
@@ -23,15 +23,15 @@ qualifies = "Deterministically checkable from the repository's module graph, wit
 
 [[sources]]
 url = "docs/design/2026-10-21_w29-detector-implementation.md"
-title = "Design: the W29 detector layer — ARCH-ONE-IMPORT-PATH-1, the canonical-symbol algorithm and its traps"
+title = "Design notes: how the check follows imports and re-exports to the file that defines a symbol, and the cases it must not report"
 
 [[sources]]
 url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
-title = "Corpus work order: consistency rules, section 7 — a symbol has one import path"
+title = "Project policy: a symbol has one import path"
 
 [[sources]]
-url = "docs/OVERNIGHT_DECISIONS.md"
-title = "Decisions log — DECISIONS MADE, 2026-10-21: a split between a symbol's origin file and an index barrel is a violation"
+url = "docs/decisions/2026-10-28_consistency_rules_scope.md"
+title = "Decision record: a split between a symbol's defining file and an index barrel is a violation"
 
 [decision]
 question = "When a symbol is both defined in one file and re-exported from a barrel, including an index file, which import path does the code outside that barrel's folder use for it?"

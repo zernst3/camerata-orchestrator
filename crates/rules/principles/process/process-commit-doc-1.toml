@@ -1,5 +1,5 @@
 id = "PROCESS-COMMIT-DOC-1"
-version = 1
+version = 2
 title = "Commits carry a substantive body documenting the change"
 domain = "process"
 layer = "universal"
@@ -24,7 +24,7 @@ title = "How to write a Git commit message (body conventions)"
 
 [[sources]]
 url = "https://commitlint.js.org/"
-title = "commitlint — lint commit messages against a convention (CI-wirable)"
+title = "commitlint: lint commit messages against a convention (CI-wirable)"
 linter = "commitlint"
 
 [decision]
@@ -34,7 +34,7 @@ why = "A commit body is where the WHY of a change is recorded — the reasoning 
 [[option]]
 id = "require-substantive-commit-body"
 label = "Require a substantive commit body (and optional story-id)"
-directive = "Every commit carries a substantive body — the lines after the subject — explaining what changed and why rather than restating the subject; when the project requires it, the body also references the work-item id."
+directive = "Every commit carries a substantive body, the lines after the subject, explaining what changed and why rather than restating the subject; when the project requires it, the body also references the work-item id."
 remediation = """
 Add a substantive body to the commit (the lines after the subject) that meets the project's configured minimum length, and include the story-id reference in the configured format if the project requires one. Verify by attempting to commit with only a subject line and no body and confirming the CI check rejects it.
 """

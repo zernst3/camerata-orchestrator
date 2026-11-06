@@ -13,7 +13,7 @@
 //!
 //! Local-first by design: this crate only ever spawns a subprocess on the same machine.
 //! Cloud tunneling (sharing a preview URL off-box) is a later phase per the design doc
-//! (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`) and is deliberately out of
+//! (the product-owner vibe-mode design notes) and is deliberately out of
 //! scope here.
 
 pub mod parser;

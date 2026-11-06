@@ -161,7 +161,7 @@ pub fn AgentActivity(run_id: String) -> Element {
                                             }
                                         }
                                     } else {
-                                        pre { class: "agent-output", "{a.output}" }
+                                        AgentOutput { output: a.output.clone() }
                                     }
                                 }
                             }
@@ -173,9 +173,52 @@ pub fn AgentActivity(run_id: String) -> Element {
     }
 }
 
+/// A model's streamed output: the text as it came, and where an attempt was superseded by a retry
+/// a short muted note instead of the raw marker line.
+#[component]
+fn AgentOutput(output: String) -> Element {
+    rsx! {
+        for (i, part) in camerata_ui_core::transcript::split_output(&output).into_iter().enumerate() {
+            match part {
+                camerata_ui_core::transcript::OutputPart::Text(text) => rsx! {
+                    pre { key: "{i}", class: "agent-output", "{text}" }
+                },
+                camerata_ui_core::transcript::OutputPart::Superseded => rsx! {
+                    p { key: "{i}", class: "agent-superseded-note",
+                        "{camerata_ui_core::transcript::SUPERSEDED_NOTE}"
+                    }
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::empty_output_label;
+    use super::{empty_output_label, AgentOutput};
+    use dioxus::prelude::*;
+
+    #[test]
+    fn a_superseded_attempt_renders_as_a_muted_note_not_the_raw_line() {
+        fn app() -> Element {
+            let output = format!(
+                "PARTIAL{}RECOVERED",
+                camerata_api_types::llm::CLI_ATTEMPT_SUPERSEDED
+            );
+            rsx! { AgentOutput { output } }
+        }
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("PARTIAL"), "{html}");
+        assert!(html.contains("RECOVERED"), "{html}");
+        assert!(html.contains("agent-superseded-note"), "{html}");
+        assert!(
+            html.contains("retrying; the text above was superseded"),
+            "{html}"
+        );
+        assert!(!html.contains("came from an attempt that failed"), "{html}");
+    }
 
     // Bug: the drawer got stuck reading "waiting…" forever after a scan finished, because
     // the old label logic only special-cased `running` and fell through to "waiting…" for

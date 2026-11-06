@@ -41,9 +41,13 @@ use camerata_core::{AgentDriver, Role, RuleId};
 /// `delegate` tool refuses.
 pub const DELEGATE_ENABLED_ENV: &str = "CAMERATA_DELEGATE_ENABLED";
 
-/// Env carrying the per-tier model ids as a JSON object, e.g.
-/// `{"fast":"claude-haiku-...","balanced":"claude-sonnet-...","strongest":"claude-opus-..."}`.
-pub const DELEGATE_MODELS_ENV: &str = "CAMERATA_DELEGATE_MODELS";
+/// The command-line argument that carries the per-tier model ids as a JSON object, e.g.
+/// `--delegate-models {"fast":"claude-haiku-...","balanced":"claude-sonnet-...","strongest":"claude-opus-..."}`.
+///
+/// The models come from the open project's tier map, written into the lead's MCP config by
+/// the fleet. They travel as an argument, not an environment variable: no model is ever
+/// chosen from the environment.
+pub const DELEGATE_MODELS_ARG: &str = "--delegate-models";
 
 /// Env carrying the absolute path to the built `camerata-gateway` binary, used to
 /// wire each delegate child's OWN gateway instance.
@@ -209,6 +213,13 @@ impl OrchestratorConfig {
     /// malformed required field fails CLOSED to `None` (delegate stays disabled)
     /// rather than spawning an unconfigured child.
     pub fn from_env() -> Option<Self> {
+        Self::from_env_and_args(std::env::args().skip(1))
+    }
+
+    /// [`Self::from_env`] with the process arguments passed in (so the model argument is
+    /// testable). The tier models are read ONLY from `--delegate-models <json>` (or
+    /// `--delegate-models=<json>`), never from the environment.
+    pub fn from_env_and_args(args: impl IntoIterator<Item = String>) -> Option<Self> {
         // Gate on the explicit enable flag first.
         let enabled = std::env::var(DELEGATE_ENABLED_ENV)
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -217,7 +228,7 @@ impl OrchestratorConfig {
             return None;
         }
 
-        let models_json = std::env::var(DELEGATE_MODELS_ENV).ok()?;
+        let models_json = models_json_from_args(args)?;
         let models: DelegateModels = serde_json::from_str(&models_json).ok()?;
 
         let worktree_root = std::env::var_os(WORKTREE_ROOT_ENV).map(PathBuf::from)?;
@@ -254,6 +265,20 @@ impl OrchestratorConfig {
     }
 }
 
+/// The JSON that follows [`DELEGATE_MODELS_ARG`] (as the next argument or after `=`), if any.
+fn models_json_from_args(args: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == DELEGATE_MODELS_ARG {
+            return args.next();
+        }
+        if let Some(rest) = arg.strip_prefix(&format!("{DELEGATE_MODELS_ARG}=")) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
 /// The result of a `delegate` call, as returned to the orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegateError {
@@ -288,7 +313,7 @@ impl std::fmt::Display for DelegateError {
 /// - [`WORKTREE_ROOT_ENV`] → the shared worktree jail,
 /// - [`DELEGATE_DEPTH_ENV`] → `depth + 1`,
 ///
-/// and **crucially WITHOUT** [`DELEGATE_ENABLED_ENV`] / [`DELEGATE_MODELS_ENV`] /
+/// and **crucially WITHOUT** [`DELEGATE_ENABLED_ENV`] / [`DELEGATE_MODELS_ARG`] /
 /// [`GATEWAY_BIN_ENV`], so the child boots in NON-orchestrator mode and never
 /// registers `delegate`. The server key is [`MCP_SERVER_KEY`] so the child's
 /// governed write tool is exactly [`GATED_WRITE_TOOL`].
@@ -774,8 +799,42 @@ mod tests {
         assert_eq!(env[DELEGATE_DEPTH_ENV], "1");
         // ...but NONE of the orchestrator-mode enablers, so it never registers delegate.
         assert!(env.get(DELEGATE_ENABLED_ENV).is_none());
-        assert!(env.get(DELEGATE_MODELS_ENV).is_none());
+        assert!(v["mcpServers"][MCP_SERVER_KEY]["args"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true));
         assert!(env.get(GATEWAY_BIN_ENV).is_none());
+    }
+
+    #[test]
+    fn the_tier_models_come_only_from_the_models_argument() {
+        let json = r#"{"fast":"f","balanced":"b","strongest":"s"}"#.to_string();
+        let sep = vec![DELEGATE_MODELS_ARG.to_string(), json.clone()];
+        assert_eq!(models_json_from_args(sep).as_deref(), Some(json.as_str()));
+        let eq = vec![format!("{DELEGATE_MODELS_ARG}={json}")];
+        assert_eq!(models_json_from_args(eq).as_deref(), Some(json.as_str()));
+        assert_eq!(models_json_from_args(Vec::<String>::new()), None);
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_models_environment_variable_is_ignored() {
+        // The old channel: a model map in the environment. It must change nothing.
+        let json = r#"{"fast":"f","balanced":"b","strongest":"s"}"#;
+        let _enabled = camerata_test_env::EnvGuard::set(DELEGATE_ENABLED_ENV, "1");
+        let _models = camerata_test_env::EnvGuard::set("CAMERATA_DELEGATE_MODELS", json);
+        let _root = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, "/work/crate");
+        let _bin = camerata_test_env::EnvGuard::set(GATEWAY_BIN_ENV, "/bin/camerata-gateway");
+        assert!(
+            OrchestratorConfig::from_env_and_args(Vec::<String>::new()).is_none(),
+            "no models argument: orchestrator mode stays off, whatever the environment says"
+        );
+        let with_arg = OrchestratorConfig::from_env_and_args(vec![
+            DELEGATE_MODELS_ARG.to_string(),
+            r#"{"fast":"arg-f","balanced":"arg-b","strongest":"arg-s"}"#.to_string(),
+        ])
+        .expect("the argument enables it");
+        assert_eq!(with_arg.models.balanced, "arg-b");
     }
 
     #[test]

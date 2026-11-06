@@ -318,11 +318,21 @@ pub fn encode<T: serde::Serialize>(value: &T) -> Result<String, PersistenceError
 ///
 /// Every method is async (RUST-DOMAIN-5). The trait is object-safe and
 /// `Send + Sync` so it can be stored in `Arc<dyn ArtifactStore>`.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait ArtifactStore: Send + Sync {
     /// Create or migrate the `artifact_revisions` schema. Idempotent: safe to
     /// call on every startup.
-    async fn migrate_artifacts(&self) -> Result<(), PersistenceError>;
+    fn migrate_artifacts<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), PersistenceError>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 
     /// Append one revision to the log and return the fully-populated stored row.
     ///
@@ -331,53 +341,106 @@ pub trait ArtifactStore: Send + Sync {
     /// transaction so concurrent appends cannot produce duplicate version numbers.
     /// The unique index on (project_id, kind, artifact_id, version) is the final
     /// backstop.
-    async fn record_revision(
-        &self,
-        new: &NewRevision,
-    ) -> Result<ArtifactRevision, PersistenceError>;
+    fn record_revision<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        new: &'life1 NewRevision,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ArtifactRevision, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// The latest live (non-deleted) revision for each artifact of the given
     /// kind within the project, ordered by `artifact_id ASC`.
     ///
     /// An artifact whose most recent revision has `op = 'delete'` is excluded.
-    async fn current(
-        &self,
-        project_id: &str,
+    fn current<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        project_id: &'life1 str,
         kind: ArtifactKind,
-    ) -> Result<Vec<ArtifactRevision>, PersistenceError>;
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<ArtifactRevision>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// The single latest revision for one artifact.
     ///
     /// Returns `None` if the artifact has never been created, or if its most
     /// recent revision is a deletion.
-    async fn current_artifact(
-        &self,
-        project_id: &str,
+    fn current_artifact<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        project_id: &'life1 str,
         kind: ArtifactKind,
-        artifact_id: &str,
-    ) -> Result<Option<ArtifactRevision>, PersistenceError>;
+        artifact_id: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<ArtifactRevision>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 
     /// Every revision for one artifact ordered by `version ASC`.
     ///
     /// Includes all operations (create, update, delete) so the caller has the
     /// full audit trail.
-    async fn history(
-        &self,
-        project_id: &str,
+    fn history<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        project_id: &'life1 str,
         kind: ArtifactKind,
-        artifact_id: &str,
-    ) -> Result<Vec<ArtifactRevision>, PersistenceError>;
+        artifact_id: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<ArtifactRevision>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 
     /// A specific historical revision by its version number (time-travel).
     ///
     /// Returns `None` if no revision exists at that version for the artifact.
-    async fn revision_at(
-        &self,
-        project_id: &str,
+    fn revision_at<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        project_id: &'life1 str,
         kind: ArtifactKind,
-        artifact_id: &str,
+        artifact_id: &'life2 str,
         version: i64,
-    ) -> Result<Option<ArtifactRevision>, PersistenceError>;
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<ArtifactRevision>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ---------------------------------------------------------------------------

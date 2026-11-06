@@ -1,6 +1,6 @@
 id = "ARCH-API-VERSIONING-1"
-version = 1
-title = "API versioning scheme: URL prefix, request header, in-place evolution, or content negotiation"
+version = 3
+title = "API versioning scheme: URL prefix, request header, in-place evolution or content negotiation"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://github.com/microsoft/api-guidelines/blob/master/Guidelines.md"
-title = "Microsoft REST API Guidelines — Versioning"
+title = "Microsoft REST API Guidelines: Versioning"
 
 [[sources]]
 url = "https://docs.stripe.com/api/versioning"
-title = "Stripe — API Versioning"
+title = "Stripe: API Versioning"
 
 [decision]
 question = "What versioning scheme does the project's API adopt: a version in the URL prefix, a version selected by request header, in-place evolution with no version segment, or content negotiation across representations?"
@@ -24,7 +24,7 @@ why = "All four are real ways to evolve an API, and the right one follows from w
 [[option]]
 id = "api-versions-live-in-the-url-prefix-changes-within-a-version-are-additive-only"
 label = "API versions live in the URL prefix; changes within a version are additive only"
-directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs, and so on. Within a published version, no field is renamed, removed, or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
+directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs and so on. Within a published version, no field is renamed, removed or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
 remediation = """
 Add an explicit version segment to the endpoint's URL (for example /v1/... or /v2/...) instead of changing the existing published shape in place. Keep the older version available and unchanged; make only additive changes (new optional fields, new endpoints) within a version. Verify by confirming the endpoint's URL carries a version prefix and that existing clients on the prior version still get the prior response shape.
 """
@@ -62,7 +62,7 @@ id = "the-api-has-no-version-segment-at-all-and-evolves-in-place"
 label = "the API has no version segment at all and evolves in place"
 directive = "The API has no version segment at all and evolves in place; each change applies to all current clients, and breaking changes are coordinated directly with the consumers rather than isolated behind a version."
 remediation = """
-Remove any version segment or header from the endpoint and coordinate upcoming breaking changes directly with the known consumers before shipping them, rather than isolating the change behind a version. Verify by confirming the endpoint has no version identifier in its URL, headers, or query parameters.
+Remove any version segment or header from the endpoint and coordinate upcoming breaking changes directly with the known consumers before shipping them, rather than isolating the change behind a version. Verify by confirming the endpoint has no version identifier in its URL, headers or query parameters.
 """
 why = "The lightest scheme, and the right fit when the server and its only client ship together as one product (one team, one deployable): a coordinated change costs nothing because both sides deploy at once, and a version segment would be pure ceremony. It asks that every consumer move in lockstep with the server, so it stops fitting once the API gains consumers that upgrade on their own cadence."
 

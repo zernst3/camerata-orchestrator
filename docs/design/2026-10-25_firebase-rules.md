@@ -1270,7 +1270,7 @@ and settings that exist only in the Firebase console are not visible to a reposi
 9. **Functions discovery (8) and rules 10, 11, 12.**
 10. **Rule 13**, `RULES_NEEDING_COMPLETE_SCAN` additions, proposed-rules test for all 13.
 11. **Corpus TOMLs** (13 files under `crates/rules/principles/firebase/`), `camerata corpus lock`,
-    under the recorded owner go in `docs/OVERNIGHT_DECISIONS.md`.
+    under the recorded owner go in the private decision log.
 12. **Acceptance.** A small fixture repo under `crates/server/tests/fixtures/firebase-app/` (a
     Vite + Firebase web app with `firestore.rules`, `storage.rules`, `firebase.json`, `functions/`,
     `src/firebase.ts` with a runtime-assembled config) scanned end to end through

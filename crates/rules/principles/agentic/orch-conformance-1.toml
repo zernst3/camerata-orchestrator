@@ -1,5 +1,5 @@
 id = "ORCH-CONFORMANCE-1"
-version = 1
+version = 4
 title = "Codified architectural commitments are enforced gates, not advisory documents"
 domain = "agentic"
 layer = "universal"
@@ -12,27 +12,27 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-CONFORMANCE-1 (codified architectural commitments are enforced gates)"
+title = "AGENTS.md: ORCH-CONFORMANCE-1 (codified architectural commitments are enforced gates)"
 
 [[sources]]
 url = "docs/RATIONALE.md"
-title = "docs/RATIONALE.md — §2 The approach: two deterministic layers (the enforcement thesis)"
+title = "docs/RATIONALE.md: §2 The approach: two deterministic layers (the enforcement thesis)"
 
 [[sources]]
 url = "https://www.oreilly.com/library/view/building-evolutionary-architectures/9781491986356/"
-title = "Ford, Parsons, Kua — Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
+title = "Ford, Parsons, Kua: Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
 
 [decision]
-question = "What position does the project take on: Codified architectural commitments are enforced gates, not advisory documents?"
+question = "How are the project's codified architectural commitments checked against agent-authored changes?"
 default = "codified-architectural-commitments-are-enforced"
 why = "A commitment that nobody checks degrades into a commitment nobody respects. The reason architectural commitments get codified upstream of the agent is to constrain the autonomous output downstream; that constraint requires a checking step, or the codification adds no signal beyond a verbal preference the agent may or may not respect on any given run. The waiver mechanism is the relief valve: real edge cases get acknowledged and recorded, not silently violated, so the rule library learns over time which commitments needed refinement and which held up. Holding commitments as advisory and citing them ad hoc when reviewers happen to notice violations works at small human-review scale but degrades at AI throughput, as ad hoc citations become inconsistent and selective across hundreds of changes. Enforcing mechanically with no waiver mechanism is overrigid and pushes legitimate edge cases into rule-rewriting cycles or silent bypasses outside the recorded path, defeating the very durability the enforcement step was meant to create. Keeping commitments only in the agent's prompt context with no separate check lets the rules drift between runs because nothing verifies adherence after the agent's turn ends; the next session may simply have forgotten or selectively recalled them."
 
 [[option]]
 id = "codified-architectural-commitments-are-enforced"
-label = "Codified architectural commitments are enforced gates, not advisory documents"
-directive = "The architectural commitments the project codifies for its autonomous agents are enforced as gates on changes, not held as advisory documents. A deterministic check (a lint rule, a type-system constraint, an AST scan, an AI reviewer reading against the rules, or a combination of those) is wired into the change pipeline. A change that violates a commitment is rejected, escalated, or carries an explicit waiver naming the commitment, the violation, and the reviewer who waived it. Waivers are recorded in a durable log so periodic human review can sweep them and decide whether the commitment needs refinement."
+label = "Architectural commitments are enforced as gates on every change, with any waiver recorded"
+directive = "The architectural commitments the project codifies for its autonomous agents are enforced as gates on changes, not held as advisory documents. A deterministic check (a lint rule, a type-system constraint, an AST scan, an AI reviewer reading against the rules or a combination of those) is wired into the change pipeline. A change that violates a commitment is rejected, escalated or carries an explicit waiver naming the commitment, the violation and the reviewer who waived it. Waivers are recorded in a durable log so periodic human review can sweep them and decide whether the commitment needs refinement."
 remediation = """
-Wire the project's codified architectural commitments into the change pipeline as an enforced gate (a lint rule, a type-system constraint, an AST scan, or an AI reviewer checking the diff against the rules), not as a document reviewers only consult ad hoc. Configure the gate so a violating change is rejected, escalated, or requires an explicit, auditable waiver rather than merging silently. Verify by introducing a deliberate violation of a codified commitment and confirming the pipeline blocks or flags it before merge.
+Wire the project's codified architectural commitments into the change pipeline as an enforced gate (a lint rule, a type-system constraint, an AST scan or an AI reviewer checking the diff against the rules), not as a document reviewers only consult ad hoc. Configure the gate so a violating change is rejected, escalated or requires an explicit, auditable waiver rather than merging silently. Verify by introducing a deliberate violation of a codified commitment and confirming the pipeline blocks or flags it before merge.
 """
 why = "A commitment that nobody checks degrades into a commitment nobody respects."
 
@@ -41,7 +41,7 @@ id = "architectural-commitments-are-held-as-advisory-d"
 violates = true
 label = "Advisory documents (ad hoc citations)"
 directive = "architectural commitments are held as advisory documents that reviewers cite ad hoc when they happen to notice violations during code review, with no mechanical or systematic enforcement step"
-why = "Advisory-only commitments work at small human-review scale but degrade at AI throughput, because ad hoc citations become inconsistent and selective across hundreds of changes."
+why = "At AI throughput, advisory commitments are cited inconsistently and selectively across hundreds of changes, so nothing reliably holds a change to them. Advisory-only works only at small human-review scale."
 
 [[option]]
 id = "architectural-commitments-are-mechanically-enfor"

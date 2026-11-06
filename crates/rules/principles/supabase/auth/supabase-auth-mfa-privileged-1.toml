@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-MFA-PRIVILEGED-1"
-version = 1
+version = 2
 title = "Privileged roles and actions must require a verified MFA factor (aal2), not just a password-only session (aal1)"
 domain = "supabase:auth"
 layer = "platform"
@@ -16,7 +16,7 @@ qualifies = "Whether a given role or action is 'privileged' enough to warrant re
 
 [[sources]]
 url = "https://supabase.com/docs/guides/auth/auth-mfa"
-title = "Supabase docs — Multi-Factor Authentication: aal claim (aal1 = password-only, aal2 = password + verified factor), checked via auth.jwt()->>'aal' in RLS or getAuthenticatorAssuranceLevel() server-side"
+title = "Supabase docs: Multi-Factor Authentication: aal claim (aal1 = password-only, aal2 = password + verified factor), checked via auth.jwt()->>'aal' in RLS or getAuthenticatorAssuranceLevel() server-side"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/308.html"
@@ -49,20 +49,20 @@ service-role handlers) and asking whether an aal2 check gates it.
 id = "require-aal2-on-privileged-actions"
 label = "Privileged actions require a verified second factor (aal2), not merely an authenticated session"
 directive = """
-Every action this project treats as privileged — admin-only routes, role and permission grants,
+Every action this project treats as privileged (admin-only routes, role and permission grants,
 SECURITY DEFINER functions performing cross-tenant or financial operations, service-role-backed
-handlers — is gated on a verified second factor before it proceeds: `(select auth.jwt()->>'aal') =
+handlers) is gated on a verified second factor before it proceeds: `(select auth.jwt()->>'aal') =
 'aal2'` in the RLS policy, or the `getAuthenticatorAssuranceLevel()` equivalent in a server-side
 handler. A password-only session carries `aal1` and does not reach these actions, whether or not
 that user has ever enrolled an MFA factor. Which actions count as privileged is this project's
-judgement — own-content edits in a notes app do not need the bar a role grant does — but the bar,
+judgement (own-content edits in a notes app do not need the bar a role grant does) but the bar,
 once set, is enforced by an `aal` check and not by enrollment being available.
 """
 remediation = """
 Add a restrictive policy or server-side check requiring `(select auth.jwt()->>'aal') = 'aal2'` before `<action>`
 proceeds, and ensure accounts that hold the privileged role are prompted to enroll an MFA factor (Supabase's MFA
 enrollment flow) rather than only optionally supporting it. Where a user has not enrolled a factor, redirect them to
-enrollment rather than silently denying — per Supabase's own documented UX pattern — instead of either silently
+enrollment rather than silently denying, per Supabase's own documented UX pattern, instead of either silently
 allowing the aal1 session through or hard-locking a legitimate admin out with no path forward. Verify by confirming
 an aal1 (password-only) session can no longer perform `<action>` while an aal2 session (post-MFA-verification)
 still can.
@@ -75,4 +75,4 @@ id = "treat-mfa-enrollment-as-sufficient-without-enforcement"
 violates = true
 label = "MFA enrollment is offered but no privileged action checks aal, so a password-only session reaches all of them"
 directive = "Users may enroll an MFA factor, but no policy or handler checks the session's `aal` claim, so an enrolled user's unverified (aal1) session reaches every privileged action exactly as a verified (aal2) one does."
-why = "Rejected: an MFA factor that is enrolled but never REQUIRED provides no protection against the scenario MFA exists to defend — a password-only session (stolen password, successful phishing) still reaches every privileged action exactly as if MFA did not exist, because nothing ever checks whether the second factor was actually verified for this session. Enrollment without enforcement is security theater for the specific threat model MFA is meant to close."
+why = "Rejected: an MFA factor that is enrolled but never REQUIRED provides no protection against the scenario MFA exists to defend: a password-only session (stolen password, successful phishing) still reaches every privileged action exactly as if MFA did not exist, because nothing ever checks whether the second factor was actually verified for this session. Enrollment without enforcement is security theater for the specific threat model MFA is meant to close."

@@ -102,22 +102,22 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     sql.fix_specific = Some("Bind the id as a parameter,\nnever format it in.".to_string());
     sql.also_matches = vec!["ARCH-STRICT-LAYERING-1".to_string()];
     sql.also_locations = vec![
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/refunds.rs".to_string(),
-            line: 22,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "format!(...)".to_string(),
-            consequence: false,
-        },
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/report.rs".to_string(),
-            line: 3,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "impact".to_string(),
-            consequence: true,
-        },
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/refunds.rs".to_string(),
+            22,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "format!(...)".to_string(),
+            false,
+        ),
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/report.rs".to_string(),
+            3,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "impact".to_string(),
+            true,
+        ),
     ];
 
     let mut in_test = kinded(
@@ -247,6 +247,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-PAGINATION-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-PAGINATION-1".to_string(),
             recommended_option_id: "cursor".to_string(),
             evidence: Some("src/api/list.rs:42 - cursor paging, with a comma".to_string()),
@@ -257,6 +258,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-IDEMPOTENCY-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-IDEMPOTENCY-1".to_string(),
             recommended_option_id: "none".to_string(),
             evidence: None,
@@ -276,11 +278,19 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     .collect();
 
     let report = ScanReport {
+        run_id: None,
+        tree: None,
+        discarded: Vec::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
         test_file_count: 1,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -299,6 +309,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance {
+            group_review_model: None,
             audited_refs: vec![AuditedRef {
                 repo: "acme/portal".to_string(),
                 sha: Some("abcdef1234567890".to_string()),
@@ -316,6 +327,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
             audited_rule_ids,
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
@@ -466,7 +478,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 26] = [
+const FINDING_HEADERS: [&str; 38] = [
     "Severity",
     "Headline",
     "Repo",
@@ -493,9 +505,21 @@ const FINDING_HEADERS: [&str; 26] = [
     "Kind",
     "Sites",
     "Also found at",
+    "Severity adjustments",
+    "Carried from",
+    "Fix type",
+    "Reviewer edited",
+    "Edit ids",
+    "Site id",
+    "Review level",
+    "Group",
+    "Sub-group",
+    "Sub-group cause",
+    "Escalated",
+    "Merged into",
 ];
 
-const FINDING_RENDERED: [&str; 24] = [
+const FINDING_RENDERED: [&str; 36] = [
     "severity",
     "headline",
     "repo",
@@ -520,18 +544,33 @@ const FINDING_RENDERED: [&str; 24] = [
     "fix_specific",
     "fix",
     "kind",
+    "severity_adjustments",
+    "carried_from",
+    "fix_type",
+    "reviewer_edited",
+    "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
 /// - `also_locations`: rendered, but flattened into the "Also found at" column;
+/// - `flagged_by`: the sources collapsed into the row; a source that cited another line is
+///   listed in the same "Also found at" column;
 /// - `site_count`: rendered as the "Sites" column;
 /// - `is_fp` / `fp_reason`: the False Positives sheet's identity and its extra "FP Reason"
 ///   column; the live sheets have no such column;
 /// - the kind payload (`deviating_sites` ... `reason_detail`): the sheet shows the kind TAG only
 ///   in a findings row; the payload is rendered on the Deviations / Conventions / Coverage
 ///   tables, which this test checks against their own datasets.
-const FINDING_EXTRA_KEYS: [&str; 12] = [
+const FINDING_EXTRA_KEYS: [&str; 13] = [
     "also_locations",
+    "flagged_by",
     "site_count",
     "is_fp",
     "fp_reason",
@@ -547,7 +586,7 @@ const FINDING_EXTRA_KEYS: [&str; 12] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 28] = [
+const FINDING_BASE_KEYS: [&str; 40] = [
     "severity",
     "headline",
     "repo",
@@ -574,6 +613,18 @@ const FINDING_BASE_KEYS: [&str; 28] = [
     "kind",
     "also_locations",
     "site_count",
+    "severity_adjustments",
+    "carried_from",
+    "fix_type",
+    "reviewer_edited",
+    "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "sub_group",
+    "sub_group_cause",
+    "escalated",
+    "merged_into",
     "is_fp",
     "fp_reason",
 ];
@@ -614,7 +665,7 @@ fn yes_or_blank(row: &Value, key: &str) -> String {
     }
 }
 
-/// The 26 cells a findings-style worksheet row must show for `row`; a False Positives row adds
+/// The 28 cells a findings-style worksheet row must show for `row`; a False Positives row adds
 /// the "FP Reason" cell (and shows a blank Action, since a false positive has no matrix cell).
 fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
     let mut cells = vec![
@@ -648,6 +699,26 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
         text(row, "kind"),
         text(row, "site_count"),
         locations_text(row),
+        text(row, "severity_adjustments"),
+        text(row, "carried_from"),
+        text(row, "fix_type"),
+        yes_or_blank(row, "reviewer_edited"),
+        row["edit_ids"]
+            .as_array()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
+        text(row, "site_id"),
+        text(row, "review_level"),
+        text(row, "group"),
+        text(row, "sub_group"),
+        text(row, "sub_group_cause"),
+        yes_or_blank(row, "escalated"),
+        text(row, "merged_into"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));
@@ -778,6 +849,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
             "locations",
             "recommended_fix",
             "rule_id",
+            "fix_type",
         ],
         &[],
     );
@@ -791,6 +863,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
         "Where",
         "Recommended fix",
         "Rule ID",
+        "Fix type",
     ];
     let expected: Vec<Vec<String>> = rows
         .iter()
@@ -815,6 +888,7 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
                     .join("\n"),
                 text(r, "recommended_fix"),
                 text(r, "rule_id"),
+                text(r, "fix_type"),
             ]
         })
         .collect();
@@ -896,8 +970,22 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "repo",
             "fixed_version",
             "action",
+            "path",
+            "site_id",
+            "review_level",
+            "group",
+            "reviewer_edited",
+            "edit_ids",
         ],
-        &["ownership"],
+        // The sub-group's label and cause, the escalation and the merge pointer are on the
+        // Sites, Tree and Remediation plan sheets; the Dependencies worksheet has no such column.
+        &[
+            "ownership",
+            "sub_group",
+            "sub_group_cause",
+            "escalated",
+            "merged_into",
+        ],
     );
     let headers = [
         "Package",
@@ -906,6 +994,12 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         "Repo",
         "Fixed in",
         "Recommended action",
+        "File",
+        "Site id",
+        "Review level",
+        "Group",
+        "Reviewer edited",
+        "Edit ids",
     ];
     let mut expected: Vec<Vec<String>> = rows
         .iter()
@@ -922,6 +1016,20 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
                 text(r, "repo"),
                 fixed.unwrap_or("(no patch yet)").to_string(),
                 action,
+                text(r, "path"),
+                text(r, "site_id"),
+                text(r, "review_level"),
+                text(r, "group"),
+                yes_or_blank(r, "reviewer_edited"),
+                r["edit_ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default(),
             ]
         })
         .collect();
@@ -1089,14 +1197,29 @@ fn build(
             .collect::<HashMap<_, _>>()
     };
     Artifacts {
-        xlsx: build_workbook(report, dispositions, corpus, &opts).unwrap(),
+        xlsx: build_workbook(
+            &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+            corpus,
+            &opts,
+        )
+        .unwrap(),
         json: by_dataset(
-            build_json_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_json_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "json",
             "json",
         ),
         csv: by_dataset(
-            build_csv_exports(report, dispositions, corpus, &opts).unwrap(),
+            build_csv_exports(
+                &camerata_server::report_export::ReviewedReport::unreviewed(report, dispositions),
+                corpus,
+                &opts,
+            )
+            .unwrap(),
             "csv",
             "csv",
         ),
@@ -1112,10 +1235,13 @@ fn assert_every_dataset_agrees(
 ) {
     let a = build(report, dispositions, corpus);
 
-    // The dataset set is exactly the eight, in BOTH text formats.
+    // The dataset set is exactly the eight, in BOTH text formats. The CSV set also holds the
+    // ticket file (WO9b), which has no JSON sibling.
     let expected: BTreeSet<String> = DATASETS.iter().map(|s| s.to_string()).collect();
+    let mut expected_csv = expected.clone();
+    expected_csv.insert("tickets".to_string());
     assert_eq!(a.json.keys().cloned().collect::<BTreeSet<_>>(), expected);
-    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(a.csv.keys().cloned().collect::<BTreeSet<_>>(), expected_csv);
 
     let mut rows: HashMap<&str, Vec<Value>> = HashMap::new();
     for dataset in DATASETS {

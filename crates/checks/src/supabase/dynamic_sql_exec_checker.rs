@@ -14,7 +14,7 @@
 //! Postgres function whose body dynamically builds and `EXECUTE`s a query string from one of
 //! its own parameters is a DIFFERENT shape of the same CWE-89 defect, invisible to every
 //! existing checker — this was the one detection miss found on an unseen hold-out repo (see
-//! `docs/plans/` for the hardening-cycle writeup this closes).
+//! the hardening-cycle writeup this closes, private working notes).
 //!
 //! # The mechanism, precisely
 //!

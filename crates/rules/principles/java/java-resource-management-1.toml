@@ -1,5 +1,5 @@
 id = "JAVA-RESOURCE-MANAGEMENT-1"
-version = 1
+version = 3
 title = "Resources (connections, streams, readers) are closed via try-with-resources or finally; never left to garbage collection"
 domain = "java"
 layer = "language"
@@ -17,17 +17,17 @@ why = "Database connections, file handles, and streams consume finite OS resourc
 
 [[sources]]
 url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#os-method-may-fail-to-close-stream-on-exception-os-open-stream"
-title = "SpotBugs — OS_OPEN_STREAM: Method may fail to close stream on exception"
+title = "SpotBugs: OS_OPEN_STREAM: Method may fail to close stream on exception"
 linter = "SpotBugs: OS_OPEN_STREAM"
 
 [[sources]]
 url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#odr-method-may-fail-to-close-database-resource-on-exception-odr-open-database-resource"
-title = "SpotBugs — ODR_OPEN_DATABASE_RESOURCE: Method may fail to close database resource"
+title = "SpotBugs: ODR_OPEN_DATABASE_RESOURCE: Method may fail to close database resource"
 linter = "SpotBugs: ODR_OPEN_DATABASE_RESOURCE"
 
 [[sources]]
 url = "https://errorprone.info/bugpattern/StreamResourceLeak"
-title = "Error Prone — StreamResourceLeak: Streams encapsulating closeable resources must use try-with-resources"
+title = "Error Prone: StreamResourceLeak: Streams encapsulating closeable resources must use try-with-resources"
 linter = "Error Prone: StreamResourceLeak"
 
 [[option]]
@@ -45,7 +45,7 @@ id = "explicit-close-method-calls"
 violates = true
 label = "explicitly call close() at the end of the method"
 directive = "Resources are closed by explicit close() calls at the end of the method or in a cleanup phase, without a try-with-resources or finally block."
-why = "If an exception is thrown between opening the resource and the close() call, close() never runs and the file handle, socket, or connection leaks for the lifetime of the process. Everything works whenever the method completes normally, which is why the leak is usually found only under the error conditions that caused it."
+why = "If an exception is thrown between opening the resource and the close() call, close() never runs and the file handle, socket or connection leaks for the lifetime of the process. Everything works whenever the method completes normally, which is why the leak is usually found only under the error conditions that caused it."
 
 [[option]]
 id = "garbage-collection-finalize"

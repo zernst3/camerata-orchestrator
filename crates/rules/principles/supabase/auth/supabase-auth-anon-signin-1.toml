@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-ANON-SIGNIN-1"
-version = 1
+version = 2
 title = "When anonymous sign-ins are enabled, every policy meant for permanent users must exclude anonymous sessions via is_anonymous"
 domain = "supabase:auth"
 layer = "platform"
@@ -17,11 +17,11 @@ qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] ena
 
 [[sources]]
 url = "https://supabase.com/docs/guides/auth/auth-anonymous"
-title = "Supabase docs — Anonymous Sign-Ins: 'Anonymous users use the authenticated role. To distinguish between anonymous users and permanent users, your policies need to check the is_anonymous field of the user's JWT.'"
+title = "Supabase docs: Anonymous Sign-Ins: 'Anonymous users use the authenticated role. To distinguish between anonymous users and permanent users, your policies need to check the is_anonymous field of the user's JWT.'"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/863.html"
-title = "CWE-863: Incorrect Authorization — a disposable anonymous session is granted the same authorization as a verified permanent account"
+title = "CWE-863: Incorrect Authorization: a disposable anonymous session is granted the same authorization as a verified permanent account"
 
 [decision]
 question = "When anonymous sign-ins are enabled, does every RLS policy meant to gate a permanent-user capability explicitly exclude anonymous sessions via the JWT's is_anonymous claim?"
@@ -53,12 +53,12 @@ label = "Policies gating permanent-user capabilities exclude anonymous sessions 
 directive = """
 Anonymous sign-ins are assigned the same `authenticated` role a permanent, signed-up account gets, so
 `to authenticated` alone does not distinguish the two. Every capability this product intends for a
-verified permanent identity — posting under a persistent profile, anything financial, anything a
-disposable session should not be able to do — is gated by a RESTRICTIVE policy checking
+verified permanent identity (posting under a persistent profile, anything financial, anything a
+disposable session should not be able to do) is gated by a RESTRICTIVE policy checking
 `(select (auth.jwt()->>'is_anonymous')::boolean) is false`. Restrictive, not permissive: permissive
 policies OR together, so a single unscoped permissive policy would still let the session through.
-Capabilities deliberately open to anonymous sessions stay open — that is the point of enabling the
-feature — but the choice is made per capability and visible in the policy, never inherited by default
+Capabilities deliberately open to anonymous sessions stay open, that is the point of enabling the
+feature, but the choice is made per capability and visible in the policy, never inherited by default
 from a policy set written before anonymous sign-ins existed.
 """
 remediation = """

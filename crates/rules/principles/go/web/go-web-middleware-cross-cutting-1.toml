@@ -1,5 +1,5 @@
 id = "GO-WEB-MIDDLEWARE-CROSS-CUTTING-1"
-version = 1
+version = 3
 title = "Cross-cutting concerns (logging, auth, timeouts, recovery) are implemented as middleware, not duplicated in handlers"
 domain = "go:web"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://pkg.go.dev/net/http#Handler"
-title = "net/http — Handler (the interface middleware wraps to compose cross-cutting behavior around a handler chain; medium authority — grounds the mechanism, not the mandate)"
+title = "net/http: Handler (the interface middleware wraps to compose cross-cutting behavior around a handler chain; medium authority: grounds the mechanism, not the mandate)"
 
 [[sources]]
 url = "https://gin-gonic.com/en/docs/middleware/using-middleware/"
-title = "Gin Web Framework — Using middleware"
+title = "Gin Web Framework: Using middleware"
 
 [decision]
 question = "How should cross-cutting concerns like logging, authentication, timeouts, and panic recovery be handled across handlers?"
@@ -25,9 +25,9 @@ why = "Go web frameworks (Gin, Echo, net/http) provide middleware chains as the 
 [[option]]
 id = "middleware-all-concerns"
 label = "Cross-cutting concerns implemented as middleware; handlers are concern-agnostic"
-directive = "Logging, authentication, timeout enforcement, panic recovery, CORS, rate limiting, and other concerns that apply across multiple handlers are implemented as middleware in the application's middleware chain. Handlers receive already-authenticated requests, already-bounded by timeout, already-logged, and do not re-implement these concerns. Each middleware applies to all routes it is registered in front of; selective application uses middleware groups or conditional branching inside the middleware, not per-handler duplication."
+directive = "Logging, authentication, timeout enforcement, panic recovery, CORS, rate limiting and other concerns that apply across multiple handlers are implemented as middleware in the application's middleware chain. Handlers receive already-authenticated requests, already-bounded by timeout, already-logged and do not re-implement these concerns. Each middleware applies to all routes it is registered in front of; selective application uses middleware groups or conditional branching inside the middleware, not per-handler duplication."
 remediation = """
-Move the authentication, logging, panic-recovery, or timeout logic duplicated inline in the handler into shared middleware registered on the application's middleware chain, and remove the per-handler copy. Verify by confirming the handler body no longer contains that logic and the concern (auth rejection, panic recovery, timeout) still applies after moving it to middleware.
+Move the authentication, logging, panic-recovery or timeout logic duplicated inline in the handler into shared middleware registered on the application's middleware chain and remove the per-handler copy. Verify by confirming the handler body no longer contains that logic and the concern (auth rejection, panic recovery, timeout) still applies after moving it to middleware.
 """
 why = "Go framework middleware is the idiomatic mechanism for cross-cutting concerns; one implementation per concern, one place to audit and maintain, consistent behavior across routes."
 
@@ -35,8 +35,8 @@ why = "Go framework middleware is the idiomatic mechanism for cross-cutting conc
 id = "per-handler-inline"
 violates = true
 label = "Each handler re-implements authentication, logging, recovery inline"
-directive = "Handlers authenticate themselves, perform logging themselves, recover from panics themselves, and manage timeouts themselves via context.WithTimeout."
-why = "Logging, auth, and panic recovery are written into each route, so a route ships with whichever of them its author remembered and the gaps are invisible from the router. Any change to a cross-cutting concern has to be repeated in every route, and the routes that had already drifted apart are found only by reading all of them."
+directive = "Handlers authenticate themselves, perform logging themselves, recover from panics themselves and manage timeouts themselves via context.WithTimeout."
+why = "Logging, auth and panic recovery are written into each route, so a route ships with whichever of them its author remembered and the gaps are invisible from the router. Any change to a cross-cutting concern has to be repeated in every route, and the routes that had already drifted apart are found only by reading all of them."
 
 [[option]]
 id = "decorator-pattern"

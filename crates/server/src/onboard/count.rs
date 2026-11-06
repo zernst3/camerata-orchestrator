@@ -64,12 +64,7 @@ pub fn count_repo(root: &Path) -> anyhow::Result<RepoCount> {
     let lang_files: usize = languages.iter().map(|l| l.files).sum();
     let lang_lines: usize = languages.iter().map(|l| l.lines).sum();
 
-    let excluded_noise_lines = extracted
-        .excluded_noise_paths
-        .iter()
-        .filter_map(|rel| std::fs::read(root.join(rel)).ok())
-        .map(|bytes| non_blank_lines(&String::from_utf8_lossy(&bytes)))
-        .sum();
+    let excluded_noise_lines = excluded_noise_lines(root, &extracted.excluded_noise_paths);
 
     Ok(RepoCount {
         languages,
@@ -81,6 +76,18 @@ pub fn count_repo(root: &Path) -> anyhow::Result<RepoCount> {
         excluded_noise_lines,
         truncated: extracted.truncated,
     })
+}
+
+/// The non-blank lines in the files the noise filter dropped (`ExtractedRepo::
+/// excluded_noise_paths`, relative to `root`). Shared by `camerata count` and the inspection
+/// (`audit_repos` records it on the report for the export's manifest), so both state the same
+/// figure. A file that cannot be read counts zero. Blocking IO.
+pub(crate) fn excluded_noise_lines(root: &Path, excluded_noise_paths: &[String]) -> usize {
+    excluded_noise_paths
+        .iter()
+        .filter_map(|rel| std::fs::read(root.join(rel)).ok())
+        .map(|bytes| non_blank_lines(&String::from_utf8_lossy(&bytes)))
+        .sum()
 }
 
 impl RepoCount {

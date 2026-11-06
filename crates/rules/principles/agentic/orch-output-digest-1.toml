@@ -1,6 +1,6 @@
 id = "ORCH-OUTPUT-DIGEST-1"
-version = 1
-title = "Output discipline — local-mostly + a single consolidated digest"
+version = 3
+title = "Output discipline: local-mostly + a single consolidated digest"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-OUTPUT-DIGEST-1 (output discipline — local-mostly + single consolidated digest)"
+title = "AGENTS.md: ORCH-OUTPUT-DIGEST-1 (output discipline: local-mostly + single consolidated digest)"
 
 [[sources]]
 url = "https://sre.google/sre-book/monitoring-distributed-systems/"
-title = "Google SRE Book — Monitoring Distributed Systems (alert on symptoms, keep noise out of paging channels)"
+title = "Google SRE Book: Monitoring Distributed Systems (alert on symptoms, keep noise out of paging channels)"
 
 [decision]
 question = "How should routines report their output?"
@@ -24,7 +24,7 @@ why = "Signal-to-noise: one clean ranked digest is read; N direct pings get mute
 
 [[option]]
 id = "local-artifacts-a-single-consolidated-daily-digest"
-label = "local artifacts + a single consolidated daily digest"
+label = "Routines write local artifacts, one ranked daily digest reports them, and critical items notify immediately"
 directive = "Autonomous routines produce local artifacts (commits, state files) and write to a shared inbox. A single daily consolidator ranks all routines' output by priority and sends one digest, rather than each routine pinging directly. Critical items break through this cadence and notify immediately."
 remediation = """
 Have each autonomous routine write its own output to local artifacts (commits, state files) and a shared inbox, rather than notifying a human directly. Add a single daily consolidator that ranks all routines' output by priority and sends one digest, with an explicit exception that lets a truly critical item break through immediately instead of waiting for the next digest. Verify by confirming a day's worth of routine output arrives as one ranked digest instead of as separate pings per routine.
@@ -33,12 +33,12 @@ why = "Signal-to-noise: one clean ranked digest is read; N direct pings get mute
 
 [[option]]
 id = "per-routine-direct-notifications"
-label = "per-routine direct notifications"
+label = "Each routine sends its own notifications directly, with no consolidation"
 directive = "each autonomous routine sends its own direct notification on its own cadence, with no consolidator step in between"
 why = "Per-routine notifications are noisier by construction: each routine fires on its own cadence and priority, and the human ends up either filtering manually or muting everything once the noise crosses the attention threshold."
 
 [[option]]
 id = "batch-everything"
-label = "batch everything"
+label = "All routine output goes into one unranked batch, critical items included"
 directive = "all autonomous-routine output is batched into one consolidated stream with no ranking or prioritization, and critical items wait for the next batch alongside routine output"
 why = "Batching without prioritization preserves volume control but loses urgency: critical items sit in the same queue as routine output, and routine output drowns the signal that needed to break through."

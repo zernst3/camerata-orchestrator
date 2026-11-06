@@ -16,7 +16,7 @@ use camerata_checks::clone_rules::{
 };
 
 use crate::onboard::architectural::ARCH_PREVIEW_TOOL;
-use crate::onboard::{Finding, MergedLocation};
+use crate::onboard::Finding;
 
 /// The default (adopted) option of each rule: the convention a clean repo follows.
 pub fn default_option_id(rule: CloneRule) -> &'static str {
@@ -279,13 +279,18 @@ fn primitive_detail(c: &Candidate, concept: &str) -> String {
     )
 }
 
-/// The client finding for a candidate the judge confirmed.
-pub fn confirmed_finding(
+/// The client findings for a candidate the judge confirmed: one row per site (design amendment
+/// A11). Every row carries the candidate's shared text (what the copies are, where each is,
+/// whether they agree and what differs) and its own path, line and quoted first line, so the
+/// grouping can place it, the evidence check can look at it and a reviewer can decide it. The
+/// rows share the candidate's captures, which is what links them to each other in the tree. A
+/// candidate with no site yields the one placeless row it always did.
+pub fn confirmed_findings(
     repo: &str,
     c: &Candidate,
     concept: &str,
     files: &[(String, String)],
-) -> Finding {
+) -> Vec<Finding> {
     // High only when the copies disagree on the decision itself (an operator, a number, a tested
     // property). Other differences (a string, a template name, an action type, a callee) are
     // named in the detail and do not raise the severity.
@@ -322,51 +327,53 @@ pub fn confirmed_finding(
             .unwrap_or(&c.id);
     captures.insert("family".to_string(), family.to_string());
 
-    let mut sites = c.facts.sites.iter();
-    let (path, line, snippet) = match sites.next() {
-        Some(first) => (
-            first.path.clone(),
-            first.start_line as usize,
-            first_line(first, files),
-        ),
-        None => (String::new(), 0, String::new()),
+    let places: Vec<(String, usize, String)> = if c.facts.sites.is_empty() {
+        vec![(String::new(), 0, String::new())]
+    } else {
+        c.facts
+            .sites
+            .iter()
+            .map(|site| {
+                (
+                    site.path.clone(),
+                    site.start_line as usize,
+                    first_line(site, files),
+                )
+            })
+            .collect()
     };
-    let also_locations: Vec<MergedLocation> = sites
-        .map(|site| MergedLocation {
-            repo: repo.to_string(),
-            path: site.path.clone(),
-            line: site.start_line as usize,
-            rule_id: c.rule.id().to_string(),
-            snippet: first_line(site, files),
-            consequence: false,
+    places
+        .into_iter()
+        .map(|(path, line, snippet)| {
+            let mut finding = Finding {
+                repo: repo.to_string(),
+                path,
+                line,
+                rule_id: c.rule.id().to_string(),
+                severity: severity.to_string(),
+                snippet,
+                detail: detail.clone(),
+                // A deterministic-tier row: the facts are token comparisons, the judge only gates
+                // which candidates are shown. Never calibrated, never held for review.
+                preview: true,
+                preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
+                confidence: Some("high".to_string()),
+                captures: captures.clone(),
+                // No `evaluated_option_id`, like every other deterministic checker's defect: the
+                // fix text lives on the rule's default option (the violating option carries
+                // none), and the export resolves a finding's Fix through `evaluated_option_id`
+                // first. Naming the violating option here would make the Fix line vanish and the
+                // row be held for want of one.
+                evaluated_option_id: None,
+                kind: Some(FindingKind::Defect),
+                ..Finding::default()
+            };
+            // The detail can quote the string literals the copies differ in, which may be
+            // secrets.
+            crate::onboard::redact::redact_finding(&mut finding);
+            finding
         })
-        .collect();
-    let mut finding = Finding {
-        repo: repo.to_string(),
-        path,
-        line,
-        rule_id: c.rule.id().to_string(),
-        severity: severity.to_string(),
-        snippet,
-        detail,
-        // A deterministic-tier row: the facts are token comparisons, the judge only gates which
-        // candidates are shown. Never calibrated, never held for review.
-        preview: true,
-        preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
-        confidence: Some("high".to_string()),
-        captures,
-        also_locations,
-        // No `evaluated_option_id`, like every other deterministic checker's defect: the fix text
-        // lives on the rule's default option (the violating option carries none), and the export
-        // resolves a finding's Fix through `evaluated_option_id` first. Naming the violating
-        // option here would make the Fix line vanish and the row be held for want of one.
-        evaluated_option_id: None,
-        kind: Some(FindingKind::Defect),
-        ..Finding::default()
-    };
-    // The detail can quote the string literals the copies differ in, which may be secrets.
-    crate::onboard::redact::redact_finding(&mut finding);
-    finding
+        .collect()
 }
 
 /// One `not_assessed` row for a rule that was armed and found candidates but could not decide

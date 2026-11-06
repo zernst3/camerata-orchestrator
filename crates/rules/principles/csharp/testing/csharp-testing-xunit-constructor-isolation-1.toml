@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-XUNIT-CONSTRUCTOR-ISOLATION-1"
-version = 1
+version = 2
 title = "xUnit per-test isolation: use the constructor for per-test setup and IDisposable for teardown; use IClassFixture only for expensive shared resources"
 domain = "csharp:testing"
 layer = "language"
@@ -41,8 +41,8 @@ why = "These attributes don't exist in xUnit; their NUnit/MSTest equivalents pro
 
 [[sources]]
 url = "https://xunit.net/docs/shared-context"
-title = "xUnit.net — Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture, IAsyncLifetime)"
+title = "xUnit.net: Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture, IAsyncLifetime)"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Use helper methods instead of Setup and Teardown"
+title = "Best practices for writing unit tests: Use helper methods instead of Setup and Teardown"

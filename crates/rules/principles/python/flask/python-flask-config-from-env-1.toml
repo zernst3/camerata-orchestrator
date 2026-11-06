@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-CONFIG-FROM-ENV-1"
-version = 1
+version = 3
 title = "Flask configuration is loaded from environment variables or config objects; no secrets appear in source files"
 domain = "python:flask"
 layer = "framework"
@@ -29,7 +29,7 @@ why = "Environment variables keep secrets out of the repository and git history;
 id = "hardcoded-in-source"
 violates = true
 label = "set config values as string literals directly in Python source"
-directive = "Configuration including SECRET_KEY, database passwords, and API keys is set as string literals in `app.py`, `config.py`, or a blueprint's `__init__.py`."
+directive = "Configuration including SECRET_KEY, database passwords and API keys is set as string literals in `app.py`, `config.py` or a blueprint's `__init__.py`."
 why = "Credentials enter git history permanently; anyone with repository access can read them; rotation requires a commit and redeployment."
 
 [[option]]
@@ -41,14 +41,14 @@ why = "Equivalent to committing credentials; the `.env` pattern is safe only whe
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/config/"
-title = "Flask docs — Configuration Handling (SECRET_KEY, environment variables, config best practices)"
+title = "Flask docs: Configuration Handling (SECRET_KEY, environment variables, config best practices)"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
-title = "Bandit B105 — hardcoded_password_string"
+title = "Bandit B105: hardcoded_password_string"
 linter = "Bandit: B105"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-password-string/"
-title = "Ruff S105 — hardcoded-password-string"
+title = "Ruff S105: hardcoded-password-string"
 linter = "Ruff: S105"

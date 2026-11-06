@@ -1,6 +1,6 @@
 id = "ORCH-MODEL-TIERING-1"
-version = 1
-title = "Model tiering — cheap for bulk, top-tier for decisions"
+version = 4
+title = "Model tiering: cheap for bulk, top-tier for decisions"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-MODEL-TIERING-1 (model tiering)"
+title = "AGENTS.md: ORCH-MODEL-TIERING-1 (model tiering)"
 
 [[sources]]
 url = "docs/decisions/2026-06-20_deterministic_model_tiering.md"
@@ -19,7 +19,7 @@ title = "Decision: Deterministic model-tiering for the governed fleet (Capabilit
 
 [[sources]]
 url = "https://docs.anthropic.com/en/docs/about-claude/models/choosing-a-model"
-title = "Anthropic — Choosing the right model"
+title = "Anthropic: Choosing the right model"
 
 [decision]
 question = "How should models be tiered?"
@@ -28,21 +28,21 @@ why = "Top-tier judgment where it matters (data-model-shaping calls), cheap thro
 
 [[option]]
 id = "tiered"
-label = "tiered"
+label = "Bulk mechanical work runs on a cheaper model; the top model handles new decisions and one-way-door validation"
 directive = "Run high-volume mechanical work (applying documented rules, repetitive porting) on a cheaper model; reserve the top model for genuinely new decisions and one-way-door validation."
 remediation = """
-Route high-volume mechanical work, such as applying already-documented rules or repetitive porting, to a cheaper model, and reserve the top-tier model for genuinely new decisions and one-way-door validation. Configure the tiering in the run's model-selection logic rather than leaving every step on the same model by default. Verify by checking a recent run's logs to confirm mechanical steps used the cheaper model and only novel-decision steps used the top-tier one.
+Route high-volume mechanical work, such as applying already-documented rules or repetitive porting, to a cheaper model and reserve the top-tier model for genuinely new decisions and one-way-door validation. Configure the tiering in the run's model-selection logic rather than leaving every step on the same model by default. Verify by checking a recent run's logs to confirm mechanical steps used the cheaper model and only novel-decision steps used the top-tier one.
 """
 why = "Top-tier judgment where it matters (data-model-shaping calls), cheap throughput on the bulk."
 
 [[option]]
 id = "top-for-everything"
-label = "top-for-everything"
+label = "Every step runs on the top-tier model"
 directive = "every step of the autonomous run uses the top-tier model, regardless of whether the step is bulk mechanical work or a genuinely new decision"
 why = "Running the top model for everything multiplies cost without changing human-escalation outcomes, since the bulk of agentic work is applying documented rules where a cheaper model produces the same result."
 
 [[option]]
 id = "cheap-for-everything"
-label = "cheap-for-everything"
+label = "Every step runs on the cheaper model"
 directive = "every step of the autonomous run uses the cheaper model, regardless of whether the step is bulk mechanical work or a one-way-door decision"
 why = "Saving cost on the bulk is correct, but a cheaper model can confidently produce a structurally wrong answer on the rare hard call and ship it past the clear-winner test, which is the failure mode tiering exists to prevent."

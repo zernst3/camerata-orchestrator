@@ -6,7 +6,7 @@
 //! value whose surrounding NAME (the variable/field/function it flows into) marks it
 //! security-relevant: a token, secret, password, nonce, session id, CSRF value, OTP, reset
 //! code, API key, or a share-link / access identifier. See
-//! `docs/plans/2026-09-29_codebase-inspection-hardening.md` D2 and
+//! the codebase-inspection hardening notes D2 and
 //! `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml` (P3 already
 //! grounded this rule id with CWE-330/338 + the OWASP Cryptographic Storage cheat sheet — this
 //! checker emits under that SAME id rather than inventing a new one).
@@ -1287,7 +1287,7 @@ mod tests {
         assert_eq!(vs.len(), 1, "{vs:#?}");
     }
 
-    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+    // ── mutation-gap tests (the master sequence plan section 2b) ────────
 
     /// The scan gates each checker on its interest globs: if they stopped matching, the checker
     /// would silently never run on any repo.

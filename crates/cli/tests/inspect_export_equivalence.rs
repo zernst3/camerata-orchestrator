@@ -58,13 +58,11 @@ use camerata::inspect_cmd::build_product_export_bytes;
 use camerata_server::onboard::{AuditedRef, Finding, ScanProvenance, ScanReport};
 use camerata_server::report_export::{self, ReportOptions};
 
+/// The synthetic client both paths export for.
+const CLIENT: &str = "Example Client Ltd";
+
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// A `Finding` built from only its non-defaulted required fields (`repo`/`path`/`line`/
@@ -140,6 +138,7 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     let dispositions: HashMap<String, report_export::DispositionWire> = HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
+    options.client_name = CLIENT.to_string();
 
     // Pass-1 W1 seal fix: the exporters take `&SealedReport` — seal the fixture here (a cheap
     // clone; this hand-built test fixture has no row-adding passes of its own left to run).
@@ -150,8 +149,7 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     // calls that same pair directly rather than through `build_product_export_bytes`, so the
     // test still proves the CLI wrapper adds nothing of its own.
     let package = camerata_server::release_gate::build_product_package(
-        &sealed,
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &dispositions),
         None,
         &options,
     )
@@ -269,7 +267,7 @@ fn flatten_zip_entries(bytes: &[u8], prefix: &str, out: &mut BTreeMap<String, Ve
         zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("must be a valid zip");
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("zip entry by index");
-        let name = file.name().to_string();
+        let name = file.name().expect("zip entry name").to_string();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).expect("read zip entry content");
         let key = format!("{prefix}{name}");
@@ -293,7 +291,7 @@ async fn cli_export_assembly_matches_the_server_product_export_path_byte_for_byt
 
     let report = fixture_report();
 
-    let (cli_stem, cli_zip) = build_product_export_bytes(&report.clone().seal(), None)
+    let (cli_stem, cli_zip) = build_product_export_bytes(&report.clone().seal(), None, CLIENT)
         .await
         .expect("the CLI's export assembly must succeed");
     let (server_stem, server_zip) = server_path_export(&report).await;

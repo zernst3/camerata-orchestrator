@@ -1090,6 +1090,8 @@ pub fn RoutineDashboard() -> Element {
                                                             let text = answer_draft();
                                                             if text.trim().is_empty() { return; }
                                                             spawn(async move {
+                                                                // The answer is translated by a model: hold the Bombe for it.
+                                                                let _guard = crate::loading::LoadingGuard::new();
                                                                 if let Some(resolved) = answer_escalation(&id, &text, "approve").await {
                                                                     if let Some(directive) = resolved.translated_directive {
                                                                         last_directive.set(Some(directive));

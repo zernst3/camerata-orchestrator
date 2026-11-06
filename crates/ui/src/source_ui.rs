@@ -348,52 +348,24 @@ pub async fn rescan_changes(project_id: &str, repo: &str) -> Result<RescanStarte
 
 // ── Clipboard and file helpers ────────────────────────────────────────────────
 
-/// The eval statement that copies `text` to the system clipboard. The text is embedded as a JSON
-/// string literal so quotes, newlines and unicode round-trip verbatim. A hidden textarea plus
-/// `execCommand('copy')` is the primary path (it works in the desktop webview, where the async
-/// clipboard API is not available); the async API is the fallback. Pure.
-pub(crate) fn copy_script(text: &str) -> Option<String> {
-    let literal = serde_json::to_string(text).ok()?;
-    Some(format!(
-        "var t = {literal}; \
-         var a = document.createElement('textarea'); \
-         a.value = t; a.setAttribute('readonly', ''); \
-         a.style.position = 'fixed'; a.style.opacity = '0'; \
-         document.body.appendChild(a); a.select(); \
-         var ok = false; \
-         try {{ ok = document.execCommand('copy'); }} catch (e) {{ ok = false; }} \
-         document.body.removeChild(a); \
-         if (!ok && navigator.clipboard && navigator.clipboard.writeText) {{ \
-           navigator.clipboard.writeText(t); ok = true; \
-         }} \
-         return ok;"
-    ))
-}
+#[cfg(test)]
+use camerata_ui::platform::copy_script;
 
 /// Copy `text` to the clipboard; `true` when something took it.
 pub(crate) async fn copy_to_clipboard(text: &str) -> bool {
-    let Some(script) = copy_script(text) else {
-        return false;
-    };
-    matches!(
-        dioxus::document::eval(&script).await,
-        Ok(serde_json::Value::Bool(true))
-    )
+    camerata_ui::platform::current().copy_text(text).await
 }
 
-/// Save `text` through the native save dialog; `Ok(false)` when the operator cancelled.
+/// Save `text` through the save dialog; `Ok(false)` when the operator cancelled.
 async fn save_text(file_name: &str, text: &str) -> Result<bool, ()> {
-    match rfd::AsyncFileDialog::new()
-        .set_file_name(file_name)
-        .save_file()
+    use camerata_ui::platform::SaveOutcome;
+    match camerata_ui::platform::current()
+        .save_file(file_name, text.as_bytes())
         .await
     {
-        Some(file) => file
-            .write(text.as_bytes())
-            .await
-            .map(|_| true)
-            .map_err(|_| ()),
-        None => Ok(false),
+        SaveOutcome::Saved => Ok(true),
+        SaveOutcome::Failed => Err(()),
+        SaveOutcome::Cancelled => Ok(false),
     }
 }
 
@@ -955,6 +927,9 @@ pub fn RescanChangesButton(project_id: String, repo: String) -> Element {
                 let (pid, rp) = (project_id.clone(), repo.clone());
                 busy.set(true);
                 spawn(async move {
+                    // The rescan starts an audit job (model work): hold the Bombe while it starts.
+                    // The job itself is polled by the scan screen, which holds its own guard.
+                    let _guard = crate::loading::LoadingGuard::new();
                     match rescan_changes(&pid, &rp).await {
                         Ok(RescanStarted::NothingChanged) => push_toast(
                             toasts,

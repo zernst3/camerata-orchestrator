@@ -541,7 +541,7 @@ fn a_readable_name_on_a_code_constant_identifier_stays_readable() {
 /// A runtime-built `AIza` key: the repository holds no 39-character literal. It ends on a letter
 /// or digit, because the shape is word-bounded (`\b`) and a key ending in `-` or `_` is not
 /// matched as a Google key at all.
-fn google_key(seed: u64) -> String {
+pub(super) fn google_key(seed: u64) -> String {
     let mut key = format!(
         "AIza{}",
         body(
@@ -557,19 +557,19 @@ fn google_key(seed: u64) -> String {
     key
 }
 
-fn assert_firebase_twin(text: &str) {
+pub(super) fn assert_firebase_twin(text: &str) {
     let twin = assert_twin(text, SecretShape::GoogleApiKey);
     assert_eq!(twin, Twin::FirebaseWebApiKey, "{text}");
 }
 
-fn assert_google_secret(text: &str, expected: &str) {
+pub(super) fn assert_google_secret(text: &str, expected: &str) {
     let secrets = detect_secrets(text);
     assert_eq!(secrets.len(), 1, "expected one secret in: {text}");
     assert_eq!(secrets[0].shape, SecretShape::GoogleApiKey);
     assert_eq!(&text[secrets[0].value.clone()], expected);
 }
 
-fn js_config(key: &str) -> String {
+pub(super) fn js_config(key: &str) -> String {
     format!(
         "const firebaseConfig = {{\n  apiKey: \"{key}\",\n  authDomain: \"x.firebaseapp.com\",\n  projectId: \"x\",\n  appId: \"1:2:web:3\"\n}};\n"
     )
@@ -830,4 +830,86 @@ fn twin_key_value_inside_the_init_call_with_a_sibling_stays_readable() {
     assert_firebase_twin(&format!(
         "initializeApp({{ key: \"{key}\", projectId: \"x\" }});"
     ));
+}
+
+#[test]
+fn twin_published_supabase_password_requirements_values() {
+    // Supabase's documented `password_requirements` values of 24 or more characters read as a
+    // named secret literal (the identifier contains `password`), but they are config enums.
+    let values = [
+        ["lower_upper_", "letters_digits"].concat(),
+        ["lower_upper_", "letters_digits_symbols"].concat(),
+    ];
+    for value in values {
+        let line = format!("password_requirements = \"{value}\"");
+        assert_eq!(
+            assert_twin(&line, SecretShape::NamedSecretLiteral),
+            Twin::PublishedExampleKey,
+            "{value}"
+        );
+        // The sentence shape the group reviewer writes: backticked code in prose.
+        let sentence = format!(
+            "Fix is two lines in config.toml (`minimum_password_length = 8`, \
+             `password_requirements = \"{value}\"` or stronger) pushed with `supabase config push`."
+        );
+        assert!(detect_secrets(&sentence).is_empty(), "{sentence}");
+        assert_eq!(redact(&sentence).text, sentence);
+    }
+}
+
+/// The published digest keys on the value AND the identifier it is documented under: Supabase's
+/// `password_requirements` enum is readable under that setting's name and nowhere else. The same
+/// words assigned to any other password-named identifier are a password.
+#[test]
+fn a_published_enum_value_is_readable_only_under_its_own_identifier() {
+    let value = ["lower_upper_", "letters_digits"].concat();
+    // Under its own name (alone, in a table, exported, in prose): readable.
+    for line in [
+        format!("password_requirements = \"{value}\""),
+        format!("auth.password_requirements = \"{value}\""),
+        format!("  password_requirements: \"{value}\""),
+        format!("`password_requirements = \"{value}\"`"),
+    ] {
+        assert!(detect_secrets(&line).is_empty(), "flagged: {line}");
+    }
+    // Under another identifier, the same value is a flagged password.
+    for line in [
+        format!("db_password = \"{value}\""),
+        format!("password = \"{value}\""),
+        format!("admin_password: \"{value}\""),
+        // A longer name that merely ends in the documented one is another identifier.
+        format!("my_password_requirements = \"{value}\""),
+        format!("password_requirements_backup = \"{value}\""),
+    ] {
+        assert_eq!(detect_secrets(&line).len(), 1, "not flagged: {line}");
+    }
+}
+
+/// A key a vendor publishes as itself (no identifier of its own) stays readable under any name.
+#[test]
+fn a_published_key_with_no_identifier_stays_readable_under_any_name() {
+    let key = crate::fixtures::stripe_docs_test_key();
+    for line in [
+        format!("STRIPE_SECRET_KEY={key}"),
+        format!("const apiSecret = \"{key}\";"),
+        format!("password = \"{key}\""),
+    ] {
+        assert!(detect_secrets(&line).is_empty(), "flagged: {line}");
+    }
+}
+
+#[test]
+fn changing_the_published_value_makes_it_a_password_again() {
+    // The exemption is the exact published digest: any change to the value is a flagged password.
+    let changed = ["lower_upper_", "letters_digits1"].concat();
+    let random = body(26, ACCOUNT_ALPHABET, 91);
+    let cases = [
+        format!("db_password = \"{changed}\""),
+        format!("password_requirements = \"{changed}\""),
+        format!("password_requirements = \"{random}\""),
+        ["password = \"correct", "-horse-battery-staple\""].concat(),
+    ];
+    for text in cases {
+        assert_eq!(detect_secrets(&text).len(), 1, "not flagged: {text}");
+    }
 }

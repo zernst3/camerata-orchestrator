@@ -11,8 +11,9 @@
 //! # The gate is universal + unchanged
 //!
 //! Implementing brownfield code is still CODE-WRITING. The agent is built from the SAME
-//! [`camerata_fleet::governed_role`] + [`camerata_agent::prepare_session`] machinery as
-//! pr_resolve_run and update_branch_run:
+//! `camerata_fleet` governed-role + [`camerata_agent::prepare_session`] machinery as
+//! pr_resolve_run and update_branch_run, with one difference: its Layer-1 rule subset is the
+//! project's selected rules plus every enforced gate rule (see [`crate::governed_rules`]):
 //!
 //! - `--allowedTools` = the read-only built-ins (Read/Grep/Glob/LS) PLUS `gated_write`
 //!   (`gated_write` is the only WRITE path).
@@ -56,12 +57,13 @@ use std::sync::Arc;
 use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_checks::runner_for_worktree;
 use camerata_core::{AgentDriver, RuleId};
-use camerata_fleet::{governed_role, locate_gateway_bin};
+use camerata_fleet::locate_gateway_bin;
 use camerata_worktracker::investigation::DecisionRecord;
 
 use crate::api_agent_driver::build_agent_driver;
 use crate::llm::LlmPort;
-use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
+use crate::project::ReviewOnError;
+use crate::review_agent::{run_l3_review, L3ReviewInput, L3Verdict, ReviewSeverity};
 use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::uow::UowStore;
 
@@ -130,6 +132,38 @@ pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<Memory
 /// exactly — this module has no `AppState` in scope, only the `Option<Arc<GovernanceLog>>`
 /// threaded in as a parameter). A `None` log is a silent no-op; a write error is
 /// `tracing::warn!`-logged and swallowed, never surfacing to the run.
+/// Why a governed dev run must not start on `project` with `model` under the client-engagement
+/// lock ([`crate::client_lock`]), or `None` when it may: the backend and model must pass the
+/// lock, and since the dev loop builds and tests the repository (its layer-2 checks execute the
+/// repository's own code), a client engagement also needs the operator's opt-in to run client
+/// tooling.
+pub(crate) fn dev_loop_client_lock_refusal(
+    project: &crate::project::Project,
+    model: &str,
+) -> Option<String> {
+    let models = [("the implementer".to_string(), model.to_string())];
+    if let Some(why) =
+        crate::client_lock::refusal(project.client_engagement, project.backend, &models)
+    {
+        return Some(format!(
+            "{why} In this project's Settings, set the backend to API and the model to a Claude \
+             model, or turn off Client engagement if this is your own development."
+        ));
+    }
+    if !crate::client_lock::client_tooling_allowed(
+        project.client_engagement,
+        project.client_tooling_opt_in,
+    ) {
+        return Some(
+            "This is a client engagement, and the dev loop builds and tests the client's code \
+             (its checks run the repository's own build, tests and scripts). Opt in to running \
+             client tooling in this project's Settings to allow it. Nothing was run."
+                .to_string(),
+        );
+    }
+    None
+}
+
 async fn record_governance(
     log: &Option<Arc<camerata_persistence::GovernanceLog>>,
     event: camerata_persistence::GovernanceEvent,
@@ -209,6 +243,68 @@ pub struct L3ReviewBundle {
     pub model: String,
     /// The LLM seam to use (typically `Arc<Llm>` from `AppState::llm()`).
     pub llm: Arc<dyn LlmPort>,
+    /// What the run does when the reviewer itself cannot run (project setting).
+    pub on_error: ReviewOnError,
+    /// Extra implementer passes allowed after a bounce, beyond `max_iterations`.
+    pub fix_rounds: u8,
+}
+
+/// What one Layer-3 review decided for the run loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum L3Outcome {
+    /// No HIGH or MEDIUM finding: the run goes on.
+    Pass,
+    /// At least one HIGH or MEDIUM finding: the reasons go back to the implementer.
+    Bounce(Vec<String>),
+    /// The reviewer could not run and the project requires a review before a run passes.
+    ReviewerRequiredButUnavailable(String),
+}
+
+/// The failure text of a run stopped because a required reviewer could not run.
+pub(crate) fn l3_fail_closed_message(error: &str) -> String {
+    format!(
+        "Layer-3 reviewer could not run, and the project requires a review before a run \
+         passes: {error}"
+    )
+}
+
+/// True when a bounce, counted after `iteration` was incremented, has used up the passes the
+/// run may make: the project's `max_iterations` plus its `fix_rounds`. With the default
+/// `fix_rounds` of 0 this is exactly the old `iteration >= max_iterations`.
+pub(crate) fn l3_bounce_ceiling_reached(
+    iteration: usize,
+    max_iterations: usize,
+    fix_rounds: u8,
+) -> bool {
+    iteration >= max_iterations.saturating_add(usize::from(fix_rounds))
+}
+
+/// Which fix round the next pass is, when it is an extra pass beyond `max_iterations`
+/// (`iteration` already incremented). `None` while the pass is an ordinary one.
+pub(crate) fn l3_fix_round(iteration: usize, max_iterations: usize) -> Option<usize> {
+    (iteration >= max_iterations).then(|| iteration - max_iterations + 1)
+}
+
+/// What to do after an L3 bounce: fail the run, or go round again (naming the fix round when the
+/// next pass is an extra one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum L3BounceNext {
+    Fail,
+    Retry { fix_round: Option<usize> },
+}
+
+pub(crate) fn l3_bounce_next(
+    iteration: usize,
+    max_iterations: usize,
+    fix_rounds: u8,
+) -> L3BounceNext {
+    if l3_bounce_ceiling_reached(iteration, max_iterations, fix_rounds) {
+        L3BounceNext::Fail
+    } else {
+        L3BounceNext::Retry {
+            fix_round: l3_fix_round(iteration, max_iterations),
+        }
+    }
 }
 
 /// Bundle for the integration-gate check (R3.e / GAP-6).
@@ -270,9 +366,8 @@ async fn worktree_diff_from_base(dir: &std::path::Path, base_commit: &str) -> St
     if base_commit.is_empty() {
         return String::new();
     }
-    match tokio::process::Command::new("git")
+    match crate::workspace::git_command(Some(dir), crate::workspace::GitEnv::Isolated)
         .args(["diff", &format!("{base_commit}..HEAD")])
-        .current_dir(dir)
         .output()
         .await
     {
@@ -285,19 +380,24 @@ async fn worktree_diff_from_base(dir: &std::path::Path, base_commit: &str) -> St
 ///
 /// Returns:
 /// - `None` when L3 is disabled or the bundle is absent (no action).
-/// - `Some(Vec<String>)` when L3 ran: empty vec = PASS; non-empty = BOUNCE reasons.
+/// - `Some(L3Outcome)` when L3 ran: a pass, a bounce with the ranked reasons, or (only when the
+///   project fails closed) a reviewer that could not run.
 ///
-/// The `next_seq` closure is taken as a reference to the caller's counter so the
-/// sequence numbers on emitted events stay monotonic.
+/// Every finding the review reports is recorded on the unit (`uow.review_findings`), so none is
+/// dropped silently. The `next_seq` closure is taken as a reference to the caller's counter so
+/// the sequence numbers on emitted events stay monotonic.
+#[allow(clippy::too_many_arguments)]
 async fn run_l3_if_enabled(
     runs: &RunStore,
+    uow: &UowStore,
+    story_id: &str,
     run_id: &str,
     next_seq: &impl Fn() -> usize,
     l3: &Option<L3ReviewBundle>,
     dir: &std::path::Path,
     base_commit: &str,
     iteration: usize,
-) -> Option<Vec<String>> {
+) -> Option<L3Outcome> {
     let bundle = l3.as_ref()?;
     // L3 is explicitly opt-in; the caller sets enabled=true when the project is configured.
     // We still check here as a defence-in-depth guard.
@@ -329,59 +429,109 @@ async fn run_l3_if_enabled(
                 content_hash: None,
             },
         );
-        return Some(Vec::new());
+        return Some(L3Outcome::Pass);
     }
+    // The unit's still-open findings go to the reviewer to re-check; only ones it confirms gone
+    // (a `[FIXED]` line) are closed. Capped so a long-lived unit cannot bloat the prompt.
+    let earlier: Vec<String> = uow
+        .open_review_findings(story_id)
+        .iter()
+        .take(50)
+        .map(|f| format!("[{}] {}", f.severity.to_uppercase(), f.title))
+        .collect();
     let input = L3ReviewInput {
         story: &bundle.story_text,
         rules_prose: &bundle.rules_prose,
         diff: &diff,
         model: &bundle.model,
+        earlier_findings: &earlier,
+    };
+    let l3_event = |verdict: &str, detail: String| {
+        runs.push_event(
+            run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "layer-3".to_string(),
+                verdict: verdict.to_string(),
+                rule: None,
+                detail,
+                content_hash: None,
+            },
+        );
     };
     match run_l3_review(bundle.llm.as_ref(), &input).await {
-        Ok(ReviewVerdict::Pass) => {
-            runs.push_event(
+        Ok(reply) => {
+            let verdict = reply.verdict;
+            // Record every finding on the unit. An earlier finding is marked fixed ONLY when
+            // the reviewer confirmed it gone with a `[FIXED]` line in a trustworthy reply;
+            // silence, a sloppy reply or a synthetic finding closes nothing.
+            let fixed = uow.record_review_findings(
+                story_id,
                 run_id,
-                GateEvent {
-                    seq: next_seq(),
-                    layer: "layer-3".to_string(),
-                    verdict: "pass".to_string(),
-                    rule: None,
-                    detail: "Layer-3 reviewer: PASS.".to_string(),
-                    content_hash: None,
-                },
+                iteration,
+                verdict.findings(),
+                &reply.confirmed_fixed,
             );
-            Some(Vec::new())
-        }
-        Ok(ReviewVerdict::Bounce { reasons }) => {
-            let summary = reasons.join("; ");
-            runs.push_event(
-                run_id,
-                GateEvent {
-                    seq: next_seq(),
-                    layer: "layer-3".to_string(),
-                    verdict: "fail".to_string(),
-                    rule: None,
-                    detail: format!("Layer-3 reviewer: BOUNCE — {summary}"),
-                    content_hash: None,
-                },
+            let count = |sev: ReviewSeverity| {
+                verdict
+                    .findings()
+                    .iter()
+                    .filter(|f| f.severity == sev)
+                    .count()
+            };
+            let (h, m, l) = (
+                count(ReviewSeverity::High),
+                count(ReviewSeverity::Medium),
+                count(ReviewSeverity::Low),
             );
-            Some(reasons)
+            let fixed_note = if fixed > 0 {
+                format!(" {fixed} earlier finding(s) confirmed fixed.")
+            } else {
+                String::new()
+            };
+            match verdict {
+                L3Verdict::Pass { .. } => {
+                    l3_event(
+                        "pass",
+                        format!(
+                            "Layer-3 review: no high or medium findings. {l} low finding(s) \
+                             recorded for sign-off.{fixed_note}"
+                        ),
+                    );
+                    Some(L3Outcome::Pass)
+                }
+                L3Verdict::Bounce { .. } => {
+                    let reasons = verdict.reasons();
+                    l3_event(
+                        "fail",
+                        format!(
+                            "Layer-3 review: {h} high, {m} medium, {l} low. Bounced to the \
+                             implementer.{fixed_note}"
+                        ),
+                    );
+                    l3_event("fail", format!("Reviewer findings: {}", reasons.join("; ")));
+                    Some(L3Outcome::Bounce(reasons))
+                }
+            }
         }
-        Err(e) => {
-            // L3 is advisory on error: log but don't block the run.
-            runs.push_event(
-                run_id,
-                GateEvent {
-                    seq: next_seq(),
-                    layer: "layer-3".to_string(),
-                    verdict: "error".to_string(),
-                    rule: None,
-                    detail: format!("Layer-3 reviewer error (treating as pass — advisory): {e}"),
-                    content_hash: None,
-                },
-            );
-            Some(Vec::new())
-        }
+        Err(e) => match bundle.on_error {
+            ReviewOnError::FailClosed => {
+                let message = l3_fail_closed_message(&e.to_string());
+                l3_event("error", message.clone());
+                Some(L3Outcome::ReviewerRequiredButUnavailable(message))
+            }
+            ReviewOnError::Advisory => {
+                // L3 is advisory on error by default: log it but do not block the run.
+                l3_event(
+                    "error",
+                    format!(
+                        "Layer-3 reviewer error (treating as pass, advisory): {e}. Set Layer 3 \
+                         review to fail closed in Settings to stop the run instead."
+                    ),
+                );
+                Some(L3Outcome::Pass)
+            }
+        },
     }
 }
 
@@ -1145,9 +1295,8 @@ pub async fn execute_dev_implement_run(
     // Capture the branch-point commit (HEAD before any agent work). This is the
     // base for `worktree_diff_from_base` — even after `commit_all`, we can diff
     // against this ref to see all changes introduced by the run.
-    let base_commit = tokio::process::Command::new("git")
+    let base_commit = crate::workspace::git_command(Some(&dir), crate::workspace::GitEnv::Isolated)
         .args(["rev-parse", "HEAD"])
-        .current_dir(&dir)
         .output()
         .await
         .ok()
@@ -1164,10 +1313,30 @@ pub async fn execute_dev_implement_run(
             return;
         }
     };
-    // THE SAME governed role the fleet uses: allowedTools = gated tools only,
-    // Task / Write / Bash / Edit / MultiEdit / NotebookEdit disallowed.
-    let role = match governed_role("BrownfieldImplementer").await {
-        Ok(r) => r,
+    // THE SAME governed role machinery the fleet uses: allowedTools = gated tools only,
+    // Task / Write / Bash / Edit / MultiEdit / NotebookEdit disallowed. Its Layer-1 rule
+    // subset is THIS project's selected rules (the selection the inspection resolves) plus
+    // every enforced gate rule; a project with no selection falls back to the built-in
+    // corpus subset. The source is recorded in the run's events.
+    let project = project_id.as_deref().and_then(|id| projects.get(id));
+    // A unit created from inspection findings adds the rules its findings violate (empty for every
+    // other unit).
+    let focus_rules = uow
+        .get(&story_id)
+        .map(|u| u.source_rule_ids())
+        .unwrap_or_default();
+    let role = match crate::governed_rules::project_governed_role(
+        "BrownfieldImplementer",
+        project.as_ref(),
+        Some(repo.as_str()),
+        &focus_rules,
+    )
+    .await
+    {
+        Ok((r, source)) => {
+            event(&runs, "info", source.describe(r.rule_subset.len()));
+            r
+        }
         Err(e) => {
             fail(
                 &runs,
@@ -1222,11 +1391,19 @@ pub async fn execute_dev_implement_run(
     // function for the project-memory sink above; a project-less run (no active project)
     // floors to `ProjectBackend::Cli` — the same zero-setup default a freshly-created
     // project gets.
-    let backend = project_id
-        .as_deref()
-        .and_then(|id| projects.get(id))
-        .map(|p| p.backend)
-        .unwrap_or_default();
+    let run_project = project_id.as_deref().and_then(|id| projects.get(id));
+    let backend = run_project.as_ref().map(|p| p.backend).unwrap_or_default();
+    // The client-engagement lock (`crate::client_lock`): a client engagement's dev loop runs only
+    // on the Anthropic API with an Anthropic model, and because it builds and tests the client's
+    // code (the layer-2 checks below run the repository's own `cargo test`, `npm` scripts and
+    // `.camerata/checks.toml` commands), only with the operator's opt-in to run client tooling.
+    if let Some(why) = run_project
+        .as_ref()
+        .and_then(|p| dev_loop_client_lock_refusal(p, &model))
+    {
+        fail(&runs, &uow, why);
+        return;
+    }
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -1483,8 +1660,10 @@ pub async fn execute_dev_implement_run(
             );
             // Layer-3 (opt-in agentic code review, R7) still applies even when L2 is
             // skipped, as long as the bundle is present.
-            if let Some(l3_bounce_reasons) = run_l3_if_enabled(
+            match run_l3_if_enabled(
                 &runs,
+                &uow,
+                &story_id,
                 &run_id,
                 &next_seq,
                 &l3,
@@ -1494,14 +1673,24 @@ pub async fn execute_dev_implement_run(
             )
             .await
             {
-                if !l3_bounce_reasons.is_empty() {
+                Some(L3Outcome::ReviewerRequiredButUnavailable(message)) => break Err(message),
+                Some(L3Outcome::Bounce(l3_bounce_reasons)) => {
                     // L3 bounced: send back to the agent for a revise pass.
                     iteration += 1;
-                    if iteration >= max_iterations {
-                        break Err(format!(
-                            "layer-3 reviewer still failing after {iteration} pass(es): {}",
-                            l3_bounce_reasons.join("; ")
-                        ));
+                    let fix_rounds = l3.as_ref().map_or(0, |b| b.fix_rounds);
+                    match l3_bounce_next(iteration, max_iterations, fix_rounds) {
+                        L3BounceNext::Fail => {
+                            break Err(format!(
+                                "layer-3 reviewer still failing after {iteration} pass(es): {}",
+                                l3_bounce_reasons.join("; ")
+                            ));
+                        }
+                        L3BounceNext::Retry { fix_round: Some(k) } => event(
+                            &runs,
+                            "info",
+                            format!("Fix round {k} of {fix_rounds} after a Layer-3 bounce."),
+                        ),
+                        L3BounceNext::Retry { fix_round: None } => {}
                     }
                     // Snapshot the iteration before bouncing.
                     let _ = crate::workspace::snapshot_worktree(
@@ -1520,6 +1709,7 @@ pub async fn execute_dev_implement_run(
                     );
                     continue;
                 }
+                Some(L3Outcome::Pass) | None => {}
             }
             // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
             // Multi-repo path (R3.f): when repo_worktrees is populated, collect diffs
@@ -1597,8 +1787,10 @@ pub async fn execute_dev_implement_run(
                 // enabled. The reviewer sees story + rules + diff — no agent transcripts.
                 // It bounces exactly like L2: reasons go back to the developer for a
                 // revise pass. The bounce count is shared with L2.
-                if let Some(l3_bounce_reasons) = run_l3_if_enabled(
+                match run_l3_if_enabled(
                     &runs,
+                    &uow,
+                    &story_id,
                     &run_id,
                     &next_seq,
                     &l3,
@@ -1608,13 +1800,23 @@ pub async fn execute_dev_implement_run(
                 )
                 .await
                 {
-                    if !l3_bounce_reasons.is_empty() {
+                    Some(L3Outcome::ReviewerRequiredButUnavailable(message)) => break Err(message),
+                    Some(L3Outcome::Bounce(l3_bounce_reasons)) => {
                         iteration += 1;
-                        if iteration >= max_iterations {
-                            break Err(format!(
-                                "layer-3 reviewer still failing after {iteration} pass(es): {}",
-                                l3_bounce_reasons.join("; ")
-                            ));
+                        let fix_rounds = l3.as_ref().map_or(0, |b| b.fix_rounds);
+                        match l3_bounce_next(iteration, max_iterations, fix_rounds) {
+                            L3BounceNext::Fail => {
+                                break Err(format!(
+                                    "layer-3 reviewer still failing after {iteration} pass(es): {}",
+                                    l3_bounce_reasons.join("; ")
+                                ));
+                            }
+                            L3BounceNext::Retry { fix_round: Some(k) } => event(
+                                &runs,
+                                "info",
+                                format!("Fix round {k} of {fix_rounds} after a Layer-3 bounce."),
+                            ),
+                            L3BounceNext::Retry { fix_round: None } => {}
                         }
                         // Snapshot the iteration before bouncing.
                         let _ = crate::workspace::snapshot_worktree(
@@ -1634,6 +1836,7 @@ pub async fn execute_dev_implement_run(
                         // Bounce: re-run the agent with the L3 reasons.
                         continue;
                     }
+                    Some(L3Outcome::Pass) | None => {}
                 }
                 // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
                 // Multi-repo path (R3.f): when repo_worktrees is populated, collect
@@ -2004,7 +2207,11 @@ pub async fn execute_dev_implement_run(
         .and_then(|pid| projects.get(pid))
         .map(|p| p.process_rule_config)
         .unwrap_or_default();
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    // A native unit's reference is `uow-<n>`, never a bare `#<n>` (which GitHub links to an
+    // unrelated issue or PR); the same config gates the message that was written for it.
+    let unit = uow.get_or_default(&story_id);
+    let vcs_config = crate::vcs_choke::config_for_unit(&vcs_config, &unit);
+    let numeric_id = unit.commit_reference();
     let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
         &vcs_config,
         "feat",
@@ -2116,6 +2323,55 @@ mod tests {
     use super::*;
     use camerata_worktracker::investigation::{DecisionOutcome, DecisionRecord};
 
+    // ── H2: the client-engagement lock on the dev loop ──────────────────────
+
+    fn lock_project(backend: &str, client: bool, opt_in: bool) -> crate::project::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-1",
+            "name": "Lock",
+            "backend": backend,
+            "client_engagement": client,
+            "client_tooling_opt_in": opt_in,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_client_dev_loop_refuses_the_cli_and_openrouter_models() {
+        let cli = dev_loop_client_lock_refusal(&lock_project("cli", true, true), "claude-sonnet-5")
+            .expect("cli is refused");
+        assert!(cli.contains("`cli` backend"), "{cli}");
+        let or = dev_loop_client_lock_refusal(
+            &lock_project("api", true, true),
+            "deepseek/deepseek-chat",
+        )
+        .expect("an OpenRouter model is refused");
+        assert!(or.contains("`deepseek/deepseek-chat`"), "{or}");
+    }
+
+    #[test]
+    fn a_client_dev_loop_needs_the_tooling_opt_in_because_it_runs_the_client_code() {
+        let why =
+            dev_loop_client_lock_refusal(&lock_project("api", true, false), "claude-sonnet-5")
+                .expect("no opt-in: refused");
+        assert!(why.contains("Opt in to running client tooling"), "{why}");
+        assert_eq!(
+            dev_loop_client_lock_refusal(&lock_project("api", true, true), "claude-sonnet-5"),
+            None
+        );
+    }
+
+    #[test]
+    fn internal_development_dev_loop_is_not_locked() {
+        assert_eq!(
+            dev_loop_client_lock_refusal(
+                &lock_project("cli", false, false),
+                "deepseek/deepseek-chat"
+            ),
+            None
+        );
+    }
+
     // ── Helper: build a minimal approved DecisionRecord ───────────────────────
 
     fn approved_decision(label: &str, question: &str, rationale: &str) -> DecisionRecord {
@@ -2130,6 +2386,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Approved,
             provenance: RevisionProvenance::new(RevisionActor::Ai, Utc::now()),
+            option_descriptions: Vec::new(),
         }
     }
 
@@ -2145,6 +2402,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Pending,
             provenance: RevisionProvenance::new(RevisionActor::Ai, Utc::now()),
+            option_descriptions: Vec::new(),
         }
     }
 
@@ -2739,7 +2997,8 @@ mod tests {
 
     // ── 3. GATE UNCHANGED assertion ────────────────────────────────────────────
 
-    /// The brownfield implement run uses `governed_role` + `prepare_session(..., Some(worktree))`
+    /// The brownfield implement run uses a governed role (`governed_rules::project_governed_role`,
+    /// built on `camerata_fleet`) + `prepare_session(..., Some(worktree))`
     /// — the IDENTICAL gate machinery as pr_resolve_run and update_branch_run. This test
     /// asserts the compile-time guarantee: we call `governed_role` and `prepare_session`
     /// from the same crates (`camerata_fleet` / `camerata_agent`) with the same
@@ -2968,6 +3227,50 @@ mod tests {
         let diff = worktree_diff_from_base(&dir, "").await;
         assert!(diff.is_empty(), "empty base_commit must return empty diff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 review: the diff the dev loop collects goes through `workspace::git_command`, which
+    /// switches off `core.fsmonitor`, so a repository whose own git configuration names a program
+    /// never gets it run. The control step prints SKIPPED when this git does not honour
+    /// `core.fsmonitor`, in which case the assertion proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_diff_from_base_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        crate::test_git::write_file(&dir, "b.txt", "two\n");
+        crate::test_git::commit_all(&dir, "work");
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        let diff = worktree_diff_from_base(&dir, &base).await;
+        assert!(diff.contains("b.txt"), "the diff still ran: {diff}");
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the diff"
+        );
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// In a real git repo, worktree_diff_from_base with the current HEAD returns an empty diff
@@ -3451,5 +3754,356 @@ mod tests {
             matches!(result, Some(Ok(()))),
             "single-entry gate must pass with PASS LLM"
         );
+    }
+
+    // ── 8. Layer-3 reviewer contract (gap 4) ──────────────────────────────────────
+
+    /// A stub reviewer that returns its scripted replies in order (an `Err` entry is a reviewer
+    /// outage). The last reply repeats once the script runs out.
+    struct ScriptedReviewer {
+        replies: std::sync::Mutex<std::collections::VecDeque<Result<String, String>>>,
+        /// Every user prompt the reviewer was sent, in order.
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedReviewer {
+        fn new(replies: Vec<Result<&str, &str>>) -> Arc<Self> {
+            Arc::new(Self {
+                replies: std::sync::Mutex::new(
+                    replies
+                        .into_iter()
+                        .map(|r| r.map(str::to_string).map_err(str::to_string))
+                        .collect(),
+                ),
+                prompts: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn prompts(&self) -> Vec<String> {
+            self.prompts.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmPort for ScriptedReviewer {
+        async fn complete(
+            &self,
+            req: crate::llm::LlmRequest,
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            self.prompts.lock().unwrap().push(req.prompt.clone());
+            let next = {
+                let mut q = self.replies.lock().unwrap();
+                if q.len() > 1 {
+                    q.pop_front().unwrap()
+                } else {
+                    q.front().cloned().unwrap()
+                }
+            };
+            match next {
+                Ok(text) => Ok(crate::llm::LlmResponse {
+                    text,
+                    model: "stub".to_string(),
+                    backend: "stub".to_string(),
+                    cost_usd: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    or_cache_discount: None,
+                    truncated: false,
+                }),
+                Err(message) => Err(anyhow::anyhow!(message)),
+            }
+        }
+        async fn complete_streaming(
+            &self,
+            req: crate::llm::LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            let r = self.complete(req).await?;
+            on_delta(&r.text);
+            Ok(r)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A real git repo with a base commit and one change on top, so the L3 diff is non-empty.
+    /// Returns the temp dir (kept alive by the caller) and the base commit.
+    fn repo_with_one_change() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("README.md"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("feature.rs"), "fn feature() {}").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "feature"]);
+        (dir, base)
+    }
+
+    fn bundle(
+        reviewer: Arc<ScriptedReviewer>,
+        on_error: ReviewOnError,
+        fix_rounds: u8,
+    ) -> Option<L3ReviewBundle> {
+        Some(L3ReviewBundle {
+            story_text: "Add a feature.".to_string(),
+            rules_prose: "RULE-1".to_string(),
+            model: "stub".to_string(),
+            llm: reviewer,
+            on_error,
+            fix_rounds,
+        })
+    }
+
+    /// One L3 review at `iteration` against the repo; returns the outcome.
+    async fn review_once(
+        runs: &RunStore,
+        uow: &UowStore,
+        run_id: &str,
+        l3: &Option<L3ReviewBundle>,
+        dir: &std::path::Path,
+        base: &str,
+        iteration: usize,
+    ) -> Option<L3Outcome> {
+        let seq = std::sync::atomic::AtomicUsize::new(iteration * 100);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        run_l3_if_enabled(
+            runs, uow, "S-9", run_id, &next_seq, l3, dir, base, iteration,
+        )
+        .await
+    }
+
+    fn l3_events(runs: &RunStore, run_id: &str) -> Vec<String> {
+        runs.get(run_id)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.layer == "layer-3")
+            .map(|e| e.detail.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reviewer_error_fails_the_run_when_fail_closed_and_continues_when_advisory() {
+        let (dir, base) = repo_with_one_change();
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("S-9", "test", crate::run::RunKind::Watched);
+
+        // Advisory (today): the error is logged and the run goes on.
+        let advisory = bundle(
+            ScriptedReviewer::new(vec![Err("model unreachable")]),
+            ReviewOnError::Advisory,
+            0,
+        );
+        let outcome = review_once(&runs, &uow, &run_id, &advisory, dir.path(), &base, 0).await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        assert!(
+            l3_events(&runs, &run_id)
+                .iter()
+                .any(|d| d.contains("model unreachable") && d.contains("fail closed in Settings")),
+            "the advisory event names the error and the setting that stops the run"
+        );
+
+        // FailClosed: the same outage stops the run, with the agreed wording.
+        let closed = bundle(
+            ScriptedReviewer::new(vec![Err("model unreachable")]),
+            ReviewOnError::FailClosed,
+            0,
+        );
+        let outcome = review_once(&runs, &uow, &run_id, &closed, dir.path(), &base, 0).await;
+        let Some(L3Outcome::ReviewerRequiredButUnavailable(message)) = outcome else {
+            panic!("fail closed must not treat an outage as a pass: {outcome:?}");
+        };
+        assert_eq!(
+            message,
+            "Layer-3 reviewer could not run, and the project requires a review before a run \
+             passes: model unreachable"
+        );
+        assert!(
+            uow.get_or_create("S-9").review_findings.is_empty(),
+            "an outage records no findings"
+        );
+    }
+
+    #[test]
+    fn a_bounce_with_fix_rounds_one_runs_one_more_pass_before_failing() {
+        // Default: max_iterations 1, no fix round. The first bounce ends the run (today).
+        assert_eq!(l3_bounce_next(1, 1, 0), L3BounceNext::Fail);
+        // One fix round: the first bounce goes round once more, named as fix round 1...
+        assert_eq!(
+            l3_bounce_next(1, 1, 1),
+            L3BounceNext::Retry { fix_round: Some(1) }
+        );
+        // ...and a second bounce then fails.
+        assert_eq!(l3_bounce_next(2, 1, 1), L3BounceNext::Fail);
+        // Ordinary passes (iteration below max_iterations) are not fix rounds.
+        assert_eq!(
+            l3_bounce_next(1, 3, 0),
+            L3BounceNext::Retry { fix_round: None }
+        );
+        assert_eq!(l3_bounce_next(3, 3, 0), L3BounceNext::Fail);
+        // Fix rounds come on top of max_iterations.
+        assert_eq!(
+            l3_bounce_next(3, 3, 2),
+            L3BounceNext::Retry { fix_round: Some(1) }
+        );
+        assert_eq!(
+            l3_bounce_next(4, 3, 2),
+            L3BounceNext::Retry { fix_round: Some(2) }
+        );
+        assert_eq!(l3_bounce_next(5, 3, 2), L3BounceNext::Fail);
+    }
+
+    #[tokio::test]
+    async fn review_findings_are_recorded_on_the_unit_and_a_fixed_line_closes_the_earlier_finding()
+    {
+        let (dir, base) = repo_with_one_change();
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("S-9", "test", crate::run::RunKind::Watched);
+        let reviewer = ScriptedReviewer::new(vec![
+            Ok("FINDINGS\n\
+                - [HIGH] Empty feature | scenario: calling feature() does nothing | rule: ACC-1 | where: feature.rs:1\n\
+                - [LOW] Name | scenario: unclear | rule: none | where: feature.rs:1\n\
+                VERDICT: BOUNCE"),
+            Ok("FINDINGS\n\
+                - [FIXED] Empty feature\n\
+                - [LOW] Name | scenario: unclear | rule: none | where: feature.rs:1\n\
+                VERDICT: PASS"),
+        ]);
+        let l3 = bundle(reviewer.clone(), ReviewOnError::Advisory, 0);
+
+        // Pass 0: bounced, two findings recorded.
+        let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 0).await;
+        let Some(L3Outcome::Bounce(reasons)) = outcome else {
+            panic!("a HIGH finding must bounce: {outcome:?}");
+        };
+        assert_eq!(
+            reasons[0],
+            "[HIGH] Empty feature: calling feature() does nothing"
+        );
+        let u = uow.get_or_create("S-9");
+        assert_eq!(u.review_findings.len(), 2);
+        assert_eq!(u.open_blocking_review_findings(), 1);
+        let events = l3_events(&runs, &run_id);
+        assert!(events
+            .iter()
+            .any(|d| d == "Layer-3 review: 1 high, 0 medium, 1 low. Bounced to the implementer."));
+
+        // Pass 1: the reviewer was shown the open findings and confirms the HIGH gone with a
+        // [FIXED] line; the LOW stays one record.
+        let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 1).await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        let prompts = reviewer.prompts();
+        assert!(!prompts[0].contains("Earlier findings to re-check"));
+        assert!(prompts[1].contains("## Earlier findings to re-check"));
+        assert!(prompts[1].contains("- [HIGH] Empty feature"));
+        let u = uow.get_or_create("S-9");
+        assert_eq!(u.review_findings.len(), 2, "the LOW is not added twice");
+        assert_eq!(
+            u.review_findings[0].status,
+            crate::uow::ReviewFindingStatus::Fixed {
+                run_id: run_id.clone(),
+                iteration: 1
+            }
+        );
+        assert_eq!(u.open_blocking_review_findings(), 0);
+        assert!(l3_events(&runs, &run_id).iter().any(|d| d.starts_with(
+            "Layer-3 review: no high or medium findings. 1 low finding(s) recorded for sign-off."
+        ) && d
+            .contains("1 earlier finding(s) confirmed fixed")));
+    }
+
+    /// An earlier HIGH is recorded by a first review; the second review replies with `reply`.
+    /// Returns the outcome of the second review and whether the HIGH is still open.
+    async fn second_review_leaves_high_open(reply: &'static str) -> (Option<L3Outcome>, bool) {
+        let (dir, base) = repo_with_one_change();
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("S-9", "test", crate::run::RunKind::Watched);
+        let l3 = bundle(
+            ScriptedReviewer::new(vec![
+                Ok("FINDINGS\n- [HIGH] Empty feature | scenario: does nothing | rule: none | where: none\nVERDICT: BOUNCE"),
+                Ok(reply),
+            ]),
+            ReviewOnError::Advisory,
+            0,
+        );
+        review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 0).await;
+        let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 1).await;
+        let still_open = uow
+            .open_review_findings("S-9")
+            .iter()
+            .any(|f| f.title == "Empty feature");
+        (outcome, still_open)
+    }
+
+    #[tokio::test]
+    async fn a_sloppy_reply_leaves_an_earlier_high_open() {
+        // "Looks fine": no VERDICT line, so it bounces on a synthetic finding and closes nothing.
+        let (outcome, open) = second_review_leaves_high_open("Looks fine.").await;
+        assert!(matches!(outcome, Some(L3Outcome::Bounce(_))));
+        assert!(open, "a sloppy reply is not evidence the HIGH is gone");
+        // A FIXED line inside a reply with no VERDICT line is ignored too.
+        let (_, open) = second_review_leaves_high_open("- [FIXED] Empty feature\nPASS").await;
+        assert!(open);
+        // And so is one next to a synthetic finding.
+        let (_, open) = second_review_leaves_high_open(
+            "- [FIXED] Empty feature\n- some stray note\nVERDICT: PASS",
+        )
+        .await;
+        assert!(open);
+    }
+
+    #[tokio::test]
+    async fn an_earlier_high_the_reviewer_does_not_mention_stays_open() {
+        // A clean PASS that never mentions the HIGH: the pass goes through but the HIGH stays
+        // open, so sign-off stays blocked until it is fixed on evidence or accepted.
+        let (outcome, open) =
+            second_review_leaves_high_open("FINDINGS\n- none\nVERDICT: PASS").await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        assert!(open, "silence is not evidence");
+    }
+
+    #[tokio::test]
+    async fn a_fixed_line_in_a_trustworthy_reply_closes_the_earlier_high() {
+        let (outcome, open) =
+            second_review_leaves_high_open("FINDINGS\n- [FIXED] Empty feature\nVERDICT: PASS")
+                .await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        assert!(!open);
+    }
+
+    #[tokio::test]
+    async fn an_unformatted_reviewer_reply_bounces_and_is_recorded_not_passed() {
+        let (dir, base) = repo_with_one_change();
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("S-9", "test", crate::run::RunKind::Watched);
+        let l3 = bundle(
+            ScriptedReviewer::new(vec![Ok("Looks fine to me.")]),
+            ReviewOnError::Advisory,
+            0,
+        );
+        let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 0).await;
+        assert!(matches!(outcome, Some(L3Outcome::Bounce(_))));
+        assert_eq!(uow.get_or_create("S-9").open_blocking_review_findings(), 1);
     }
 }

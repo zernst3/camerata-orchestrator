@@ -5,8 +5,8 @@
 
 ## Context
 
-The 2026-07-05 audit blitz (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) and the
-escalation-decisions document (`docs/plans/2026-07-05_escalation-decisions.md`) identified three
+The 2026-07-05 audit blitz and the escalation-decisions document (both private working notes)
+identified three
 P0 gate/moat defects that were approved for immediate remediation.
 
 ### GAP-2: commit/PR gate configured but never enforced

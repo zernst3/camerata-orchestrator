@@ -1,5 +1,5 @@
 id = "ARCH-MIDDLEWARE-FIRST-1"
-version = 1
+version = 4
 title = "If a cross-cutting concern can be expressed as middleware, it must be"
 domain = "api-layer"
 layer = "universal"
@@ -7,20 +7,21 @@ enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: both outside sources are rated low authority; they document the middleware mechanism, not the mandate to extract every cross-cutting concern, which is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/"
-title = "ASP.NET Core — Middleware"
+title = "ASP.NET Core: Middleware"
 relevance = "Authority note (author-facing): low authority — the pages establish the middleware mechanism itself, not a 'must extract every cross-cutting concern to middleware' mandate, which is this project's own policy"
 
 [[sources]]
 url = "https://expressjs.com/en/5x/guide/using-middleware/"
-title = "Express.js — Using middleware"
+title = "Express.js: Using middleware"
 relevance = "Authority note (author-facing): low authority — same caveat: documents the mechanism, not the mandate"
 
 [decision]
-question = "What position does the project take on: If a cross-cutting concern can be expressed as middleware, it must be?"
+question = "Where are cross-cutting concerns such as auth, logging, and rate limiting implemented?"
 default = "if-a-cross-cutting-concern-can-be-expressed-as-middleware-it-must-be"
 why = "Cross-cutting logic that lives inside individual handlers drifts. Five handlers that each do their own auth check eventually have five subtly different auth checks; one new handler omits the check entirely and the gap is invisible until a security review catches it. A single middleware implementation can be reviewed once, hardened once, and changed once; every route mounted under it gets the new behavior for free. The middleware itself becomes the auditable artifact for the cross-cutting concern, and 'is this enforced everywhere?' reduces to 'is this middleware mounted at the right router level?' Inlining the cross-cutting logic in each handler is the duplicated-logic failure mode: the handlers slowly diverge into subtly different implementations of the same concern, and new handlers omit the logic entirely by accident. Extracting a helper function and calling it from each handler is better than inline but still requires every handler to remember to call it; one new handler skips the call and the gap is invisible to the type system and to most code review. Using middleware sparingly only for universally-recognized cases like CORS leaves the line between 'obvious middleware case' and 'leave it in the handler' arbitrary, drifting per reviewer, and accumulating exceptions over time."
 
@@ -29,7 +30,7 @@ id = "if-a-cross-cutting-concern-can-be-expressed-as-middleware-it-must-be"
 label = "If a cross-cutting concern can be expressed as middleware, it must be"
 directive = "Cross-cutting concerns that apply to more than one handler (authentication, authorization gates, request logging, tracing, request ID generation, rate limiting, body size limits, CORS, security headers, error-envelope rendering, idempotency-key lookup, response compression) are implemented as reusable middleware once and attached to the route or router. Inlining the same logic across handlers is forbidden, and so is per-handler helper-function calls that depend on every handler remembering to make the call. New handlers inherit the cross-cutting behavior by virtue of where they are mounted, not by virtue of what each handler's author remembers to write."
 remediation = """
-Extract the cross-cutting logic duplicated across handlers (auth, logging, tracing, rate limiting, CORS, or similar) into a single reusable middleware, and attach it to the route or router rather than repeating it per handler. Remove the inline or per-handler copies once the middleware is wired in. Verify by confirming the concern now executes for every relevant route from one middleware definition, and a handler no longer implements it inline.
+Extract the cross-cutting logic duplicated across handlers (auth, logging, tracing, rate limiting, CORS or similar) into a single reusable middleware and attach it to the route or router rather than repeating it per handler. Remove the inline or per-handler copies once the middleware is wired in. Verify by confirming the concern now executes for every relevant route from one middleware definition, and a handler no longer implements it inline.
 """
 why = "Cross-cutting logic that lives inside individual handlers drifts."
 
@@ -52,4 +53,4 @@ id = "middleware-is-used-only-for-universally-recogniz"
 violates = true
 label = "Middleware for obvious cases only"
 directive = "middleware is used only for universally-recognized cross-cutting cases (CORS, body parsing) and other concerns live inside individual handlers regardless of how many handlers share them"
-why = "Restricting middleware to only obvious cases leaves the line between 'obvious middleware case' and 'leave it in the handler' arbitrary, drifting per reviewer, and accumulating exceptions over time."
+why = "Restricting middleware to only obvious cases leaves the line between 'obvious middleware case' and 'leave it in the handler' arbitrary, drifting per reviewer and accumulating exceptions over time."

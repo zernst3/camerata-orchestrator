@@ -98,9 +98,10 @@ verification = "{}"
 /// population is non-empty.
 ///
 /// The vacuity guard is the load-bearing half. "No `policy` rule is disarmed" is trivially true
-/// of a corpus with no `policy` rules, and this corpus has 21 — including the two the A8 finding
-/// named by id. Pinning those two by name means a future edit that quietly re-labels them cannot
-/// make this test pass by emptying its own population.
+/// of a corpus with no `policy` rules, and this corpus carries well over ten (the count moves as
+/// rules gain outside sources and are re-labelled `grounded`, so the floor is a sanity bound, not
+/// a roster). The two rules the A8 finding named by id are pinned by name below, so a future edit
+/// that quietly re-labels them cannot make this test pass by emptying its own population.
 #[test]
 fn req_w17_every_policy_rule_in_the_corpus_arms() {
     let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
@@ -115,26 +116,35 @@ fn req_w17_every_policy_rule_in_the_corpus_arms() {
         .map(|r| r.id.0.as_str())
         .collect();
     assert!(
-        policy.len() >= 15,
-        "vacuity guard: only {} `policy` rules loaded (21 on 2026-10-12); this test says nothing \
-         about a corpus that has none",
+        policy.len() >= 10,
+        "vacuity guard: only {} `policy` rules loaded (expected at least 10); this test says nothing about a \
+         corpus that has none",
         policy.len()
     );
 
-    // The two the A8 finding named. `SPIRIT-FILE-SIZE-1` was DOUBLY disarmed (policy, plus the
-    // `SPIRIT-` prefix exclusion from the code-audit tier); `PROC-CITE-CONVENTION-ID-1` stands
-    // for the `PROC-*` governance family the product is explicitly about.
-    for id in ["SPIRIT-FILE-SIZE-1", "PROC-CITE-CONVENTION-ID-1"] {
-        let rule = set
-            .get_by_id(id)
-            .unwrap_or_else(|| panic!("{id} must be present in the bundled corpus"));
-        assert_eq!(
-            rule.verification(),
-            Verification::Policy,
-            "{id} is one of the A8 rules and is expected to still be `policy`; if it was \
-             deliberately re-labelled, update this test's roster rather than widening it"
-        );
-    }
+    // The A8 finding named two rules. `PROC-CITE-CONVENTION-ID-1` stands for the `PROC-*`
+    // governance family the product is explicitly about, and is still `policy`.
+    let cite = set
+        .get_by_id("PROC-CITE-CONVENTION-ID-1")
+        .expect("PROC-CITE-CONVENTION-ID-1 must be present in the bundled corpus");
+    assert_eq!(
+        cite.verification(),
+        Verification::Policy,
+        "PROC-CITE-CONVENTION-ID-1 is one of the A8 rules and is expected to still be `policy`; \
+         if it was deliberately re-labelled, update this test's roster rather than widening it"
+    );
+
+    // `SPIRIT-FILE-SIZE-1` was the other one, DOUBLY disarmed (policy, plus the `SPIRIT-` prefix
+    // exclusion from the code-audit tier). It was deliberately re-labelled `grounded` on
+    // 2026-10-28 when it gained outside sources (CWE-1080, ESLint `max-lines`), so it no longer
+    // belongs in the `policy` population above; what A8 was about, that it ARMS, still holds.
+    let file_size = set
+        .get_by_id("SPIRIT-FILE-SIZE-1")
+        .expect("SPIRIT-FILE-SIZE-1 must be present in the bundled corpus");
+    assert!(
+        file_size.is_auto_recommended(),
+        "SPIRIT-FILE-SIZE-1 is one of the A8 rules and must arm whatever its verification"
+    );
 
     let disarmed: Vec<&str> = set
         .iter()

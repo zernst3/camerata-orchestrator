@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-NAMING-1"
-version = 1
+version = 2
 title = "Test methods use descriptive snake_case or camelCase names that state the scenario and expected outcome; @DisplayName provides the human-readable label in reports"
 domain = "java:testing"
 layer = "language"
@@ -17,11 +17,11 @@ why = "A test method name is the first line of a failure report. A name like tes
 
 [[sources]]
 url = "https://docs.junit.org/6.0.2/writing-tests/display-names.html"
-title = "JUnit User Guide — Display Names (@DisplayName and DisplayNameGenerator.ReplaceUnderscores)"
+title = "JUnit User Guide: Display Names (@DisplayName and DisplayNameGenerator.ReplaceUnderscores)"
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldusetestannotation"
-title = "PMD Best Practices — UnitTestShouldUseTestAnnotation (catches legacy 'test' prefix naming without @Test)"
+title = "PMD Best Practices: UnitTestShouldUseTestAnnotation (catches legacy 'test' prefix naming without @Test)"
 linter = "PMD: UnitTestShouldUseTestAnnotation"
 
 [[option]]

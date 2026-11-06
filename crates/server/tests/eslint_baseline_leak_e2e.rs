@@ -103,7 +103,15 @@ async fn a_scan_that_selects_only_the_hooks_rules_reports_no_baseline_eslint_row
         &std::collections::HashMap::new(),
     )
     .await;
-    camerata_server::merge_scan_preview(&mut report, &sources, &rules, Some(&corpus), None).await;
+    camerata_server::merge_scan_preview(
+        &mut report,
+        &sources,
+        &rules,
+        Some(&corpus),
+        None,
+        camerata_server::client_lock::ClientTooling::INTERNAL,
+    )
+    .await;
 
     let eslint_rows: Vec<&onboard::Finding> = report
         .findings

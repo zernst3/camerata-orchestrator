@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-EFFECTS-IN-REDUCERS-1"
-version = 1
+version = 4
 title = "Reducers are pure; side effects live in thunks or middleware"
 domain = "javascript:redux"
 layer = "library"
@@ -11,10 +11,10 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#reducers-must-not-have-side-effects"
-title = "Redux Style Guide — Reducers Must Not Have Side Effects (Priority A: Essential)"
+title = "Redux Style Guide: Reducers Must Not Have Side Effects (Priority A: Essential)"
 
 [decision]
-question = "What position does the project take on: Reducers are pure; side effects live in thunks or middleware?"
+question = "Where do side effects such as API calls and random value generation happen relative to Redux reducers?"
 default = "reducers-are-pure-side-effects-live-in-thunks-or"
 why = "A reducer is required to be a pure function of (state, action): same inputs produce the same output, with no side effects and no dependence on anything outside its arguments. The whole framework leans on this. Reducers are re-run during time-travel and action replay, so any side effect inside one (an API call, a dispatch, reading the clock, generating a random id, writing to storage) fires again on every replay, producing duplicate requests and non-reproducible state. A reducer that calls an async API also cannot return the result synchronously, so it tends to return stale or undefined state and wire the real update through a back channel, defeating the single-source-of-truth model. Side effects belong in the layer built for them: thunks (createAsyncThunk / RTK Query) or custom middleware, which sit between dispatch and the reducer, perform the I/O, and dispatch plain result actions that the pure reducer folds into state. Doing the fetch inside the reducer because that is where the triggering action arrives couples the state transition to the effect and makes both untestable in isolation; splitting them keeps the reducer a trivially testable pure function and puts the effect somewhere it runs exactly once."
 
@@ -23,12 +23,12 @@ id = "reducers-are-pure-side-effects-live-in-thunks-or"
 label = "Reducers are pure; side effects live in thunks or middleware"
 directive = "Reducers are pure functions of (state, action) with no side effects: no API calls, no dispatching, no I/O, no reading the clock, no random or unique-id generation, no logging. All side effects and async work live in thunks (createAsyncThunk or RTK Query) or custom middleware, which perform the effect and dispatch plain result actions that the reducer folds into state. Non-deterministic inputs an action needs (timestamps, generated ids) are computed in the action creator or thunk and passed in via the payload, not produced inside the reducer."
 remediation = """
-Move the API call, dispatch, I/O, clock read, or id generation out of the reducer and into a thunk (createAsyncThunk or RTK Query) or middleware, leaving the reducer as a pure function of state and action. Verify by confirming the reducer produces the same output for the same state and action every time it's called, with no external effect as a side channel.
+Move the API call, dispatch, I/O, clock read or id generation out of the reducer and into a thunk (createAsyncThunk or RTK Query) or middleware, leaving the reducer as a pure function of state and action. Verify by confirming the reducer produces the same output for the same state and action every time it's called, with no external effect as a side channel.
 """
 why = "Reducers are re-run during replay and time-travel, so a side effect inside one fires again on every replay producing duplicate requests and non-reproducible state; effects belong in thunks or middleware that run exactly once."
 
 [[option]]
 id = "reducers-perform-side-effects-such-as-api-calls"
 label = "Side effects performed directly in reducers"
-directive = "reducers perform side effects such as API calls, dispatching, or id generation directly when the triggering action arrives there, rather than confining all effects to thunks and middleware and keeping reducers pure"
+directive = "reducers perform side effects such as API calls, dispatching or id generation directly when the triggering action arrives there, rather than confining all effects to thunks and middleware and keeping reducers pure"
 why = "Performing side effects such as API calls or id generation directly inside a reducer couples the state transition to the effect and makes both untestable in isolation: a reducer with an API call fires again on every time-travel replay, producing duplicate requests and non-reproducible state. An async reducer also cannot return the result synchronously, so it tends to return stale or undefined state and wire the real update through a back channel, defeating the single-source-of-truth model."

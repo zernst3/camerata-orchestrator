@@ -220,12 +220,30 @@ pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The message a server refusal carries: its `reason` (else its `error`), or `fallback` plus the
+/// HTTP status when the body has neither. What the console shows when a save is refused (400
+/// invalid branch name, 409 repository outside the active project) instead of failing silently.
+pub(super) async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
+    let status = resp.status();
+    let body = resp.json::<serde_json::Value>().await.ok();
+    body.as_ref()
+        .and_then(|v| v.get("reason").or_else(|| v.get("error")))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{fallback} (HTTP {status})."))
+}
+
 /// Persist the per-story repo/branch scope (R6). `repos` is the full in-scope set; each
 /// entry is `{ repo, branch }` where `branch` is the tagged `BranchMode` JSON
 /// (`{"mode":"existing","branch_name":…}` or `{"mode":"new_from_base","base":…,"new_name":…}`).
-/// Fire-and-forget: returns `true` on a 2xx.
-pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) -> bool {
-    reqwest::Client::new()
+/// `Err(message)` when the server refuses (the message is the server's reason, for a toast) or
+/// cannot be reached.
+pub(super) async fn save_intake_repos(
+    story_id: &str,
+    repos: serde_json::Value,
+) -> Result<(), String> {
+    let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/intake/repos",
             crate::bff_base(),
@@ -234,8 +252,12 @@ pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) 
         .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .map_err(|_| "Could not reach the server to save the repo scope.".to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(rejection_message(resp, "The repo scope was not saved").await)
+    }
 }
 
 /// Append one turn (`role` = `"user"` | `"agent"`) to the investigation/refinement agent
@@ -964,6 +986,10 @@ pub(super) struct DevelopmentStateView {
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct UowView {
     pub story_id: String,
+    /// The repository the unit works in (the server's own field for the unit, not parsed from
+    /// the story id). `None` for a unit that names none yet.
+    #[serde(default)]
+    pub repo: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -978,6 +1004,20 @@ pub(super) struct UowView {
     pub gate_provenance: Option<GateProvenanceView>,
     #[serde(default)]
     pub sign_off: Option<SignOffView>,
+    /// The Layer-3 reviewer findings recorded for this unit (gap 4). An open HIGH or MEDIUM one
+    /// blocks sign-off until it is fixed or accepted with a reason.
+    #[serde(default)]
+    pub review_findings: Vec<super::review_findings::RecordedReviewFindingView>,
+    /// Where the unit came from: the inspection findings it closes (roadmap 2c). `None` for every
+    /// other unit.
+    #[serde(default)]
+    pub source: Option<super::remediation::UowSourceView>,
+    /// What each delta retest said about those findings, oldest first.
+    #[serde(default)]
+    pub retests: Vec<super::remediation::RetestEvidenceView>,
+    /// The project the unit belongs to (a rescan runs against it).
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
     #[serde(default)]
     pub intake: IntakeStateView,
@@ -1006,6 +1046,172 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
     .json::<UowView>()
     .await
     .ok()
+}
+
+/// The branch a development run works on for this unit, derived from its Intake Repos in
+/// scope: the branch mode of the single in-scope repo or, with several, of the unit's own
+/// repository (`unit_repo`, the `repo` the server reports for the unit: the repo a run works
+/// in; the unit's id is never parsed for it). `None` when no such repo is in scope. Uses the shared [`camerata_api_types::uow::BranchMode::branch_for_story`], so the
+/// branch matches the one the server derives for that repo's worktree.
+pub(super) fn run_branch_from_scope(
+    story_id: &str,
+    unit_repo: Option<&str>,
+    repos: &[RepoScopeView],
+) -> Option<String> {
+    let entry = match repos {
+        [only] => only,
+        many => {
+            let repo = unit_repo?;
+            many.iter().find(|r| r.repo == repo)?
+        }
+    };
+    // A malformed mode reads as the default (new branch from base), exactly as the server's
+    // `#[serde(default)]` does.
+    let mode: camerata_api_types::uow::BranchMode =
+        serde_json::from_value(entry.branch.clone()).unwrap_or_default();
+    Some(mode.branch_for_story(story_id))
+}
+
+/// `POST /api/uow/:story_id/branch` body `{ branch }`: record the unit's branch. `Err(message)`
+/// when the server refuses (400 invalid branch name, 409 unit outside the active project: the
+/// message is the server's reason) or cannot be reached.
+pub(super) async fn set_uow_branch(story_id: &str, branch: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/branch",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "branch": branch }))
+        .send()
+        .await
+        .map_err(|_| "Could not reach the server to record the branch.".to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(rejection_message(resp, "The branch was not recorded").await)
+    }
+}
+
+/// Before a development run starts: record the unit's branch from its Intake Repos in scope
+/// when none is set yet, so the run works in the unit's real repository. Without a branch the
+/// server has no repository to work in. An already-set branch is left alone here: the server
+/// is the single owner of the branch, and a run re-derives it from the Intake scope and records
+/// any change in the unit's history. When no repo is in scope nothing is recorded and the run
+/// start goes ahead (the server refuses it with the reason). When the server REFUSES the
+/// branch, `Err(message)` carries its reason so the console shows it instead of starting a run
+/// that cannot work.
+pub(super) async fn ensure_run_branch(story_id: &str) -> Result<(), String> {
+    let Some(uow) = fetch_uow(story_id).await else {
+        return Ok(());
+    };
+    if uow.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+        return Ok(());
+    }
+    match run_branch_from_scope(story_id, uow.repo.as_deref(), &uow.intake.repos) {
+        Some(branch) => set_uow_branch(story_id, &branch).await,
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod run_branch_tests {
+    use super::{run_branch_from_scope, RepoScopeView};
+
+    fn scope(repo: &str, branch: serde_json::Value) -> RepoScopeView {
+        RepoScopeView {
+            repo: repo.to_string(),
+            branch,
+        }
+    }
+
+    #[test]
+    fn a_single_new_from_base_repo_works_on_the_story_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "new_from_base", "base": "main", "new_name": "" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
+
+    #[test]
+    fn a_single_existing_branch_repo_works_on_that_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "existing", "branch_name": "feature/x" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
+            Some("feature/x")
+        );
+    }
+
+    #[test]
+    fn with_several_repos_the_issue_repo_decides_and_a_missing_one_gives_none() {
+        let repos = [
+            scope(
+                "acme/web",
+                serde_json::json!({ "mode": "existing", "branch_name": "web-branch" }),
+            ),
+            scope(
+                "acme/api",
+                serde_json::json!({ "mode": "existing", "branch_name": "api-branch" }),
+            ),
+        ];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
+            Some("api-branch")
+        );
+        assert_eq!(
+            run_branch_from_scope("acme/other#7", Some("acme/other"), &repos),
+            None
+        );
+        assert_eq!(run_branch_from_scope("draft-1", None, &repos), None);
+    }
+
+    /// The repo that decides is the unit's own, whatever its key looks like: a native unit
+    /// (`uow-3`) and a key that merely contains a `#` behave the same.
+    #[test]
+    fn the_unit_repo_decides_whatever_the_key_looks_like() {
+        let repos = [
+            scope(
+                "acme/web",
+                serde_json::json!({ "mode": "existing", "branch_name": "web-branch" }),
+            ),
+            scope(
+                "acme/api",
+                serde_json::json!({ "mode": "existing", "branch_name": "api-branch" }),
+            ),
+        ];
+        for key in ["uow-3", "other/repo#9", "no-separator"] {
+            assert_eq!(
+                run_branch_from_scope(key, Some("acme/web"), &repos).as_deref(),
+                Some("web-branch"),
+                "key {key:?}"
+            );
+        }
+        assert_eq!(run_branch_from_scope("uow-3", None, &repos), None);
+    }
+
+    #[test]
+    fn no_repo_in_scope_gives_none() {
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_malformed_mode_reads_as_the_default_new_branch() {
+        let repos = [scope("acme/api", serde_json::json!("bogus"))];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
 }
 
 /// POST a new dev-status for a story's UoW. Returns `Some(())` on a 2xx. The server
@@ -1410,6 +1616,9 @@ pub(super) struct UowListEntry {
     /// `true` when this is a blank/authoring DRAFT UoW (render the authoring panel).
     #[serde(default)]
     pub authoring: bool,
+    /// `"findings"` for a unit made from an inspection's findings (a small badge in the list).
+    #[serde(default)]
+    pub source_kind: Option<String>,
 }
 
 /// The `GET /api/uows` envelope.
@@ -2075,6 +2284,10 @@ pub(super) struct DecisionRecordView {
     pub outcome: DecisionOutcomeView,
     #[serde(default)]
     pub provenance: RevisionProvenanceView,
+    /// One-line option descriptions (recommended or chosen first, then the alternatives).
+    /// Carried so posting the whole list back does not erase them.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 /// The `GET /api/uow/:id/investigation` envelope.
@@ -2311,6 +2524,9 @@ pub(super) fn GovernedDevPage() -> Element {
                                             }
                                             span { class: "govdev-uow-assignee", "{assignees}" }
                                             span { class: "govdev-uow-stage", "{stage}" }
+                                            if u.source_kind.as_deref() == Some("findings") {
+                                                span { class: "govdev-uow-source", "from inspection" }
+                                            }
                                         }
                                     }
                                     if confirming {
@@ -3978,7 +4194,7 @@ pub(super) enum OversightMode {
     #[default]
     Interactive,
     /// Dialogs are emitted to a triage backlog; answered later (routines).
-    // dead_code: the routines follow-on (docs/plans/2026-06-25_uow-3phase-redesign.md section 8)
+    // dead_code: the routines follow-on (the UoW three-phase redesign notes section 8)
     // is not built yet; phases already take an `OversightMode` so it can be wired in.
     #[allow(dead_code)]
     Batched,
@@ -4087,7 +4303,11 @@ pub(super) fn IntakePhaseView(
             let sid = sid.clone();
             let payload = repo_scope_payload(&selected_repos(), &repo_branch_modes());
             spawn(async move {
-                let _ = save_intake_repos(&sid, payload).await;
+                // A refused scope (invalid branch name, repository outside the project) is
+                // shown to the user, never dropped silently.
+                if let Err(message) = save_intake_repos(&sid, payload).await {
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, message);
+                }
             });
         }
     };
@@ -5164,6 +5384,33 @@ pub(super) fn DevelopmentPhaseView(
     let mut bug_report = use_signal(String::new);
     let mut bug_fix_running = use_signal(|| false);
 
+    // The Layer-3 reviewer findings recorded on the unit (empty until a review has run).
+    let review_findings: Vec<super::review_findings::RecordedReviewFindingView> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| u.review_findings)
+        .unwrap_or_default();
+
+    // The inspection findings this unit closes, with what each delta retest said (gap 6).
+    let (findings_source, findings_retests, findings_repo, findings_project): (
+        Option<super::remediation::FindingsSourceView>,
+        Vec<super::remediation::RetestEvidenceView>,
+        String,
+        Option<String>,
+    ) = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| {
+            let repo = u.repo.clone().unwrap_or_default();
+            let source = u
+                .source
+                .map(|super::remediation::UowSourceView::Findings(f)| f);
+            (source, u.retests, repo, u.project_id)
+        })
+        .unwrap_or_default();
+
     // ── Layer-2 results (displayed after a dev run completes — no button) ─────────
     // TODO(#105): fetch real Layer-2 bounce results from the run's provenance endpoint
     let layer2_results: Option<String> = uow_for_stage
@@ -5622,6 +5869,14 @@ pub(super) fn DevelopmentPhaseView(
                 }
                 // TODO(#105): integrate live Layer-2 bounce stream and Layer-3 opt-in agentic
                 // code reviewer (R7); both run with / parallel to Layer-2.
+            }
+
+            // ── Layer-3 reviewer findings (gap 4): rendered only when the unit has some ───
+            super::review_findings::ReviewFindingsSection { story_id: story_id.clone(), findings: review_findings, uow_refresh }
+
+            // ── Inspection findings this unit closes (gap 6): rendered only for such a unit ───
+            if let Some(source) = findings_source {
+                super::remediation::FindingsSourceSection { source, retests: findings_retests, repo: findings_repo, story_id: story_id.clone(), project_id: findings_project, uow_refresh }
             }
 
             // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────
@@ -6965,13 +7220,28 @@ pub(super) fn DecisionsReviewPanel(
             // ── Decisions ──────────────────────────────────────────────────────
             div { class: "uow-decisions",
                 p { class: "uow-field-label", "Decisions ({decisions.len()})" }
+                p { class: "section-hint",
+                    "The investigation proposes decisions. Approve, change or reject each one. Development starts only when every decision is approved."
+                }
                 if decisions.is_empty() {
                     p { class: "section-hint",
                         "No decisions recorded yet. The development gate requires at least one APPROVED decision. Add one below."
                     }
                 }
                 for (i, d) in decisions.iter().enumerate() {
-                    {
+                    if super::decision_cards::proposed_decision_vm(d).is_some() {
+                        super::decision_cards::ProposedDecisionCard {
+                            // Keyed on the rationale too, so a new pass that changes the
+                            // recommendation remounts the card with a fresh preselection.
+                            key: "{d.artifact_id}|{d.rationale}",
+                            story_id: story_id.clone(),
+                            decisions: decisions.clone(),
+                            index: i,
+                            busy,
+                            local_refresh,
+                        }
+                    } else {
+                        {
                         let (olabel, ocss) = (d.outcome.label(), d.outcome.css());
                         let decisions_for_approve = decisions.clone();
                         let decisions_for_reject = decisions.clone();
@@ -6983,15 +7253,29 @@ pub(super) fn DecisionsReviewPanel(
                                     span { class: "uow-decision-label", "{d.label}" }
                                     span { class: "wi-state {ocss}", "{olabel}" }
                                 }
-                                if !d.question.is_empty() {
-                                    p { class: "uow-decision-q", "Q: {d.question}" }
-                                }
-                                if !d.rationale.is_empty() {
-                                    p { class: "uow-decision-rationale", "{d.rationale}" }
-                                }
+                                // A decision the architect has ruled on collapses to its one-line
+                                // outcome; the question and reasoning stay one click away.
                                 if let DecisionOutcomeView::Rejected { reason } = &d.outcome {
                                     if !reason.is_empty() {
                                         p { class: "uow-decision-reject-reason", "Rejected: {reason}" }
+                                    }
+                                }
+                                if matches!(d.outcome, DecisionOutcomeView::Pending) {
+                                    if !d.question.is_empty() {
+                                        p { class: "uow-decision-q", "Q: {d.question}" }
+                                    }
+                                    if !d.rationale.is_empty() {
+                                        p { class: "uow-decision-rationale", "{d.rationale}" }
+                                    }
+                                } else if !d.question.is_empty() || !d.rationale.is_empty() {
+                                    details { class: "uow-decision-details",
+                                        summary { "Details" }
+                                        if !d.question.is_empty() {
+                                            p { class: "uow-decision-q", "Q: {d.question}" }
+                                        }
+                                        if !d.rationale.is_empty() {
+                                            p { class: "uow-decision-rationale", "{d.rationale}" }
+                                        }
                                     }
                                 }
                                 div { class: "uow-decision-actions",
@@ -7054,6 +7338,7 @@ pub(super) fn DecisionsReviewPanel(
                                 }
                             }
                         }
+                        }
                     }
                 }
 
@@ -7103,6 +7388,7 @@ pub(super) fn DecisionsReviewPanel(
                                     question: new_question().trim().to_string(),
                                     rationale: new_rationale().trim().to_string(),
                                     alternatives_considered: Vec::new(),
+                                    option_descriptions: Vec::new(),
                                     outcome: DecisionOutcomeView::Approved,
                                     // Stamp a real provenance: an empty {actor:"",at:""} fails to
                                     // deserialize server-side (actor enum + DateTime), which 422'd
@@ -7224,23 +7510,8 @@ pub(super) fn DecisionsReviewPanel(
 /// kebab-case slug for a decision label (alnum runs → hyphens, lowercased, trimmed).
 /// Mirrors the `"{story_id}/decision/{slug}"` artifact-id convention. Pure + testable.
 pub(super) fn slugify_decision_label(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut prev_dash = false;
-    for ch in label.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "decision".to_string()
-    } else {
-        trimmed
-    }
+    // One implementation, shared with the server (which files the AI proposals).
+    camerata_worktracker::investigation::slugify_decision_label(label)
 }
 
 /// Whether the note-review requirement is satisfied for the readiness hint. When the
@@ -7784,9 +8055,84 @@ mod bff_tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let ok = super::save_intake_repos("CAM-1", repos).await;
+        let saved = super::save_intake_repos("CAM-1", repos).await;
 
-        assert!(ok);
+        assert_eq!(saved, Ok(()));
+    }
+
+    /// A refused scope save returns the server's own reason (what the console toasts), for the
+    /// 400 invalid-branch and 409 outside-the-project refusals, and a status fallback when the
+    /// body carries no message.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn save_intake_repos_returns_the_servers_refusal_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/BAD-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid branch name",
+                "reason": "Repo `o/r`: `..` is not a valid branch name: it contains `..`."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/OUT-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "repository not in the active project",
+                "reason": "This unit's Repos in scope include `other/web`, which is not one of the active project's repositories."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/EMPTY-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let repos = serde_json::json!([]);
+
+        let err = super::save_intake_repos("BAD-1", repos.clone())
+            .await
+            .unwrap_err();
+        assert!(err.contains("not a valid branch name"), "{err}");
+        let err = super::save_intake_repos("OUT-1", repos.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("other/web") && err.contains("active project"),
+            "{err}"
+        );
+        let err = super::save_intake_repos("EMPTY-1", repos)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not saved") && err.contains("500"), "{err}");
+    }
+
+    /// The branch record returns the server's message on a 400/409 too.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_uow_branch_returns_the_servers_refusal_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-9/branch"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "This unit of work belongs to `other/web`, which is not one of the active project's repositories."
+            })))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let err = super::set_uow_branch("CAM-9", "camerata/x")
+            .await
+            .unwrap_err();
+        assert!(err.contains("other/web"), "{err}");
     }
 
     #[tokio::test]
@@ -7931,6 +8277,7 @@ mod bff_tests {
             question: String::new(),
             rationale: rationale.to_string(),
             alternatives_considered: vec![],
+            option_descriptions: Vec::new(),
             outcome,
             provenance: RevisionProvenanceView::default(),
         };
@@ -9080,6 +9427,7 @@ mod bff_tests {
             question: "Which backend?".into(),
             rationale: "fast".into(),
             alternatives_considered: vec!["sql".into()],
+            option_descriptions: Vec::new(),
             outcome: DecisionOutcomeView::Approved,
             provenance: RevisionProvenanceView::default(),
         }];
@@ -9356,6 +9704,7 @@ mod render_tests {
                         work_item: None,
                         stage: UowStage::default(),
                         authoring: false,
+                        source_kind: None,
                     }),
                     uows_refresh,
                     sel,

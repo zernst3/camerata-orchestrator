@@ -1,5 +1,5 @@
 id = "GO-WEB-REQUEST-BINDING-VALIDATION-1"
-version = 1
+version = 3
 title = "Request payloads are bound to typed structs with validation tags; no raw map access or manual parsing"
 domain = "go:web"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://gin-gonic.com/en/docs/binding/binding-and-validation/"
-title = "Gin Web Framework — Model binding and validation"
+title = "Gin Web Framework: Model binding and validation"
 
 [[sources]]
 url = "https://github.com/go-playground/validator"
-title = "go-playground/validator v10 — struct and field validation via tags (the library Gin's binding uses)"
+title = "go-playground/validator v10: struct and field validation via tags (the library Gin's binding uses)"
 
 [decision]
 question = "How should incoming request payloads (JSON, form, query params) be parsed into handler arguments?"
@@ -25,7 +25,7 @@ why = "Go's json and http packages provide low-level unmarshaling that requires 
 [[option]]
 id = "typed-struct-with-validation"
 label = "Typed request structs with framework binding + struct tags for validation"
-directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery / c.ShouldBindUri, Echo's c.Bind which binds body, query, and path params together using json/query/param struct tags, or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query/param, depending on framework and source) specifying its source and a validate tag (required/min/max/email/etc. via the validator library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
+directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery / c.ShouldBindUri, Echo's c.Bind which binds body, query and path params together using json/query/param struct tags or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query/param, depending on framework and source) specifying its source and a validate tag (required/min/max/email/etc. via the validator library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
 remediation = """
 Define a typed request struct with the framework's binding and validation struct tags, and bind the incoming payload to it through the framework's binder instead of accessing a raw map or manually parsing strings in the handler. Verify by sending a request with a missing or malformed field and confirming it is rejected by the binder's validation before the handler's business logic runs.
 """
@@ -35,11 +35,11 @@ why = "Type-safe, validation-consistent, and leverages the framework's or the la
 id = "raw-map-access"
 violates = true
 label = "Handlers access raw maps or unvalidated json.RawMessage"
-directive = "Handlers receive request payloads as raw map[string]interface{} or json.RawMessage, extract fields manually, and validate them with ad-hoc checks inside the handler or a shared helper."
-why = "Request bodies are read as untyped maps, so a missing field, a wrong type, or an out-of-range value is not caught at the boundary and arrives in the handler body, or in the database, as whatever the client sent. Each handler has to re-implement its own validation, and the ones that do it incompletely fail silently rather than returning a 400."
+directive = "Handlers receive request payloads as raw map[string]interface{} or json.RawMessage, extract fields manually and validate them with ad-hoc checks inside the handler or a shared helper."
+why = "Request bodies are read as untyped maps, so a missing field, a wrong type or an out-of-range value is not caught at the boundary and arrives in the handler body, or in the database, as whatever the client sent. Each handler has to re-implement its own validation, and the ones that do it incompletely fail silently rather than returning a 400."
 
 [[option]]
 id = "string-based-parsing"
 label = "Handlers parse query params and form fields as strings and coerce them in-handler"
-directive = "Handlers access request fields as raw strings (via r.FormValue, c.Query, etc.), coerce them to the required types, and validate them."
+directive = "Handlers access request fields as raw strings (via r.FormValue, c.Query, etc.), coerce them to the required types and validate them."
 why = "Common for simple query-param handlers; trades type safety and framework validation for simplicity in lightweight scenarios; error handling is diffuse across handlers."

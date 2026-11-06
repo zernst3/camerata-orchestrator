@@ -93,12 +93,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 fn selected_rls_rules() -> Vec<SelectedRule> {
@@ -271,8 +266,10 @@ async fn architectural_finding_rides_through_report_to_pdf() {
         ..Default::default()
     };
     let json = report_export::build_report_json(
-        &report.clone().seal(),
-        &dispositions,
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &report.clone().seal(),
+            &dispositions,
+        ),
         Some(&corpus),
         &opts,
     );

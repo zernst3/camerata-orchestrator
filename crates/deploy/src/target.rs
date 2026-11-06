@@ -5,8 +5,6 @@
 //! [`crate::gate::can_publish`]). A target implementation never auto-publishes
 //! on behalf of the system.
 
-use async_trait::async_trait;
-
 use crate::artifact::DeployArtifact;
 use crate::outcome::DeployOutcome;
 
@@ -18,7 +16,10 @@ use crate::outcome::DeployOutcome;
 /// Built-in implementations:
 /// - [`crate::local::LocalDeployTarget`] (dev / test stub, always succeeds)
 /// - [`crate::azure::AzureWebAppTarget`] (Azure Web App shape; plan-only for now)
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait DeployTarget: Send + Sync {
     /// A short, human-readable label for this target (e.g. `"local"`,
     /// `"azure-web-app"`). Used in logs and diagnostic messages.
@@ -30,5 +31,14 @@ pub trait DeployTarget: Send + Sync {
     /// subprocess could not be spawned). Returning `Ok(DeployOutcome)` with a
     /// [`DeployStatus::Failed`][crate::outcome::DeployStatus::Failed] status
     /// means the deploy was attempted but the app did not go live.
-    async fn deploy(&self, artifact: &DeployArtifact) -> anyhow::Result<DeployOutcome>;
+    fn deploy<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        artifact: &'life1 DeployArtifact,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<DeployOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
