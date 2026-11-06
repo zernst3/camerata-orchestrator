@@ -1240,3 +1240,55 @@ fn empty_findings_object_is_clean() {
     assert!(f.is_empty());
     assert!(r.is_empty());
 }
+
+// ── A keyword bump needs a security rule, not a word in a message ───────────────────────────
+
+/// The shape that took `app/api/me/route.ts` from Low to Critical: a structured-errors
+/// convention row whose message describes the unauthenticated caller it answers with a 401. The
+/// word is the row's own context, not its defect, and the rule is not a security rule.
+#[test]
+fn the_word_unauthenticated_in_a_convention_rows_message_does_not_floor_it_to_critical() {
+    let f = finding_with_detail(
+        "ARCH-STRUCTURED-ERRORS-1",
+        "low",
+        "Error response lacks structured code and message shape. The GET handler answers an \
+         unauthenticated caller with a 401 whose body is a bare string. Return a stable code.",
+    );
+    let out = apply_severity_calibration_rule(f);
+    assert_eq!(out.severity, "low");
+    assert_eq!(out.calibration_rationale, None);
+}
+
+/// Every row of a non-security corpus rule is left alone, whatever its message says.
+#[test]
+fn a_hygiene_rule_row_is_never_floored_by_any_phrase() {
+    for detail in [
+        "Reached without authentication by a health probe; the log line is unstructured.",
+        "Handler for account takeover emails uses a magic string for the subject.",
+        "Another user's profile page renders a list, and the code views it with a for loop.",
+    ] {
+        let f = finding_with_detail("ARCH-STRUCTURED-ERRORS-1", "low", detail);
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(out.severity, "low", "{detail}");
+    }
+}
+
+/// What a real bump must still catch: a security rule of the corpus, a security category, and
+/// an invented row whose message is the whole account of the defect.
+#[test]
+fn a_real_unauthenticated_bump_is_still_caught_for_a_security_rule_a_category_and_an_ai_row() {
+    let detail = "The endpoint is reachable without authentication and returns every record.";
+    for rule in [
+        "SEC-NO-OPEN-REDIRECT-1",
+        "ARCH-SERVER-AUTHZ-1",
+        "SUPABASE-RLS-ENABLED-1",
+        "AI-EXPORT-ENDPOINT",
+    ] {
+        let out = apply_severity_calibration_rule(finding_with_detail(rule, "medium", detail));
+        assert_eq!(out.severity, "critical", "{rule}");
+    }
+    // A convention rule whose row was categorised as authorization by calibration is a security
+    // row, and the bump applies.
+    let f = finding_with_category("ARCH-STRUCTURED-ERRORS-1", "medium", detail, "authorization");
+    assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
+}
