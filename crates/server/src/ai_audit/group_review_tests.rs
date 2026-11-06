@@ -1133,7 +1133,7 @@ async fn ledger_states_budget_escalated_and_over_budget() {
     assert!((block.share_escalated - 12.0 / 24.0).abs() < 1e-9);
     assert_eq!(
         block.sentence(),
-        "Escalated 12 of a budget of 5 (7 over, all secret exposure at critical)"
+        "Escalated 12 of a budget of 5 (7 over, all secret exposure at high or critical)"
     );
     // The tree says the same, and every over-budget candidate records its reason.
     let t = tree(&report);
@@ -1163,14 +1163,14 @@ fn the_escalation_sentence_reads_every_shape() {
         .insert("secret_exposure".to_string(), 17);
     assert_eq!(
         block.sentence(),
-        "Escalated 347 of a budget of 300 (47 over, all unauthenticated reach or secret exposure at critical)"
+        "Escalated 347 of a budget of 300 (47 over, all unauthenticated reach at critical, and secret exposure at high or critical)"
     );
     block
         .over_budget_by_reason
         .insert("evidence_unverified".to_string(), 2);
-    assert!(block
-        .sentence()
-        .ends_with("secret exposure at critical or unverified evidence)"));
+    assert!(block.sentence().ends_with(
+        "secret exposure at high or critical, and unverified evidence at any severity)"
+    ));
     let within = crate::scan_ledger::EscalationBlock {
         budget: 20,
         escalated: 18,
