@@ -281,12 +281,21 @@ pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE: f64 = 40.0;
 /// a one-site group writes as much of as a big one. MEASURED: 90 calls of the faktura cli run
 /// averaged 1,048 output tokens at about 1.3 sites each.
 pub const GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL: f64 = 950.0;
-/// Estimator assumption: sites in one rule group (one group is one rule). MEASURED, not guessed:
-/// the faktura cli run found 116 sites in 90 rule groups, 1.3 each; the earlier assumption of 8
-/// priced 15 calls where the run made 90. A repository with many sites to a rule is priced as
-/// more calls than it makes, which errs high; [`group_review_estimate`] caps the groups at the
-/// number of rules.
-pub const GROUP_REVIEW_SITES_PER_GROUP: f64 = 1.3;
+/// The curve stage 2's rule groups are quoted from. A group is one rule, and a site lands in one
+/// of the rules in play, so the groups that get a site are `rules * (1 - exp(-sites / (k * rules)))`:
+/// close to one group per site while there are few sites, and approaching the rule count (never
+/// reaching it) as they pile up. A fixed number of sites to a group could not do that: it quoted
+/// every rule as soon as the sites passed 1.3 times the rules, 2x to 3x over for a repo in which
+/// few rules fire.
+///
+/// `k` is FITTED to the ledgers of five saved runs (the faktura cli run and the four accuracy
+/// round runs: faktura, lumen, supabase portal, tutorly). Each gives a `k` of its own, 0.85 to
+/// 1.19 (a `k` of 1 is the model where every site is equally likely to land in any rule). The
+/// constant is the SMALLEST, 0.85, because a smaller `k` gives more groups: the quote is then not
+/// under any of the five runs, and over them by 6 to 21 percent. It errs high on purpose, since
+/// the figure gates a spend limit. The scan ledger (`GroupReviewCounts`) records each run's
+/// sites, groups and rules, so the next fit reads the next runs.
+pub const GROUP_REVIEW_SATURATION_K: f64 = 0.85;
 /// The most sites one group reviewer call is asked about (`group_review::MAX_CHUNK_MEMBERS`).
 pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
 
@@ -318,9 +327,12 @@ pub fn group_review_estimate(
             output_tokens: 0.0,
         };
     }
-    let groups = (sites / GROUP_REVIEW_SITES_PER_GROUP)
-        .ceil()
-        .min(rules.max(1) as f64);
+    // The curve over the rules in play, and never more groups than sites (a group needs one).
+    let rules_in_play = rules.max(1) as f64;
+    let groups = (rules_in_play
+        * (1.0 - (-sites / (GROUP_REVIEW_SATURATION_K * rules_in_play)).exp()))
+    .min(sites)
+    .ceil();
     let calls = groups
         .max((sites / GROUP_REVIEW_MAX_CHUNK_SITES).ceil())
         .max(1.0);
@@ -3177,15 +3189,15 @@ mod tests {
             (none.calls, none.input_tokens, none.output_tokens),
             (0, 0.0, 0.0)
         );
-        // 78 sites at 1.3 to a group are 60 calls; each carries the system prompt and its
-        // overhead, and the reply's fixed part.
+        // 78 sites over 152 rules land in about 69 rule groups on the curve; each carries the
+        // system prompt and its overhead, and the reply's fixed part.
         let e = group_review_estimate(78.0, 152, api);
-        assert_eq!(e.calls, 60);
-        let expected_in = 60.0 * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
+        assert_eq!(e.calls, 69);
+        let expected_in = 69.0 * (GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS)
             + 78.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
         assert!((e.input_tokens - expected_in).abs() < 1e-6, "{e:?}");
         let expected_out =
-            60.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL + 78.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE;
+            69.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_CALL + 78.0 * GROUP_REVIEW_OUTPUT_TOKENS_PER_SITE;
         assert!((e.output_tokens - expected_out).abs() < 1e-6, "{e:?}");
         // A single site is still one call.
         assert_eq!(group_review_estimate(1.0, 152, api).calls, 1);
@@ -3195,7 +3207,7 @@ mod tests {
         assert_eq!(group_review_estimate(3_000.0, 5, api).calls, 20);
         // On the CLI every call also carries the CLI's own prompt, written at twice the price.
         let cli = group_review_estimate(78.0, 152, ProjectBackend::Cli);
-        let want_cli = (expected_in + 60.0 * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT;
+        let want_cli = (expected_in + 69.0 * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT;
         assert!((cli.input_tokens - want_cli).abs() < 1e-6, "{cli:?}");
     }
 
@@ -3690,5 +3702,90 @@ mod tests {
             "90 rule groups were read: {}",
             gr.calls
         );
+    }
+    // ── Stage 2 groups follow a saturating curve, not a fixed number of sites to a group ────
+
+    /// What the ledgers of the saved runs say: the sites stage 1 calibrated, the rules in play,
+    /// and the rule groups stage 2 read (`escalation.rules_reviewed + rules_failed`). The runs are
+    /// the faktura cli run the constant was fitted to and the four accuracy-round runs. The rules
+    /// selected are not stored in a ledger, so the rules that ran less the nine that run outside
+    /// the library stand in (faktura: 161 ran, 152 selected).
+    const GROUP_REVIEW_RUNS: [(&str, f64, usize, usize); 5] = [
+        ("faktura cli run", 116.0, 152, 90),
+        ("faktura accuracy run", 116.0, 152, 85),
+        ("lumen accuracy run", 162.0, 157, 91),
+        ("supabase portal accuracy run", 102.0, 153, 76),
+        ("tutorly accuracy run", 154.0, 157, 93),
+    ];
+
+    /// The curve the estimate is made from: a site lands in one of the rules, so the groups that
+    /// get a site are `rules * (1 - exp(-sites / (k * rules)))`, and never more than the sites.
+    fn curve_groups(sites: f64, rules: usize) -> f64 {
+        let rules = rules.max(1) as f64;
+        (rules * (1.0 - (-sites / (GROUP_REVIEW_SATURATION_K * rules)).exp())).min(sites)
+    }
+
+    #[test]
+    fn stage_2_groups_follow_the_saturating_curve() {
+        for (sites, rules) in [
+            (1.0, 152usize),
+            (30.0, 152),
+            (78.0, 152),
+            (200.0, 152),
+            (3_000.0, 152),
+            (80.0, 20),
+        ] {
+            let e = group_review_estimate(sites, rules, ProjectBackend::Api);
+            let want = curve_groups(sites, rules).ceil().max(1.0) as usize;
+            let want = want.max((sites / GROUP_REVIEW_MAX_CHUNK_SITES).ceil() as usize);
+            assert_eq!(e.calls, want, "{sites} sites over {rules} rules");
+        }
+    }
+
+    /// The estimate never falls under what a saved run did, and stays within a quarter over it:
+    /// the quote errs high, and by little.
+    #[test]
+    fn stage_2_calls_err_high_on_every_saved_run_by_less_than_a_quarter() {
+        for (name, sites, rules, actual) in GROUP_REVIEW_RUNS {
+            let calls = group_review_estimate(sites, rules, ProjectBackend::Cli).calls;
+            assert!(
+                calls >= actual,
+                "{name}: quoted {calls} calls, the run made {actual}"
+            );
+            assert!(
+                (calls as f64) <= actual as f64 * 1.25,
+                "{name}: quoted {calls} calls, the run made {actual}"
+            );
+        }
+    }
+
+    /// A mid-size repo has more sites than the constant's 1.3 to a group puts in every rule, so the
+    /// constant quoted the full rule count whatever fired (2x to 3x over when few rules fire). The
+    /// curve approaches the rule count and does not reach it.
+    #[test]
+    fn a_mid_size_repo_is_not_quoted_at_the_full_rule_count() {
+        let rules = 152;
+        let sites = 200.0;
+        // The fixed 1.3 sites to a group the curve replaced.
+        let old = (sites / 1.3_f64).ceil().min(rules as f64) as usize;
+        assert_eq!(old, rules, "the constant quoted every rule");
+        let calls = group_review_estimate(sites, rules, ProjectBackend::Api).calls;
+        assert!(
+            calls < rules,
+            "{calls} calls for {sites} sites over {rules} rules"
+        );
+        // Still an upper side of what such a repo does: a run that read 60 rule groups.
+        assert!(calls >= 60);
+        // And more sites never lowers the quote.
+        let more = group_review_estimate(400.0, rules, ProjectBackend::Api).calls;
+        assert!(more >= calls && more <= rules, "{more}");
+    }
+
+    #[test]
+    fn a_group_needs_a_site_so_calls_never_exceed_sites() {
+        for sites in [1.0, 2.0, 5.0, 12.0] {
+            let calls = group_review_estimate(sites, 152, ProjectBackend::Api).calls;
+            assert!(calls as f64 <= sites, "{sites} sites quoted {calls} calls");
+        }
     }
 }
