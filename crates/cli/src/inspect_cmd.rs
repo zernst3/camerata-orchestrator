@@ -2910,7 +2910,7 @@ mod tests {
         let text = render_ledger_summary(&ledger, &[], false);
         assert!(
             text.contains(
-                "Escalated 24 of a budget of 20 (4 over, all secret exposure at critical)"
+                "Escalated 24 of a budget of 20 (4 over, all secret exposure at high or critical)"
             ),
             "{text}"
         );
