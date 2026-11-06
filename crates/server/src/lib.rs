@@ -36,6 +36,7 @@ pub mod api_agent_driver;
 pub mod app_dirs;
 pub mod arm;
 pub mod auto_fire;
+mod chat_review_context;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;

@@ -487,7 +487,7 @@ pub(crate) async fn reapply_edit(
 /// The scanned text of `path` in `repo`, redacted the way the model saw it, for the evidence
 /// check of a finding the reviewer adds. `None` when the source cannot be read (deleted, never
 /// linked, or the file is not there): the check then holds the row.
-async fn source_of(
+pub(crate) async fn source_of(
     state: &AppState,
     project: &str,
     repo: &str,
