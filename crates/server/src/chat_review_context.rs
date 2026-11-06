@@ -217,6 +217,35 @@ fn row_block(
             short(&f.snippet, MAX_TEXT_CHARS)
         ));
     }
+    if let Some(stage1) = f
+        .captures
+        .get(crate::ai_audit::STAGE1_CAPTURE)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        let real = stage1["real"].as_str().unwrap_or("?");
+        let reason = stage1["reason"].as_str().unwrap_or("");
+        out.push_str(&format!(
+            "    stage 1: real {real} \u{2014} {}\n",
+            short(reason, 160)
+        ));
+    }
+    if let Some(why) = &f.calibration_rationale {
+        out.push_str(&format!(
+            "    calibration: {}\n",
+            short(why, MAX_TEXT_CHARS)
+        ));
+    }
+    let ratings: Vec<String> = [
+        ("confidence", &f.confidence),
+        ("effort", &f.effort),
+        ("category", &f.category),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.as_ref().map(|v| format!("{name} {v}")))
+    .collect();
+    if !ratings.is_empty() {
+        out.push_str(&format!("    {}\n", ratings.join(", ")));
+    }
     for place in f.also_locations.iter().take(4) {
         out.push_str(&format!(
             "    also at {}/{}:{} ({})\n",

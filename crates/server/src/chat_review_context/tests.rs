@@ -409,6 +409,50 @@ fn the_context_is_bounded_and_the_held_rows_come_before_the_top_findings() {
     );
 }
 
+/// "Why is this critical?": the stage 1 verdict (real or not, and its reason) and the calibration
+/// rationale and ratings are on the row.
+#[test]
+fn the_stage_1_verdict_and_calibration_rationale_are_on_each_row() {
+    let mut f = row("SEC-AUTHZ-4", "src/a.rs", 5, "critical");
+    f.captures.insert(
+        crate::ai_audit::STAGE1_CAPTURE.to_string(),
+        serde_json::json!({ "real": "yes", "reason": "the handler skips the owner check" })
+            .to_string(),
+    );
+    f.calibration_rationale =
+        Some("Raised to critical: unauthenticated access to a protected operation.".to_string());
+    f.confidence = Some("high".to_string());
+    f.effort = Some("low".to_string());
+    f.category = Some("authorization".to_string());
+    let out = render(&reviewed(vec![f], |_| {}));
+    assert!(
+        out.contains("stage 1: real yes \u{2014} the handler skips the owner check"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "calibration: Raised to critical: unauthenticated access to a protected operation."
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("confidence high, effort low, category authorization"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_row_with_no_stage_1_record_says_nothing_about_it() {
+    let out = render(&reviewed(
+        vec![row("SEC-AUTHZ-4", "src/a.rs", 5, "high")],
+        |_| {},
+    ));
+    assert!(
+        !out.contains("stage 1:") && !out.contains("calibration:"),
+        "{out}"
+    );
+}
+
 // ── The endpoint: the sealed report decides ────────────────────────────────────────────────────
 
 fn scan_report_of(rows: Vec<Finding>) -> ScanReport {
