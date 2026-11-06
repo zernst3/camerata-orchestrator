@@ -4,7 +4,7 @@
 
 Camerata is a governed engineering platform for working on code with AI. It is built on one library of written, versioned rules, and two products use it: the **Codebase Inspection**, which reads a codebase against the rules and reports what it finds, and the **governed development console**, where AI agents change code only through a deterministic gate that enforces the same rules.
 
-The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so every check Camerata makes is readable in plain text. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation). [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
+The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so every check Camerata makes is readable in plain text. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation): 442 of the 443 rules cite at least one published source, 901 sources in all, each with its link. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
 ## The Codebase Inspection
 
@@ -91,7 +91,7 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 | Rust | over 650,000 lines of Rust across 29 crates and one maintainer tool, including tests |
 | Tests | 11,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
-| Rule library | 443 rules across 22 domains |
+| Rule library | 443 rules across 22 domains; 442 cite at least one published source (901 sources in all) |
 | Commits | 2,800+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
 The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
