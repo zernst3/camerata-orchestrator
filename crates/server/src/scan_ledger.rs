@@ -649,7 +649,9 @@ impl EscalationBlock {
             .iter()
             .filter(|c| keys.contains(c.key.as_str()))
             .collect();
-        let escalated = candidates.iter().filter(|c| c.escalated).count();
+        // The budget counts slots: rows at one site share one (R-1).
+        let (slots, escalated) =
+            camerata_api_types::review::count_slots(candidates.iter().copied());
         let budget = tree.budget.budget;
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         let mut over_by_reason: BTreeMap<String, usize> = BTreeMap::new();
@@ -666,7 +668,7 @@ impl EscalationBlock {
             floor: tree.budget.floor,
             counted_lines: tree.budget.counted_lines,
             budget,
-            candidates: candidates.len(),
+            candidates: slots,
             escalated,
             over_budget: escalated.saturating_sub(budget),
             total_sites: total,

@@ -452,3 +452,133 @@ fn an_empty_over_budget_set_lets_only_unverified_evidence_past_the_budget() {
     assert_eq!(ranked.budget.escalated, 1);
     assert_eq!(ranked.budget.over_budget, 1);
 }
+
+// ---- R-1: a slot is a site, not a row ----------------------------------------------------
+
+const RULE_A: &str = "SEC-NO-RAW-SQL-CONCAT-1";
+const RULE_B: &str = "SEC-NO-HARDCODED-SECRETS-1";
+const RULE_C: &str = "SEC-RLS-ENABLED-1";
+
+fn row_at(rule: &str, path: &str, line: usize, severity: &str) -> Finding {
+    Finding {
+        repo: "acme/app".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("snippet {rule} {path}"),
+        detail: "detail".to_string(),
+        ..Finding::default()
+    }
+}
+
+/// The tree and rows of `rows`, with every row keyed and placed.
+fn tree_of_rows(mut rows: Vec<Finding>) -> (ReviewTree, Vec<Finding>) {
+    backfill_site_keys(&mut rows);
+    let tree = build_tree(&mut rows, &mut [], None, &ToolMap::builtin(), "run-1");
+    (tree, rows)
+}
+
+fn row_of<'a>(rows: &'a [Finding], rule: &str, path: &str) -> &'a Finding {
+    rows.iter()
+        .find(|f| f.rule_id == rule && f.path == path)
+        .unwrap_or_else(|| panic!("no row of {rule} at {path}"))
+}
+
+#[test]
+fn rows_of_different_rules_at_one_site_take_one_slot() {
+    // Lumen's shape: three sites each flagged by three rules (nine rows, nine slots under the
+    // old arithmetic), and six more sites with one row each. A budget of six is three sites
+    // plus three of the singles, not two sites.
+    let mut rows = Vec::new();
+    for s in 0..3 {
+        for rule in [RULE_A, RULE_B, RULE_C] {
+            rows.push(row_at(rule, &format!("app/api/site{s}/route.ts"), 8, "high"));
+        }
+    }
+    for n in 0..6 {
+        rows.push(row_at(RULE_A, &format!("src/solo{n}.rs"), 4, "high"));
+    }
+    let (mut tree, rows) = tree_of_rows(rows);
+    for s in 0..3 {
+        for (rule, node_rank) in [(RULE_A, s + 1), (RULE_B, s + 1), (RULE_C, s + 1)] {
+            let f = row_of(&rows, rule, &format!("app/api/site{s}/route.ts")).clone();
+            rule_node_of(&mut tree, &f).escalations.push(esc(
+                &f,
+                EscalationReason::UnauthenticatedReach,
+                node_rank as u32,
+            ));
+        }
+    }
+    for n in 0..6 {
+        let f = row_of(&rows, RULE_A, &format!("src/solo{n}.rs")).clone();
+        rule_node_of(&mut tree, &f).escalations.push(esc(
+            &f,
+            EscalationReason::UnauthenticatedReach,
+            n as u32 + 4,
+        ));
+    }
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(6));
+    assert_eq!(ranked.candidates.len(), 15, "every row stays a candidate");
+    let escalated_at = |path: &str| {
+        ranked
+            .candidates
+            .iter()
+            .filter(|c| {
+                rows.iter()
+                    .any(|f| f.site_key == c.key && f.path == path && c.escalated)
+            })
+            .count()
+    };
+    for s in 0..3 {
+        assert_eq!(
+            escalated_at(&format!("app/api/site{s}/route.ts")),
+            3,
+            "all three rows of site {s} share one slot and are escalated together"
+        );
+    }
+    let solos_escalated = (0..6)
+        .filter(|n| escalated_at(&format!("src/solo{n}.rs")) == 1)
+        .count();
+    assert_eq!(solos_escalated, 3, "the six freed slots go to other sites");
+    assert_eq!(ranked.budget.budget, 6);
+    assert_eq!(ranked.budget.escalated, 6, "the budget counts slots");
+    assert_eq!(ranked.budget.over_budget, 0);
+    assert_eq!(ranked.budget.candidates, 9, "nine sites in all");
+}
+
+#[test]
+fn a_shared_site_takes_the_highest_severity_of_its_rows_and_shows_every_reason() {
+    let rows = vec![
+        row_at(RULE_A, "app/x.ts", 5, "low"),
+        row_at(RULE_B, "app/x.ts", 5, "critical"),
+        row_at(RULE_A, "app/y.ts", 9, "high"),
+    ];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let a = row_of(&rows, RULE_A, "app/x.ts").clone();
+    let b = row_of(&rows, RULE_B, "app/x.ts").clone();
+    let y = row_of(&rows, RULE_A, "app/y.ts").clone();
+    rule_node_of(&mut tree, &a)
+        .escalations
+        .push(esc(&a, EscalationReason::UnauthenticatedReach, 2));
+    rule_node_of(&mut tree, &b)
+        .escalations
+        .push(esc(&b, EscalationReason::SecretExposure, 1));
+    rule_node_of(&mut tree, &y)
+        .escalations
+        .push(esc(&y, EscalationReason::SecretExposure, 1));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(1));
+    let of = |key: &str| ranked.candidates.iter().find(|c| c.key == key).unwrap();
+    assert_eq!(
+        of(&a.site_key).severity,
+        "critical",
+        "the low row carries its site's highest severity"
+    );
+    assert_eq!(of(&a.site_key).reason, EscalationReason::UnauthenticatedReach);
+    assert_eq!(of(&b.site_key).reason, EscalationReason::SecretExposure);
+    assert!(
+        of(&a.site_key).escalated && of(&b.site_key).escalated,
+        "the whole site is inside the one slot"
+    );
+    assert!(!of(&y.site_key).escalated, "the other site is past a budget of one");
+}

@@ -317,7 +317,7 @@ impl<'a> ReviewComposer<'a> {
             budget: self.budget,
             lanes: LaneCounts {
                 tree_undecided: counts.unresolved,
-                escalations: self.budget.escalated,
+                escalations: self.candidates.iter().filter(|c| c.escalated).count(),
                 engine_check: sample.drawn(),
                 engine_check_off: self.inputs.settings.sample_size_per_run == 0,
                 flat_rows: counts.total,
