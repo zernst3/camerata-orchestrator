@@ -25,6 +25,7 @@ pub mod holds;
 pub mod junk;
 mod report;
 mod secrets;
+pub mod tool_claim;
 pub mod unsynced;
 
 use crate::report_export::{AuditReportJson, ReportOptions, ReviewedReport};
@@ -83,6 +84,10 @@ pub struct ProductPackage {
     /// decision in the export request, one problem each. Worked out beside the evidence check, for
     /// the same reason, and recorded by [`release`] under the content check.
     pub undecided_junk_content: Vec<Problem>,
+    /// Where the summary's claim about missing preview tools and the ledger disagree
+    /// ([`tool_claim::problems`]). Checked for every package, an internal one too: the claim is
+    /// false whoever reads it. Recorded under the content check.
+    pub tool_claim_problems: Vec<Problem>,
     /// The package is for the operator's own review. Only an internal package may record an
     /// incomplete run, and only [`release_internal`] releases it.
     pub internal: bool,
@@ -231,6 +236,8 @@ pub(crate) fn assemble_package(
         }
     }
 
+    let tool_claim_problems = tool_claim::problems(report, &report_json);
+
     Ok(ProductPackage {
         stem: stem.to_string(),
         report_json,
@@ -254,6 +261,7 @@ pub(crate) fn assemble_package(
             reviewed,
         ),
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
+        tool_claim_problems,
         internal: options.internal,
     })
 }
@@ -601,6 +609,7 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     if !allow_incomplete {
         report.record(CheckId::Content, package.undecided_junk_content.clone());
     }
+    report.record(CheckId::Content, package.tool_claim_problems.clone());
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
@@ -706,6 +715,9 @@ mod junk_content_tests;
 
 #[cfg(test)]
 mod evidence_tests;
+
+#[cfg(test)]
+mod tool_claim_tests;
 
 #[cfg(test)]
 mod held_tests;

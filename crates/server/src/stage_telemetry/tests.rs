@@ -300,10 +300,15 @@ fn calls_are_counted_per_model_and_the_fix_tally_sums() {
     );
     assert!(
         table.contains(
-            "fix give-up rate: 37.5% (3 of 8 answered by the fix model; 2 not answered: 1 \
-             stopped by the spend limit, 1 failed in transport; 2 used"
+            "fix give-up rate: 37.5% (3 of the 8 findings the fix model answered ended with no \
+             fix that passed the self-check; 2 findings were not answered: 1 stopped by the \
+             spend limit, 1 failed in transport; 2 used"
         ),
         "{table}"
+    );
+    assert!(
+        !table.contains("answered by the fix model"),
+        "the figure counts the findings that gave up, never those answered: {table}"
     );
 
     assert_eq!(

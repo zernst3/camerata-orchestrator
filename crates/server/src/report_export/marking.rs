@@ -506,6 +506,39 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// client can act on) and it deliberately carries NEITHER the file path NOR the `RulesError`
 /// text: both name the reviewer's filesystem and TOML internals, and both stay in the note's
 /// own `message` plus the `tracing::error!` line, which no client artifact reads.
+/// The sentence a client reads for selected checks no preview tool was wired for. The release
+/// gate looks for it by this text, so the producer and the check cannot drift.
+pub(crate) const NO_PREVIEW_TOOL_LINE: &str =
+    "Some selected checks had no scan-time preview tool available this run; they are not \
+     reflected in this report and enforce once wired into CI.";
+
+/// The notes whose claim the ledger backs: an "unrouted" note names a selected rule no preview
+/// tool is wired for, and says the check is not reflected in the report. A rule with no such
+/// tool is judged by the model instead, and the ledger records it as run, so the claim is false
+/// for it and the note is dropped from what a client reads. A rule the ledger does not show as
+/// run keeps its note. Every other note passes through unchanged.
+pub(crate) fn notes_the_ledger_backs(
+    notes: &[crate::onboard::CoverageNote],
+    ledger: &crate::scan_ledger::ScanLedger,
+) -> Vec<crate::onboard::CoverageNote> {
+    notes
+        .iter()
+        .filter(|n| match crate::scan_tools::unrouted_note_rule(n) {
+            Some(rule) => !ledger.rules().any(|e| e.rule_id == rule && e.ran),
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`tool_coverage_disclosures`] over the notes `ledger` backs.
+pub(crate) fn tool_coverage_disclosures_for(
+    notes: &[crate::onboard::CoverageNote],
+    ledger: &crate::scan_ledger::ScanLedger,
+) -> Vec<String> {
+    tool_coverage_disclosures(&notes_the_ledger_backs(notes, ledger))
+}
+
 pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) -> Vec<String> {
     // Counted per tool, not merely collected: the W13 arm states HOW MANY rules were missing
     // from the library, which one deduplicated tool name cannot express.
@@ -519,9 +552,7 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
             if tool == "unrouted" {
                 // Not a tool name a client would recognize: these notes mean "a selected
                 // check had no scan-time tool available at all".
-                "Some selected checks had no scan-time preview tool available this run; \
-                 they are not reflected in this report and enforce once wired into CI."
-                    .to_string()
+                NO_PREVIEW_TOOL_LINE.to_string()
             } else if tool == crate::FIREBASE_SCOPE_COVERAGE_TOOL {
                 // Not a tool either: the one written statement of what Firebase coverage is.
                 crate::FIREBASE_SCOPE_SENTENCE.to_string()
