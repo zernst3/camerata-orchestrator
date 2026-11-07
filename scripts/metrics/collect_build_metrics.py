@@ -214,7 +214,7 @@ def section_coverage():
                 "Not measured: cargo-llvm-cov is not installed. Install it with "
                 "`cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`, then rerun."]
     report = ROOT / "target" / "metrics-llvm-cov.json"
-    base = ["cargo", "llvm-cov", "--workspace", "--locked", "--json", "--summary-only", "--output-path", str(report)]
+    base = ["cargo", "llvm-cov", "--workspace", "--locked", "--json", "--summary-only", "--output-path", "target/metrics-llvm-cov.json"]
     cmd = base + ["--branch"]
     code, _, err, secs = run(cmd, env=CARGO_ENV)
     branch = code == 0
@@ -256,8 +256,9 @@ def section_mutants(packages):
            "| Crate | Mutants | Caught | Missed | Timeout | Unviable | Score (caught / (caught + missed + timeout)) | Command |",
            "|---|---:|---:|---:|---:|---:|---:|---|"]
     for pkg in packages:
-        outdir = ROOT / "target" / f"metrics-mutants-{pkg}"
-        cmd = ["cargo", "mutants", "--package", pkg, "--jobs", "4", "--timeout-multiplier", "3", "--output", str(outdir)]
+        rel = Path("target") / f"metrics-mutants-{pkg}"  # relative, so the doc names no home path
+        outdir = ROOT / rel
+        cmd = ["cargo", "mutants", "--package", pkg, "--jobs", "4", "--timeout-multiplier", "3", "--output", str(rel)]
         _, _, _, secs = run(cmd, env=CARGO_ENV)
         res = outdir / "mutants.out" / "outcomes.json"
         if not res.exists():
@@ -386,8 +387,9 @@ def section_graph():
 
 def section_clean_build():
     target = PARENT / "_workspace" / "metrics-clean-target"
-    clean = ["cargo", "clean", "--target-dir", str(target)]
-    build = ["cargo", "build", "--workspace", "--locked", "--target-dir", str(target)]
+    rel = os.path.relpath(target, ROOT)  # relative, so the doc names no home path
+    clean = ["cargo", "clean", "--target-dir", rel]
+    build = ["cargo", "build", "--workspace", "--locked", "--target-dir", rel]
     run(clean)
     code, _, err, secs = run(build, env=CARGO_ENV)
     return ["## 7b. Clean build", "",
