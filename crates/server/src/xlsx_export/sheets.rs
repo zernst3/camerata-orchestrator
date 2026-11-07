@@ -755,7 +755,6 @@ pub(super) fn rules_checked_table(
     lay: &Layout,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Table {
-    let _ = corpus;
     let mut table = Table::new(
         v::RULES_CHECKED,
         vec![
@@ -860,6 +859,41 @@ pub(super) fn rules_checked_table(
             .put(v::H_EVIDENCE, Cell::wrap(evidence))
             .put(v::H_GO_TO_FIX, go_to_fix)
             .put(v::H_RULE_ID, Cell::text(&row.rule_id));
+        table.rows.push(c.assemble(&table.cols));
+    }
+    // A rule an alternative was chosen for but that is not in the checked list still gets its
+    // row, so the choice and its evidence are never lost.
+    let listed: std::collections::HashSet<&str> =
+        coverage.iter().map(|r| r.rule_id.as_str()).collect();
+    for (rule_id, picks) in &picks {
+        if listed.contains(rule_id) {
+            continue;
+        }
+        let multi_pick = picks.iter().any(|a| !a.repo.is_empty());
+        let join = |f: &dyn Fn(&RulesAppliedRow) -> &str| {
+            picks
+                .iter()
+                .filter(|a| !f(a).is_empty())
+                .map(|a| {
+                    if multi_pick {
+                        format!("{}: {}", a.repo, f(a))
+                    } else {
+                        f(a).to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut c = RowCells::default();
+        c.put(
+            v::H_AREA,
+            Cell::text(crate::report_export::category_for(rule_id, corpus)),
+        )
+        .put(v::H_RULE, Cell::wrap(rule_title(rule_id, corpus)))
+        .put(v::H_RESULT, Cell::text("Alternative chosen"))
+        .put(v::H_ALTERNATIVE_APPLIED, Cell::wrap(join(&|a| &a.chosen)))
+        .put(v::H_EVIDENCE, Cell::wrap(join(&|a| &a.evidence)))
+        .put(v::H_RULE_ID, Cell::text(*rule_id));
         table.rows.push(c.assemble(&table.cols));
     }
     table.empty_note = Some("No rules were recorded as checked for this inspection.".into());
