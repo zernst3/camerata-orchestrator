@@ -3910,10 +3910,7 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
         .into_response()
 }
 
-/// The README.txt manifest bundled inside the product-export zip: what each file is, who
-/// it's for, the provenance lines, and the advisory disclaimer (verbatim, reused from
-/// `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
-/// paragraph).
+/// The README.txt bundled inside the product-export zip.
 ///
 /// A CLIENT README says what each file is and how to import the tickets, and nothing else: no
 /// model role or model name, no corpus hash, no engine commit, no release-check list, no
@@ -3929,7 +3926,11 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
 ///
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.
-pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
+pub fn product_export_readme(
+    stem: &str,
+    provenance: &ManifestProvenance,
+    internal: bool,
+) -> String {
     // A project of several repos gets one more paragraph: where the services differ on a rule.
     let patterns = if provenance.repos.len() > 1 {
         "Patterns across services\n\
@@ -3940,47 +3941,53 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
     } else {
         ""
     };
-    format!(
+    let files = format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
          \n\
-         This ZIP contains the artifacts below, all derived from the SAME inspection scan:\n\
+         This ZIP holds the files below. All of them come from the same inspection.\n\
          \n\
          {stem}.pdf\n\
-         \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
-         \x20 severity x effort matrix, curated findings with citations and recommended\n\
-         \x20 fixes, what's healthy, dependency snapshot, and methodology. Intended for a\n\
-         \x20 board / buyer / decision-maker. False positives are excluded throughout and\n\
-         \x20 counted once, in the methodology section.\n\
+         \x20 The report to read first. It has the cover, the executive summary, the scorecard by\n\
+         \x20 area, the severity by effort matrix, the problems with their citations and fixes,\n\
+         \x20 what is healthy, the dependency snapshot and how the inspection was done. It is\n\
+         \x20 written for a board, a buyer or a decision maker. Problems ruled out are left out\n\
+         \x20 and counted once, in the methodology section.\n\
          \n\
          {stem}-findings.xlsx\n\
-         \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
-         \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
-         \x20 (every rule inspected this run, found or not), and a False Positives sheet\n\
-         \x20 (with the reviewer's exclusion reasons, nothing is silently dropped). Intended\n\
-         \x20 for the engineers doing remediation. The Remediation plan sheet comes first: one\n\
-         \x20 row for each sub-group, in the order to fix them. The Sites sheet lists every\n\
-         \x20 site, and the Tree sheet shows how the sites are grouped.\n\
+         \x20 The complete working list for the engineers doing the fixes. Every problem is one\n\
+         \x20 row that you can sort and filter. It also has a sheet for each area, a Dependencies\n\
+         \x20 sheet, a Coverage sheet (every rule checked, whether it found anything or not) and\n\
+         \x20 a False Positives sheet with the reason each problem was ruled out, so nothing is\n\
+         \x20 dropped silently. The Remediation plan sheet comes first: one row for each fix, in\n\
+         \x20 the order to do them. The Sites sheet lists every place a problem was seen, and the\n\
+         \x20 Tree sheet shows how those places are grouped.\n\
          \n\
          findings.json\n\
-         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data: the same\n\
-         \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
-         \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
-         \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
-         \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
-         \x20 from the same pass over the scan.\n\
+         \x20 The same rows as the workbook's All Findings sheet, for scripts, CI and your own\n\
+         \x20 tools: severity, area, repo, path and line, the code seen, the explanation, the fix,\n\
+         \x20 disposition, effort, confidence, citation and more, wrapped with the report's\n\
+         \x20 summary counts. It never disagrees with the workbook, because both are built from\n\
+         \x20 the same pass over the scan.\n\
          \n\
          decisions.json\n\
-         \x20 Every decision record the report was reviewed with: what was ruled on which\n\
-         \x20 site or group of sites, and whether a reason was recorded. The Decisions sheet\n\
-         \x20 of the workbook is the same list.\n\
+         \x20 Every decision record the report was reviewed with: what was ruled on which site or\n\
+         \x20 group of sites, and whether a reason was recorded. The Decisions sheet of the\n\
+         \x20 workbook is the same list.\n\
+         \n\
+         csv/ and json/\n\
+         \x20 The tables of the workbook, one file for each, as CSV and as JSON, for tools that do\n\
+         \x20 not read Excel.\n\
+         \n\
+         manifest.json\n\
+         \x20 The list of the files in this ZIP with a checksum for each.\n\
          \n\
          csv/tickets.csv\n\
-         \x20 One ticket for each sub-group (one kind of violation with one cause) that still\n\
-         \x20 has sites to fix. A site marked a false positive or accepted as a risk is on no\n\
-         \x20 ticket. Columns: Title, Description, Priority, Labels, Estimate, Group id, Site\n\
-         \x20 count and Sites (the first 50 sites, then a pointer to the Sites sheet filtered\n\
-         \x20 on the Group id). To import the file:\n\
+         \x20 One ticket for each fix (one kind of problem with one cause) that still has sites to\n\
+         \x20 change. A site marked a false positive or accepted as a risk is on no ticket.\n\
+         \x20 Columns: Title, Description, Priority, Labels, Estimate, Group id, Site count and\n\
+         \x20 Sites (the first 50 sites, then a pointer to the Sites sheet filtered on the Group\n\
+         \x20 id). To import the file:\n\
          \x20 - Jira: map Title to Summary, Description to Description, Priority to Priority\n\
          \x20   (Highest, High, Medium or Low), Labels to Labels (split on commas) and Sites to\n\
          \x20   a text field of your choice. Estimate is text, not a duration.\n\
@@ -3992,13 +3999,13 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
          \x20   the body or drop them.\n\
          \x20 Keep Group id in a custom field or in the body: it is the value to filter the\n\
          \x20 Sites sheet on.\n\
-         \n\
-         \n\
-         {}\
-         {}\
-         \n\
-         {}\n",
-        patterns,
+         \n"
+    );
+    if !internal {
+        return format!("{}\n", format!("{files}{patterns}").trim_end());
+    }
+    format!(
+        "{files}\n{patterns}{}\n{}\n",
         provenance.readme_lines(),
         crate::report_export::audit_report_disclaimer(provenance.repos.len()),
     )

@@ -172,7 +172,7 @@ fn a_dirty_tree_is_disclosed_next_to_its_commit() {
     let p = export_provenance_with(&report, &json.cover, None, None);
     assert!(p.repos[0].dirty && !p.repos[1].dirty);
 
-    let readme = product_export_readme("acme", &p);
+    let readme = product_export_readme("acme", &p, true);
     assert!(
         readme.contains("Commit (acme/portal): aaaa (the working tree had uncommitted changes)"),
         "{readme}"
@@ -305,7 +305,7 @@ fn the_sanctioned_date_reaches_the_package_and_no_maintenance_text_comes_with_it
         Some("2020-01-01")
     );
 
-    let readme = product_export_readme("acme", &provenance);
+    let readme = product_export_readme("acme", &provenance, true);
     let zip = build_product_zip(
         "acme",
         b"%PDF-1.7 stand-in",
@@ -348,7 +348,7 @@ fn the_sanctioned_date_reaches_the_package_and_no_maintenance_text_comes_with_it
 fn manifest_and_readme(
     provenance: &camerata_server::ManifestProvenance,
 ) -> (serde_json::Value, String) {
-    let readme = product_export_readme("acme", provenance);
+    let readme = product_export_readme("acme", provenance, true);
     let zip = build_product_zip(
         "acme",
         b"%PDF-1.7 stand-in",

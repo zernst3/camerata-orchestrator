@@ -1238,6 +1238,57 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
     p
 }
 
+/// The README lines of a provenance block, by their opening words. A client README names none of
+/// them: it says what each file is and how to import the tickets, and nothing about how the
+/// inspection was run.
+const PROVENANCE_LINE_OPENINGS: [&str; 16] = [
+    "Prepared for: ",
+    "Repos inspected: ",
+    "Generated: ",
+    "Commit (",
+    "Engine version: ",
+    "Corpus version: ",
+    "Corpus rules applied: ",
+    "Rules last reviewed on ",
+    "Counted lines: ",
+    "Excluded as noise: ",
+    "Model backend: ",
+    "Model provider: ",
+    "Model (",
+    "Client engagement: ",
+    "Release checks: ",
+    "Spend limit: ",
+];
+
+/// A CLIENT package's README carries no provenance line, no vulnerability-data stamp and no
+/// engine or corpus identity, whatever it says elsewhere.
+pub fn client_readme_problems(readme: &str) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (i, line) in readme.lines().enumerate() {
+        let opening = PROVENANCE_LINE_OPENINGS
+            .iter()
+            .find(|opening| line.starts_with(**opening))
+            .copied()
+            .or_else(|| {
+                line.starts_with(crate::vuln_intel::README_PREFIX)
+                    .then_some("Vulnerability data")
+            });
+        if let Some(opening) = opening {
+            problems.push(problem(
+                "README.txt",
+                &format!("line {}", i + 1),
+                format!(
+                    "a client README carries no provenance line, and this one opens with \
+                     \"{}\": the models, the corpus, the engine commit and the release checks \
+                     are in manifest.json",
+                    opening.trim_end()
+                ),
+            ));
+        }
+    }
+    problems
+}
+
 fn manifest_str(manifest: &Value, key: &str) -> Option<String> {
     manifest["inspection"][key].as_str().map(str::to_string)
 }

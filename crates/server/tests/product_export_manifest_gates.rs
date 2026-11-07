@@ -122,7 +122,7 @@ fn report_json() -> AuditReportJson {
 /// Assemble the ZIP exactly as the two real entry points do: README rendered from the
 /// provenance, then the ZIP (and so the manifest) built from the SAME provenance value.
 fn build_zip(provenance: &ManifestProvenance) -> Vec<u8> {
-    let readme = product_export_readme(STEM, provenance);
+    let readme = product_export_readme(STEM, provenance, true);
     let extra = vec![
         ("csv/all-findings.csv".to_string(), b"a,b\n1,2\n".to_vec()),
         (

@@ -38,10 +38,10 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
-    dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
-    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems, row_parity,
-    verify_manifest, verify_readme_provenance, ReadmeProvenance,
+    client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
+    dataset_parity_problems, dataset_set_problems, marking_problems, package_stem,
+    parse_readme_provenance, patterns_section_problems, pdf_count_reconciliation_problems,
+    pdf_marking_problems, row_parity, verify_manifest, verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -225,7 +225,7 @@ pub(crate) fn assemble_package(
         .map(|m| m.with_models_from(&report.provenance));
     let client = crate::report_export::clean_client_name(&options.client_name);
     provenance.client_name = (!client.is_empty()).then_some(client);
-    let mut readme = crate::product_export_readme(stem, &provenance);
+    let mut readme = crate::product_export_readme(stem, &provenance, options.internal);
     // The tickets file of a report with no review tree is its header alone; the README says why.
     if !crate::xlsx_export::no_tree_note(reviewed).is_empty() {
         const TICKETS_PARAGRAPH_END: &str = " Sites sheet on.\n";
@@ -397,7 +397,10 @@ fn audit_zip_with(
         manifest_problems.extend(incomplete_run_problems(&entries));
     }
     report.record(CheckId::Manifest, manifest_problems);
-    report.record(CheckId::Provenance, provenance_problems(&entries));
+    report.record(
+        CheckId::Provenance,
+        provenance_problems(&entries, allow_incomplete),
+    );
     // A merge with no decision behind it, or a group decision missing a site's record, is a
     // structural defect whoever receives the package, so it is checked for an internal package
     // too. Read from the package's own decisions.json.
@@ -534,14 +537,23 @@ fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Ve
         .unwrap_or_default()
 }
 
-fn provenance_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+/// The README against the manifest. An INTERNAL package's README carries the provenance lines and
+/// they must equal the manifest's; a CLIENT package's README carries none of them (the models, the
+/// corpus hash, the engine commit and the release checks are the operator's, in `manifest.json`).
+fn provenance_problems(
+    entries: &std::collections::BTreeMap<String, Vec<u8>>,
+    internal: bool,
+) -> Vec<Problem> {
     let (Some(readme), Some(manifest)) = (entries.get("README.txt"), entries.get("manifest.json"))
     else {
         // The dataset-set check reports the missing file.
         return Vec::new();
     };
     match serde_json::from_slice::<serde_json::Value>(manifest) {
-        Ok(manifest) => verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest),
+        Ok(manifest) if internal => {
+            verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest)
+        }
+        Ok(_) => client_readme_problems(&String::from_utf8_lossy(readme)),
         Err(_) => vec![Problem::new(
             "manifest.json",
             "manifest",
@@ -732,6 +744,9 @@ mod patterns_tests;
 
 #[cfg(test)]
 mod text_style_tests;
+
+#[cfg(test)]
+mod readme_tests;
 
 #[cfg(test)]
 mod merged_site_tests;

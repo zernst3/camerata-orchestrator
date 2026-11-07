@@ -123,7 +123,7 @@ async fn the_readme_and_manifest_state_the_engine_version_with_its_commit() {
     );
     let provenance =
         crate::client_provenance::export_provenance(&report, &json.cover, Some(&corpus));
-    let readme = crate::product_export_readme("stem", &provenance);
+    let readme = crate::product_export_readme("stem", &provenance, true);
     assert!(
         readme.contains(&format!(
             "Engine version: {}\n",

@@ -139,6 +139,10 @@ fn released() -> ReleasedZip {
     release(package()).expect("a clean package must clear the gate")
 }
 
+fn internal_released() -> ReleasedZip {
+    release_internal(internal_package()).expect("a clean internal package must clear the gate")
+}
+
 /// 22a: the backend and provider in `ReportOptions` reach the package's provenance, and the
 /// released package (gate included) states them in the manifest and the README alike.
 #[test]
@@ -148,6 +152,7 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
         model: Some(crate::ModelRecord::anthropic(
             crate::llm::ProjectBackend::Api,
         )),
+        internal: true,
         ..client_options()
     };
     let json = build_report_json(
@@ -169,7 +174,7 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
     let manifest = package.provenance.inspection_json();
     assert_eq!(manifest["model_backend"], "api");
     assert_eq!(manifest["model_provider"], "anthropic");
-    release(package).expect("the gate's agreement check passes with the model lines");
+    release_internal(package).expect("the gate's agreement check passes with the model lines");
 }
 
 /// The fixture scan with the AI passes recorded as having run.
@@ -190,6 +195,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
             crate::ModelRecord::anthropic(crate::llm::ProjectBackend::Api)
                 .with_client_engagement(true),
         ),
+        internal: true,
         ..client_options()
     };
     let json = build_report_json(
@@ -228,7 +234,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
         package.report_json.cover.model_backend.as_deref(),
         Some("api (anthropic)")
     );
-    release(package).expect("the gate's agreement check passes with the model lines");
+    release_internal(package).expect("the gate's agreement check passes with the model lines");
 }
 
 /// H2: a README whose model line disagrees with the manifest is blocked by the agreement check.
@@ -239,6 +245,7 @@ fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
         model: Some(crate::ModelRecord::anthropic(
             crate::llm::ProjectBackend::Api,
         )),
+        internal: true,
         ..ReportOptions::default()
     };
     let json = build_report_json(
@@ -260,7 +267,11 @@ fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
         &format!("Model (the scan): {scan_model}"),
         "Model (the scan): deepseek/deepseek-chat",
     );
-    let failure = blocked(package);
+    let failure = match release_internal(package) {
+        Err(ReleaseError::Blocked(failure)) => failure,
+        Err(other) => panic!("expected the gate to block, got {other}"),
+        Ok(_) => panic!("expected the gate to block, but the package was released"),
+    };
     assert!(
         failure
             .report
@@ -436,7 +447,7 @@ fn release_passes_a_clean_package_and_reports_fifteen_checks() {
 
 #[test]
 fn the_readme_and_manifest_state_the_release_checks_that_ran() {
-    let z = released();
+    let z = internal_released();
     let entries = read_zip_entries(&z.bytes).expect("zip");
     let readme = String::from_utf8_lossy(&entries["README.txt"]).to_string();
     assert!(
@@ -788,7 +799,7 @@ fn manifest_check_flags_one_corrupted_byte_in_any_member() {
 
 #[test]
 fn provenance_check_flags_a_readme_manifest_mismatch() {
-    let entries = entries_of(&released());
+    let entries = entries_of(&internal_released());
     let manifest: Value = serde_json::from_slice(&entries["manifest.json"]).expect("manifest");
     let readme = String::from_utf8(entries["README.txt"].clone()).expect("utf8");
     assert!(
