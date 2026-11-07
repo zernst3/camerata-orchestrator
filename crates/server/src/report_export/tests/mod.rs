@@ -11,6 +11,7 @@ mod healthy_pdf_marking;
 mod serial_commas;
 mod severity_dispositions;
 mod text_hygiene;
+mod whole_file;
 
 pub(super) fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
     Finding {

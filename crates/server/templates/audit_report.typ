@@ -320,8 +320,12 @@
 
 // The card's location strip: the severity chip, then `repo / path, line N` in mono, ink-faint,
 // on a 3.5% ink tint with a 4 pt radius (the site's report-excerpt shape).
+// A place: `line N`, or "whole file" for a problem in a whole file (the report records it as
+// line 0, and a reader must never see "line 0").
+#let place_label(line) = if line == 0 { "whole file" } else { "line " + str(line) }
+
 #let location_strip(sev, repo, path, line) = block(fill: tint, radius: 4pt, inset: (x: 6pt, y: 4pt), width: 100%, below: 8pt)[
-  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), line #str(line)]
+  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), #place_label(line)]
 ]
 
 // One curated-finding site, as a finding card — factored out so the FIRST site of a group can
@@ -401,7 +405,7 @@
       #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
       #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
         #linebreak()
-        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
+        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), #place_label(also.line)]
         #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]] else if also.headline != none [#text(size: 8pt, fill: ink_faint)[(#also.headline)]]
         #if also.severity != none [#text(size: 8pt, fill: ink_faint)[(rated #also.severity)]]
         #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
@@ -590,7 +594,7 @@
         #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
         #linebreak()
         #text(font: mono, size: 8pt, fill: ink_faint)[
-          #item.repo / #breakable(item.path), line #str(item.line) (#item.rule_id)
+          #item.repo / #breakable(item.path), #place_label(item.line) (#item.rule_id)
         ]
         #linebreak()
         #text(size: 9pt)[Rough estimate: #item.hours_label]

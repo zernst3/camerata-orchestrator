@@ -773,6 +773,8 @@ pub(crate) fn flagged_sentence(
         .or(corpus_title.filter(|t| !t.trim().is_empty()));
     let place = if at_own_place {
         "here".to_string()
+    } else if l.line == 0 {
+        format!("at {} (whole file)", l.path)
     } else {
         format!("at {}:{}", l.path, l.line)
     };
