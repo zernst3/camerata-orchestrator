@@ -25,6 +25,7 @@ pub mod holds;
 pub mod junk;
 mod report;
 mod secrets;
+mod text_style;
 pub mod tool_claim;
 pub mod unsynced;
 
@@ -369,6 +370,16 @@ fn audit_zip_with(
         CheckId::Secrets,
         archive_secret_problems(&entries, pdf_text),
     );
+    // The operator's own review package (internal) carries engine notes, discarded rows and review
+    // flags; it is not a client file, so the text-style check is a client-package check.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::archive_problems(&entries, pdf_text)
+        },
+    );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
@@ -611,6 +622,17 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     }
     report.record(CheckId::Content, package.tool_claim_problems.clone());
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    // The PDF's text is whatever its data and its template make of it; a banned character in the
+    // data is caught here before Typst is given anything, and the compiled PDF's own text is read
+    // by the archive pass above.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::json_bytes_problems("PDF data (data.json)", package.data_json.as_bytes())
+        },
+    );
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
     // confidentiality line to them.
@@ -664,6 +686,10 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
 pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     let mut report = GateReport::default();
     report.record(CheckId::Secrets, pdf_data_problems(data_json));
+    report.record(
+        CheckId::ClientTextStyle,
+        text_style::json_bytes_problems("PDF data (data.json)", data_json.as_bytes()),
+    );
     if report.is_clean() {
         Ok(())
     } else {
@@ -703,6 +729,9 @@ pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
 
 #[cfg(test)]
 mod patterns_tests;
+
+#[cfg(test)]
+mod text_style_tests;
 
 #[cfg(test)]
 mod merged_site_tests;

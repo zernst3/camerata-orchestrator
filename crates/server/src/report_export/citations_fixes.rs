@@ -760,10 +760,17 @@ pub(crate) fn client_headline_and_detail(
         overlay::reviewer_text(finding, field)
             .filter(|_| overlay::reviewer_edited_field(finding, field))
     };
-    (
+    // Whoever wrote it, a headline and a detail reach the client without a dash, a multiplication
+    // sign or a hedge label in front (`Borderline:`), and a whole-file place reads "whole file".
+    let (headline, detail) = (
         reviewer_text(camerata_api_types::edits::EditField::Headline)
             .map_or(headline, str::to_string),
         reviewer_text(camerata_api_types::edits::EditField::Detail).map_or(detail, str::to_string),
+    );
+    (
+        crate::client_text::without_hedge_label(&crate::report_export::client_prose(&headline))
+            .into_owned(),
+        crate::report_export::client_prose(&detail),
     )
 }
 

@@ -636,7 +636,7 @@ pub(crate) fn failed_pass_disclosures(
                 return format!("{pass} for {}: did not complete.", f.repo);
             }
             format!(
-                "{pass} for {}: not computed — pass failed ({}).",
+                "{pass} for {}: not computed, pass failed ({}).",
                 f.repo, f.reason
             )
         })

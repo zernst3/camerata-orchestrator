@@ -407,7 +407,11 @@ fn text_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
 /// label, cause or reason reaches the tree or a row with a secret in it. The same detector the
 /// release gate runs does the redacting, so what ships passes the gate.
 fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
-    text_of(obj, key, at).map(|text| camerata_secrets::redact_str(&text).into_owned())
+    text_of(obj, key, at).map(|text| {
+        // Redacted first, then rewritten for the client: no em dash, no en dash, no
+        // multiplication sign, and a problem in a whole file is "whole file", not `path:0`.
+        crate::report_export::client_prose(&camerata_secrets::redact_str(&text))
+    })
 }
 
 fn index_of(obj: &Obj, key: &str, at: &str) -> Result<usize, String> {

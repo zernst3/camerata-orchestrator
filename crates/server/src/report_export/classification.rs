@@ -1235,10 +1235,13 @@ pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
 /// so by carrying no location, which is what `located: false` exists to express.
 pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
     let trimmed = evidence.trim();
-    let head = trimmed
-        .split(" — ")
-        .next()
-        .and_then(|s| s.split(" - ").next())
+    // The note follows the place after an em dash, a spaced hyphen, a colon or a comma (the
+    // house form of a client citation is `path:line: note`, and the text the models write is
+    // rewritten to it at parse), so the place is what comes before the first of them.
+    let head = [" \u{2014} ", " - ", ": ", ", "]
+        .iter()
+        .filter_map(|separator| trimmed.split_once(separator).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
         .unwrap_or(trimmed)
         .trim();
     if let Some((path, line_str)) = head.rsplit_once(':') {

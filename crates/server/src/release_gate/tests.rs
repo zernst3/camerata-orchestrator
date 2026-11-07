@@ -106,8 +106,19 @@ pub(super) fn client_options() -> ReportOptions {
 
 /// A clean package, built by the production assembly around a stand-in PDF.
 pub(super) fn package() -> ProductPackage {
+    package_with(client_options())
+}
+
+/// A clean INTERNAL package (the operator's own review): its README carries the provenance lines.
+pub(super) fn internal_package() -> ProductPackage {
+    package_with(ReportOptions {
+        internal: true,
+        ..client_options()
+    })
+}
+
+fn package_with(options: ReportOptions) -> ProductPackage {
     let sealed = sealed_report();
-    let options = client_options();
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
@@ -297,7 +308,11 @@ fn xml_escape(text: &str) -> String {
 }
 
 /// Rewrite one part of an xlsx (a zip), keeping every other part byte for byte.
-fn rewrite_xlsx_part(xlsx: &[u8], part: &str, edit: impl FnOnce(&str) -> String) -> Vec<u8> {
+pub(super) fn rewrite_xlsx_part(
+    xlsx: &[u8],
+    part: &str,
+    edit: impl FnOnce(&str) -> String,
+) -> Vec<u8> {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
@@ -393,7 +408,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_fourteen_checks() {
+fn release_passes_a_clean_package_and_reports_fifteen_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -412,7 +427,8 @@ fn release_passes_a_clean_package_and_reports_fourteen_checks() {
             "confidentiality marking",
             "manifest",
             "provenance",
-            "unsynced reviewer changes"
+            "unsynced reviewer changes",
+            "client text style"
         ]
     );
     assert_eq!(&z.bytes[0..2], b"PK");
@@ -429,7 +445,7 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
              reviewer correction on flagged findings, confidentiality marking, manifest, \
-             provenance, unsynced reviewer changes (all passed)"
+             provenance, unsynced reviewer changes, client text style (all passed)"
         ),
         "{readme}"
     );
@@ -808,11 +824,11 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
-    // WO9: 8 -> 9. The merge check now reads the package's own decisions.json, so a standalone
+    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own decisions.json, so a standalone
     // audit of a zip runs it too.
     assert_eq!(
         report.checks.len(),
-        9,
+        10,
         "row parity needs the in-memory rows"
     );
 }
@@ -1106,7 +1122,7 @@ fn request() -> axum::Json<crate::AuditReportReq> {
     })
 }
 
-fn typst_on_path() -> bool {
+pub(super) fn typst_on_path() -> bool {
     camerata_test_env::typst_on_path()
 }
 
@@ -1222,7 +1238,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
              finding content, reviewer decision on unverified evidence, decision records behind \
              merged rows, reviewer decision on restored findings, reviewer correction on \
              flagged findings, confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes"
+             reviewer changes, client text style"
         )
     );
 }

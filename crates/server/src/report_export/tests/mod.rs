@@ -9,6 +9,7 @@ mod citations_fixes;
 mod headlines_scorecard;
 mod healthy_pdf_marking;
 mod severity_dispositions;
+mod text_hygiene;
 
 pub(super) fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
     Finding {

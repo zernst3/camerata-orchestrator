@@ -43,6 +43,7 @@ pub mod clarify_resume;
 pub mod client_lock;
 pub mod client_provenance;
 pub mod client_source;
+pub mod client_text;
 pub mod connections;
 /// H5: the three-pass consensus option (off by default).
 pub mod consensus;
@@ -3914,11 +3915,17 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
 /// `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
 /// paragraph).
 ///
-/// The provenance lines (repos, generated-at, commit, engine version, corpus version, rules
-/// last reviewed) come from [`ManifestProvenance::readme_lines`], the human rendering of the
-/// SAME struct `manifest.json`'s `inspection` block is rendered from
-/// ([`ManifestProvenance::inspection_json`]), so the two cannot drift. Pass the same value to
-/// [`build_product_zip`].
+/// A CLIENT README says what each file is and how to import the tickets, and nothing else: no
+/// model role or model name, no corpus hash, no engine commit, no release-check list, no
+/// disclaimer (the PDF carries it). Those live in `manifest.json` and are the operator's.
+///
+/// An INTERNAL README (`internal`, the operator's own review package) is the same text followed
+/// by the provenance lines and the advisory disclaimer. The provenance lines (repos,
+/// generated-at, commit, engine version, corpus version, rules last reviewed, models, release
+/// checks) come from [`ManifestProvenance::readme_lines`], the human rendering of the SAME struct
+/// `manifest.json`'s `inspection` block is rendered from ([`ManifestProvenance::inspection_json`]),
+/// so the two cannot drift. The disclaimer is `report_export::AUDIT_REPORT_DISCLAIMER`, never a
+/// second, drifting copy of that paragraph.
 ///
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.

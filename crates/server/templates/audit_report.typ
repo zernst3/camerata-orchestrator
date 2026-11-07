@@ -650,7 +650,7 @@
 // (`report_export::build_priority_grid`) is the ACTUAL severity-rows x effort-columns grid:
 // each open finding sits in exactly one cell. Accepted and Informational findings are
 // deliberately out of scope (a footnote, not a row/column) — see the struct's doc comment.
-#section("Prioritization", [Severity × effort matrix])
+#section("Prioritization", [Severity by effort matrix])
 
 #let effort_col_label(key) = {
   if key == "low" { "Low effort" }
@@ -861,8 +861,8 @@
   No findings held for a reviewer's judgment call this run.
 ] else [
   #text(size: 9pt, style: "italic", fill: ink_faint)[
-    Held for a human reviewer's judgment call — not an open action item, but worth a second \
-    look.
+    Held for a human reviewer's judgment call. These are not open action items, but they are \
+    worth a second look.
   ]
   #v(4pt)
   #for group in d.held_for_review_findings [

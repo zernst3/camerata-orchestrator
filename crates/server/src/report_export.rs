@@ -256,6 +256,40 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Model-written (or reviewer-written) prose as a client reads it: no em dash, no en dash, no
+/// multiplication sign ([`crate::client_text::plain`]) and no "line 0" for a problem in a whole
+/// file ([`crate::client_text::whole_file_places`]).
+pub(crate) fn client_prose(text: &str) -> String {
+    crate::client_text::whole_file_places(&crate::client_text::plain(text)).into_owned()
+}
+
+/// A finding's `detail` as a client reads it. The parser joins a title to its explanation with
+/// the engine's own separator (`ai_audit::HEADLINE_SEP`, an em dash that the detail stage splits
+/// on again); a client reads "Title: explanation", or "Title. Borderline: explanation" when the
+/// explanation opens with a label, and never the separator.
+pub(crate) fn client_detail(detail: &str) -> String {
+    let joined = match detail.split_once(crate::ai_audit::HEADLINE_SEP) {
+        Some((title, rest)) => {
+            let (title, rest) = (title.trim_end(), rest.trim_start());
+            if title.is_empty() {
+                rest.to_string()
+            } else if rest.is_empty() {
+                // A title with no explanation keeps the colon that says so (the content check
+                // reads it as an empty explanation); a reviewer holds such a row.
+                format!("{}:", title.trim_end_matches([':', '.']))
+            } else if title.ends_with(['.', '!', '?', ':']) {
+                format!("{title} {rest}")
+            } else if crate::client_text::opens_with_label(rest) {
+                format!("{title}. {rest}")
+            } else {
+                format!("{title}: {rest}")
+            }
+        }
+        None => detail.to_string(),
+    };
+    client_prose(&joined)
+}
+
 /// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
 /// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
@@ -268,8 +302,8 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     let mut f = finding.clone();
     f.path = strip_zero_width(&f.path).into_owned();
-    f.snippet = strip_zero_width(&f.snippet).into_owned();
-    f.detail = strip_zero_width(&f.detail).into_owned();
+    f.snippet = client_prose(&strip_zero_width(&f.snippet));
+    f.detail = client_detail(&strip_zero_width(&f.detail));
     for v in f.captures.values_mut() {
         *v = strip_zero_width(v).into_owned();
     }
@@ -277,13 +311,14 @@ pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     // the model-written fix (`fix_specific`), every absorbed evidence site's snippet, and the
     // severity rationale. This gap is exactly where the sweep exports' leaked keys sat.
     if let Some(fix) = f.fix_specific.as_mut() {
-        *fix = strip_zero_width(fix).into_owned();
+        *fix = client_prose(&strip_zero_width(fix));
     }
     if let Some(rationale) = f.calibration_rationale.as_mut() {
-        *rationale = strip_zero_width(rationale).into_owned();
+        *rationale = client_prose(&strip_zero_width(rationale));
     }
     for site in &mut f.also_locations {
-        site.snippet = strip_zero_width(&site.snippet).into_owned();
+        site.snippet = client_prose(&strip_zero_width(&site.snippet));
+        site.headline = client_prose(&site.headline);
     }
     // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from
     // the detector; then the secret redaction (belt and braces: every producer already redacted

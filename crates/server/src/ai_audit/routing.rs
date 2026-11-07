@@ -841,7 +841,7 @@ pub(crate) fn conventions_observed_findings(
             severity: "info".to_string(),
             snippet,
             detail: format!(
-                "The codebase consistently follows \"{}\" for {} — zero violations were \
+                "The codebase consistently follows \"{}\" for {}. Zero violations were \
                  observed this scan. Reported so the convention can be adopted as an explicit \
                  decision and enforced going forward. {}",
                 opt.label, rec.rule_id, rec.recommendation_reasoning
