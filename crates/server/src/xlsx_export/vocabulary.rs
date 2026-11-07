@@ -165,7 +165,9 @@ pub fn sheet_info(name: &str) -> Option<&'static SheetInfo> {
 /// The tab colour of a sheet by name; the reviewers' light tab for a name this module does not
 /// know.
 pub fn tab_color_of(name: &str) -> &'static str {
-    sheet_info(name).map_or(SheetGroup::ForReviewers.tab_color(), |s| s.group.tab_color())
+    sheet_info(name).map_or(SheetGroup::ForReviewers.tab_color(), |s| {
+        s.group.tab_color()
+    })
 }
 
 /// The questions the PDF's "Where the details are" section answers, each with the exact sheet
@@ -175,10 +177,19 @@ pub const DETAIL_MAP: [(&str, &str); 8] = [
     ("What do we fix, and in what order?", FIX_PLAN),
     ("Where exactly is each problem?", ALL_PROBLEMS),
     ("What must a reviewer rule on first?", NEEDS_A_DECISION),
-    ("What does our code already do consistently?", YOUR_CONVENTIONS),
-    ("Where does our code depart from its own habits?", DEPARTURES),
+    (
+        "What does our code already do consistently?",
+        YOUR_CONVENTIONS,
+    ),
+    (
+        "Where does our code depart from its own habits?",
+        DEPARTURES,
+    ),
     ("Which packages are vulnerable?", DEPENDENCIES),
-    ("What did we check, and what came back clean?", RULES_CHECKED),
+    (
+        "What did we check, and what came back clean?",
+        RULES_CHECKED,
+    ),
     ("What did we not check?", NOT_CHECKED),
 ];
 
@@ -690,7 +701,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         "More detail",
         "The longer explanation behind a row.",
-        "Your conventions; Not checked",
+        "All problems; Your conventions; Not checked",
     ),
     e(
         "Places departing",
@@ -1064,8 +1075,14 @@ pub fn banned_synonym_in(text: &str) -> Option<&'static str> {
         while let Some(at) = lower[from..].find(banned) {
             let start = from + at;
             let end = start + banned.len();
-            let before_ok = lower[..start].chars().next_back().map_or(true, |c| !is_word_char(c));
-            let after_ok = lower[end..].chars().next().map_or(true, |c| !is_word_char(c));
+            let before_ok = lower[..start]
+                .chars()
+                .next_back()
+                .map_or(true, |c| !is_word_char(c));
+            let after_ok = lower[end..]
+                .chars()
+                .next()
+                .map_or(true, |c| !is_word_char(c));
             if before_ok && after_ok {
                 return Some(banned);
             }
@@ -1116,7 +1133,11 @@ mod tests {
     fn the_glossary_names_each_term_once() {
         let terms = glossary_terms();
         let unique: std::collections::HashSet<_> = terms.iter().collect();
-        assert_eq!(terms.len(), unique.len(), "a Glossary term is defined twice");
+        assert_eq!(
+            terms.len(),
+            unique.len(),
+            "a Glossary term is defined twice"
+        );
     }
 
     #[test]
@@ -1198,7 +1219,10 @@ mod tests {
     #[test]
     fn the_banned_check_matches_whole_words_only() {
         assert_eq!(banned_synonym_in("Do now"), Some("do now"));
-        assert_eq!(banned_synonym_in("the Remediation plan"), Some("remediation"));
+        assert_eq!(
+            banned_synonym_in("the Remediation plan"),
+            Some("remediation")
+        );
         assert_eq!(banned_synonym_in("a Sub-group"), Some("sub-group"));
         assert_eq!(banned_synonym_in("Sites sheet"), Some("sites"));
         assert_eq!(banned_synonym_in("Rule ID"), Some("Rule ID"));

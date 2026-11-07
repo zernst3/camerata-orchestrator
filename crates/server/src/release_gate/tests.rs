@@ -523,9 +523,9 @@ fn secrets_check_locates_an_xlsx_hit_by_sheet_and_cell() {
     let cells = xlsx_cells(&pkg.xlsx).expect("cells");
     let target = cells
         .iter()
-        .find(|c| c.sheet == "All Findings" && c.text == "raw SQL concatenation")
-        .or_else(|| cells.iter().find(|c| c.sheet == "All Findings"))
-        .expect("an All Findings cell")
+        .find(|c| c.sheet == "All problems" && c.text == "raw SQL concatenation")
+        .or_else(|| cells.iter().find(|c| c.sheet == "All problems"))
+        .expect("an All problems cell")
         .clone();
     let needle = format!(">{}<", xml_escape(&target.text));
     let replacement = format!(">{}<", xml_escape(&p.value));
@@ -1624,12 +1624,13 @@ fn the_manifest_the_pdf_and_the_workbook_name_the_client_identically() {
         .line
         .contains("prepared for Acme Ltd on "));
     assert_eq!(package.provenance.client_name.as_deref(), Some("Acme Ltd"));
-    let index = archive::xlsx_sheet_grid(&package.xlsx, "Index").expect("the Index sheet");
+    let index =
+        archive::xlsx_sheet_grid(&package.xlsx, "Start here").expect("the Start here sheet");
     assert!(
         index
             .iter()
             .any(|row| row.first().is_some_and(|c| c == "Prepared for Acme Ltd")),
-        "the workbook Index names the client the same way"
+        "the workbook Start here names the client the same way"
     );
 }
 
@@ -2026,7 +2027,7 @@ fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
 }
 
 /// Remove every worksheet row that holds a cell with exactly this text, leaving the rest of the
-/// workbook (its Index counts included) untouched: a row dropped from one sheet by itself.
+/// workbook (its Start here counts included) untouched: a row dropped from one sheet by itself.
 fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
     let cell = format!("t=\"s\"><v>{}</v>", shared_string_index(xlsx, text));
     rewrite_xlsx(xlsx, |name, xml| {
@@ -2059,7 +2060,7 @@ fn the_gate_catches_a_no_convention_row_dropped_from_the_conventions_sheet() {
     let problems = count_problems(&failure);
     assert!(
         problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
-            && p.location == "sheet \"Conventions\" rows, kind no_convention"),
+            && p.location == "sheet \"Your conventions\" rows, kind no_convention"),
         "{failure}"
     );
     assert!(
@@ -2079,7 +2080,7 @@ fn the_gate_catches_a_not_assessed_row_dropped_from_the_coverage_sheet() {
         count_problems(&failure)
             .iter()
             .any(|p| p.file.ends_with("-findings.xlsx")
-                && p.location == "sheet \"Coverage\" rows, kind not_assessed"),
+                && p.location == "sheet \"Not checked\" rows, kind not_assessed"),
         "{failure}"
     );
 }
@@ -2087,15 +2088,13 @@ fn the_gate_catches_a_not_assessed_row_dropped_from_the_coverage_sheet() {
 #[test]
 fn the_gate_catches_a_followed_convention_row_dropped_from_the_conventions_sheet() {
     let mut package = mixed_package();
-    package.xlsx = drop_sheet_rows_with_text(
-        &package.xlsx,
-        "Followed consistently \u{2014} no exceptions found",
-    );
+    package.xlsx =
+        drop_sheet_rows_with_text(&package.xlsx, "Followed consistently, no exceptions found");
     let failure = blocked(package);
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.location == "sheet \"Conventions\" rows, kind convention_observed"),
+            .any(|p| p.location == "sheet \"Your conventions\" rows, kind convention_observed"),
         "{failure}"
     );
 }

@@ -5,7 +5,6 @@ use camerata_api_types::edits::EditField;
 use serde_json::Value;
 
 use super::support::*;
-use crate::release_gate::xlsx_sheet_grid;
 use crate::report_export::apply_overlay;
 
 #[test]
@@ -31,18 +30,18 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids_on_the_sites_sheet_and_
         "{csv}"
     );
 
-    // The workbook: the Sites sheet and the Dependencies sheet.
+    // The workbook: the All source rows sheet and the Dependencies sheet.
     let xlsx = entries
         .iter()
         .find(|(n, _)| n.ends_with(".xlsx"))
         .map(|(_, b)| b.clone())
         .unwrap();
     for (sheet, file) in [
-        ("Sites", "src/a.rs"),
-        ("Sites", "package.json"),
+        ("All source rows", "src/a.rs"),
+        ("All source rows", "package.json"),
         ("Dependencies", "package.json"),
     ] {
-        let grid = xlsx_sheet_grid(&xlsx, sheet).unwrap();
+        let grid = sheet_table(&xlsx, sheet);
         let col = |name: &str| {
             grid[0]
                 .iter()
@@ -64,7 +63,7 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids_on_the_sites_sheet_and_
         );
     }
     // A row nobody edited says so.
-    let grid = xlsx_sheet_grid(&xlsx, "Sites").unwrap();
+    let grid = sheet_table(&xlsx, "All source rows");
     let edited = grid[0].iter().position(|h| h == "Reviewer edited").unwrap();
     let file = grid[0].iter().position(|h| h == "File").unwrap();
     let plain = grid.iter().skip(1).find(|r| r[file] == "src/b.rs").unwrap();

@@ -1,5 +1,5 @@
-//! WO9 and WO9b: the Remediation plan sheet and the ticket CSV, one row per sub-group, with false
-//! positives and ignored sites left out (design 3B items 2 and 4, D16).
+//! WO9 and WO9b: the Fix plan sheet and the ticket CSV, one row per fix, with ruled-out
+//! problems and ignored places left out (design 3B items 2 and 4, D16).
 
 use camerata_api_types::decisions::DecisionState;
 
@@ -55,22 +55,22 @@ fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_an
     let entries = released_entries(&reviewed, &client_options());
     let xlsx = workbook(&entries);
 
-    // It is the first sheet of the workbook.
+    // It is the first sheet of the "What to fix" group, after Start here and the Glossary.
     let names = xlsx_sheet_names(&xlsx).expect("sheet names");
-    assert_eq!(names[0], "Remediation plan", "{names:?}");
+    assert_eq!(names[2], "Fix plan", "{names:?}");
 
-    let grid = xlsx_sheet_grid(&xlsx, "Remediation plan").expect("the plan sheet");
+    let grid = xlsx_sheet_grid(&xlsx, "Fix plan").expect("the plan sheet");
     for header in [
-        "Group id",
-        "Rule",
-        "Cause",
+        "Fix id",
+        "Rules",
+        "What is wrong",
         "Severity",
-        "Sites",
+        "Places",
         "Fix",
-        "Worked example",
+        "Example from your code",
         "Effort",
-        "Top folders",
-        "Sequence",
+        "Folders",
+        "Fix order",
     ] {
         assert!(
             grid[0].iter().any(|h| h == header),
@@ -92,36 +92,33 @@ fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_an
         .clone();
     let row_of = |group: &str| -> &[String] {
         rows.iter()
-            .find(|r| cell(&grid, r, "Group id") == group)
+            .find(|r| cell(&grid, r, "Fix id") == group)
             .map(|r| r.as_slice())
             .unwrap_or_else(|| panic!("no plan row for {group}"))
     };
     let sql = row_of(&sql_group);
     assert_eq!(
-        cell(&grid, sql, "Sites"),
+        cell(&grid, sql, "Places"),
         "2",
         "the ignored site is not a site to fix"
     );
     assert_eq!(cell(&grid, sql, "Severity"), "High");
     assert_eq!(
-        cell(&grid, sql, "Worked example"),
+        cell(&grid, sql, "Example from your code"),
         "Bind the parameters with the driver."
     );
-    assert_eq!(cell(&grid, sql, "Sequence"), "Fix first");
-    assert!(
-        cell(&grid, sql, "Top folders").contains("src (2)"),
-        "{sql:?}"
-    );
+    assert_eq!(cell(&grid, sql, "Fix order"), "First");
+    assert!(cell(&grid, sql, "Folders").contains("src (2)"), "{sql:?}");
     let layering = row_of(&layering_group);
     assert_eq!(
-        cell(&grid, layering, "Sites"),
+        cell(&grid, layering, "Places"),
         "1",
         "the false positive is excluded"
     );
-    assert_eq!(cell(&grid, layering, "Sequence"), "Next");
-    // Fix first leads.
-    assert_eq!(cell(&grid, rows[0], "Sequence"), "Fix first");
-    assert_eq!(cell(&grid, rows[rows.len() - 1], "Sequence"), "Next");
+    assert_eq!(cell(&grid, layering, "Fix order"), "Next");
+    // First leads.
+    assert_eq!(cell(&grid, rows[0], "Fix order"), "First");
+    assert_eq!(cell(&grid, rows[rows.len() - 1], "Fix order"), "Next");
     // Neither the false positive nor the ignored site is named anywhere on the sheet.
     let sheet_text: String = grid
         .iter()
@@ -207,7 +204,7 @@ fn ticket_csv_has_one_row_per_subgroup_and_excludes_false_positives() {
 }
 
 #[test]
-fn a_ticket_lists_fifty_sites_and_points_at_the_sites_sheet_for_the_rest() {
+fn a_ticket_lists_fifty_places_and_points_at_the_all_problems_sheet_for_the_rest() {
     let mut report = crate::release_gate::test_scan_report();
     report.findings = (0..60)
         .map(|i| sql_row(&format!("src/handlers/h{i:02}.rs"), 10 + i))
@@ -224,7 +221,7 @@ fn a_ticket_lists_fifty_sites_and_points_at_the_sites_sheet_for_the_rest() {
     assert_eq!(sites.matches("src/handlers/").count(), 50, "{sites}");
     assert!(
         sites.ends_with(&format!(
-            "and 10 more rows, see Sites sheet, filter Group = {group}"
+            "and 10 more rows, see the All problems sheet, filter Fix id = {group}"
         )),
         "{sites}"
     );
@@ -257,13 +254,13 @@ fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
     let options = client_options();
     let entries = released_entries(&reviewed, &options);
 
-    let grid = xlsx_sheet_grid(&workbook(&entries), "Remediation plan").expect("the plan sheet");
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Fix plan").expect("the plan sheet");
     let plan_row = grid
         .iter()
         .skip(1)
-        .find(|r| cell(&grid, r, "Group id") == group)
+        .find(|r| cell(&grid, r, "Fix id") == group)
         .expect("the plan row");
-    let plan_sites = cell(&grid, plan_row, "Sites").to_string();
+    let plan_sites = cell(&grid, plan_row, "Places").to_string();
 
     let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
     let tickets: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();
@@ -290,7 +287,7 @@ fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
     assert_eq!(plan_sites, pdf_sites, "the plan counts sites, not rows");
     assert_eq!(ticket_sites, pdf_sites, "the ticket counts sites, not rows");
     assert!(
-        ticket[1].contains("5 sites, listed as rows below"),
+        ticket[1].contains("5 places, listed as rows below"),
         "the ticket description counts sites: {:?}",
         &ticket[1]
     );
@@ -306,7 +303,7 @@ fn a_report_with_no_tree_says_so_in_the_plan_the_tickets_and_the_pdf_patterns() 
     let entries = released_entries(&reviewed, &options);
 
     // The plan sheet: its header, then one row that says why there is no plan.
-    let grid = xlsx_sheet_grid(&workbook(&entries), "Remediation plan").expect("the plan sheet");
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Fix plan").expect("the plan sheet");
     assert_eq!(grid.len(), 2, "{grid:?}");
     assert!(
         grid[1][0].contains("no review tree"),

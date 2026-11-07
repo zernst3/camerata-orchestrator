@@ -108,7 +108,7 @@ fn an_internal_export_carries_held_rows_marked_held_and_a_client_export_is_refus
 
     let internal = release_internal(package_with(rows(), &internal_options()))
         .expect("an internal export may carry held rows");
-    let grid = xlsx_sheet_grid(&workbook_of(&internal.bytes), "All Findings").unwrap();
+    let grid = xlsx_sheet_grid(&workbook_of(&internal.bytes), "All problems").unwrap();
     let held_col = grid[0]
         .iter()
         .position(|h| h == "Held")
@@ -130,7 +130,7 @@ fn review_flags_are_in_the_internal_workbook_and_nowhere_in_a_client_package() {
     let rows = || report_with(vec![flagged()]);
 
     let internal = release_internal(package_with(rows(), &internal_options())).expect("internal");
-    let grid = xlsx_sheet_grid(&workbook_of(&internal.bytes), "All Findings").unwrap();
+    let grid = xlsx_sheet_grid(&workbook_of(&internal.bytes), "All problems").unwrap();
     let col = grid[0]
         .iter()
         .position(|h| h == "Review flags")
@@ -152,6 +152,6 @@ fn review_flags_are_in_the_internal_workbook_and_nowhere_in_a_client_package() {
         assert!(!text.contains("Review flags"), "column in {name}");
         assert!(!text.contains("review_flags"), "capture name in {name}");
     }
-    let grid = xlsx_sheet_grid(&workbook_of(&client.bytes), "All Findings").unwrap();
+    let grid = xlsx_sheet_grid(&workbook_of(&client.bytes), "All problems").unwrap();
     assert!(!grid[0].iter().any(|h| h == "Review flags" || h == "Held"));
 }

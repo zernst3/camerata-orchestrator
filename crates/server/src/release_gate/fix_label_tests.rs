@@ -221,11 +221,11 @@ enum Tamper {
     Rename,
 }
 
-/// The workbook's All Findings sheet carries the same label beside each fix.
+/// The workbook's All problems sheet carries the same label beside each fix.
 #[test]
 fn the_workbook_labels_each_fix_beside_the_fix() {
     let package = package_for(report("Raw SQL built by string formatting."));
-    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let grid = xlsx_sheet_grid(&package.xlsx, "All problems").expect("the sheet");
     let header = &grid[0];
     let col = |name: &str| {
         header
@@ -233,7 +233,7 @@ fn the_workbook_labels_each_fix_beside_the_fix() {
             .position(|h| h == name)
             .unwrap_or_else(|| panic!("no column {name:?} in {header:?}"))
     };
-    let (fix_col, type_col) = (col("Fix (specific to this finding)"), col("Fix type"));
+    let (fix_col, type_col) = (col("What to do here"), col("Fix type"));
     let mut seen = BTreeMap::new();
     for row in &grid[1..] {
         seen.insert(row[fix_col].clone(), row[type_col].clone());
@@ -337,7 +337,7 @@ async fn an_unmarked_fix_equal_to_the_authored_text_is_a_standard_fix_in_every_f
     let record = reader.records().next().unwrap().unwrap();
     assert_eq!(&record[col], STANDARD_FIX_LABEL);
 
-    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let grid = xlsx_sheet_grid(&package.xlsx, "All problems").expect("the sheet");
     let col = grid[0].iter().position(|h| h == "Fix type").unwrap();
     assert_eq!(grid[1][col], STANDARD_FIX_LABEL);
 

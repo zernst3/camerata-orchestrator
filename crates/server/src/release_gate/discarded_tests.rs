@@ -118,8 +118,8 @@ fn every_discarded_row_carries_a_site_key_after_the_seal() {
     assert_eq!(distinct.len(), 2);
 }
 
-/// The internal workbook has a "Thrown out by the engine" sheet listing every discarded row with
-/// its reason, rule, place and headline; a client package has no such sheet and none of the rows.
+/// The internal workbook lists every discarded row on the Ruled out sheet (ruled out by the Engine)
+/// with its reason, rule, place and problem; a client package has no such sheet and none of the rows.
 #[test]
 fn the_internal_workbook_lists_thrown_out_rows_and_a_client_package_never_does() {
     let rows = || {
@@ -133,12 +133,22 @@ fn the_internal_workbook_lists_thrown_out_rows_and_a_client_package_never_does()
     };
     let internal = release_internal(package_with(rows(), &internal_options)).expect("internal");
     let wb = workbook_of(&internal.bytes);
-    let grid = xlsx_sheet_grid(&wb, "Thrown out by the engine").expect("the sheet exists");
-    assert_eq!(grid[0], ["Reason", "Rule", "Place", "Headline"]);
-    assert_eq!(grid.len(), 2, "{grid:?}");
-    assert!(grid[1][0].contains("placeholder"), "{:?}", grid[1]);
-    assert_eq!(grid[1][1], "AI-TYPESCRIPT-PLACEHOLDER");
-    assert_eq!(grid[1][2], "lib/placeholder_zone.ts:8");
+    let grid = xlsx_sheet_grid(&wb, "Ruled out").expect("the sheet exists");
+    let col = |name: &str| grid[0].iter().position(|h| h == name).expect(name);
+    let engine: Vec<&Vec<String>> = grid
+        .iter()
+        .skip(1)
+        .filter(|r| r[col("Ruled out by")] == "Engine")
+        .collect();
+    assert_eq!(engine.len(), 1, "{grid:?}");
+    assert!(
+        engine[0][col("Reason")].contains("placeholder"),
+        "{:?}",
+        engine[0]
+    );
+    assert_eq!(engine[0][col("Rule id")], "AI-TYPESCRIPT-PLACEHOLDER");
+    assert_eq!(engine[0][col("File")], "lib/placeholder_zone.ts");
+    assert_eq!(engine[0][col("Line")], "8");
 
     let client = release(package_with(rows(), &client_options())).expect("client");
     assert!(!xlsx_sheet_names(&workbook_of(&client.bytes))
