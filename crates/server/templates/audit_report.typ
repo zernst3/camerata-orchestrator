@@ -677,7 +677,7 @@
 }
 
 #if d.priority_grid.rows.len() == 0 [
-  No do-now, do-next, or plan findings this run.
+  No do-now, do-next or plan findings this run.
 ] else [
   #table(
     columns: (auto,) + d.priority_grid.columns.map(c => 1fr),

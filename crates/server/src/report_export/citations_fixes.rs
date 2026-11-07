@@ -65,7 +65,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
              whoever can reach that endpoint.",
         ),
         "SUPABASE-AUTH-USERS-EXPOSED-1" => Some(
-            "Exposing auth.users through a view or grant leaks every user's email, phone, and \
+            "Exposing auth.users through a view or grant leaks every user's email, phone and \
              identity metadata to anyone who can query it.",
         ),
         // ── Supabase: secrets, storage, exposure, functions ───────────────────────────
@@ -96,7 +96,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
         ),
         // ── Universal / deterministic-floor ────────────────────────────────────────
         "ARCH-NO-SECRETS-IN-URL-1" => Some(
-            "A credential carried in a URL is written into proxy logs, browser history, and \
+            "A credential carried in a URL is written into proxy logs, browser history and \
              server access logs by default, which is a durable exposure even after the \
              credential is rotated.",
         ),
@@ -106,7 +106,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
              is deleted.",
         ),
         "SEC-NO-SECRET-FILE-1" => Some(
-            "A committed secret-bearing file (a private key, keystore, or real .env) is \
+            "A committed secret-bearing file (a private key, keystore or real .env) is \
              exposed to everyone with repository access, past and future.",
         ),
         "SEC-NO-HARDCODED-SECRETS-1" => Some(
@@ -123,7 +123,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
         ),
         "SEC-NO-RAW-SQL-CONCAT-1" => Some(
             "String-concatenated SQL lets an attacker who controls any part of the input \
-             read, modify, or delete arbitrary rows in the database.",
+             read, modify or delete arbitrary rows in the database.",
         ),
         _ => None,
     }

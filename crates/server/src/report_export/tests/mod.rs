@@ -8,6 +8,7 @@ mod brand_template_review;
 mod citations_fixes;
 mod headlines_scorecard;
 mod healthy_pdf_marking;
+mod serial_commas;
 mod severity_dispositions;
 mod text_hygiene;
 

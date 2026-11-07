@@ -1080,7 +1080,7 @@ pub(crate) fn ai_tier_note_for(
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. This export has not yet had a human triage pass: every \
              advisory finding here is the engine's own calibrated output, awaiting a human \
-             reviewer's judgment before any is accepted, marked tech debt, or ruled out. \
+             reviewer's judgment before any is accepted, marked tech debt or ruled out. \
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
