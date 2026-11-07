@@ -5373,6 +5373,34 @@ select:focus {
   box-shadow: 0 0 5px rgba(234,88,12,0.35), inset 0 2px 4px rgba(0,0,0,0.7);
 }
 
+/* Single-choice selects draw their own caret. The native caret is painted by the platform theme
+   and its position moved by about two pixels between two runs on one machine and one Chrome, which
+   broke the pixel-exact visual check on every state with a select. With the native appearance
+   dropped the caret is two diagonal strokes in the ink colour (a 10 x 5 px chevron, 2 px from the
+   right padding edge, as the native one sat), so the app, the review gallery and the baselines
+   render the same on every machine. The selector is (0,2,1) in specificity on purpose, above any one-class rule:
+   the component rules above and below set `background:` shorthands that would wipe the caret
+   image, and only `background-image` is set here, so their colours stay. List boxes (`multiple`,
+   `size`) have no caret and keep the platform's. Dropping the native appearance also makes each
+   select about 2 px shorter and starts its text about 4 px further left, so content below a
+   select sits a few pixels higher than with the native control (up to 8 px on the settings page).
+   Without the native arrow a disabled select had no visible cue left, hence the dimming rule. */
+select:not([multiple]):not([size]) {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 24px;
+  background-image:
+    linear-gradient(to top right, transparent calc(50% - 0.75px), var(--ink) calc(50% - 0.75px), var(--ink) calc(50% + 0.75px), transparent calc(50% + 0.75px)),
+    linear-gradient(to top left, transparent calc(50% - 0.75px), var(--ink) calc(50% - 0.75px), var(--ink) calc(50% + 0.75px), transparent calc(50% + 0.75px));
+  background-repeat: no-repeat;
+  background-size: 5px 5px;
+  background-position: right 7px center, right 2px center;
+}
+select:not([multiple]):not([size]):disabled {
+  opacity: .55;
+  cursor: default;
+}
+
 /* ── Global header ────────────────────────────────────────────────────────
    The cockpit's top bar / topbar maps to the app's .cockpit-topbar.
    The brand panel is .topbar-brand and nav tabs are .cockpit-nav-tab.

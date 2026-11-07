@@ -220,6 +220,90 @@ fn no_gallery_page_contains_an_em_dash() {
     }
 }
 
+/// The one rule that themes every single-choice `<select>`: the text of its block in the
+/// stylesheet, or a panic when it is missing.
+fn select_rule_block() -> &'static str {
+    let selector = "select:not([multiple]):not([size]) {";
+    let start = GLOBAL_CSS
+        .find(selector)
+        .unwrap_or_else(|| panic!("the stylesheet has no `{selector}` rule"));
+    let body = &GLOBAL_CSS[start..];
+    &body[..body.find('}').expect("the select rule is closed")]
+}
+
+/// A native `<select>` draws its caret with the platform theme, and that drawing moved by about
+/// two pixels between two runs on one machine and one Chrome (the visual check failed on nine
+/// states with nothing else changed). Every single-choice select therefore drops the native
+/// appearance and draws its caret from the stylesheet's own tokens, so the gallery, the app and
+/// the pixel baselines cannot drift with the platform again.
+#[test]
+fn single_choice_selects_use_a_stylesheet_caret_not_the_native_one() {
+    let rule = select_rule_block();
+    assert!(
+        rule.contains("appearance: none"),
+        "selects must drop the native appearance: {rule}"
+    );
+    assert!(
+        rule.contains("-webkit-appearance: none"),
+        "the prefixed property too: {rule}"
+    );
+    assert!(
+        rule.contains("background-image") && rule.contains("var(--ink)"),
+        "the caret is drawn from the ink token: {rule}"
+    );
+    assert!(
+        rule.contains("padding-right"),
+        "room is kept for the caret: {rule}"
+    );
+}
+
+/// Without the native appearance a disabled select lost its last visible cue (the greyed native
+/// arrow), and several selects have no `:disabled` rule of their own, so one rule dims them all.
+#[test]
+fn a_disabled_single_choice_select_still_looks_disabled() {
+    let selector = "select:not([multiple]):not([size]):disabled {";
+    let start = GLOBAL_CSS
+        .find(selector)
+        .unwrap_or_else(|| panic!("the stylesheet has no `{selector}` rule"));
+    let body = &GLOBAL_CSS[start..];
+    let rule = &body[..body.find('}').expect("the disabled select rule is closed")];
+    assert!(
+        rule.contains("opacity"),
+        "a disabled select is dimmed: {rule}"
+    );
+}
+
+/// The rule above skips `multiple` and `size` selects (a list box has no caret). A gallery page
+/// that rendered one, or a native file input, would draw platform pixels the rule does not cover.
+#[test]
+fn no_gallery_page_renders_a_native_control_the_stylesheet_does_not_theme() {
+    let mut selects = 0;
+    for s in registry() {
+        let page = s.render().replace(GLOBAL_CSS, "");
+        let mut rest = page.as_str();
+        while let Some(at) = rest.find("<select") {
+            let tail = &rest[at..];
+            let end = tail.find('>').expect("a select tag is closed");
+            let tag = &tail[..end];
+            if tag.starts_with("<select ") || tag.starts_with("<select>") || tag == "<select" {
+                selects += 1;
+                assert!(
+                    !tag.contains("multiple") && !tag.contains("size="),
+                    "{} renders a list-box select the caret rule does not cover: {tag}",
+                    s.id()
+                );
+            }
+            rest = &tail[end..];
+        }
+        assert!(
+            !page.contains("type=\"file\""),
+            "{} renders a native file input, whose button is drawn by the platform",
+            s.id()
+        );
+    }
+    assert!(selects > 0, "a vacuous pass proves nothing");
+}
+
 #[test]
 fn fixtures_cover_every_state() {
     use camerata_ui_core::test_support::review_fixtures::{fixture, FIXTURE_IDS};

@@ -595,6 +595,12 @@ double application is idempotent).
   operator's home directory; those contain the (now redacted) prompts. Nothing raw leaves.
 - Model OUTPUT can still contain a secret the model knows from elsewhere or reconstructs; the
   construction-time redaction (A8, B1) and the gate cover the output side.
+- Development-console agents that work on client code (builder, fix, planner, reviewer, intake)
+  may read raw files themselves through their file tools, secrets included (owner decision
+  2026-11-06): their job is to change that code, including fixing a leaked secret. Every prompt
+  Camerata builds still passes the model-input chokepoint (`camerata_secrets::model_input`,
+  guarded by `crates/llm/tests/model_input_guard.rs`), and no inspection or chat call can read
+  files itself.
 
 ## 6. The fingerprint change
 
