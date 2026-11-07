@@ -142,3 +142,29 @@ fn the_evidence_gate_row_reads_plainly_and_is_held_for_a_decision() {
         row.snippet
     );
 }
+
+#[test]
+fn a_not_assessed_row_does_not_open_with_its_rule_id() {
+    let rows = crate::ai_audit::not_assessed_findings(
+        "owner/repo",
+        &[(
+            "SUPABASE-FUNC-SEARCH-PATH-1".to_string(),
+            "no file in the repository matched its scope".to_string(),
+        )],
+    );
+    assert_eq!(rows.len(), 1);
+    let (headline, detail) = client_headline_and_detail(&rows[0], None, "Fallback", None);
+    for text in [&headline, &detail] {
+        assert!(!text.starts_with("SUPABASE-FUNC-SEARCH-PATH-1"), "{text}");
+        assert!(!text.contains("armed for this scan"), "{text}");
+        assert!(
+            crate::client_text::banned_headline_prefix(text).is_none(),
+            "{text}"
+        );
+    }
+    assert!(
+        headline.starts_with("This check could not be run on this codebase"),
+        "{headline}"
+    );
+    assert!(detail.contains("never reads as clean"), "{detail}");
+}
