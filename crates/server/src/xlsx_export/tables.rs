@@ -175,7 +175,8 @@ pub(super) fn write_table(
     let plain = table.plain_count();
     let spacer = plain as u16;
     let tech_first = spacer + 1;
-    let last_col = (table.cols.len() as u16) + 0; // plain + spacer + technical = cols.len() + 1 columns
+    // plain + spacer + technical = cols.len() + 1 columns, so the last index is cols.len().
+    let last_col = table.cols.len() as u16;
     let header_row = table.header_row();
 
     if let Some((title, line)) = &table.banner {

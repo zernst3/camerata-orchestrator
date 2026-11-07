@@ -1078,11 +1078,8 @@ pub fn banned_synonym_in(text: &str) -> Option<&'static str> {
             let before_ok = lower[..start]
                 .chars()
                 .next_back()
-                .map_or(true, |c| !is_word_char(c));
-            let after_ok = lower[end..]
-                .chars()
-                .next()
-                .map_or(true, |c| !is_word_char(c));
+                .is_none_or(|c| !is_word_char(c));
+            let after_ok = lower[end..].chars().next().is_none_or(|c| !is_word_char(c));
             if before_ok && after_ok {
                 return Some(banned);
             }

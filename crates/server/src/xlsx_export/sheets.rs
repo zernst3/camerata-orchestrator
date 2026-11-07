@@ -82,8 +82,7 @@ impl<'a> Layout<'a> {
             .map(|(i, g)| (g.id.clone(), (i as u32 + 1, i)))
             .collect();
         let mut problems = representative_rows(rows);
-        problems
-            .sort_by(|a, b| fix_order_key(a, &fix_at, plan).cmp(&fix_order_key(b, &fix_at, plan)));
+        problems.sort_by_key(|r| fix_order_key(r, &fix_at, plan));
         let mut placement = HashMap::new();
         let mut first_problem_of_fix = HashMap::new();
         let mut first_problem_of_rule = HashMap::new();
@@ -1241,7 +1240,7 @@ fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
