@@ -271,7 +271,7 @@ fn the_section_is_in_no_severity_total_or_finding_count() {
     );
     // The workbook sheet exists and is a sheet of its own.
     let xlsx = workbook(&report);
-    let sheet = grid(&xlsx, "Differences across services");
+    let sheet = grid(&xlsx, "Patterns across services");
     let flat: Vec<&str> = sheet.iter().flatten().map(String::as_str).collect();
     assert!(flat.iter().any(|c| c.starts_with("Violated 1")), "{flat:?}");
     assert!(flat.contains(&"Clean"), "{flat:?}");
@@ -311,7 +311,7 @@ fn the_pattern_sheet_shows_not_applicable_and_not_reviewed_as_themselves() {
     );
 
     let xlsx = workbook(&report);
-    let sheet = grid(&xlsx, "Differences across services");
+    let sheet = grid(&xlsx, "Patterns across services");
     let flat: Vec<&str> = sheet.iter().flatten().map(String::as_str).collect();
     assert!(
         flat.iter().any(|c| c.starts_with("Not applicable (")),
@@ -329,7 +329,7 @@ fn a_one_repo_report_has_no_section_no_sheet_and_no_key() {
     let xlsx = workbook(&report);
     let names = camerata_server::release_gate::xlsx_sheet_names(&xlsx).unwrap();
     assert!(
-        !names.iter().any(|n| n == "Differences across services"),
+        !names.iter().any(|n| n == "Patterns across services"),
         "{names:?}"
     );
 }
@@ -774,17 +774,14 @@ fn a_credential_note_never_cites_a_row_dismissed_as_a_false_positive() {
 /// Start here lists every sheet with its number of rows. The differences sheet holds
 /// observations, not problems, so its rows are in no scorecard total.
 #[test]
-fn start_here_does_not_count_difference_rows_in_the_scorecard() {
+fn start_here_does_not_count_pattern_rows_in_the_scorecard() {
     let report = two_repo_report();
     let xlsx = workbook(&report);
     let start = grid(&xlsx, "Start here");
     let row = start
         .iter()
-        .find(|row| {
-            row.first()
-                .is_some_and(|c| c == "Differences across services")
-        })
-        .expect("the differences sheet is listed");
+        .find(|row| row.first().is_some_and(|c| c == "Patterns across services"))
+        .expect("the patterns sheet is listed");
     let patterns = report_json(&report).patterns_across_services.unwrap();
     assert_eq!(
         row.get(2).map(String::as_str).unwrap_or(""),
@@ -808,7 +805,7 @@ fn start_here_does_not_count_difference_rows_in_the_scorecard() {
     let problems = grid(&xlsx, "All problems").len() - 1;
     assert!(
         scorecard_problems >= problems,
-        "the scorecard counts the problems, not the difference rows"
+        "the scorecard counts the problems, not the pattern rows"
     );
 }
 

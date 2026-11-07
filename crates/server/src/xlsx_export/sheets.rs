@@ -13,7 +13,7 @@
 //! | Dependencies | Dependencies (its coverage notes moved to Not checked) |
 //! | Coverage: the per-rule table and the Rules applied block | Rules checked |
 //! | Coverage: the could-not-complete, not-run and not-reviewed blocks | Not checked |
-//! | Patterns across services | Differences across services |
+//! | Patterns across services | Patterns across services |
 //! | False Positives, Thrown out by the engine | Ruled out |
 //! | Index | Start here (the counts and the cover facts) and Glossary (the legend) |
 //! | Tree | How problems were grouped |
@@ -900,17 +900,15 @@ pub(super) fn rules_checked_table(
     table
 }
 
-/// The Differences across services sheet: one row for each rule the services answer differently,
+/// The Patterns across services sheet: one row for each rule the services answer differently,
 /// one column for each service.
-pub(super) fn differences_table(
-    patterns: &crate::report_export::PatternsAcrossServicesJson,
-) -> Table {
+pub(super) fn patterns_table(patterns: &crate::report_export::PatternsAcrossServicesJson) -> Table {
     let mut cols = vec![Col::plain(v::H_WHAT_WE_CHECKED, 56.0)];
     for repo in &patterns.repos {
         cols.push(Col::plain(repo, 34.0));
     }
     cols.push(Col::technical(v::H_RULE_ID, 28.0));
-    let mut table = Table::new(v::DIFFERENCES_ACROSS_SERVICES, cols);
+    let mut table = Table::new(v::PATTERNS_ACROSS_SERVICES, cols);
     table.header_note = Some(patterns.note.clone());
     for row in &patterns.rows {
         let mut cells = vec![Cell::wrap(&row.statement)];

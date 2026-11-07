@@ -201,7 +201,7 @@ fn start_here_says_what_each_sheet_is_and_how_many_rows_it_holds() {
     let grid = xlsx_sheet_grid(&xlsx, v::START_HERE).unwrap();
     for info in v::SHEETS.iter().filter(|s| s.name != v::START_HERE) {
         // The differences sheet exists only for a project of several repos.
-        if info.name == v::DIFFERENCES_ACROSS_SERVICES {
+        if info.name == v::PATTERNS_ACROSS_SERVICES {
             continue;
         }
         let row = grid
@@ -597,16 +597,20 @@ fn no_dash_or_multiplication_sign_in_the_strings_the_workbook_code_writes() {
 }
 
 #[test]
-fn no_banned_synonym_in_a_sheet_name_a_header_or_the_static_sheets() {
+fn no_retired_synonym_in_a_sheet_name_a_header_or_the_static_sheets() {
     let xlsx = client_workbook();
     for name in xlsx_sheet_names(&xlsx).unwrap() {
-        assert_eq!(v::banned_synonym_in(&name), None, "sheet name {name:?}");
+        assert_eq!(
+            v::banned_synonym_in(&name),
+            None,
+            "sheet name {name:?} uses a retired word"
+        );
         let grid = table(&xlsx, &name);
         for h in &grid[0] {
             assert_eq!(
                 v::banned_synonym_in(h),
                 None,
-                "header {h:?} on {name:?} uses an old name"
+                "header {h:?} on {name:?} uses a retired word (the second item is its replacement)"
             );
         }
     }
@@ -614,7 +618,7 @@ fn no_banned_synonym_in_a_sheet_name_a_header_or_the_static_sheets() {
         assert_eq!(
             v::banned_synonym_in(&text),
             None,
-            "{sheet:?} says {text:?}, which uses an old name"
+            "{sheet:?} says {text:?}, which uses a retired word (the second item is its replacement)"
         );
     }
 }
@@ -707,4 +711,42 @@ fn needs_a_decision_lists_only_problems_that_wait_and_says_why() {
         marked,
         "the sheet and the column disagree"
     );
+}
+
+/// "Pattern" names one concept only: how each service follows each rule. In the static sheets the
+/// word appears only in that concept's own entries.
+#[test]
+fn the_word_pattern_names_only_how_services_follow_rules() {
+    let xlsx = client_workbook();
+    // The sheet's own name may be written anywhere; any other use of the word must be the
+    // concept's own entry.
+    let has_pattern = |t: &str| {
+        t.replace(v::PATTERNS_ACROSS_SERVICES, "")
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "pattern" || w == "patterns")
+    };
+    let glossary = xlsx_sheet_grid(&xlsx, v::GLOSSARY).unwrap();
+    let mut seen = 0;
+    for row in &glossary {
+        if row.iter().any(|c| has_pattern(c)) {
+            seen += 1;
+            assert!(
+                row[0] == "Pattern" || row[0] == v::PATTERNS_ACROSS_SERVICES,
+                "the Glossary uses pattern in the entry {:?}",
+                row[0]
+            );
+        }
+    }
+    assert!(seen >= 2, "the pattern concept is defined");
+    for row in xlsx_sheet_grid(&xlsx, v::START_HERE).unwrap() {
+        if row.iter().any(|c| has_pattern(c)) {
+            assert_eq!(row[0], v::PATTERNS_ACROSS_SERVICES, "{row:?}");
+        }
+    }
+    for name in xlsx_sheet_names(&xlsx).unwrap() {
+        for h in &table(&xlsx, &name)[0] {
+            assert!(!has_pattern(h), "header {h:?} on {name:?} uses pattern");
+        }
+    }
 }

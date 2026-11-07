@@ -24,7 +24,7 @@ pub const YOUR_CONVENTIONS: &str = "Your conventions";
 pub const DEPARTURES: &str = "Departures";
 pub const DEPENDENCIES: &str = "Dependencies";
 pub const RULES_CHECKED: &str = "Rules checked";
-pub const DIFFERENCES_ACROSS_SERVICES: &str = "Differences across services";
+pub const PATTERNS_ACROSS_SERVICES: &str = "Patterns across services";
 pub const RULED_OUT: &str = "Ruled out";
 pub const NOT_CHECKED: &str = "Not checked";
 /// Excel caps a sheet name at 31 characters, so "(complete record)" is said by the sheet's own
@@ -76,7 +76,7 @@ pub struct SheetInfo {
     pub purpose: &'static str,
 }
 
-/// Every sheet a client workbook can hold, in reading order. The Differences across services
+/// Every sheet a client workbook can hold, in reading order. The Patterns across services
 /// sheet exists only for a project of several repos.
 pub const SHEETS: [SheetInfo; 15] = [
     SheetInfo {
@@ -125,9 +125,9 @@ pub const SHEETS: [SheetInfo; 15] = [
         purpose: "Every rule we ran and what it found.",
     },
     SheetInfo {
-        name: DIFFERENCES_ACROSS_SERVICES,
+        name: PATTERNS_ACROSS_SERVICES,
         group: SheetGroup::WhatWeChecked,
-        purpose: "Rules your services answer differently.",
+        purpose: "How each service follows each rule: the patterns and the differences.",
     },
     SheetInfo {
         name: RULED_OUT,
@@ -401,6 +401,21 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Fix order",
         "When to do a fix: First, Next or Later. First is every critical and high fix and the quick medium ones. Next is the rest of the medium fixes. Later is the low ones.",
         "Fix plan; All problems; Needs a decision",
+    ),
+    e(
+        "First",
+        "Fix order: do this fix before the others. Every critical and high fix, and the medium fixes that are quick.",
+        "Fix plan; All problems",
+    ),
+    e(
+        "Next",
+        "Fix order: do this fix after the First ones. The rest of the medium fixes.",
+        "Fix plan; All problems",
+    ),
+    e(
+        "Later",
+        "Fix order: plan this fix after the Next ones. The low fixes.",
+        "Fix plan; All problems",
     ),
     e(
         "Severity",
@@ -681,7 +696,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         "What we checked",
         "The thing we looked for, in words.",
-        "Your conventions; Differences across services",
+        "Your conventions; Patterns across services",
     ),
     e(
         "What your code does",
@@ -945,9 +960,14 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "The What we checked tabs",
     ),
     e(
-        "Differences across services",
-        "The rules your services answer differently. It is an observation, so it carries no severity.",
+        "Patterns across services",
+        "How each service follows each rule, patterns and differences alike: violated in some places, clean, not applicable or not reviewed. It is an observation, so it carries no severity.",
         "The What we checked tabs, for projects of several repos",
+    ),
+    e(
+        "Pattern",
+        "How one service follows one rule: violated in some places, clean, not applicable or not reviewed. A difference between services is a pattern too.",
+        "Patterns across services",
     ),
     e(
         "Not checked",
@@ -1014,76 +1034,148 @@ pub const INTERNAL_GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
 ];
 
-// ── Words the package must never use for a thing named above ────────────────────────────
+// ── The vocabulary map: one term for each concept ───────────────────────────────────────
 
-/// The old names. None of them may appear in a string a person reads in the workbook. The CSV
-/// and JSON headers are machine-facing and keep their field names; a test strips file names such
-/// as `findings.json` before it looks.
-pub const BANNED_SYNONYMS: &[&str] = &[
-    "site",
-    "sites",
-    "sub-group",
-    "subgroup",
-    "sub group",
-    "remediation",
-    "do now",
-    "do next",
-    "fix first",
-    "backlog",
-    "sequence",
-    "finding",
-    "findings",
-    "headline",
-    "candidate",
-    "false positive",
-    "false positives",
-    "thrown out",
-    "discarded",
-    "category",
-    "categories",
-    "pattern",
-    "patterns",
-    "bucket",
-    "disposition",
-    "held for review",
-    "informational",
-    "provenance",
-    "action-needed",
-    "est. hours",
-    "needs review",
+/// One concept the package talks about, the one client term for it, and the older words that
+/// meant the same concept and are retired in its favour.
+///
+/// A word is retired only when another term owns its concept. A word that no concept in this
+/// table owns is free to be used for what it plainly means.
+#[derive(Debug, Clone, Copy)]
+pub struct Concept {
+    /// What the concept is, in a few words.
+    pub concept: &'static str,
+    /// The one term a client reads for it.
+    pub term: &'static str,
+    /// Words that used to name the same concept. None may appear in a human-facing workbook
+    /// string, matched as whole words and ignoring case.
+    pub retired: &'static [&'static str],
+}
+
+const fn k(concept: &'static str, term: &'static str, retired: &'static [&'static str]) -> Concept {
+    Concept {
+        concept,
+        term,
+        retired,
+    }
+}
+
+/// Every concept of the client package. A term names exactly one concept; a retired word is
+/// recorded against exactly one term.
+///
+/// Un-retired when Zach set the rule (a word stays retired only if a term owns its concept):
+/// - "pattern": it now names the Patterns across services concept (how each service follows each
+///   rule), so it is owned, not retired;
+/// - "remediation" on its own: only "remediation plan" was the old name of the Fix plan;
+/// - "action-needed": the PDF scorecard's status chip is not a workbook concept.
+pub const CONCEPTS: &[Concept] = &[
+    k(
+        "one cause, one change, any number of places",
+        "Fix",
+        &["sub-group", "subgroup", "sub group", "remediation item"],
+    ),
+    k(
+        "the fixes in the order to do them",
+        "Fix plan",
+        &["remediation plan"],
+    ),
+    k(
+        "one file and line, or one whole file",
+        "Place",
+        &["site", "sites"],
+    ),
+    k(
+        "what was found at a place",
+        "Problem",
+        &["finding", "findings", "headline", "candidate"],
+    ),
+    k(
+        "the part of the system a rule belongs to",
+        "Area",
+        &["category", "categories"],
+    ),
+    k("one thing we looked for", "Rule", &[]),
+    k("when to do a fix", "Fix order", &["sequence", "bucket"]),
+    k("fix order, first", "First", &["fix first", "do now"]),
+    k("fix order, second", "Next", &["do next"]),
+    k("fix order, last", "Later", &["backlog"]),
+    k(
+        "a reviewer must rule before the client acts",
+        "Needs a decision",
+        &["held for review", "informational", "needs review"],
+    ),
+    k(
+        "looked at and not a problem",
+        "Ruled out",
+        &[
+            "false positive",
+            "false positives",
+            "thrown out",
+            "discarded",
+        ],
+    ),
+    k(
+        "what a reviewer has decided so far",
+        "Decision so far",
+        &["disposition"],
+    ),
+    k("who found it", "Source", &["provenance"]),
+    k(
+        "the hours a size of change stands for",
+        "Estimated hours",
+        &["est. hours"],
+    ),
+    k("the short code naming a rule", "Rule id", &["Rule ID"]),
+    k("the short code naming a place", "Place id", &["Site id"]),
+    k(
+        "the code naming a group of problems",
+        "Group id",
+        &["Node id"],
+    ),
+    k(
+        "how each service follows each rule, patterns and differences alike",
+        "Patterns across services",
+        &[],
+    ),
+    k("how bad the problem is", "Severity", &[]),
+    k("the size of the change", "Effort", &[]),
+    k("how sure the review is", "Confidence", &[]),
+    k("a habit the code follows consistently", "Convention", &[]),
+    k("a place that departs from a convention", "Departure", &[]),
 ];
 
-/// Banned as written (case matters): the id header is "Rule id", never "Rule ID".
-pub const BANNED_EXACT: &[&str] = &["Rule ID", "Site id", "Node id"];
-
-/// The first banned synonym in `text`, if any. A word counts only as a whole word, so "website"
-/// does not match "site"; machine file names are removed first.
-pub fn banned_synonym_in(text: &str) -> Option<&'static str> {
+/// The retired word found in `text`, with the term that replaced it. A word counts only as a
+/// whole word (so "website" does not match "site"); machine file names are removed first. A
+/// retired word written with capitals in the table (an id header) is matched as written.
+pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
     for file in ["all-findings", "findings.json", "false-positives"] {
         cleaned = cleaned.replace(file, " ");
     }
-    for exact in BANNED_EXACT {
-        if cleaned.contains(exact) {
-            return Some(exact);
-        }
-    }
     let lower = cleaned.to_lowercase();
     let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
-    for banned in BANNED_SYNONYMS {
-        let mut from = 0;
-        while let Some(at) = lower[from..].find(banned) {
-            let start = from + at;
-            let end = start + banned.len();
-            let before_ok = lower[..start]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !is_word_char(c));
-            let after_ok = lower[end..].chars().next().is_none_or(|c| !is_word_char(c));
-            if before_ok && after_ok {
-                return Some(banned);
+    for concept in CONCEPTS {
+        for retired in concept.retired {
+            if retired.chars().any(char::is_uppercase) {
+                if cleaned.contains(retired) {
+                    return Some((retired, concept.term));
+                }
+                continue;
             }
-            from = end;
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(retired) {
+                let start = from + at;
+                let end = start + retired.len();
+                let before_ok = lower[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !is_word_char(c));
+                let after_ok = lower[end..].chars().next().is_none_or(|c| !is_word_char(c));
+                if before_ok && after_ok {
+                    return Some((retired, concept.term));
+                }
+                from = end;
+            }
         }
     }
     None
@@ -1194,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn no_vocabulary_string_uses_a_banned_synonym() {
+    fn no_vocabulary_string_uses_a_retired_synonym() {
         let mut strings: Vec<String> = Vec::new();
         for sheet in &SHEETS {
             strings.push(sheet.name.to_string());
@@ -1209,22 +1301,95 @@ mod tests {
             strings.push(question.to_string());
         }
         for s in &strings {
-            assert_eq!(banned_synonym_in(s), None, "{s:?} uses an old name");
+            assert_eq!(
+                banned_synonym_in(s),
+                None,
+                "{s:?} uses a retired word; use the term that replaced it"
+            );
         }
     }
 
     #[test]
-    fn the_banned_check_matches_whole_words_only() {
-        assert_eq!(banned_synonym_in("Do now"), Some("do now"));
+    fn the_retired_check_names_the_term_that_replaced_the_word_and_matches_whole_words_only() {
+        assert_eq!(banned_synonym_in("Do now"), Some(("do now", "First")));
         assert_eq!(
             banned_synonym_in("the Remediation plan"),
-            Some("remediation")
+            Some(("remediation plan", "Fix plan"))
         );
-        assert_eq!(banned_synonym_in("a Sub-group"), Some("sub-group"));
-        assert_eq!(banned_synonym_in("Sites sheet"), Some("sites"));
-        assert_eq!(banned_synonym_in("Rule ID"), Some("Rule ID"));
+        assert_eq!(banned_synonym_in("a Sub-group"), Some(("sub-group", "Fix")));
+        assert_eq!(banned_synonym_in("Sites sheet"), Some(("sites", "Place")));
+        assert_eq!(banned_synonym_in("Rule ID"), Some(("Rule ID", "Rule id")));
+        assert_eq!(banned_synonym_in("Backlog"), Some(("backlog", "Later")));
         assert_eq!(banned_synonym_in("a website"), None);
         assert_eq!(banned_synonym_in("see findings.json"), None);
+    }
+
+    /// A word an owned concept uses is not retired: "pattern" names the Patterns across services
+    /// concept, and "remediation" alone was never a client term.
+    #[test]
+    fn a_word_that_a_term_owns_is_not_retired() {
+        assert_eq!(banned_synonym_in("Patterns across services"), None);
+        assert_eq!(banned_synonym_in("How one service follows a pattern"), None);
+        assert_eq!(banned_synonym_in("the remediation guidance"), None);
+        assert_eq!(banned_synonym_in("Action-needed"), None);
+    }
+
+    #[test]
+    fn each_concept_has_exactly_one_term_and_no_term_names_two_concepts() {
+        let mut terms = std::collections::HashSet::new();
+        let mut concepts = std::collections::HashSet::new();
+        for c in CONCEPTS {
+            assert!(!c.term.is_empty() && !c.concept.is_empty());
+            assert!(
+                terms.insert(c.term.to_lowercase()),
+                "the term {:?} names two concepts",
+                c.term
+            );
+            assert!(
+                concepts.insert(c.concept),
+                "the concept {:?} has two terms",
+                c.concept
+            );
+        }
+    }
+
+    #[test]
+    fn each_retired_word_is_recorded_against_exactly_one_term_and_is_never_a_current_term() {
+        let terms: std::collections::HashSet<String> =
+            CONCEPTS.iter().map(|c| c.term.to_lowercase()).collect();
+        let mut seen = std::collections::HashMap::new();
+        for c in CONCEPTS {
+            for r in c.retired {
+                // A retired word spelled with capitals is a spelling of an id header, matched
+                // as written, and differs from its term only in case.
+                if r.chars().any(char::is_uppercase) {
+                    continue;
+                }
+                assert!(
+                    !terms.contains(&r.to_lowercase()),
+                    "{r:?} is retired in favour of {:?} yet is itself a current term",
+                    c.term
+                );
+                if let Some(other) = seen.insert(r.to_lowercase(), c.term) {
+                    panic!("{r:?} is retired for both {other:?} and {:?}", c.term);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_term_in_the_map_has_a_glossary_entry_with_a_plain_definition() {
+        for c in CONCEPTS {
+            let entry = GLOSSARY_ENTRIES
+                .iter()
+                .find(|e| e.term.eq_ignore_ascii_case(c.term))
+                .unwrap_or_else(|| panic!("the term {:?} has no Glossary entry", c.term));
+            assert!(
+                entry.meaning.split_whitespace().count() >= 3,
+                "{:?} needs a plain definition",
+                c.term
+            );
+        }
     }
 
     #[test]

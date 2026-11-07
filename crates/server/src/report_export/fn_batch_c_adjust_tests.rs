@@ -161,7 +161,7 @@ fn the_workbook_has_a_severity_adjustments_column() {
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
-    assert!(all.contains("Severity adjustments"), "{all}");
+    assert!(all.contains("Why the severity changed"), "{all}");
     assert!(all.contains(CEILING_NOTE), "{all}");
 }
 

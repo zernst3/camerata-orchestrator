@@ -880,15 +880,15 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
             if let Ok(names) = super::archive::xlsx_sheet_names(xlsx) {
                 let has_sheet = names
                     .iter()
-                    .any(|n| n == crate::xlsx_export::vocabulary::DIFFERENCES_ACROSS_SERVICES);
+                    .any(|n| n == crate::xlsx_export::vocabulary::PATTERNS_ACROSS_SERVICES);
                 if has_sheet != report.patterns_across_services.is_some() {
                     problems.push(problem(
                         &format!("{stem}-findings.xlsx"),
                         PATTERNS,
                         if has_sheet {
-                            "the workbook has a Differences across services sheet and the report has no such section"
+                            "the workbook has a Patterns across services sheet and the report has no such section"
                         } else {
-                            "the report has a patterns section and the workbook has no Differences across services sheet"
+                            "the report has a patterns section and the workbook has no Patterns across services sheet"
                         },
                     ));
                 }

@@ -1848,7 +1848,7 @@ pub fn build_workbook(
         sheets::rules_checked_table(&coverage_rows, &rules_applied_rows, &lay, corpus),
     ];
     if let Some(patterns) = &patterns_json {
-        tables.push(sheets::differences_table(patterns));
+        tables.push(sheets::patterns_table(patterns));
     }
     tables.push(sheets::ruled_out_table(&fp_rows, &engine_discards));
     tables.push(sheets::not_checked_table(

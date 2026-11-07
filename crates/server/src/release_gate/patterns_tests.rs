@@ -167,7 +167,7 @@ fn the_gate_flags_a_workbook_sheet_the_report_does_not_have() {
     assert!(
         problems
             .iter()
-            .any(|p| p.message.contains("Differences across services sheet")),
+            .any(|p| p.message.contains("Patterns across services sheet")),
         "{problems:?}"
     );
 }
