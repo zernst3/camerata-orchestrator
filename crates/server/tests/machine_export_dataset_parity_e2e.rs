@@ -1086,12 +1086,13 @@ fn check_coverage(xlsx: &[u8], rows: &[Value]) {
         c("Rule id", |r| text(r, "rule_id")),
     ];
     let refs: Vec<&Value> = rows.iter().collect();
-    assert_sheet_matches(
-        "Rules checked",
-        &sheet_rows(xlsx, "Rules checked", "Rule id"),
-        &refs,
-        &projection,
-    );
+    // A rule that only has a chosen alternative has a row too (see rules-applied); it is not a
+    // checked rule of the coverage dataset.
+    let checked: Vec<HashMap<String, String>> = sheet_rows(xlsx, "Rules checked", "Rule id")
+        .into_iter()
+        .filter(|r| r["Result"] != "Alternative chosen")
+        .collect();
+    assert_sheet_matches("Rules checked", &checked, &refs, &projection);
 }
 
 fn check_rules_applied(xlsx: &[u8], rows: &[Value]) {
