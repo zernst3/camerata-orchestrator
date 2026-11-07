@@ -257,6 +257,22 @@ fn single_choice_selects_use_a_stylesheet_caret_not_the_native_one() {
     );
 }
 
+/// Without the native appearance a disabled select lost its last visible cue (the greyed native
+/// arrow), and several selects have no `:disabled` rule of their own, so one rule dims them all.
+#[test]
+fn a_disabled_single_choice_select_still_looks_disabled() {
+    let selector = "select:not([multiple]):not([size]):disabled {";
+    let start = GLOBAL_CSS
+        .find(selector)
+        .unwrap_or_else(|| panic!("the stylesheet has no `{selector}` rule"));
+    let body = &GLOBAL_CSS[start..];
+    let rule = &body[..body.find('}').expect("the disabled select rule is closed")];
+    assert!(
+        rule.contains("opacity"),
+        "a disabled select is dimmed: {rule}"
+    );
+}
+
 /// The rule above skips `multiple` and `size` selects (a list box has no caret). A gallery page
 /// that rendered one, or a native file input, would draw platform pixels the rule does not cover.
 #[test]

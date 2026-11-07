@@ -5381,7 +5381,10 @@ select:focus {
    render the same on every machine. The selector is (0,2,1) in specificity on purpose, above any one-class rule:
    the component rules above and below set `background:` shorthands that would wipe the caret
    image, and only `background-image` is set here, so their colours stay. List boxes (`multiple`,
-   `size`) have no caret and keep the platform's. */
+   `size`) have no caret and keep the platform's. Dropping the native appearance also makes each
+   select about 2 px shorter and starts its text about 4 px further left, so content below a
+   select sits a few pixels higher than with the native control (up to 8 px on the settings page).
+   Without the native arrow a disabled select had no visible cue left, hence the dimming rule. */
 select:not([multiple]):not([size]) {
   -webkit-appearance: none;
   appearance: none;
@@ -5392,6 +5395,10 @@ select:not([multiple]):not([size]) {
   background-repeat: no-repeat;
   background-size: 5px 5px;
   background-position: right 7px center, right 2px center;
+}
+select:not([multiple]):not([size]):disabled {
+  opacity: .55;
+  cursor: default;
 }
 
 /* ── Global header ────────────────────────────────────────────────────────
