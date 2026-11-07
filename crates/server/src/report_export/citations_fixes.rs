@@ -468,8 +468,9 @@ pub(crate) fn citation_for_finding(
 ///    from for this finding's class, so the header and the citation underneath it describe the
 ///    SAME standard rather than a human-readable citation sitting under a header that is
 ///    nothing but the model's own invented id repeated;
-/// 3. the bare rule id — truly unclassifiable, last resort, never fabricated (identical to the
-///    pre-existing behavior for this case).
+/// 3. the rule id written as a plain name (`AI-PUBLIC-STORAGE-BUCKET` reads `Public storage
+///    bucket`): truly unclassifiable, last resort. The id itself is never a title, because a
+///    group headed `ID: ID` reads as the engine talking to itself.
 pub(crate) fn title_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -488,7 +489,7 @@ pub(crate) fn title_for_finding(
             }
         }
     }
-    finding.rule_id.clone()
+    crate::client_text::plain_rule_name(&finding.rule_id)
 }
 
 /// C4-P4 (residual defect 2): human-readable TITLES for a finding's `also_matches` list (other

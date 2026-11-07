@@ -791,6 +791,7 @@ pub(crate) fn finding_ref(
         line: f.line,
         severity: severity.to_string(),
         headline,
+        why_waiting: None,
         // C4-P3: calibration's effort, else the rule's authored band — see `resolve_effort`'s
         // doc comment. Keeps the matrix table AND the "three things this week" box (which reads
         // `FindingRefJson::effort` for its hour estimate / total) in lockstep with
@@ -1352,10 +1353,9 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
             severity: "medium".to_string(),
             snippet: evidence.chars().take(200).collect(),
             detail: format!(
-                "This rule's own evaluation evidence reads \"{evidence}\", which appears to \
-                 negate the rule's own requirement, even though the rule reported zero \
-                 findings this run. Flagged here for manual confirmation rather than listed as \
-                 healthy."
+                "This rule found no violation, but the evidence recorded for it describes a \
+                 possible problem. The evidence reads \"{evidence}\". A reviewer must decide \
+                 whether it is a problem before you act on it."
             ),
             needs_review: true,
             confidence: Some("needs-review".to_string()),

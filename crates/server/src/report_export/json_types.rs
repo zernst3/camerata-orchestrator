@@ -279,6 +279,10 @@ pub struct FindingRefJson {
     /// title ("Every table... has RLS enabled") — read cold, the invariant sounds like a
     /// clean bill of health. See `defect_headline`.
     pub headline: String,
+    /// Why a row held for a reviewer is waiting, in plain words (`report_export::waiting_reason`),
+    /// or `None` for a row that is not held for one of the three concrete reasons. The reason is
+    /// its own field and never a prefix on the headline.
+    pub why_waiting: Option<String>,
     /// Carried through so item 7's "If you only do three things this week" box can map effort
     /// to a rough hour estimate without re-joining back to the original `Finding`.
     pub effort: Option<String>,
@@ -542,6 +546,10 @@ pub struct CuratedSiteJson {
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
     /// is demoted to a smaller subtitle line for registry traceability.
     pub headline: String,
+    /// Why this held site is waiting for a reviewer, in plain words
+    /// (`report_export::waiting_reason`), or `None`. Rendered in the card footer beside the
+    /// disposition; never a prefix on `headline`.
+    pub why_waiting: Option<String>,
     /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]) — rendered as
     /// its own "Fix:" line in the template, distinct from `detail`'s explanation of the
     /// violation. Placeholder tokens (`<table>`, `<function-name>`, `<bucket>`, …) have already

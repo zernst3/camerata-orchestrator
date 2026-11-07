@@ -382,7 +382,7 @@
       #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix)
     ]
     #v(2pt)
-    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition]
+    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition#if site.why_waiting != none [ · Why it is waiting: #site.why_waiting]]
     // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
     // `report_export::also_matches_titles`'s doc comment.
     #if site.also_matches_titles.len() > 0 [

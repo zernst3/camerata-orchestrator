@@ -6,6 +6,7 @@ use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
 mod brand_template_review;
 mod citations_fixes;
+mod headlines;
 mod headlines_scorecard;
 mod healthy_pdf_marking;
 mod serial_commas;
