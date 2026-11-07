@@ -394,6 +394,13 @@ fn col_letter(mut col: usize) -> String {
 #[test]
 fn only_all_source_rows_lists_a_place_more_than_once() {
     let xlsx = client_workbook();
+    assert!(
+        xlsx_sheet_names(&xlsx)
+            .unwrap()
+            .iter()
+            .any(|n| n == v::ALL_SOURCE_ROWS),
+        "the sheet that may repeat a problem exists"
+    );
     for name in xlsx_sheet_names(&xlsx).unwrap() {
         if matches!(
             name.as_str(),
