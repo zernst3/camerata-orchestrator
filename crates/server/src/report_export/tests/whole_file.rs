@@ -48,3 +48,28 @@ async fn the_pdf_says_whole_file_and_never_line_zero() {
     assert!(!joined.contains("line0"), "{text}");
     assert!(!joined.contains(".env.production:0"), "{text}");
 }
+
+#[test]
+fn the_template_prints_a_line_number_only_through_its_place_helpers() {
+    // Every place the PDF prints goes through `place_label` or `place_of`, which say "whole file"
+    // for line 0. A line number printed any other way is a "line 0" waiting to happen: the
+    // escalations table printed `path:0` that way.
+    let template = include_str!("../../../templates/audit_report.typ");
+    let mut helpers = 0;
+    for line in template
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+    {
+        if line.contains("str(") && (line.contains(".line") || line.contains("(line)")) {
+            assert!(
+                line.contains("#let place_label") || line.contains("#let place_of"),
+                "a line number printed outside the place helpers: {line}"
+            );
+            helpers += 1;
+        }
+    }
+    assert_eq!(
+        helpers, 2,
+        "the two place helpers are the only printers of a line number"
+    );
+}

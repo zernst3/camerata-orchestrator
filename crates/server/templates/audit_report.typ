@@ -324,6 +324,9 @@
 // line 0, and a reader must never see "line 0").
 #let place_label(line) = if line == 0 { "whole file" } else { "line " + str(line) }
 
+// A place as one string, `path:line`, or `path (whole file)` for line 0.
+#let place_of(path, line) = if line == 0 { path + " (whole file)" } else { path + ":" + str(line) }
+
 #let location_strip(sev, repo, path, line) = block(fill: tint, radius: 4pt, inset: (x: 6pt, y: 4pt), width: 100%, below: 8pt)[
   #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), #place_label(line)]
 ]
@@ -778,7 +781,7 @@
       ..d.escalations.items.map(item => (
         [#severity_chip(lower(item.severity))],
         [#item.headline],
-        [#breakable(item.path + ":" + str(item.line))],
+        [#breakable(place_of(item.path, item.line))],
         [#item.decision],
       )).flatten()
     )
