@@ -3968,6 +3968,7 @@ pub fn build_csv_exports(
 
 pub mod review_sheets;
 mod subgroups;
+pub mod vocabulary;
 pub(crate) use subgroups::{no_tree_note, pdf_sections};
 pub mod tickets;
 pub mod triage_log;
