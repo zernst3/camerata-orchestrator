@@ -1774,7 +1774,7 @@ fn mixed_scan_report() -> ScanReport {
     report
 }
 
-fn mixed_package() -> ProductPackage {
+pub(super) fn mixed_package() -> ProductPackage {
     let sealed = mixed_scan_report().seal();
     let options = client_options();
     let json = build_report_json(

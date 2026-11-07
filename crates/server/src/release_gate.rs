@@ -196,7 +196,7 @@ pub(crate) fn assemble_package(
         &report_json,
         &options.chosen_options,
     );
-    let findings_json = serde_json::to_vec_pretty(&findings_export)
+    let mut findings_json = serde_json::to_vec_pretty(&findings_export)
         .map_err(|e| anyhow::anyhow!("could not serialize findings.json: {e}"))?;
 
     // The per-dataset machine-readable tables: the SAME `partition_rows` pass as the workbook
@@ -207,6 +207,10 @@ pub(crate) fn assemble_package(
         .map_err(|e| anyhow::anyhow!("could not build the machine-readable exports: {e}"))?;
     let mut datasets = csv;
     datasets.extend(json);
+    // The list and number fields beside the prose ones, and a header on every empty CSV. One pass
+    // over findings.json and the datasets, so they stay equal to each other.
+    crate::machine_files::finish(&mut findings_json, &mut datasets)
+        .map_err(|e| anyhow::anyhow!("could not finish the machine-readable exports: {e}"))?;
     // The decisions the report was reviewed with. The gate reads this file, not the records the
     // package was built from, to check that a merge has its decision (design 5.3).
     datasets.push((
@@ -747,6 +751,9 @@ mod text_style_tests;
 
 #[cfg(test)]
 mod readme_tests;
+
+#[cfg(test)]
+mod machine_files_tests;
 
 #[cfg(test)]
 mod merged_site_tests;

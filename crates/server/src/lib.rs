@@ -82,6 +82,7 @@ pub mod dev_implement_run;
 pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
+pub mod machine_files;
 mod native_units;
 pub mod notify;
 pub mod onboard;
