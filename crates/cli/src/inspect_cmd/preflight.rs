@@ -89,6 +89,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         .map(|r| RunRepoInput {
             repo: r.repo.clone(),
             code_chars: r.code_chars,
+            files: r.files.len(),
             selected: r.semantic.len(),
             multi_option_selected: r.multi_option_rules,
             routing_groups: camerata_server::scan_routing::plan_routes(
@@ -181,8 +182,9 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             if ceiling_is_above(dollars, ceiling) {
                 writeln!(
                     out,
-                    "  at most ${ceiling:.2} if the detail step needs every repeat round on every \
-                     finding (the usual run pays for its first round only)"
+                    "  at most ${ceiling:.2} if the scan reports sites at the highest rate seen and the \
+                     detail step needs every repeat round on every finding (the usual run pays \
+                     for its first round only)"
                 )
                 .ok();
             }
@@ -361,7 +363,11 @@ mod tests {
     fn repo(chars: usize, rules: usize) -> RepoScanFacts {
         RepoScanFacts {
             repo: "acme/api".into(),
-            files: vec![("a.rs".into(), "x".repeat(chars))],
+            // About as many files as real code of this size has (the saved runs average 740
+            // characters a file); the estimate's sites follow the file count.
+            files: (0..(chars / 740).max(1))
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / (chars / 740).max(1))))
+                .collect(),
             code_chars: chars,
             semantic: (0..rules)
                 .map(|i| (format!("R-{i}"), "do it".to_string()))
@@ -425,9 +431,10 @@ mod tests {
             "the gate's figure is the expected cost"
         );
 
-        // With the stage off the two figures are one and nothing says "at most".
+        // With the stage off the ceiling is still above the figure: it is quoted on the highest
+        // site rate seen as well as on the repeat rounds, so the "at most" line stays.
         let p = build(&inputs(&repos, None));
-        assert!(!p.text.contains("at most $"), "{}", p.text);
+        assert!(p.text.contains("at most $"), "{}", p.text);
     }
 
     #[test]
@@ -665,5 +672,32 @@ mod tests {
         full.clone_judge_model = None;
         let unpriced = build(&full).estimate_usd.unwrap();
         assert!((unpriced - without).abs() < 1e-9, "{unpriced} vs {without}");
+    }
+
+    /// A repository of `files` files and `chars` characters, as the pre-flight reads it.
+    fn with_files(files: usize, chars: usize, rules: usize) -> RepoScanFacts {
+        RepoScanFacts {
+            files: (0..files)
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / files)))
+                .collect(),
+            ..repo(chars, rules)
+        }
+    }
+
+    /// The cli figure follows the files the scan reads (the sites stage 1 calibrates follow them),
+    /// where two repositories of one code size used to be quoted the same; so does the API figure
+    /// (the site count is the scan's, not the transport's).
+    #[test]
+    fn both_backends_estimates_follow_the_files() {
+        let few = [with_files(20, 26_544, 152)];
+        let many = [with_files(60, 26_544, 152)];
+        let cli = |repos| {
+            let mut i = inputs(repos, None);
+            i.backend = ProjectBackend::Cli;
+            build(&i).estimate_usd.unwrap()
+        };
+        assert!(cli(&few) < cli(&many), "{} vs {}", cli(&few), cli(&many));
+        let api = |repos| build(&inputs(repos, None)).estimate_usd.unwrap();
+        assert!(api(&few) < api(&many), "{} vs {}", api(&few), api(&many));
     }
 }

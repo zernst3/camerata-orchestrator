@@ -918,6 +918,11 @@ pub struct GroupReviewCounts {
     pub groups: usize,
     /// The rules that ran, the ceiling on the groups.
     pub rules_in_play: usize,
+    /// The files the scan read: what the estimate's site count is sized from
+    /// (`camerata_ui_core::scan::RUN_FIT`), recorded beside the sites it predicts so the next fit
+    /// reads them from one place. 0 on a ledger written before it was recorded.
+    #[serde(default)]
+    pub files: usize,
 }
 
 /// A10: how many rows the engine threw out and kept, by reason (`engine_discard`). Every one of
@@ -1461,6 +1466,7 @@ impl ScanLedger {
             sites: rows_in(crate::ai_audit::group_review::STAGE_SAMPLE_NAME),
             groups: block.rules_reviewed + block.rules_failed,
             rules_in_play: self.merged_rules().values().filter(|r| r.ran).count(),
+            files: self.input.files_scanned,
         });
         self.escalation = Some(block);
     }
@@ -4028,6 +4034,10 @@ mod tests {
             0,
             0,
         );
+        ledger.record_input(ScanInputFacts {
+            files_scanned: 36,
+            ..ScanInputFacts::default()
+        });
         ledger.record_stage("ai-calibration", 3, 3, StageAccounting::default());
         ledger.record_stage("ai-group-review", 5, 5, StageAccounting::default());
         assert!(
@@ -4050,6 +4060,7 @@ mod tests {
             "rule groups read, and the one that failed"
         );
         assert_eq!(counts.rules_in_play, 2, "rules that ran");
+        assert_eq!(counts.files, 36, "the files the estimate's sites follow");
         // It survives the file.
         let back: ScanLedger =
             serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
