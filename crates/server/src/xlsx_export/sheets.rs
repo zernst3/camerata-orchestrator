@@ -294,18 +294,22 @@ fn why_waiting(row: &FindingRow, internal: bool) -> String {
     if !row.needs_review {
         return String::new();
     }
-    let mut why = match row.bucket {
-        "held" => {
-            "The review was unsure, or no published standard backs it, so a reviewer must rule \
-             before you act on it."
-        }
-        "informational" => {
+    // The row's own reason when the report states one (the PDF prints the same words); otherwise
+    // the sentence for the bucket the row sits in.
+    let mut why = match (&row.why_waiting, row.bucket) {
+        (Some(own), _) => own.clone(),
+        (None, "held") => "The review was unsure, or no published standard backs it, so a \
+                           reviewer must rule before you act on it."
+            .to_string(),
+        (None, "informational") => {
             "It reads as a convention to consider, so a reviewer must decide whether it applies \
              to your code."
+                .to_string()
         }
-        _ => "The review was unsure it is a real problem, so a reviewer must rule on it.",
-    }
-    .to_string();
+        (None, _) => {
+            "The review was unsure it is a real problem, so a reviewer must rule on it.".to_string()
+        }
+    };
     if internal && !row.held.is_empty() {
         why.push_str(&format!(" Held because: {}.", row.held));
     }

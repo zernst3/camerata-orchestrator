@@ -135,6 +135,11 @@ pub struct FindingRow {
     /// `"informational"` or `"held"` (being held for review is itself a hedge, regardless of
     /// which signal routed it there).
     needs_review: bool,
+    /// The concrete reason a row waits for a reviewer ([`crate::report_export::waiting_reason`]),
+    /// the same words the PDF prints. Read by the "Why it is waiting" column; not exported to
+    /// `findings.json`, which keeps its field set.
+    #[serde(skip)]
+    why_waiting: Option<String>,
     in_test: bool,
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
     /// `resolve_citation(...).kind`, per the design doc's Provenance column.
@@ -524,13 +529,14 @@ fn partition_rows_for(
         let resolved_effort = resolve_effort(f, &f.rule_id, corpus, chosen_option_for_rule);
         let (_, est_hours) = effort_hours_bounds(resolved_effort.as_deref());
 
-        let (bucket, disposition_kind, disposition_label_str, fp_reason) = if is_fp {
+        let (bucket, disposition_kind, disposition_label_str, fp_reason, why_waiting) = if is_fp {
             (
                 "",
                 None,
                 "Ruled out (excluded from every working sheet, see the Ruled out sheet)"
                     .to_string(),
                 wire.map(|d| d.reason.clone()).unwrap_or_default(),
+                None,
             )
         } else {
             let disposition = classify(f, wire);
@@ -555,7 +561,17 @@ fn partition_rows_for(
             let label = crate::report_export::overlay::merged_label(f)
                 .map(str::to_string)
                 .unwrap_or_else(|| disposition_label(disposition, &reason, bucket, confirmed));
-            (bucket, Some(disposition), label, String::new())
+            let why_waiting = crate::report_export::row_waiting_reason(
+                f,
+                disposition,
+                &severity,
+                corpus,
+                report.test_file_count,
+                chosen_option_for_rule,
+                bucket,
+            )
+            .map(str::to_string);
+            (bucket, Some(disposition), label, String::new(), why_waiting)
         };
 
         rows.push(FindingRow {
@@ -581,6 +597,7 @@ fn partition_rows_for(
             // disagree with each other, since both derive from the same `bucket`+`f` call.
             confidence: hedge_confidence(f, bucket).unwrap_or_default(),
             needs_review: is_hedged(f, bucket),
+            why_waiting,
             in_test: f.in_test,
             provenance,
             citation_kind,

@@ -3911,6 +3911,13 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
         .into_response()
 }
 
+/// How the README's tickets paragraph ends: the sheet it tells the reader to filter. The release
+/// gate looks for this text to add its sentence about a report with no review tree, so the two
+/// cannot disagree.
+pub(crate) fn tickets_paragraph_end() -> String {
+    format!(" {} sheet on.\n", xlsx_export::vocabulary::ALL_PROBLEMS)
+}
+
 /// The README.txt bundled inside the product-export zip.
 ///
 /// A CLIENT README says what each file is and how to import the tickets, and nothing else: no
@@ -3932,16 +3939,27 @@ pub fn product_export_readme(
     provenance: &ManifestProvenance,
     internal: bool,
 ) -> String {
+    use xlsx_export::tickets::{INLINE_SITES, TICKET_HEADERS};
+    use xlsx_export::vocabulary as v;
+
+    // Every sheet the README names is spelled from the vocabulary, so a renamed sheet renames
+    // the README with it.
+    let [title, description, priority, labels, estimate, group_id, place_count, places] =
+        TICKET_HEADERS;
     // A project of several repos gets one more paragraph: where the services differ on a rule.
     let patterns = if provenance.repos.len() > 1 {
-        "Patterns across services\n\
-         \x20 Where the services of this project differ on a rule: a sheet of that name in the\n\
-         \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
-         \x20 An observation, not a finding: it has no severity and is in no count.\n\
-         \n"
+        format!(
+            "{services}\n\
+             \x20 Where the services of this project differ on a rule: the {services} sheet of the\n\
+             \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+             \x20 An observation, not a problem: it has no severity and is in no count.\n\
+             \n",
+            services = v::PATTERNS_ACROSS_SERVICES,
+        )
     } else {
-        ""
+        String::new()
     };
+    let tickets_end = tickets_paragraph_end();
     let files = format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
@@ -3956,24 +3974,30 @@ pub fn product_export_readme(
          \x20 and counted once, in the methodology section.\n\
          \n\
          {stem}-findings.xlsx\n\
-         \x20 The complete working list for the engineers doing the fixes. Every problem is one\n\
-         \x20 row that you can sort and filter. It also has a sheet for each area, a Dependencies\n\
-         \x20 sheet, a Coverage sheet (every rule checked, whether it found anything or not) and\n\
-         \x20 a False Positives sheet with the reason each problem was ruled out, so nothing is\n\
-         \x20 dropped silently. The Remediation plan sheet comes first: one row for each fix, in\n\
-         \x20 the order to do them. The Sites sheet lists every place a problem was seen, and the\n\
-         \x20 Tree sheet shows how those places are grouped.\n\
+         \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
+         \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
+         \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
+         \x20 order to do them. The {all_problems} sheet has every problem once, as a row you can\n\
+         \x20 sort and filter, with the place it was seen and what to do there. The {needs} sheet\n\
+         \x20 holds the problems a reviewer must rule on before you act on them. {conventions},\n\
+         \x20 {departures} and {dependencies} say what your code already does consistently,\n\
+         \x20 where it departs from that and which packages it depends on are vulnerable. The\n\
+         \x20 {rules_checked} sheet lists every rule we checked, whether it found anything or not,\n\
+         \x20 the {ruled_out} sheet gives the reason each problem was ruled out and the\n\
+         \x20 {not_checked} sheet lists what we could not or did not check, so nothing is dropped\n\
+         \x20 silently. The last sheets are for reviewers: {source_rows}, {decisions} and\n\
+         \x20 {grouped}.\n\
          \n\
          findings.json\n\
-         \x20 The same rows as the workbook's All Findings sheet, for scripts, CI and your own\n\
+         \x20 The same rows as the workbook's {all_problems} sheet, for scripts, CI and your own\n\
          \x20 tools: severity, area, repo, path and line, the code seen, the explanation, the fix,\n\
-         \x20 disposition, effort, confidence, citation and more, wrapped with the report's\n\
+         \x20 the decision so far, effort, confidence, citation and more, wrapped with the report's\n\
          \x20 summary counts. It never disagrees with the workbook, because both are built from\n\
          \x20 the same pass over the scan.\n\
          \n\
          decisions.json\n\
-         \x20 Every decision record the report was reviewed with: what was ruled on which site or\n\
-         \x20 group of sites, and whether a reason was recorded. The Decisions sheet of the\n\
+         \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
+         \x20 group of places, and whether a reason was recorded. The {decisions} sheet of the\n\
          \x20 workbook is the same list.\n\
          \n\
          csv/ and json/\n\
@@ -3984,23 +4008,37 @@ pub fn product_export_readme(
          \x20 The list of the files in this ZIP with a checksum for each.\n\
          \n\
          csv/tickets.csv\n\
-         \x20 One ticket for each fix (one kind of problem with one cause) that still has sites to\n\
-         \x20 change. A site marked a false positive or accepted as a risk is on no ticket.\n\
-         \x20 Columns: Title, Description, Priority, Labels, Estimate, Group id, Site count and\n\
-         \x20 Sites (the first 50 sites, then a pointer to the Sites sheet filtered on the Group\n\
-         \x20 id). To import the file:\n\
-         \x20 - Jira: map Title to Summary, Description to Description, Priority to Priority\n\
-         \x20   (Highest, High, Medium or Low), Labels to Labels (split on commas) and Sites to\n\
-         \x20   a text field of your choice. Estimate is text, not a duration.\n\
-         \x20 - Linear: Title, Description and Labels map to the fields of the same name.\n\
-         \x20   Priority maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
+         \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
+         \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
+         \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {place_count}\n\
+         \x20 and {places} (the first {INLINE_SITES} places, then a pointer to the {all_problems} sheet).\n\
+         \x20 {group_id} is the {fix_id} of the {all_problems} sheet. To import the file:\n\
+         \x20 - Jira: map {title} to Summary, {description} to Description, {priority} to Priority\n\
+         \x20   (Highest, High, Medium or Low), {labels} to Labels (split on commas) and {places} to\n\
+         \x20   a text field of your choice. {estimate} is text, not a duration.\n\
+         \x20 - Linear: {title}, {description} and {labels} map to the fields of the same name.\n\
+         \x20   {priority} maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
          \x20   Low.\n\
-         \x20 - GitHub Issues: map Title to Title, Description to Body and Labels to Labels\n\
-         \x20   (comma separated). Priority and Estimate have no field there, so put them in\n\
+         \x20 - GitHub Issues: map {title} to Title, {description} to Body and {labels} to Labels\n\
+         \x20   (comma separated). {priority} and {estimate} have no field there, so put them in\n\
          \x20   the body or drop them.\n\
-         \x20 Keep Group id in a custom field or in the body: it is the value to filter the\n\
-         \x20 Sites sheet on.\n\
-         \n"
+         \x20 Keep {group_id} in a custom field or in the body: it is the {fix_id} to filter the\n\
+         \x20{tickets_end}\n",
+        start = v::START_HERE,
+        glossary = v::GLOSSARY,
+        fix_plan = v::FIX_PLAN,
+        all_problems = v::ALL_PROBLEMS,
+        needs = v::NEEDS_A_DECISION,
+        conventions = v::YOUR_CONVENTIONS,
+        departures = v::DEPARTURES,
+        dependencies = v::DEPENDENCIES,
+        rules_checked = v::RULES_CHECKED,
+        ruled_out = v::RULED_OUT,
+        not_checked = v::NOT_CHECKED,
+        source_rows = v::ALL_SOURCE_ROWS,
+        decisions = v::REVIEWER_DECISIONS,
+        grouped = v::HOW_PROBLEMS_WERE_GROUPED,
+        fix_id = v::H_FIX_ID,
     );
     if !internal {
         return format!("{}\n", format!("{files}{patterns}").trim_end());

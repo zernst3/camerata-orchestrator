@@ -6,6 +6,7 @@
 //! [`INLINE_SITES`], then the cell points at the Sites sheet filter that lists the rest.
 
 use super::subgroups::{in_plan_order, subgroup_facts, SubgroupFacts};
+use super::vocabulary as v;
 use crate::report_export::ReviewedReport;
 
 /// The archive path of the ticket file.
@@ -86,13 +87,15 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
         description.push(format!("Example from your code: {}", g.worked_example));
     }
     description.push(format!(
-        "{} {}, listed as rows below and on the All problems sheet (filter Fix id = {}).",
+        "{} {}, listed as rows below and on the {} sheet (filter {} = {}).",
         g.open_site_total,
         if g.open_site_total == 1 {
             "place"
         } else {
             "places"
         },
+        v::ALL_PROBLEMS,
+        v::H_FIX_ID,
         g.id
     ));
     let mut labels = vec!["camerata".to_string(), label_part(&g.rule_id)];
@@ -115,8 +118,10 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
     let mut sites = shown.join("\n");
     if g.open.len() > INLINE_SITES {
         sites.push_str(&format!(
-            "\nand {} more rows, see the All problems sheet, filter Fix id = {}",
+            "\nand {} more rows, see the {} sheet, filter {} = {}",
             g.open.len() - INLINE_SITES,
+            v::ALL_PROBLEMS,
+            v::H_FIX_ID,
             g.id
         ));
     }

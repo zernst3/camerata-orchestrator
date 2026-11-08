@@ -1163,7 +1163,12 @@ pub const CONCEPTS: &[Concept] = &[
 /// retired word written with capitals in the table (an id header) is matched as written.
 pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
-    for file in ["all-findings", "findings.json", "false-positives"] {
+    for file in [
+        "all-findings",
+        "findings.json",
+        "findings.xlsx",
+        "false-positives",
+    ] {
         cleaned = cleaned.replace(file, " ");
     }
     let lower = cleaned.to_lowercase();

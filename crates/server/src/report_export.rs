@@ -573,6 +573,38 @@ pub(crate) fn waiting_reason(
     }
 }
 
+/// [`waiting_reason`] for one finding: the three gates computed from the finding itself, so the
+/// workbook reads the same reason the PDF's held rows print.
+pub(crate) fn row_waiting_reason(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+    bucket: &str,
+) -> Option<&'static str> {
+    waiting_reason(
+        is_uncited_ai_finding(finding, corpus),
+        is_action_row_missing_a_fix(
+            finding,
+            disposition,
+            severity,
+            corpus,
+            test_file_count,
+            chosen_option,
+        ),
+        is_action_row_missing_an_estimate(
+            finding,
+            disposition,
+            severity,
+            corpus,
+            test_file_count,
+            chosen_option,
+        ) && (bucket == "held" || bucket == "informational"),
+    )
+}
+
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
     disposition: Disposition,
@@ -2293,6 +2325,7 @@ mod wo9 {
     mod edit_ids_tests;
     mod pdf_tests;
     mod plan_tests;
+    mod readme_tests;
     mod review_level_tests;
     mod row_set_tests;
     mod signature_tests;

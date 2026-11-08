@@ -97,7 +97,12 @@ fn a_client_readme_says_what_each_file_is_and_how_to_import_the_tickets() {
         assert!(readme.contains(expected), "missing {expected:?}:\n{readme}");
     }
     // Nothing follows the import steps but the end of the file.
-    assert!(readme.trim_end().ends_with("Sites sheet on."), "{readme}");
+    assert!(
+        readme
+            .trim_end()
+            .ends_with(crate::tickets_paragraph_end().trim_end()),
+        "{readme}"
+    );
 }
 
 #[test]

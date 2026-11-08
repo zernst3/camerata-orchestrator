@@ -232,12 +232,14 @@ pub(crate) fn assemble_package(
     let mut readme = crate::product_export_readme(stem, &provenance, options.internal);
     // The tickets file of a report with no review tree is its header alone; the README says why.
     if !crate::xlsx_export::no_tree_note(reviewed).is_empty() {
-        const TICKETS_PARAGRAPH_END: &str = " Sites sheet on.\n";
-        const NO_TREE_SENTENCE: &str =
+        let paragraph_end = crate::tickets_paragraph_end();
+        let no_tree_sentence = format!(
             "  This report has no review tree, so the file has its header and no tickets;\n  \
-             every site is on the Sites sheet.\n";
-        if let Some(at) = readme.find(TICKETS_PARAGRAPH_END) {
-            readme.insert_str(at + TICKETS_PARAGRAPH_END.len(), NO_TREE_SENTENCE);
+             every place is on the {} sheet.\n",
+            crate::xlsx_export::vocabulary::ALL_PROBLEMS
+        );
+        if let Some(at) = readme.find(&paragraph_end) {
+            readme.insert_str(at + paragraph_end.len(), &no_tree_sentence);
         }
     }
 
