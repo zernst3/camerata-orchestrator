@@ -82,7 +82,7 @@ pub const SHEETS: [SheetInfo; 15] = [
     SheetInfo {
         name: START_HERE,
         group: SheetGroup::Start,
-        purpose: "What this file is, where everything is, and the counts.",
+        purpose: "What this file is, where everything is and the counts.",
     },
     SheetInfo {
         name: GLOSSARY,
@@ -442,7 +442,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Confidence",
-        "How sure the review is that the problem is real: High, Low when the review was unsure, or Disputed when the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
+        "How sure the review is that the problem is real: High, Low or Disputed. Low means the review was unsure; Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
         "All problems; Needs a decision",
     ),
     e(
@@ -467,7 +467,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Source",
-        "Who found it: Deterministic, Model-reviewed, or Tool followed by the tool's name.",
+        "Who found it: Deterministic, Model-reviewed or Tool followed by the tool's name.",
         "All problems; Needs a decision",
     ),
     e(
