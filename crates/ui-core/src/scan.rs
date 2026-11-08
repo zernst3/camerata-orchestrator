@@ -318,6 +318,48 @@ pub const GROUP_REVIEW_SATURATION_K: f64 = 0.85;
 /// The most sites one group reviewer call is asked about (`group_review::MAX_CHUNK_MEMBERS`).
 pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
 
+/// The constants of the run estimate that are FITTED to saved runs, gathered so a fit made from
+/// some of the runs can be tried on one it was not made from (the leave-one-out check in
+/// `saved_runs_tests`). The tokens a stage writes per unit are the largest value any saved run
+/// showed, so the quote is not under any of them; the sites per file are the median, which the
+/// comment on [`RUN_FIT`] explains. The comments there name the runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunFit {
+    /// Sites stage 1 calibrates per file the scan reads.
+    pub sites_per_file: f64,
+    /// Input tokens the fix stage writes per site on the CLI backend (the CLI's own prompt of each
+    /// call is priced beside it).
+    pub fix_cli_input_tokens_per_site: f64,
+    /// Output tokens the fix stage writes per site on the CLI backend.
+    pub fix_cli_output_tokens_per_site: f64,
+    /// Tokens a stage 2 call writes to the cache on the CLI backend before its site lines: the
+    /// rule text and the CLI's own framing.
+    pub group_review_cli_tokens_per_call: f64,
+}
+
+/// The fit the estimate is made with, FITTED on 2026-11-08 to the ledgers of four complete cli runs
+/// of the engine as it stands (1ada6108): the supabase portal fixture (36 files, 80 sites),
+/// faktura (39 files, 119 sites), tutorly (45 files, 132 sites) and the lumen run of 2026-11-06
+/// (54 files, 141 sites). The tokens written per unit are the largest value any of the four showed,
+/// rounded up, so the quote is not under any of them; the sites per file are their median, not the
+/// largest, because repositories differ in them by more than the whole band the quote is held to
+/// (80 sites for 36 files and 119 for 39, at the same code size), and the largest would quote the
+/// 36-file repository 1.5 times what it cost. `saved_runs_tests` holds the runs, checks these against them and
+/// leaves each run out of the fit in turn. The scan ledger records `files` beside the sites and
+/// groups ([`GroupReviewCounts`] in the server crate), so the next fit reads the next runs.
+pub const RUN_FIT: RunFit = RunFit {
+    // 2.22, 3.05, 2.93 and 2.61 sites a file: the median is 2.77.
+    sites_per_file: 2.78,
+    // The fix stage wrote 929, 955, 1,006 and 931 tokens to the cache per site beyond the CLI's own
+    // prompt of each call (the old 1,200 was 20 percent over the largest).
+    fix_cli_input_tokens_per_site: 1_010.0,
+    // 413, 456, 446 and 447 output tokens per site (the old 600 was a third over).
+    fix_cli_output_tokens_per_site: 460.0,
+    // A stage 2 call wrote 1,176, 1,165, 1,174 and 1,157 tokens before its site lines (the old
+    // 2,100, the rule text plus the 1,700 the CLI was thought to add, was 80 percent over).
+    group_review_cli_tokens_per_call: 1_180.0,
+};
+
 /// What stage 2 costs over a number of sites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupReviewEstimate {
@@ -334,6 +376,17 @@ pub struct GroupReviewEstimate {
 /// The CLI backend adds its own per-call prompt, written to the cache at twice the input price
 /// ([`CLI_CALL_OVERHEAD_TOKENS`]); the API backend sends the prompt once at the input price.
 pub fn group_review_estimate(
+    sites: f64,
+    rules: usize,
+    backend: ProjectBackend,
+) -> GroupReviewEstimate {
+    group_review_estimate_with(&RUN_FIT, sites, rules, backend)
+}
+
+/// [`group_review_estimate`] with the fitted constants given, so a fit made from some of the saved
+/// runs can be tried on one it was not made from.
+pub fn group_review_estimate_with(
+    fit: &RunFit,
     sites: f64,
     rules: usize,
     backend: ProjectBackend,
@@ -362,7 +415,7 @@ pub fn group_review_estimate(
         // (1,400 to 2,000 tokens a call written, 2,400 read, in the two runs measured). What a
         // call writes is its rule text, its site lines and the CLI's overhead.
         ProjectBackend::Cli => {
-            let own = calls * (GROUP_REVIEW_CALL_OVERHEAD_TOKENS + CLI_CALL_OVERHEAD_TOKENS)
+            let own = calls * fit.group_review_cli_tokens_per_call
                 + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
             own * CLI_CACHE_WRITE_MULT
                 + GROUP_REVIEW_SYSTEM_TOKENS * CLI_CACHE_WRITE_MULT
@@ -946,12 +999,8 @@ const ALTERNATIVES_BATCH_RULES: usize = 25;
 /// `low`). Measured on both runs: 3.2k and 4.2k input, 0.7k and 1.0k output per finding.
 const FIX_INPUT_TOKENS_PER_FINDING: f64 = 3_000.0;
 const FIX_OUTPUT_TOKENS_PER_FINDING: f64 = 800.0;
-/// The same on the CLI backend, which sends the fix batches of 25 and writes what it sends to its
-/// cache (priced at [`CLI_CACHE_WRITE_MULT`]). MEASURED on the two complete cli runs: lumen wrote
-/// 1,027 input and 447 output tokens per calibrated site (7 calls), the supabase-portal fixture
-/// 1,063 and 330 (6 calls). Rounded up, because the figure gates a spend limit.
-const FIX_CLI_INPUT_TOKENS_PER_FINDING: f64 = 1_200.0;
-const FIX_CLI_OUTPUT_TOKENS_PER_FINDING: f64 = 600.0;
+// The same on the CLI backend: see `RUN_FIT` (`fix_cli_input_tokens_per_site`, which writes what
+// it sends to the CLI's cache at `CLI_CACHE_WRITE_MULT`, and `fix_cli_output_tokens_per_site`).
 
 /// The clone judge: two calls on a fast model (measured: $0.009 on Haiku 4.5).
 const CLONE_JUDGE_CALLS: f64 = 2.0;
@@ -1007,6 +1056,9 @@ pub struct RunModels<'a> {
 pub struct RunRepoInput {
     pub repo: String,
     pub code_chars: usize,
+    /// Files the scan will read from the repo (0 when the caller does not know: the stage 1 site
+    /// count is then sized from the code, as it was before files were an input).
+    pub files: usize,
     pub selected: usize,
     pub multi_option_selected: usize,
     pub routing_groups: usize,
@@ -1022,18 +1074,33 @@ pub struct RunFlags {
 
 /// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
 /// calls it prices.
-pub fn estimated_sites(repo: &RunRepoInput, mode: &str) -> usize {
-    run_findings(repo, mode).1 as usize
+pub fn estimated_sites(repo: &RunRepoInput, mode: &str, backend: ProjectBackend) -> usize {
+    run_findings(&RUN_FIT, repo, mode, backend).1 as usize
 }
 
 /// The scan's output volume in tokens (before the model's scale) and the findings it implies, for
 /// the run estimate: the arithmetic the scan and calibration terms are sized from.
-fn run_findings(repo: &RunRepoInput, mode: &str) -> (f64, f64) {
+fn run_findings(
+    fit: &RunFit,
+    repo: &RunRepoInput,
+    mode: &str,
+    backend: ProjectBackend,
+) -> (f64, f64) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
     const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
     const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
+    // The files the scan reads, when the caller knows them: the sites stage 1 calibrates follow
+    // them (2.2 to 3.1 a file in four runs), where the code size and the rule batches the older
+    // sizing used gave the same figure to a 36-file repository that calibrated 80 sites and a
+    // 39-file one that calibrated 119. Fitted to cli runs only: no saved run of the API backend
+    // records its sites, so that backend keeps the older sizing (its figures are unchanged) until
+    // one does; the ledger now records the files beside the sites for either backend.
+    if backend == ProjectBackend::Cli && repo.files > 0 && repo.selected > 0 {
+        let sites = (fit.sites_per_file * repo.files as f64).ceil();
+        return (sites * REGEN_SCAN_TOKENS_PER_FINDING, sites);
+    }
     let chunks = repo.code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let groups = repo.routing_groups.max(1);
     let batches_per_group = if mode == "sequential" {
@@ -1141,6 +1208,7 @@ fn estimate_run_with_regeneration(
     scale_regen_output: bool,
 ) -> (u64, f64, usize) {
     let (tokens, stages, passes) = estimate_run_stages_with_regeneration(
+        &RUN_FIT,
         repo,
         mode,
         models,
@@ -1186,11 +1254,32 @@ pub fn estimate_run_stage_dollars(
     models: &RunModels<'_>,
     flags: RunFlags,
 ) -> RunStageDollars {
-    estimate_run_stages_with_regeneration(repo, mode, models, flags, regeneration_expected, true).1
+    estimate_run_stage_dollars_with(&RUN_FIT, repo, mode, models, flags)
+}
+
+/// [`estimate_run_stage_dollars`] with the fitted constants given.
+pub fn estimate_run_stage_dollars_with(
+    fit: &RunFit,
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+) -> RunStageDollars {
+    estimate_run_stages_with_regeneration(
+        fit,
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_expected,
+        true,
+    )
+    .1
 }
 
 #[allow(clippy::too_many_arguments)]
 fn estimate_run_stages_with_regeneration<'a>(
+    fit: &RunFit,
     repo: &RunRepoInput,
     mode: &str,
     models: &RunModels<'a>,
@@ -1269,11 +1358,7 @@ fn estimate_run_stages_with_regeneration<'a>(
     let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64 * scan_scale;
 
     // The findings the scan reports, from its output volume (text, before the model's scale).
-    let findings_out = OUT_TOKENS_PER_PASS * passes as f64
-        + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64;
-    let findings = (findings_out / REGEN_SCAN_TOKENS_PER_FINDING)
-        .ceil()
-        .max(0.0);
+    let (findings_out, findings) = run_findings(fit, repo, mode, flags.backend);
 
     // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
     // and the site's own text; see [`calibration_estimate`]. ──
@@ -1286,7 +1371,7 @@ fn estimate_run_stages_with_regeneration<'a>(
     // ── Group review: stage 2 reads each rule group once, in real time, on its own model. ──
     let (gr_in, gr_out, gr_dollars, gr_calls) = match models.group_review {
         Some(m) => {
-            let e = group_review_estimate(sites, repo.selected, flags.backend);
+            let e = group_review_estimate_with(fit, sites, repo.selected, flags.backend);
             let gr_scale = output_scale(m.id);
             let gout = e.output_tokens * gr_scale;
             (
@@ -1370,10 +1455,10 @@ fn estimate_run_stages_with_regeneration<'a>(
             let batches = (findings as usize).div_ceil(FIX_BATCH_FINDINGS) as f64;
             let (fin, fout) = match flags.backend {
                 ProjectBackend::Cli => (
-                    (findings * FIX_CLI_INPUT_TOKENS_PER_FINDING
+                    (findings * fit.fix_cli_input_tokens_per_site
                         + batches * CLI_CALL_OVERHEAD_TOKENS)
                         * CLI_CACHE_WRITE_MULT,
-                    findings * FIX_CLI_OUTPUT_TOKENS_PER_FINDING,
+                    findings * fit.fix_cli_output_tokens_per_site,
                 ),
                 ProjectBackend::Api => (
                     findings * FIX_INPUT_TOKENS_PER_FINDING + batches * cli_call,
@@ -3306,6 +3391,7 @@ mod tests {
         RunRepoInput {
             repo: "supabase-portal-fixture".into(),
             code_chars: 26_544,
+            files: 0,
             selected: 152,
             multi_option_selected: 34,
             routing_groups: 4,
@@ -3363,9 +3449,11 @@ mod tests {
         // And a group over 150 sites is read in more than one call.
         assert_eq!(group_review_estimate(3_000.0, 5, api).calls, 20);
         // On the CLI the system prompt is written once and read by the other 68 calls; each call
-        // writes its own overhead, the CLI's and its site lines, at twice the price.
+        // writes its rule text and the CLI's framing (1,180 tokens in the four runs fitted to,
+        // where the 2,100 it was thought to write was 80 percent over) and its site lines, at
+        // twice the price.
         let cli = group_review_estimate(78.0, 152, ProjectBackend::Cli);
-        let own = 69.0 * (GROUP_REVIEW_CALL_OVERHEAD_TOKENS + CLI_CALL_OVERHEAD_TOKENS)
+        let own = 69.0 * RUN_FIT.group_review_cli_tokens_per_call
             + 78.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
         let want_cli = own * CLI_CACHE_WRITE_MULT
             + GROUP_REVIEW_SYSTEM_TOKENS * CLI_CACHE_WRITE_MULT
@@ -3375,7 +3463,7 @@ mod tests {
 
     #[test]
     fn the_run_estimate_prices_stage_2_at_its_own_model_and_leaves_it_out_when_unpriced() {
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         let free = PricedModel {
             id: "unmeasured-model",
             price_in: 0.0,
@@ -3452,7 +3540,7 @@ mod tests {
     /// many sites, and the calls include them.
     #[test]
     fn the_run_estimate_prices_one_calibration_call_per_estimated_site() {
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         assert!(sites > 10, "the fixture reports findings: {sites}");
         let free = PricedModel {
             id: "unmeasured-model",
@@ -3488,6 +3576,7 @@ mod tests {
         let small = RunRepoInput {
             repo: "small".into(),
             code_chars: 2_000,
+            files: 0,
             selected: 1,
             multi_option_selected: 0,
             routing_groups: 1,
@@ -3496,7 +3585,7 @@ mod tests {
             terse_output: false,
             ..flags()
         };
-        let small_sites = estimated_sites(&small, "parallel");
+        let small_sites = estimated_sites(&small, "parallel", ProjectBackend::Api);
         assert!(small_sites > 0);
         let small_run = estimate_run_cost_bounds(&small, "parallel", &models(cal), no_regen);
         assert_eq!(small_run.expected.2, 2 + small_sites);
@@ -3558,7 +3647,7 @@ mod tests {
         // 30 detail, 60 fix, 2 judge), most of them the repeats retry fixes F1 removed; a clean
         // run makes far fewer, and the estimate counts the stages, not the repeats.
         // One stage 1 call per site replaces the 3 calibration calls of the recorded run.
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         assert!(
             sonnet_calls > 30 && sonnet_calls < 119 - 3 + sites,
             "{sonnet_calls}"
@@ -3757,6 +3846,7 @@ mod tests {
         let b = RunRepoInput {
             repo: "acme/api".into(),
             code_chars: 400_000,
+            files: 0,
             selected: 30,
             multi_option_selected: 0,
             routing_groups: 2,
@@ -3795,6 +3885,7 @@ mod tests {
         RunRepoInput {
             repo: "faktura".into(),
             code_chars: 25_871,
+            files: 0,
             selected: 152,
             multi_option_selected: 34,
             routing_groups: 4,
@@ -3845,7 +3936,7 @@ mod tests {
 
     #[test]
     fn the_faktura_sites_and_rule_groups_are_near_what_the_run_found() {
-        let sites = estimated_sites(&faktura(), "parallel") as f64;
+        let sites = estimated_sites(&faktura(), "parallel", ProjectBackend::Cli) as f64;
         assert!(
             (100.0..=130.0).contains(&sites),
             "116 sites were found: {sites}"

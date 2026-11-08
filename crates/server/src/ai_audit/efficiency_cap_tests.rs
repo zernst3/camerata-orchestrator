@@ -997,6 +997,7 @@ fn the_batch_fallback_estimate_is_the_run_estimate() {
             &RunRepoInput {
                 repo: "batch".to_string(),
                 code_chars: files.iter().map(|(_, c)| c.len()).sum(),
+                files: 0,
                 selected: 20,
                 multi_option_selected: 0,
                 routing_groups: 1,

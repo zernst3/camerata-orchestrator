@@ -89,6 +89,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         .map(|r| RunRepoInput {
             repo: r.repo.clone(),
             code_chars: r.code_chars,
+            files: r.files.len(),
             selected: r.semantic.len(),
             multi_option_selected: r.multi_option_rules,
             routing_groups: camerata_server::scan_routing::plan_routes(
@@ -665,5 +666,32 @@ mod tests {
         full.clone_judge_model = None;
         let unpriced = build(&full).estimate_usd.unwrap();
         assert!((unpriced - without).abs() < 1e-9, "{unpriced} vs {without}");
+    }
+
+    /// A repository of `files` files and `chars` characters, as the pre-flight reads it.
+    fn with_files(files: usize, chars: usize, rules: usize) -> RepoScanFacts {
+        RepoScanFacts {
+            files: (0..files)
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / files)))
+                .collect(),
+            ..repo(chars, rules)
+        }
+    }
+
+    /// The cli figure follows the files the scan reads (the sites stage 1 calibrates follow them),
+    /// where two repositories of one code size used to be quoted the same; the API figure is
+    /// unchanged by them (no saved API run records its sites).
+    #[test]
+    fn the_cli_estimate_follows_the_files_and_the_api_estimate_does_not() {
+        let few = [with_files(20, 26_544, 152)];
+        let many = [with_files(60, 26_544, 152)];
+        let cli = |repos| {
+            let mut i = inputs(repos, None);
+            i.backend = ProjectBackend::Cli;
+            build(&i).estimate_usd.unwrap()
+        };
+        assert!(cli(&few) < cli(&many), "{} vs {}", cli(&few), cli(&many));
+        let api = |repos| build(&inputs(repos, None)).estimate_usd.unwrap();
+        assert!((api(&few) - api(&many)).abs() < 1e-9);
     }
 }

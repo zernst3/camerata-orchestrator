@@ -1647,6 +1647,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         Some(camerata_ui_core::scan::RunRepoInput {
                                             repo: z.repo.clone(),
                                             code_chars: z.code_chars,
+                                            files: z.files,
                                             selected: ids.len(),
                                             multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
                                             routing_groups: 1,
@@ -1667,6 +1668,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let est = run_estimate(&[camerata_ui_core::scan::RunRepoInput {
                                     repo: report.repos.first().cloned().unwrap_or_default(),
                                     code_chars: report.code_chars,
+                                    files: report.files_scanned,
                                     selected: sel,
                                     multi_option_selected,
                                     routing_groups: 1,

@@ -609,6 +609,7 @@ pub(super) fn batch_estimate_usd(
         &RunRepoInput {
             repo: "batch".to_string(),
             code_chars,
+            files: 0,
             selected: rules,
             multi_option_selected: 0,
             routing_groups: 1,
