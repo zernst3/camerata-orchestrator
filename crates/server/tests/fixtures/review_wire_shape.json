@@ -192,6 +192,15 @@
             }
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            {
+              "$one_of": [
+                "empty",
+                "string"
+              ]
+            }
+          ],
           "fix_type": "string",
           "flagged_by": [
             {
@@ -402,6 +411,10 @@
             }
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            "string"
+          ],
           "fix_type": "string",
           "flagged_by": [
             "empty"
@@ -510,6 +523,10 @@
             "empty"
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            "string"
+          ],
           "fix_type": "string",
           "flagged_by": [
             "empty"
@@ -725,6 +742,10 @@
           }
         ],
         "fix": "string",
+        "fix_id": "string",
+        "fix_rules": [
+          "string"
+        ],
         "fix_type": "string",
         "flagged_by": [
           {
