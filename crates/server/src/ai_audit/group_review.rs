@@ -2049,8 +2049,12 @@ fn record_ledger(
             floor: cfg.rank.floor,
             counted_lines: report.code_lines,
             budget: budget.budget,
-            candidates: tree.candidates.len(),
+            // Both counts are in sites (slots), the unit the budget is in; the rows behind them
+            // are stated beside, so the two units never mix in one subtraction.
+            candidates: camerata_api_types::review::count_slots(tree.candidates.iter()).0,
             escalated: budget.escalated,
+            candidate_rows: tree.candidates.len(),
+            escalated_rows: tree.candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
             total_sites: total,
             share_escalated: if total == 0 {

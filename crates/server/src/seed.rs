@@ -808,8 +808,10 @@ impl Seeding {
             floor: settings.floor,
             counted_lines: self.fixture.run.run.code_lines,
             budget: budget.budget,
-            candidates: candidates.len(),
+            candidates: camerata_api_types::review::count_slots(candidates.iter()).0,
             escalated: budget.escalated,
+            candidate_rows: candidates.len(),
+            escalated_rows: candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
             total_sites,
             share_escalated: if total_sites == 0 {

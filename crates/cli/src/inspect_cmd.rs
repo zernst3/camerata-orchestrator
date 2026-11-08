@@ -1646,10 +1646,21 @@ pub fn render_ledger_summary(
     if let Some(block) = ledger.escalation() {
         writeln!(out, "\n== ESCALATION ==").ok();
         writeln!(out, "  {}", block.sentence()).ok();
+        // Sites are the unit of the budget; the rows behind them are stated beside, when known.
+        let rows = |n: usize| {
+            if n == 0 {
+                String::new()
+            } else {
+                format!(" ({n} rows)")
+            }
+        };
         writeln!(
             out,
-            "  {} candidate(s) in all, {} below the line; group review model {}",
+            "  Escalated {} sites{}; {} candidate sites{}, {} below the line; group review model {}",
+            block.escalated,
+            rows(block.escalated_rows),
             block.candidates,
+            rows(block.candidate_rows),
             block.candidates.saturating_sub(block.escalated),
             block.model.as_deref().unwrap_or("(none recorded)")
         )

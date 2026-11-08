@@ -479,6 +479,61 @@ async fn stage2_cannot_remove_a_member_and_an_unplaced_index_is_recorded() {
 // ── 4.2: disagreements ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn the_escalation_block_counts_slots_not_rows() {
+    // Three nominated rows of three rules at one site and one nominated row elsewhere: two
+    // candidate sites. A budget of one leaves one of them below the line. The recorded block
+    // states sites beside the escalated count, which is in sites too.
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.code_lines = 1_000;
+    for rule in [SQL, SECRETS, LAYERING] {
+        let mut f = site(rule, 0, "medium");
+        f.path = "src/shared/site.rs".to_string();
+        f.line = 7;
+        report.findings.push(f);
+    }
+    report.findings.push(site(SQL, 1, "medium"));
+    report.assign_site_keys();
+    let llm = Reviewer::new(|call| {
+        let escalations: Vec<(usize, &str, u32, &str)> = call
+            .indices
+            .iter()
+            .map(|&i| (i, "unauthenticated_reach", i as u32 + 1, "Reachable."))
+            .collect();
+        Ok(reply(
+            "All.",
+            &[("All", "one cause", call.indices.clone())],
+            &[],
+            &escalations,
+            &[],
+        ))
+    });
+    let rules: Vec<(String, String)> = Vec::new();
+    let config = GroupReviewConfig {
+        rank: RankSettings {
+            floor: 1,
+            ..RankSettings::default()
+        },
+        ..cfg(&rules)
+    };
+    review_groups(&mut report, &llm, &config, None).await;
+    let block = report.ledger.escalation().expect("block");
+    assert_eq!(tree(&report).candidates.len(), 4, "four rows are candidates");
+    assert_eq!(block.candidates, 2, "two candidate sites");
+    assert_eq!(block.escalated, 1);
+    assert_eq!(block.candidates.saturating_sub(block.escalated), 1);
+
+    // The export's re-derivation from the tree agrees with the scan-time block.
+    let derived = block.derived_from_tree(tree(&report), &report.findings);
+    assert_eq!(derived.candidates, block.candidates);
+    assert_eq!(derived.escalated, block.escalated);
+    assert_eq!(derived.over_budget, block.over_budget);
+    assert_eq!(derived.candidate_rows, block.candidate_rows);
+    assert_eq!(derived.escalated_rows, block.escalated_rows);
+    assert_eq!((block.candidate_rows, block.escalated_rows), (4, 3));
+}
+
+#[tokio::test]
 async fn stage2_disagreement_is_recorded_and_stage1_is_not_overwritten() {
     let mut report = report_of(&[(SQL, 4)]);
     let llm = Reviewer::new(|call| {
