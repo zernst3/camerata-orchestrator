@@ -387,7 +387,9 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
     }
     // A whole-file place shares each line place of its file that another Fix holds and this Fix
     // does not already hold itself (that one place is counted above).
-    let mut lines_in: HashMap<(&str, &str), Vec<(usize, Vec<usize>)>> = HashMap::new();
+    /// Per file: each Fix that holds lines of it, with those lines.
+    type LinesIn<'a> = HashMap<(&'a str, &'a str), Vec<(usize, Vec<usize>)>>;
+    let mut lines_in: LinesIn = HashMap::new();
     for (i, fx) in fixes.iter().enumerate() {
         let mut per_file: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
         for p in fx.places.iter().filter(|p| p.line > 0) {
