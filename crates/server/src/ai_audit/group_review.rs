@@ -853,9 +853,19 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     } else {
         format!("{}:{}", f.path, f.line)
     };
+    // A rule's declared minimum can raise the shown severity above what the per-site reviewer
+    // rated; say so, so the group reviewer never reads the minimum as that reviewer's call.
+    let severity = match stage1.as_ref().and_then(|s| s.severity.as_deref()) {
+        Some(rated) if !rated.eq_ignore_ascii_case(&f.severity) => {
+            format!(
+                "{} (floor after review; per-site reviewer: {rated})",
+                f.severity
+            )
+        }
+        _ => f.severity.clone(),
+    };
     let mut line = format!(
-        "{idx}: {place} | {} | real: {real} | effort: {} | stage 1: {} | {}",
-        f.severity,
+        "{idx}: {place} | {severity} | real: {real} | effort: {} | stage 1: {} | {}",
         f.effort.as_deref().unwrap_or("-"),
         reason.split_whitespace().collect::<Vec<_>>().join(" "),
         finding_headline(f),
@@ -1376,7 +1386,11 @@ fn apply_rule(
             let f = &mut findings[m.row];
             // Stage 1's own value, read from the row, whatever the reply quotes.
             let stage1_value = match d.field {
-                DisagreementField::Severity => f.severity.clone(),
+                // Stage 1's own rating, not the severity a severity floor raised it to; a run
+                // saved before that was kept falls back to the row's severity.
+                DisagreementField::Severity => stage1_of(f)
+                    .and_then(|s| s.severity)
+                    .unwrap_or_else(|| f.severity.clone()),
                 DisagreementField::Real => stage1_of(f)
                     .map(|s| s.real.as_str().to_string())
                     .unwrap_or_default(),
@@ -2049,8 +2063,12 @@ fn record_ledger(
             floor: cfg.rank.floor,
             counted_lines: report.code_lines,
             budget: budget.budget,
-            candidates: tree.candidates.len(),
+            // Both counts are in sites (slots), the unit the budget is in; the rows behind them
+            // are stated beside, so the two units never mix in one subtraction.
+            candidates: camerata_api_types::review::count_slots(tree.candidates.iter()).0,
             escalated: budget.escalated,
+            candidate_rows: tree.candidates.len(),
+            escalated_rows: tree.candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
             total_sites: total,
             share_escalated: if total == 0 {

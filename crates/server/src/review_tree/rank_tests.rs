@@ -964,3 +964,211 @@ fn a_low_row_does_not_borrow_its_siblings_severity_to_pass_the_budget() {
         ranked.candidates
     );
 }
+
+// ---- a rule minimum above both reviewers is a mechanical candidate (R-5) -----------------------
+
+const RULE_FLOOR: &str = RULE_C;
+
+/// A row of `RULE_FLOOR` shown at `shown`, whose stage 1 rated `rated` (`None`: a record saved
+/// before the rating was kept) and answered `real`.
+fn floored_row(path: &str, shown: &str, real: &str, rated: Option<&str>) -> Finding {
+    let mut f = row_at(RULE_FLOOR, path, 8, shown);
+    let mut record = serde_json::json!({"real": real, "reason": "a hardening gap"});
+    if let Some(rated) = rated {
+        record["severity"] = serde_json::Value::String(rated.to_string());
+    }
+    f.captures.insert(
+        crate::ai_audit::STAGE1_CAPTURE.to_string(),
+        record.to_string(),
+    );
+    f
+}
+
+/// `n` rows of another rule at `shown`; [`nominate`] then has stage 2 name them.
+fn nominated(rows: &mut Vec<Finding>, tag: &str, n: usize, shown: &str) {
+    for i in 0..n {
+        rows.push(row_at(RULE_A, &format!("src/{tag}{i}.rs"), 4, shown));
+    }
+}
+
+fn nominate(
+    tree: &mut ReviewTree,
+    rows: &[Finding],
+    tag: &str,
+    n: usize,
+    reason: EscalationReason,
+) {
+    for i in 0..n {
+        let f = row_of(rows, RULE_A, &format!("src/{tag}{i}.rs")).clone();
+        rule_node_of(tree, &f)
+            .escalations
+            .push(esc(&f, reason, i as u32 + 1));
+    }
+}
+
+fn candidate_of<'a>(
+    ranked: &'a Ranked,
+    rows: &[Finding],
+    path: &str,
+) -> Option<&'a EscalationCandidate> {
+    let key = &row_of(rows, RULE_FLOOR, path).site_key;
+    ranked.candidates.iter().find(|c| &c.key == key)
+}
+
+#[test]
+fn a_rule_minimum_over_both_reviewers_lands_above_the_line_against_mediums() {
+    let mut rows = vec![floored_row(
+        "supabase/0006.sql",
+        "high",
+        "yes",
+        Some("medium"),
+    )];
+    nominated(&mut rows, "med", 3, "medium");
+    let (mut tree, rows) = tree_of_rows(rows);
+    nominate(&mut tree, &rows, "med", 3, EscalationReason::RuleMisfit);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    let found = candidate_of(&ranked, &rows, "supabase/0006.sql");
+    assert!(found.is_some(), "the floor row is a candidate");
+    let c = found.unwrap();
+    assert_eq!(c.reason, EscalationReason::ConflictingVerdicts);
+    assert!(c.escalated, "above the line: {c:?}");
+    assert_eq!(c.slot, 1, "a high site sorts before every medium one");
+    assert_eq!(
+        ranked.candidates.iter().filter(|c| c.escalated).count(),
+        2,
+        "the budget of two slots is the floor row and the first medium"
+    );
+}
+
+#[test]
+fn a_row_stage_1_called_not_real_is_not_a_mechanical_candidate() {
+    let rows = vec![floored_row("a.sql", "high", "no", Some("medium"))];
+    let (tree, rows) = tree_of_rows(rows);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert!(candidate_of(&ranked, &rows, "a.sql").is_none());
+    assert!(ranked.candidates.is_empty());
+}
+
+#[test]
+fn a_row_shown_at_the_severity_stage_1_rated_is_not_a_mechanical_candidate() {
+    let rows = vec![
+        floored_row("a.sql", "high", "yes", Some("high")),
+        floored_row("b.sql", "critical", "yes", Some("critical")),
+        floored_row("c.sql", "medium", "yes", Some("low")),
+    ];
+    let (tree, rows) = tree_of_rows(rows);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert!(
+        ranked.candidates.is_empty(),
+        "equal severity, and a raise to medium, are not candidates: {:?}",
+        ranked.candidates
+    );
+}
+
+#[test]
+fn a_saved_run_without_stage_1_severity_yields_no_mechanical_candidate() {
+    let rows = vec![floored_row("old.sql", "high", "yes", None)];
+    let (tree, rows) = tree_of_rows(rows);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert!(
+        ranked.candidates.is_empty(),
+        "no guess from a missing rating"
+    );
+}
+
+#[test]
+fn a_mechanical_candidate_never_goes_over_budget_or_displaces_a_reasoned_high() {
+    let mut rows = vec![floored_row(
+        "supabase/0006.sql",
+        "high",
+        "yes",
+        Some("medium"),
+    )];
+    nominated(&mut rows, "hi", 2, "high");
+    let (mut tree, rows) = tree_of_rows(rows);
+    // The weakest reasons in the list: the mechanical row still sorts after them.
+    nominate(&mut tree, &rows, "hi", 2, EscalationReason::NeedsMoreCode);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    let found = candidate_of(&ranked, &rows, "supabase/0006.sql");
+    assert!(found.is_some(), "the floor row is a candidate");
+    let c = found.unwrap();
+    assert!(!c.escalated, "the budget is full of reasoned highs: {c:?}");
+    assert_eq!(c.over_budget_reason, None);
+    assert_eq!(c.slot, 3);
+    assert_eq!(ranked.budget.escalated, 2);
+    assert_eq!(ranked.budget.over_budget, 0);
+}
+
+#[test]
+fn a_site_stage_2_nominated_is_not_added_again() {
+    let rows = vec![floored_row("a.sql", "high", "yes", Some("medium"))];
+    let (mut tree, rows) = tree_of_rows(rows);
+    let f = rows[0].clone();
+    rule_node_of(&mut tree, &f)
+        .escalations
+        .push(esc(&f, EscalationReason::OutlierInGroup, 1));
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert_eq!(ranked.candidates.len(), 1);
+    assert_eq!(
+        ranked.candidates[0].reason,
+        EscalationReason::OutlierInGroup
+    );
+}
+
+#[test]
+fn a_rule_minimum_row_joins_its_nominated_site_without_moving_it() {
+    let build = || {
+        let mut rows = vec![row_at(RULE_A, "x.sql", 8, "medium")];
+        let mut floor = floored_row("x.sql", "high", "yes", Some("medium"));
+        floor.line = 8;
+        rows.push(floor);
+        nominated(&mut rows, "hi", 2, "high");
+        let (mut tree, rows) = tree_of_rows(rows);
+        let f = row_of(&rows, RULE_A, "x.sql").clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, EscalationReason::OutlierInGroup, 1));
+        nominate(&mut tree, &rows, "hi", 2, EscalationReason::NeedsMoreCode);
+        (tree, rows)
+    };
+    let (tree, rows) = build();
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    let floor = candidate_of(&ranked, &rows, "x.sql");
+    assert!(floor.is_some(), "the floor row is a candidate at its site");
+    let floor = floor.unwrap();
+    assert_eq!(floor.reason, EscalationReason::ConflictingVerdicts);
+    let own = ranked
+        .candidates
+        .iter()
+        .find(|c| c.key == row_of(&rows, RULE_A, "x.sql").site_key)
+        .expect("the nominated row");
+    assert_eq!(own.slot, floor.slot, "one slot for the site");
+    assert_eq!(floor.slot, 3, "the site keeps its reasoned place");
+    assert!(!floor.escalated && !own.escalated);
+    assert_eq!(ranked.budget.escalated, 2);
+    assert_eq!(ranked.budget.over_budget, 0);
+    assert_eq!(
+        camerata_api_types::review::count_slots(ranked.candidates.iter()).0,
+        3
+    );
+
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(3));
+    let at_site: Vec<_> = ranked
+        .candidates
+        .iter()
+        .filter(|c| {
+            rows.iter()
+                .any(|f| f.site_key == c.key && f.path == "x.sql")
+        })
+        .collect();
+    assert_eq!(at_site.len(), 2);
+    assert!(at_site.iter().all(|c| c.escalated));
+}
+
+#[test]
+fn an_upper_cased_stage_1_rating_is_read_as_its_lower_case() {
+    let rows = vec![floored_row("a.sql", "high", "yes", Some("HIGH"))];
+    let (tree, rows) = tree_of_rows(rows);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert!(ranked.candidates.is_empty(), "HIGH is not below high");
+}

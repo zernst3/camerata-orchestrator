@@ -615,6 +615,13 @@ pub struct EscalationBlock {
     pub candidates: usize,
     /// Candidates in the architect's queue: the budget's worth plus the ones past it.
     pub escalated: usize,
+    /// The rows behind `candidates` (a site can hold several nominated rows). Zero in a run
+    /// saved before the block stated both units.
+    #[serde(default)]
+    pub candidate_rows: usize,
+    /// The rows behind `escalated`. Zero in a run saved before the block stated both units.
+    #[serde(default)]
+    pub escalated_rows: usize,
     /// `escalated - budget` when positive.
     pub over_budget: usize,
     /// The sites in the report, so the share below is checkable.
@@ -667,6 +674,7 @@ impl EscalationBlock {
         // The budget counts slots: rows at one site share one (R-1).
         let (slots, escalated) =
             camerata_api_types::review::count_slots(candidates.iter().copied());
+        let escalated_rows = candidates.iter().filter(|c| c.escalated).count();
         let budget = tree.budget.budget;
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         let mut over_by_reason: BTreeMap<String, usize> = BTreeMap::new();
@@ -685,6 +693,8 @@ impl EscalationBlock {
             budget,
             candidates: slots,
             escalated,
+            candidate_rows: candidates.len(),
+            escalated_rows,
             over_budget: escalated.saturating_sub(budget),
             total_sites: total,
             share_escalated: if total == 0 {
