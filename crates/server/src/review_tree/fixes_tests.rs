@@ -371,6 +371,17 @@ fn a_whole_file_fix_and_the_fix_holding_its_lines_cross_reference() {
     ];
     let fixes = fixes_of(&rows);
     assert_eq!(fixes.len(), 2);
+    // A Fix that also holds a.ts:6 itself shares that one place once, not once for the line and
+    // again for its whole file.
+    let mut rows = rows;
+    rows.push(row("sub:FILE/1", "FILE", "low", "a.ts", 6));
+    let both = fixes_of(&rows);
+    assert_eq!(both.len(), 2);
+    assert_eq!(both[0].shares.len(), 1);
+    assert_eq!(both[0].shares[0].places, 1, "{:?}", both[0].shares);
+    assert_eq!(both[1].shares[0].places, 1, "{:?}", both[1].shares);
+    let rows = &rows[..3];
+    let fixes = fixes_of(rows);
     let (file, lines) = (&fixes[0], &fixes[1]);
     assert_eq!(file.members, names(&["sub:FILE/1"]));
     assert_eq!(
