@@ -278,6 +278,8 @@ pub struct CategoryRowJson {
 #[derive(Debug, Clone, Serialize)]
 pub struct ScorecardJson {
     pub rows: Vec<CategoryRowJson>,
+    /// The line under the scorecard: how a place with rules of several areas is counted.
+    pub footnote: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

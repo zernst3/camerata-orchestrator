@@ -1060,7 +1060,16 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
         out.push(crate::report_export::EscalatedSiteJson {
             place: vocabulary::place_text(&head.repo, &head.path, head.line),
             rules_line: format!("{}: {}", vocabulary::H_RULES, rules.join(", ")),
-            what_to_do: String::new(),
+            // The fix written for this place (its head row's own), else the rule's.
+            what_to_do: crate::report_export::first_sentences(
+                head.fix_specific
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .or(head.fix.as_deref())
+                    .unwrap_or_default(),
+                2,
+                400,
+            ),
             effort: String::new(),
             group: head.facts.group.clone(),
             fix_id: head.facts.fix_id.clone(),
@@ -1099,6 +1108,8 @@ pub(crate) struct PdfSections {
     /// Problems by area and severity (critical, high, medium, low), one for each place: the
     /// scorecard and the cover, counted the way the workbook's scorecard counts.
     pub problem_counts: BTreeMap<String, [usize; 4]>,
+    /// The same by severity alone, each place once: the cover.
+    pub problem_totals: [usize; 4],
 }
 
 /// What the PDF prints from the reviewed report beyond the per-site sections (design 3B item 1):
@@ -1116,17 +1127,21 @@ pub(crate) fn pdf_sections(
     // What each escalated place's Fix asks of the reader, in two sentences, and its effort.
     for entry in &mut escalated {
         if let Some(g) = facts.iter().find(|g| g.id == entry.fix_id) {
-            let text = if g.worked_example.is_empty() {
-                &g.fix
-            } else {
-                &g.worked_example
-            };
-            entry.what_to_do = crate::report_export::first_sentences(text, 2, 400);
+            // Last resort: the Fix's own text.
+            if entry.what_to_do.is_empty() {
+                let text = if g.worked_example.is_empty() {
+                    &g.fix
+                } else {
+                    &g.worked_example
+                };
+                entry.what_to_do = crate::report_export::first_sentences(text, 2, 400);
+            }
             entry.effort = g.effort.clone();
         }
     }
     let conventions = super::pdf_conventions_of(&rows, corpus);
     let problem_counts = super::sheets::problem_counts(rows.iter());
+    let problem_totals = super::sheets::problem_totals(rows.iter());
     let by_id = facts
         .iter()
         .map(|g| {
@@ -1191,5 +1206,6 @@ pub(crate) fn pdf_sections(
         fixes: by_id,
         conventions,
         problem_counts,
+        problem_totals,
     }
 }

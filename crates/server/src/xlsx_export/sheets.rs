@@ -1697,22 +1697,45 @@ pub(super) fn scorecard(
     by_area
 }
 
-/// Problems by area and severity (critical, high, medium, low), one for each place. See
-/// [`scorecard`].
+/// Problems by area and severity (critical, high, medium, low): each place is counted in every
+/// area where a rule fired at it, at the worst severity of that area's rules there. A place with
+/// rules from several areas is in each of them; [`problem_totals`] counts each place once.
 pub(crate) fn problem_counts<'a>(
     rows: impl Iterator<Item = &'a FindingRow>,
 ) -> BTreeMap<String, [usize; 4]> {
+    let slot = |severity: &str| match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    };
+    let mut worst: BTreeMap<(String, String, usize, String), usize> = BTreeMap::new();
+    for r in rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings) {
+        let key = (r.repo.clone(), r.path.clone(), r.line, r.category.clone());
+        let s = slot(&r.severity);
+        let e = worst.entry(key).or_insert(s);
+        *e = (*e).min(s);
+    }
     let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
-    for row in problem_heads(rows) {
-        let counts = by_area.entry(row.category.clone()).or_insert([0; 4]);
-        match row.severity.as_str() {
-            "critical" => counts[0] += 1,
-            "high" => counts[1] += 1,
-            "medium" => counts[2] += 1,
-            _ => counts[3] += 1,
-        }
+    for ((_, _, _, area), s) in worst {
+        by_area.entry(area).or_insert([0; 4])[s] += 1;
     }
     by_area
+}
+
+/// Problems by severity (critical, high, medium, low), each place once, at the severity of the
+/// row that heads it: the cover's counts and the scorecard's Total.
+pub(crate) fn problem_totals<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> [usize; 4] {
+    let mut totals = [0usize; 4];
+    for row in problem_heads(rows) {
+        match row.severity.as_str() {
+            "critical" => totals[0] += 1,
+            "high" => totals[1] += 1,
+            "medium" => totals[2] += 1,
+            _ => totals[3] += 1,
+        }
+    }
+    totals
 }
 
 pub(super) fn write_start_here(
@@ -1803,12 +1826,11 @@ pub(super) fn write_start_here(
     }
     r += 1;
     let by_area = scorecard(facts.live_rows, facts.report, facts.corpus);
-    let mut totals = [0usize; 4];
+    let totals = problem_totals(facts.live_rows.iter().copied());
     for (area, counts) in &by_area {
         ws.write_text(r, 0, area)?;
         for (i, count) in counts.iter().enumerate() {
             ws.write_number(r, (i + 1) as u16, *count as f64)?;
-            totals[i] += *count;
         }
         ws.write_number(r, 5, counts.iter().sum::<usize>() as f64)?;
         r += 1;

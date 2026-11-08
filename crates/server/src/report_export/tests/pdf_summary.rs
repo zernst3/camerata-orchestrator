@@ -609,3 +609,78 @@ fn the_cover_the_matrix_the_scorecard_and_the_summary_count_the_same_places() {
         + json.matrix.held.len();
     assert_eq!(rows, 3);
 }
+
+/// F2: a place where rules of two areas fired is counted in each area; the cover and the Total
+/// count it once; no area row of zeros is marked Action-needed.
+#[test]
+fn an_area_row_counts_each_place_where_a_rule_of_that_area_fired() {
+    let mut a = finding("SEC-A-1", "src/a.rs", 1, "critical");
+    a.category = Some("universal".to_string());
+    let mut b = finding("SEC-B-1", "src/a.rs", 1, "critical");
+    b.category = Some("secret-exposure".to_string());
+    let report = report_with(vec![a, b], vec!["SEC-A-1", "SEC-B-1"]).seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let json = build_report_json(&reviewed, None, &options());
+    for area in ["Universal", "Secret Exposure"] {
+        let row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == area)
+            .unwrap_or_else(|| panic!("no {area} row"));
+        assert_eq!(row.critical, 1, "{area}");
+    }
+    assert_eq!(
+        json.cover.stats.critical, 1,
+        "the cover counts the place once"
+    );
+    for row in &json.scorecard.rows {
+        let n = row.critical + row.high + row.medium + row.low;
+        assert!(
+            n > 0 || row.status != "Action-needed",
+            "an all-zero row marked Action-needed: {row:?}"
+        );
+    }
+    assert!(json.scorecard.footnote.contains("counted in each"));
+    // Start here's scorecard agrees: each area 1, Total 1.
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &options()).expect("workbook");
+    let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, v::START_HERE).expect("Start here");
+    let total = grid
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == "Total"))
+        .expect("Total");
+    assert_eq!(total[1], "1");
+    let secret = grid
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == "Secret Exposure"))
+        .expect("Secret Exposure row");
+    assert_eq!(secret[1], "1");
+}
+
+/// F3: each escalated place prints the fix written for it, not the one worked example of its Fix.
+#[test]
+fn each_escalated_place_prints_its_own_fix() {
+    let mut rows = Vec::new();
+    for (line, fix) in [
+        (1, "Rotate the key in a.rs. Then redeploy."),
+        (2, "Enable row security on b.rs. Then add a policy."),
+    ] {
+        let mut f = finding("SEC-SAME-1", &format!("src/f{line}.rs"), line, "critical");
+        f.fix_specific = Some(fix.to_string());
+        f.review.escalation_state = EscalationState::Escalated;
+        rows.push(f);
+    }
+    let report = report_with(rows, vec!["SEC-SAME-1"]).seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let json = build_report_json(&reviewed, None, &options());
+    let items = &json.escalations.items;
+    assert_eq!(items.len(), 2);
+    let a = items.iter().find(|i| i.path == "src/f1.rs").unwrap();
+    let b = items.iter().find(|i| i.path == "src/f2.rs").unwrap();
+    assert_eq!(a.fix_id, b.fix_id, "one Fix");
+    assert_eq!(a.what_to_do, "Rotate the key in a.rs. Then redeploy.");
+    assert_eq!(
+        b.what_to_do,
+        "Enable row security on b.rs. Then add a policy."
+    );
+}

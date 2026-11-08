@@ -538,6 +538,8 @@
       [#chip(row.status, status_kind(row.status))],
     )).flatten()
   )
+  #v(4pt)
+  #text(size: 8.5pt, fill: ink_faint)[#d.scorecard.footnote]
 ]
 
 #v(0.6cm)

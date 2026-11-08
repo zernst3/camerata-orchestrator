@@ -1343,6 +1343,7 @@ pub fn build_report_json(
         fixes: fix_facts,
         conventions,
         problem_counts,
+        problem_totals,
     } = crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
@@ -1374,7 +1375,10 @@ pub fn build_report_json(
                 }
             }
         }
-        let status = if open_high_or_critical {
+        let status = if critical + high + medium + low == 0 {
+            // No problem in this area: it is never marked for action.
+            "Clean"
+        } else if open_high_or_critical {
             "Action-needed"
         } else if open_medium {
             "Attention"
@@ -1889,10 +1893,10 @@ pub fn build_report_json(
         })
         .collect();
     let stats = CoverStatsJson {
-        critical: scorecard_rows.iter().map(|r| r.critical).sum(),
-        high: scorecard_rows.iter().map(|r| r.high).sum(),
-        medium: scorecard_rows.iter().map(|r| r.medium).sum(),
-        low: scorecard_rows.iter().map(|r| r.low).sum(),
+        critical: problem_totals[0],
+        high: problem_totals[1],
+        medium: problem_totals[2],
+        low: problem_totals[3],
         accepted,
         dependency_advisories: dependency_snapshot.rows.len(),
     };
@@ -2072,6 +2076,7 @@ pub fn build_report_json(
         three_things,
         scorecard: ScorecardJson {
             rows: scorecard_rows,
+            footnote: "A place with rules from several areas is counted in each; the Total counts each place once.".to_string(),
         },
         matrix,
         priority_grid,
