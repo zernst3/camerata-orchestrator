@@ -502,3 +502,62 @@ fn the_scorecards_and_the_cover_count_the_places_all_problems_lists() {
     assert_eq!(pdf_scorecard, all_problems, "PDF scorecard Total");
     assert_eq!(cover, all_problems, "PDF cover counts");
 }
+
+/// "Your conventions" is counts and short lines: what the code follows, where it has no single
+/// habit and where it departs from itself. The rows are on the Your conventions and Departures
+/// sheets.
+#[test]
+fn your_conventions_is_counts_and_short_lines() {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind,
+    };
+    let mut rows = Vec::new();
+    for (n, area) in ["Area One", "Area Two"].into_iter().enumerate() {
+        let mut f = finding(&format!("ARCH-CONV-{n}"), &format!("src/c{n}.rs"), 1, "low");
+        f.category = Some(area.to_string());
+        f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: String::new(),
+            convention_label: "a habit".to_string(),
+        }));
+        rows.push(f);
+    }
+    let mut none = finding("ARCH-NONE-1", "src/n.rs", 1, "low");
+    none.kind = Some(FindingKind::NoConvention(NoConventionKind {
+        observed_options: Vec::new(),
+    }));
+    rows.push(none);
+    for line in [3, 4] {
+        let mut f = finding("ARCH-DEP-1", "src/d.rs", line, "medium");
+        f.category = Some("Area One".to_string());
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(5),
+            convention_option_id: None,
+            convention_label: "Handlers call services".to_string(),
+        }));
+        rows.push(f);
+    }
+    let report = report_with(rows, vec![]).seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let c = build_report_json(&reviewed, None, &options()).conventions;
+    assert!(c.any);
+    assert_eq!(
+        c.followed_line,
+        "2 conventions followed consistently, in 2 areas."
+    );
+    assert_eq!(
+        c.none_adopted_line,
+        "1 rule where your code has settled on no single habit."
+    );
+    assert_eq!(
+        c.departures_line,
+        "1 departure from a convention your code mostly follows, in 1 area (2 places)."
+    );
+    assert_eq!(c.departures.len(), 1);
+    assert!(
+        c.departures[0].ends_with("Handlers call services (2 of 5 places)"),
+        "{:?}",
+        c.departures
+    );
+    assert_eq!(c.more_line, "");
+}

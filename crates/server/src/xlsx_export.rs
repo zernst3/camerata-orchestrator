@@ -1409,7 +1409,7 @@ pub(crate) fn pdf_conventions_of(
         String::new()
     } else {
         format!(
-            "{} departing from a convention your code mostly follows, in {} ({}).",
+            "{} from a convention your code mostly follows, in {} ({}).",
             word(departures.len(), "departure", "departures"),
             word(
                 areas(departures.iter().map(|d| d.category.as_str()).collect()),
@@ -1423,20 +1423,16 @@ pub(crate) fn pdf_conventions_of(
         .iter()
         .take(PDF_MAX_DEPARTURES)
         .map(|d| {
-            let checked = d
-                .assessed_sites
-                .map_or(String::new(), |n| format!(" of {n}"));
-            format!(
-                "{}: {} ({}{checked} {} depart)",
-                d.category,
-                if d.convention_label.is_empty() {
-                    d.rule_title.clone()
-                } else {
-                    d.convention_label.clone()
-                },
-                d.deviating_sites,
-                vocabulary::places_word(d.assessed_sites.unwrap_or(d.deviating_sites)),
-            )
+            let named = if d.convention_label.is_empty() {
+                d.rule_title.clone()
+            } else {
+                d.convention_label.clone()
+            };
+            let places = match d.assessed_sites {
+                Some(of) => format!("{} of {of} places", d.deviating_sites),
+                None => vocabulary::places_count(d.deviating_sites),
+            };
+            format!("{}: {named} ({places})", d.category)
         })
         .collect();
     let more_line = if departures.len() > PDF_MAX_DEPARTURES {
