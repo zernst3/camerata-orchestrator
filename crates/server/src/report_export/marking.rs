@@ -3,11 +3,6 @@
 
 use super::*;
 
-/// The site count above which only the reshaped PDF (summary, escalations and patterns) is
-/// rendered (amendment A14 item 4). At 30,000 sites the full PDF compiled in about 22 seconds
-/// (M8); the limit is the size the full PDF was measured at.
-pub const FULL_PDF_SITE_LIMIT: usize = 30_000;
-
 /// A site the group reviewer escalated, as the PDF prints it, with the decision on it. Nothing the
 /// group reviewer wrote about the site (its reason, rank or words) is in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -28,6 +23,15 @@ pub struct EscalatedSiteJson {
     /// The decision on the place, as its rows state it ("Confirmed by the reviewer ...", "Open ...").
     pub decision: String,
     pub review_level: String,
+    /// The place as the PDF prints it: `repo / path, line 12`, or `, whole file` for a problem in
+    /// a whole file. Never "line 0".
+    pub place: String,
+    /// "Rules: A, B": every rule at the place, by id. One entry, however many rules.
+    pub rules_line: String,
+    /// The Fix's change in at most two sentences.
+    pub what_to_do: String,
+    /// The Fix's effort band, in words; empty when it is not estimated.
+    pub effort: String,
 }
 
 /// The escalations section: the sentence the ledger states and the sites above the line.
@@ -37,7 +41,28 @@ pub struct EscalationsJson {
     /// when the group review did not run for this report.
     pub sentence: String,
     pub items: Vec<EscalatedSiteJson>,
+    /// How many of `items` the PDF prints, worst first ([`PDF_MAX_SERIOUS_PROBLEMS`]).
+    pub cap: usize,
+    /// "and 4 more in the Fix plan sheet" when the cap leaves some out; empty otherwise.
+    pub more_line: String,
+    /// The sentence above the entries.
+    pub intro: String,
 }
+
+/// The most entries the PDF's "The most serious problems" section prints.
+pub const PDF_MAX_SERIOUS_PROBLEMS: usize = 8;
+/// The most lines the PDF's "The other fixes" section prints.
+pub const PDF_MAX_OTHER_FIXES: usize = 60;
+/// The most rules the PDF's "What is healthy" section lists.
+pub const PDF_MAX_HEALTHY_RULES: usize = 25;
+/// The most skipped files the PDF names; the Not checked sheet holds the rest.
+pub const PDF_MAX_SKIPPED_FILES: usize = 10;
+/// The most dependency advisories the PDF names; the Dependencies sheet holds the rest.
+pub const PDF_MAX_DEPENDENCIES: usize = 5;
+/// The most rules the PDF names in the cross-service comparison.
+pub const PDF_MAX_CROSS_SERVICE_LINES: usize = 10;
+/// The most departures the PDF names in "Your conventions".
+pub const PDF_MAX_DEPARTURES: usize = 5;
 
 /// One sub-group as the PDF describes it: what its sites share, the fix once and a worked example.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -46,6 +71,10 @@ pub struct PatternJson {
     pub group: String,
     pub rule_id: String,
     pub rule_title: String,
+    /// The Fix's area (the first when its rules span several).
+    pub area: String,
+    /// The Fix's name, as the Fix plan sheet states it.
+    pub name: String,
     /// Every rule the Fix satisfies, by id, the worst first.
     pub rules: Vec<String>,
     pub label: String,
@@ -71,18 +100,59 @@ pub struct PatternJson {
     pub pointer: String,
 }
 
-/// How many rows the matrix held in one bucket at one severity and kind. In the reshaped PDF the
-/// matrix lists no site, and this is what the release gate reconciles its counts against.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MatrixTallyJson {
-    pub bucket: String,
+/// One line of "The other fixes": a Fix that is not one of the most serious problems.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixLineJson {
+    /// The Fix's name.
+    pub name: String,
     pub severity: String,
-    pub kind: String,
-    pub count: usize,
+    /// "3 places".
+    pub places: String,
+    /// The effort band in words; empty when it is not estimated.
+    pub effort: String,
+    /// First, Next or Later.
+    pub fix_order: String,
+}
+
+/// The Fixes of one area, in the order to do them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixGroupJson {
+    pub area: String,
+    pub lines: Vec<OtherFixLineJson>,
+}
+
+/// "The other fixes": one line for each Fix that is not one of the most serious problems, grouped
+/// by area. At most [`PDF_MAX_OTHER_FIXES`] lines; the rest are counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixesJson {
+    pub groups: Vec<OtherFixGroupJson>,
+    /// The sentence above the lines.
+    pub intro: String,
+    /// How many lines are printed.
+    pub shown: usize,
+    /// "and 132 more in the Fix plan sheet" when the cap leaves some out; empty otherwise.
+    pub more_line: String,
+}
+
+/// "Your conventions": counts and short lines, never a row for each convention.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ConventionsSummaryJson {
+    /// True when the inspection derived any convention or departure.
+    pub any: bool,
+    /// What the code does consistently: "12 conventions followed consistently, in 5 areas."
+    pub followed_line: String,
+    /// Where it has no single habit.
+    pub none_adopted_line: String,
+    /// Where it departs from itself.
+    pub departures_line: String,
+    /// The worst few departures, one line each.
+    pub departures: Vec<String>,
+    /// "and 7 more in the Departures sheet"; empty when none are left out.
+    pub more_line: String,
 }
 
 /// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
-/// the finished label ("Violated, 3 sites", "Clean", "Not applicable: ...", "Not reviewed: ...").
+/// the finished label ("Violated, 3 places", "Clean", "Not applicable: ...", "Not reviewed: ...").
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternCellJson {
     pub repo: String,
@@ -112,6 +182,11 @@ pub struct PatternsAcrossServicesJson {
     pub note: String,
     pub rows: Vec<PatternRowJson>,
     pub themes: Vec<crate::onboard::patterns_matrix::Theme>,
+    /// One line for each rule the services differ on ("Title: repo A violated, 3 places; repo B
+    /// clean"), at most [`PDF_MAX_CROSS_SERVICE_LINES`]. The PDF prints these, not the cells.
+    pub summary_lines: Vec<String>,
+    /// "and 4 more in the Patterns across services sheet"; empty when none are left out.
+    pub more_line: String,
 }
 
 /// What the section says about itself: an observation, not a finding.
@@ -125,13 +200,27 @@ pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
     match state {
         CellState::Violated { sites } => {
             format!(
-                "Violated, {sites} {}",
-                if *sites == 1 { "site" } else { "sites" }
+                "Violated, {}",
+                crate::xlsx_export::vocabulary::places_count(*sites)
             )
         }
         CellState::Clean => "Clean".to_string(),
         CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
         CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
+    }
+}
+
+trait LowercaseFirst {
+    fn to_lowercase_first(&self) -> String;
+}
+
+impl LowercaseFirst for str {
+    fn to_lowercase_first(&self) -> String {
+        let mut chars = self.chars();
+        match chars.next() {
+            Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
     }
 }
 
@@ -170,11 +259,34 @@ pub fn patterns_across_services_json(
             })
         })
         .collect();
+    let rows: Vec<PatternRowJson> = rows;
+    let summary_lines: Vec<String> = rows
+        .iter()
+        .take(PDF_MAX_CROSS_SERVICE_LINES)
+        .map(|row| {
+            let cells: Vec<String> = row
+                .cells
+                .iter()
+                .map(|c| format!("{} {}", c.repo, c.label.to_lowercase_first()))
+                .collect();
+            format!("{}: {}", row.title, cells.join("; "))
+        })
+        .collect();
+    let more_line = if rows.len() > PDF_MAX_CROSS_SERVICE_LINES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            rows.len() - PDF_MAX_CROSS_SERVICE_LINES,
+            crate::xlsx_export::vocabulary::PATTERNS_ACROSS_SERVICES,
+        )
+    } else {
+        String::new()
+    };
     Some(PatternsAcrossServicesJson {
         repos: matrix.repos.clone(),
         note: PATTERNS_NOTE.to_string(),
         rows,
         themes: matrix.themes.clone(),
+        summary_lines,
+        more_line,
     })
 }
 
@@ -757,7 +869,7 @@ pub(crate) fn next_steps_note_for(
         }
     };
     format!(
-        "There are three steps from here. First, the do-now items above get fixed, by your own \
+        "There are three steps from here. First, the fixes above get done, by your own \
          team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
          retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
          signs a short addendum confirming each item is closed. Third, ongoing coverage: a \

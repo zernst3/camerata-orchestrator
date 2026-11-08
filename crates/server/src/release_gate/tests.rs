@@ -1919,7 +1919,8 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
     );
 }
 
-/// The groups the PDF renders as finding cards: "Curated findings" and "Held for review".
+/// The curated and held groups of the report data: the PDF prints no card for them, and the
+/// release gate holds them to the matrix.
 fn rendered_groups(
     package: &mut ProductPackage,
 ) -> impl Iterator<Item = &mut crate::report_export::CuratedGroupJson> {
@@ -1937,9 +1938,10 @@ fn rendered_count(package: &mut ProductPackage, severity: &str, kind: &str) -> u
         .count()
 }
 
-/// The PDF renders its findings from `curated_findings` and `held_for_review_findings`, not from
-/// the matrix the counts are first taken from. A site that falls out of those lists is a finding
-/// the reader never sees while the matrix, the cover and every total still agree.
+/// The report data holds `curated_findings` and `held_for_review_findings` beside the matrix the
+/// counts are first taken from (the PDF prints neither list). A site that falls out of those lists
+/// is a problem the datasets no longer agree on while the matrix, the cover and every total still
+/// agree.
 #[test]
 fn the_gate_catches_a_finding_the_pdf_counts_but_does_not_render() {
     let mut package = mixed_package();
@@ -1954,7 +1956,7 @@ fn the_gate_catches_a_finding_the_pdf_counts_but_does_not_render() {
     assert!(
         count_problems(&failure).iter().any(|p| p.file == "PDF data"
             && p.location == "severity critical, kind defect"
-            && p.message.contains("rendered")),
+            && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }
@@ -1980,7 +1982,7 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+            .any(|p| p.file == "PDF data" && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }
@@ -1997,7 +1999,7 @@ fn the_gate_catches_a_finding_rendered_twice() {
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+            .any(|p| p.file == "PDF data" && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }

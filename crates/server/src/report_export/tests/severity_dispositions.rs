@@ -553,7 +553,7 @@ fn unresolved_high_severity_low_effort_is_do_now() {
     assert_eq!(json.executive_summary.open, 1);
     assert_eq!(
         json.curated_findings[0].sites[0].disposition,
-        "Open (recommended: Do now)"
+        "Open (recommended: First)"
     );
 }
 
@@ -639,7 +639,7 @@ fn unresolved_disposition_label_names_do_next_bucket() {
     );
     assert_eq!(
         json.curated_findings[0].sites[0].disposition,
-        "Open (recommended: Do next)"
+        "Open (recommended: Next)"
     );
 }
 
@@ -654,7 +654,7 @@ fn unresolved_disposition_label_names_plan_bucket() {
     );
     assert_eq!(
         json.curated_findings[0].sites[0].disposition,
-        "Open (recommended: Plan)"
+        "Open (recommended: Later)"
     );
 }
 

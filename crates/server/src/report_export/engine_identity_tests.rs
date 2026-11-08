@@ -143,10 +143,12 @@ async fn the_readme_and_manifest_state_the_engine_version_with_its_commit() {
     );
 }
 
+/// The engine build and the rule library hash are in manifest.json and the README, not in the PDF:
+/// a reader of the report has no use for them. The data still carries them for the manifest.
 #[tokio::test]
-async fn the_pdf_states_the_engine_commit_and_the_rule_library_lock_hash() {
+async fn the_pdf_does_not_state_the_engine_commit_or_the_rule_library_lock_hash() {
     if which_typst().is_none() {
-        eprintln!("skipping the_pdf_states_the_engine_commit_and_the_rule_library_lock_hash: typst not on PATH");
+        eprintln!("skipping the_pdf_does_not_state_the_engine_commit: typst not on PATH");
         return;
     }
     let corpus = corpus().await;
@@ -155,17 +157,21 @@ async fn the_pdf_states_the_engine_commit_and_the_rule_library_lock_hash() {
         Some(&corpus),
         &empty_opts(),
     );
+    // The cover data (which the manifest is built from) still has both.
+    let lock_hash = camerata_rules::corpus_version(&corpus);
+    assert_eq!(
+        json.cover.corpus_version.as_deref(),
+        Some(lock_hash.as_str())
+    );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text: String = pdf_extract::extract_text_from_mem(&pdf)
         .unwrap_or_default()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(text.contains("Rule library lock hash"), "{text}");
-    // Long hex strings may wrap across lines in the PDF; the first 16 characters do not.
-    let lock_hash = camerata_rules::corpus_version(&corpus);
-    assert!(text.contains(&lock_hash[..23]), "{text}");
+    assert!(!text.contains("Rule library lock hash"), "{text}");
+    assert!(!text.contains(&lock_hash[..23]), "{text}");
     if let Some(commit) = crate::ENGINE_COMMIT {
-        assert!(text.contains(&commit[..12]), "{text}");
+        assert!(!text.contains(&commit[..12]), "{text}");
     }
 }

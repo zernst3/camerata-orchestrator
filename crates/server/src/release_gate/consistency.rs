@@ -357,9 +357,6 @@ type RowId = (String, String, String, usize);
 /// buckets) must equal `findings.json`'s. A row in one and not the other is named by its rule
 /// and location (never its text).
 pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
-    if report.reduced {
-        return reduced_row_parity(report, findings);
-    }
     let mut pdf: BTreeSet<RowId> = BTreeSet::new();
     for bucket in [
         &report.matrix.do_now,
@@ -403,48 +400,6 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
             &describe(row),
             "a row in findings.json is missing from the PDF",
         ));
-    }
-    problems
-}
-
-/// Row parity for the reshaped PDF (above 30,000 sites), which lists no row: the count of rows in
-/// each bucket, severity and kind that the PDF states must equal `findings.json`'s.
-fn reduced_row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
-    let mut pdf: BTreeMap<(String, String, String), usize> = BTreeMap::new();
-    for r in &report.reduced_matrix {
-        *pdf.entry((r.bucket.clone(), r.severity.clone(), r.kind.clone()))
-            .or_default() += r.count;
-    }
-    let value = serde_json::to_value(findings).unwrap_or(Value::Null);
-    let mut json: BTreeMap<(String, String, String), usize> = BTreeMap::new();
-    for row in value
-        .get("findings")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        *json
-            .entry((
-                row["bucket"].as_str().unwrap_or_default().to_string(),
-                row["severity"].as_str().unwrap_or_default().to_string(),
-                row["kind"].as_str().unwrap_or_default().to_string(),
-            ))
-            .or_default() += 1;
-    }
-    let mut problems = Vec::new();
-    let keys: BTreeSet<&(String, String, String)> = pdf.keys().chain(json.keys()).collect();
-    for key in keys {
-        let (p, j) = (
-            pdf.get(key).copied().unwrap_or(0),
-            json.get(key).copied().unwrap_or(0),
-        );
-        if p != j {
-            problems.push(problem(
-                "PDF data",
-                &format!("bucket {}, severity {}, kind {}", key.0, key.1, key.2),
-                format!("the reshaped PDF counts {p} rows here and findings.json has {j}"),
-            ));
-        }
     }
     problems
 }
@@ -816,7 +771,8 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
                     ));
                 }
             }
-            for (severity, w) in by_severity_bucket(&json) {
+            // The scorecard counts problems, one for each place, as All problems lists them.
+            for (severity, w) in by_severity_bucket(&json_for_sheet) {
                 let g = severities.get(severity).copied().unwrap_or(0);
                 if w != g {
                     problems.push(problem(
@@ -924,8 +880,8 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
 
 /// 22d, the PDF side (the in-memory release, which holds the PDF's data): the rows the PDF
 /// counts (all six matrix buckets) agree with `json/all-findings.json` by severity and kind, the
-/// finding cards it renders (curated plus held for review) agree with those matrix rows by
-/// severity and kind, and the cover's severity summary agrees by severity column.
+/// report data's curated and held groups (kept beside the matrix, never printed) agree with those
+/// matrix rows by severity and kind, and the cover's severity summary agrees by severity column.
 pub fn pdf_count_reconciliation_problems(
     entries: &Entries,
     report: &AuditReportJson,
@@ -944,19 +900,12 @@ pub fn pdf_count_reconciliation_problems(
                 .or_insert(0) += 1;
         }
     }
-    // The reshaped PDF (above 30,000 sites) lists no row; it states the counts instead.
-    for r in &report.reduced_matrix {
-        *pdf.entry((r.severity.clone(), r.kind.clone())).or_insert(0) += r.count;
-    }
-    // What the PDF actually draws is its finding cards, "Curated findings" plus "Held for
-    // review", not the matrix the totals above are taken from. Every matrix row must be drawn
-    // exactly once, so a finding that falls out of the cards (or is drawn twice) fails here
-    // even though the matrix, the cover and every total still agree.
+    // The PDF prints no card and no list of problems, so there is no rendered row to count. The
+    // report data still holds the curated and held groups beside the matrix (the template does
+    // not read them). Every matrix row must be in them exactly once, so a problem that falls out
+    // of the groups (or is in them twice) fails here even though the matrix, the cover and every
+    // total still agree. This is a check of two datasets, not of PDF rows.
     let mut rendered = Tally::new();
-    if report.reduced {
-        // No card is drawn by design, so the cards are the counts.
-        rendered = pdf.clone();
-    }
     for group in report
         .curated_findings
         .iter()
@@ -970,7 +919,7 @@ pub fn pdf_count_reconciliation_problems(
     }
     let mut problems = tally_differences_against(
         "PDF data",
-        "the PDF's rendered finding cards",
+        "the PDF data's curated and held groups",
         "its own matrix",
         &pdf,
         &rendered,
@@ -985,6 +934,8 @@ pub fn pdf_count_reconciliation_problems(
         Some(Ok(tally)) => tally,
     };
     problems.extend(tally_differences("PDF data", "the PDF", &json, &pdf));
+    // The cover counts problems, one for each place, as the All problems sheet lists them.
+    let problem_places = places_tally(entries, &crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS);
     let stats = &report.cover.stats;
     for (severity, printed) in [
         ("critical", stats.critical),
@@ -992,7 +943,7 @@ pub fn pdf_count_reconciliation_problems(
         ("medium", stats.medium),
         ("low", stats.low),
     ] {
-        let w = by_severity_bucket(&json)
+        let w = by_severity_bucket(&problem_places)
             .get(severity)
             .copied()
             .unwrap_or(0);

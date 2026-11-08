@@ -720,32 +720,6 @@ async fn deterministic_finding_with_real_location_exports_high_confidence_and_an
         row["effort"], "low",
         "xlsx effort must fall back to the authored band"
     );
-
-    // ── PDF source ──
-    if which_typst().is_none() {
-        eprintln!(
-            "skipping the PDF leg of \
-                 deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate: \
-                 typst not on PATH"
-        );
-        return;
-    }
-    let pdf = compile_pdf(&json).await.expect("compile_pdf must succeed");
-    let text = pdf_extract::extract_text_from_mem(&pdf)
-        .expect("must be able to extract text from the compiled PDF");
-    assert!(
-        text.contains("Confidence: high"),
-        "the PDF must render the deterministic-by-construction confidence: {text:?}"
-    );
-    assert!(
-        !text.contains("Confidence: not evaluated this run"),
-        "a proven deterministic finding must never render as unevaluated: {text:?}"
-    );
-    assert!(
-        !text.contains("Effort: not estimated this run"),
-        "a deterministic finding with an authored effort band must never render \
-             unestimated: {text:?}"
-    );
 }
 
 /// Sequencing proof with R1 (`downgrade_unlocated_above_informational`): a deterministic
@@ -1372,7 +1346,7 @@ async fn fix_generation_failure_exports_unhedged_with_the_rule_level_fix_in_do_n
         site.detail
     );
     assert!(
-        site.disposition.to_ascii_lowercase().contains("do now"),
+        site.disposition.to_ascii_lowercase().contains("first"),
         "the site's own disposition label must not be demoted either: {:?}",
         site.disposition
     );

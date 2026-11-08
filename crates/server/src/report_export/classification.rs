@@ -1157,7 +1157,7 @@ pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, 
 /// than folding a guessed number into the sum.
 pub(crate) fn total_hours_label_of(efforts: &[Option<String>]) -> String {
     if efforts.is_empty() {
-        return "No do-now items this run.".to_string();
+        return "No fix is due first this run.".to_string();
     }
     let mut lo_sum = 0u32;
     let mut hi_sum = 0u32;

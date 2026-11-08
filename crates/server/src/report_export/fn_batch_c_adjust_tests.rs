@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::tests::{empty_opts, finding, report_with, which_typst};
+use super::tests::{empty_opts, finding, report_with};
 use super::*;
 use crate::onboard::Finding;
 
@@ -163,26 +163,4 @@ fn the_workbook_has_a_severity_adjustments_column() {
         .join("\n");
     assert!(all.contains("Why the severity changed"), "{all}");
     assert!(all.contains(CEILING_NOTE), "{all}");
-}
-
-#[tokio::test]
-async fn the_pdf_prints_the_adjustment() {
-    if which_typst().is_none() {
-        eprintln!("skipping the_pdf_prints_the_adjustment: typst not on PATH");
-        return;
-    }
-    let corpus = corpus_with_ceiling();
-    let report = report_with(vec![capped_finding()], vec!["CEIL-1"]);
-    let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
-        Some(&corpus),
-        &empty_opts(),
-    );
-    let pdf = compile_pdf(&json).await.expect("the PDF compiles");
-    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
-    let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(
-        joined.contains("Severityloweredfromhightolow:therulecapstheseverityofwhatitfinds."),
-        "{text}"
-    );
 }

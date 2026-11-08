@@ -1,0 +1,504 @@
+//! WO-A: the PDF is a summary at every size, at most 20 pages, in 15 sections. It holds no list
+//! of problems, no per-place card or table, no code snippet and no low or info row; every row
+//! lives in the workbook and the CSVs. Synthetic fixtures only.
+
+use std::sync::OnceLock;
+
+use camerata_api_types::review::EscalationState;
+
+use super::*;
+use crate::onboard::{Finding, SealedReport};
+use crate::report_export::{apply_overlay, build_report_json, render_data_json};
+use crate::xlsx_export::vocabulary as v;
+
+/// The 15 sections of the redesign's section 1, in order, as the PDF outline names them.
+const SECTIONS: [&str; 15] = [
+    "Cover",
+    "Contents",
+    "Executive summary",
+    "If you only do three things this week",
+    "Area scorecard",
+    "Severity by effort matrix",
+    "The most serious problems",
+    "The other fixes",
+    "Your conventions",
+    "What is healthy",
+    "Dependencies",
+    "Next steps",
+    "Where the details are",
+    "How this was done and its limits",
+    "Disclaimer",
+];
+
+const MAX_PAGES: usize = 20;
+const ESCALATED: usize = 12;
+const CLEAN_RULES: usize = 40;
+
+fn options() -> ReportOptions {
+    ReportOptions {
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    }
+}
+
+/// `problems` problems spread over `rules` rules (each rule is its own Fix: every rule has its
+/// own places), in 24 areas. The first `ESCALATED` rules are critical and one place of each is
+/// escalated. Every seventh place is a whole file. Details carry the characters the PDF must
+/// never print, every place carries a long unbroken file name and every snippet a marker.
+fn synthetic_report(problems: usize, rules: usize) -> SealedReport {
+    let mut report = crate::release_gate::test_scan_report();
+    let mut findings = Vec::with_capacity(problems);
+    for i in 0..problems {
+        let rule = i % rules;
+        let severity = match rule {
+            r if r < ESCALATED => "critical",
+            r if r % 4 == 1 => "high",
+            r if r % 4 == 2 => "medium",
+            _ => "low",
+        };
+        let whole_file = i % 7 == 3;
+        let mut f = Finding {
+            repo: "owner/repo".to_string(),
+            path: format!(
+                "src/zone_{rule}/module_{i}_with_a_very_long_unbroken_file_name_{}.rs",
+                "x".repeat(40)
+            ),
+            line: if whole_file { 0 } else { i % 400 + 1 },
+            rule_id: format!("SYN-RULE-{rule:03}"),
+            severity: severity.to_string(),
+            snippet: format!("SNIPPET_MARK_{i}"),
+            detail: format!(
+                "Input reaches a query \u{2014} unsafe in module {i} \u{00D7} twice. It must be \
+                 bound. Then it must be checked."
+            ),
+            effort: Some(
+                if rule.is_multiple_of(3) {
+                    "low"
+                } else {
+                    "medium"
+                }
+                .to_string(),
+            ),
+            category: Some(format!("Area {}", rule % 24)),
+            fix_specific: Some(
+                "Bind the value with the driver. Then add a test that proves it. A third \
+                 sentence that must not be printed."
+                    .to_string(),
+            ),
+            located: true,
+            ..Finding::default()
+        };
+        if i < ESCALATED {
+            f.review.escalation_state = EscalationState::Escalated;
+        }
+        findings.push(f);
+    }
+    report.findings = findings;
+    let mut audited: Vec<String> = (0..rules).map(|r| format!("SYN-RULE-{r:03}")).collect();
+    audited.extend((0..CLEAN_RULES).map(|c| format!("CLEAN-RULE-{c:02}")));
+    report.provenance.audited_rule_ids = audited;
+    report.seal()
+}
+
+struct Built {
+    data: String,
+    json: serde_json::Value,
+    text: String,
+    flat: String,
+    pages: usize,
+    outline: Vec<String>,
+}
+
+fn build_in_thread(problems: usize, rules: usize) -> Built {
+    std::thread::spawn(move || {
+        let sealed = synthetic_report(problems, rules);
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let built = build_report_json(&reviewed, None, &options());
+        let data = render_data_json(&built).expect("data.json");
+        let json: serde_json::Value = serde_json::from_str(&data).expect("data.json parses");
+        let pdf = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(crate::report_export::compile_pdf_from_data(&data))
+            .expect("the PDF compiles");
+        let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF's text extracts");
+        let doc = pdf_extract::Document::load_mem(&pdf).expect("the PDF loads");
+        let pages = doc.get_pages().len();
+        let outline = doc
+            .get_toc()
+            .map(|t| t.toc.iter().map(|e| e.title.clone()).collect())
+            .unwrap_or_default();
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        Built {
+            data,
+            json,
+            text,
+            flat,
+            pages,
+            outline,
+        }
+    })
+    .join()
+    .expect("the build thread")
+}
+
+/// 5,000 problems over 200 rules: the synthetic report of the work order.
+fn big() -> Option<&'static Built> {
+    static BIG: OnceLock<Option<Built>> = OnceLock::new();
+    BIG.get_or_init(|| camerata_test_env::typst_on_path().then(|| build_in_thread(5_000, 200)))
+        .as_ref()
+}
+
+/// A report the size of the largest saved package (141 places over 85 rules).
+fn fixture_sized() -> Option<&'static Built> {
+    static FIXTURE: OnceLock<Option<Built>> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| camerata_test_env::typst_on_path().then(|| build_in_thread(141, 85)))
+        .as_ref()
+}
+
+#[test]
+fn the_pdf_is_at_most_twenty_pages_on_the_largest_fixture_package() {
+    let Some(b) = fixture_sized() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    assert!(
+        b.pages <= MAX_PAGES,
+        "the fixture-sized PDF is {} pages",
+        b.pages
+    );
+}
+
+#[test]
+fn the_pdf_is_at_most_twenty_pages_on_a_five_thousand_problem_report() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    assert!(b.pages <= MAX_PAGES, "the PDF is {} pages", b.pages);
+}
+
+#[test]
+fn the_pdf_outline_is_the_fifteen_sections_in_order() {
+    let Some(b) = fixture_sized() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    assert_eq!(b.outline, SECTIONS, "the PDF outline");
+}
+
+#[test]
+fn the_vocabulary_names_the_same_fifteen_sections() {
+    assert_eq!(v::PDF_SECTIONS, SECTIONS);
+}
+
+#[test]
+fn no_em_dash_en_dash_or_multiplication_sign_is_in_the_rendered_text() {
+    for b in [big(), fixture_sized()].into_iter().flatten() {
+        for bad in ['\u{2014}', '\u{2013}', '\u{00D7}'] {
+            assert!(
+                !b.text.contains(bad),
+                "U+{:04X} is in the PDF text",
+                bad as u32
+            );
+        }
+        assert!(
+            !b.data.contains('\u{2014}'),
+            "an em dash is in the PDF's data"
+        );
+    }
+}
+
+#[test]
+fn a_whole_file_place_never_prints_line_zero() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    let squashed: String = b.text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(!squashed.contains("line0"), "line 0 is printed");
+    assert!(!squashed.contains(".rs:0"), "path:0 is printed");
+    assert!(
+        squashed.contains(&v::WHOLE_FILE.replace(' ', "")),
+        "no whole file place is named although some are escalated or in the top three"
+    );
+}
+
+#[test]
+fn a_many_place_pdf_holds_no_per_place_card_table_or_snippet() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    for retired in [
+        "Curated findings",
+        "Held for review",
+        "Sites reviewed in person",
+        "What the findings have in common",
+        "Where the individual findings are",
+    ] {
+        assert!(!b.flat.contains(retired), "{retired:?} is still a section");
+    }
+    assert!(
+        !b.text.contains("SNIPPET_MARK_"),
+        "a code snippet is printed"
+    );
+    assert!(
+        !b.flat.contains("Worked example"),
+        "a worked example is printed"
+    );
+    // A place's file name appears for the top three and for the escalated entries only.
+    let squashed: String = b.text.chars().filter(|c| !c.is_whitespace()).collect();
+    let named = squashed.matches("src/zone_").count();
+    assert!(
+        named <= 3 + 8,
+        "{named} places are named in a PDF that lists at most eleven"
+    );
+}
+
+#[test]
+fn the_most_serious_problems_are_at_most_eight_narrative_entries_with_an_overflow_line() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    assert_eq!(
+        b.flat.matches("What to do: ").count(),
+        8,
+        "eight entries, no more"
+    );
+    let more = more_counts(&b.flat);
+    assert!(
+        more.contains(&(ESCALATED - 8)),
+        "the overflow line names the {} places left: {more:?}",
+        ESCALATED - 8
+    );
+    // Two sentences of what to do, never a third.
+    assert!(!b.flat.contains("A third sentence"));
+    assert!(b.flat.contains("Rules: SYN-RULE-"));
+}
+
+/// Every N in "and N more in the Fix plan sheet" the PDF prints.
+fn more_counts(flat: &str) -> Vec<usize> {
+    let re = regex::Regex::new(r"and (\d+) more in the Fix plan sheet").expect("a regex");
+    re.captures_iter(flat)
+        .filter_map(|c| c[1].parse().ok())
+        .collect()
+}
+
+#[test]
+fn the_other_fixes_are_one_line_each_capped_at_sixty_with_a_count_of_the_rest() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    let open_fixes = b.json["sub_group_patterns"]
+        .as_array()
+        .expect("patterns")
+        .iter()
+        .filter(|p| p["open_sites"].as_u64().unwrap_or(0) > 0)
+        .count();
+    assert_eq!(open_fixes, 200);
+    let rest = open_fixes - 8 - 60;
+    assert!(
+        more_counts(&b.flat).contains(&rest),
+        "the other fixes name the {rest} not listed: {:?}",
+        more_counts(&b.flat)
+    );
+}
+
+#[test]
+fn what_is_healthy_lists_at_most_twenty_five_rules_by_plain_title() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    assert_eq!(b.flat.matches("(CLEAN-RULE-").count(), 25);
+    assert!(
+        b.flat.contains(&format!(
+            "{} further rules verified clean",
+            CLEAN_RULES - 25
+        )),
+        "the rest are counted"
+    );
+}
+
+#[test]
+fn where_the_details_are_uses_the_workbooks_tab_names() {
+    let Some(b) = fixture_sized() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    for (question, sheet) in v::DETAIL_MAP {
+        assert!(b.flat.contains(question), "{question:?} is not printed");
+        assert!(b.flat.contains(sheet), "{sheet:?} is not printed");
+    }
+}
+
+#[test]
+fn the_methodology_holds_no_engine_internals() {
+    let Some(b) = fixture_sized() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    for internal in [
+        "Engine commit",
+        "Rule library lock hash",
+        "Calibration model",
+        "of a budget of",
+        "Escalated ",
+    ] {
+        assert!(!b.flat.contains(internal), "{internal:?} is printed");
+    }
+}
+
+#[test]
+fn no_headline_in_the_pdf_starts_with_a_banned_prefix() {
+    let Some(b) = big() else {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    };
+    for line in b.text.lines() {
+        assert!(
+            crate::client_text::banned_headline_prefix(line).is_none(),
+            "a line of the PDF opens with an engine note: {line}"
+        );
+    }
+    let headlines = b.json["three_things"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            b.json["escalations"]["items"]
+                .as_array()
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(|i| i["headline"].as_str());
+    for h in headlines {
+        assert!(
+            crate::client_text::banned_headline_prefix(h).is_none(),
+            "{h}"
+        );
+    }
+}
+
+#[test]
+fn the_template_has_no_per_place_section_and_no_word_of_its_own_for_counts() {
+    let template = include_str!("../../../templates/audit_report.typ");
+    for gone in [
+        "render_curated_group",
+        "render_site",
+        "d.curated_findings",
+        "d.held_for_review_findings",
+        "d.reduced",
+        "FULL_PDF_SITE_LIMIT",
+    ] {
+        assert!(!template.contains(gone), "the template still has {gone}");
+    }
+    // "Closes N rules" and "N places" are built from the vocabulary, not spelled here.
+    assert!(!template.contains("Closes"), "the template spells Closes");
+}
+
+#[test]
+fn a_long_unbroken_area_name_wraps_and_the_pdf_stays_in_budget() {
+    if !camerata_test_env::typst_on_path() {
+        eprintln!("skipping: typst not on PATH");
+        return;
+    }
+    let long = "W".repeat(90);
+    let built = std::thread::spawn(move || {
+        let mut sealed = synthetic_report(30, 5).into_inner();
+        for f in &mut sealed.findings {
+            f.category = Some(long.clone());
+        }
+        let reviewed = apply_overlay(&sealed.seal(), &[], &[], &[]);
+        let data = render_data_json(&build_report_json(&reviewed, None, &options())).unwrap();
+        let pdf = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::report_export::compile_pdf_from_data(&data))
+            .expect("the PDF compiles");
+        let text = pdf_extract::extract_text_from_mem(&pdf).unwrap();
+        let pages = pdf_extract::Document::load_mem(&pdf)
+            .unwrap()
+            .get_pages()
+            .len();
+        (text, pages)
+    })
+    .join()
+    .unwrap();
+    let squashed: String = built.0.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        squashed.to_lowercase().contains(&"w".repeat(90)),
+        "the long name is cut off instead of wrapped"
+    );
+    assert!(built.1 <= MAX_PAGES);
+}
+
+/// W2: Start here said All problems held 118 rows and its scorecard Total said 126, because the
+/// scorecard counted convention rows and the rows behind a place. A problem is a place: the
+/// scorecard, the PDF scorecard and the PDF cover count the places All problems lists, once each.
+#[test]
+fn the_scorecards_and_the_cover_count_the_places_all_problems_lists() {
+    use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+    let mut rows = vec![
+        finding("SEC-A-1", "src/a.rs", 1, "critical"),
+        // A second rule at the same place: one problem, not two.
+        finding("SEC-B-1", "src/a.rs", 1, "high"),
+        finding("SEC-C-1", "src/c.rs", 3, "medium"),
+        finding("SEC-D-1", "src/d.rs", 4, "low"),
+    ];
+    for n in 0..2 {
+        let mut convention = finding("ARCH-CONV-1", &format!("src/conv{n}.rs"), 1, "low");
+        convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: String::new(),
+            convention_label: "a habit".to_string(),
+        }));
+        rows.push(convention);
+    }
+    let report = report_with(
+        rows,
+        vec!["SEC-A-1", "SEC-B-1", "SEC-C-1", "SEC-D-1", "ARCH-CONV-1"],
+    )
+    .seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let json = build_report_json(&reviewed, None, &options());
+    let pdf_scorecard: usize = json
+        .scorecard
+        .rows
+        .iter()
+        .map(|r| r.critical + r.high + r.medium + r.low)
+        .sum();
+    let s = &json.cover.stats;
+    let cover = s.critical + s.high + s.medium + s.low;
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &options()).expect("workbook");
+    let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, v::START_HERE).expect("Start here");
+    let all_problems: usize = grid
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == v::ALL_PROBLEMS))
+        .and_then(|r| r.get(2))
+        .and_then(|c| c.parse().ok())
+        .expect("Start here lists All problems with its row count");
+    let header_at = grid
+        .iter()
+        .position(|r| {
+            r.first().is_some_and(|c| c == v::H_AREA) && r.get(5).is_some_and(|c| c == "Total")
+        })
+        .expect("the scorecard header");
+    let start_total: usize = grid
+        .iter()
+        .skip(header_at + 1)
+        .find(|r| r.first().is_some_and(|c| c == "Total"))
+        .map(|r| r[1..=4].iter().map(|c| c.parse::<usize>().unwrap()).sum())
+        .expect("the scorecard Total");
+
+    assert_eq!(all_problems, 3, "three places hold a problem");
+    assert_eq!(start_total, all_problems, "Start here scorecard Total");
+    assert_eq!(pdf_scorecard, all_problems, "PDF scorecard Total");
+    assert_eq!(cover, all_problems, "PDF cover counts");
+}

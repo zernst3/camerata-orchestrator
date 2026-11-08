@@ -506,23 +506,15 @@ fn shipped_template_gates_the_failed_pass_disclosure_on_both_sections() {
 /// value — `or_na`'s "N/A" reads as the latter. Pins that the shipped template uses the
 /// field-specific placeholders for both fields in the per-finding chip line, never `or_na`.
 #[test]
-fn shipped_template_never_renders_na_for_effort_or_confidence() {
+fn shipped_template_never_renders_na_for_effort() {
     let template = include_str!("../../../templates/audit_report.typ");
     assert!(
-        template.contains("or_not_estimated(site.effort)"),
+        template.contains("or_not_estimated(item.effort)"),
         "an unestimated effort must render \"not estimated this run\", not \"N/A\""
     );
     assert!(
-        template.contains("or_not_evaluated(site.confidence)"),
-        "an unevaluated confidence must render \"not evaluated this run\", not \"N/A\""
-    );
-    assert!(
-        !template.contains("or_na(site.effort)"),
-        "the per-finding effort chip must never fall back to the generic N/A placeholder"
-    );
-    assert!(
-        !template.contains("or_na(site.confidence)"),
-        "the per-finding confidence chip must never fall back to the generic N/A placeholder"
+        !template.contains("or_na(item.effort)"),
+        "an entry's effort must never fall back to the generic N/A placeholder"
     );
 }
 
@@ -610,64 +602,6 @@ fn a_failed_estimation_pass_is_disclosed_and_unestimated_rows_still_ship() {
 }
 
 // ── Template regressions (2026-09-13 review) ────────────────────────────────
-
-/// FIX 1 rendering bug this pass fixes: `CuratedSiteJson.fix`/`fix_for_this_finding` are
-/// `Option<String>`, which serialize to JSON `null` and parse in Typst as `none` — NOT an
-/// empty string. A `!= ""` guard would let `none` fall into the render branch and print a
-/// bare "Fix:" label with nothing after it. Pins the correct `!= none` guard in the shipped
-/// template so this can't regress silently.
-#[test]
-fn shipped_template_gates_the_fix_block_on_none_not_empty_string() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    assert!(
-        template.contains("if site.fix != none"),
-        "the Fix block must be gated on `!= none` (Option<String> -> JSON null -> Typst \
-             none), not `!= \"\"` — see report_export::CuratedSiteJson::fix's doc comment"
-    );
-    assert!(
-        !template.contains("if site.fix != \"\""),
-        "the old `!= \"\"` gate must not come back"
-    );
-    assert!(
-        template.contains("site.fix_for_this_finding != none"),
-        "the template must gate on `fix_for_this_finding`'s presence, not just `fix`'s"
-    );
-}
-
-/// P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix) must be the
-/// PRIMARY "Fix:" line, with the rule's generic `fix` demoted to a secondary line
-/// UNDER it — never the reverse order this template used before fix-generation existed.
-#[test]
-fn shipped_template_renders_fix_specific_before_the_generic_fix() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    let primary_idx = template
-        .find(r#"if site.fix_for_this_finding != none ["#)
-        .expect("the primary branch must gate on fix_for_this_finding first");
-    let fix_label_idx = template[primary_idx..]
-        .find(r#"[#site.fix_type: ]#fix_body(site.fix_for_this_finding)"#)
-        .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
-    let secondary_idx = template[primary_idx..]
-        .find("General guidance: ")
-        .expect("the rule's generic fix must render as secondary \"General guidance\" text");
-    assert!(
-        fix_label_idx < secondary_idx,
-        "fix_for_this_finding's Fix: line must render BEFORE the generic General guidance \
-             line"
-    );
-}
-
-/// The fallback path (fix-generation never ran or gave up) must still show the rule's
-/// generic remediation as the ONLY Fix line — never silently drop it.
-#[test]
-fn shipped_template_falls_back_to_the_generic_fix_when_no_fix_specific() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    assert!(
-        template.contains("] else if site.fix != none ["),
-        "the fallback branch must still render the generic fix alone when \
-             fix_for_this_finding is none"
-    );
-}
-
 /// FIX 4 regression: the exec summary's own "Top priority items" bullet list (and its
 /// `top_do_now` feed) must not come back — the "Three things this week" box is the one
 /// place page 3 names the top do-now findings.
@@ -722,10 +656,9 @@ fn the_typst_time_budget_is_a_base_plus_a_per_site_allowance_up_to_a_ceiling() {
 }
 
 #[test]
-fn the_site_count_is_every_site_on_a_curated_or_held_card() {
+fn the_site_count_is_the_places_the_report_covers() {
     let data = serde_json::json!({
-        "curated_findings": [{"sites": [{}, {}, {}]}, {"sites": [{}]}],
-        "held_for_review_findings": [{"sites": [{}, {}]}],
+        "site_total": 6,
         "cover": {"project_title": "x"}
     })
     .to_string();
@@ -749,11 +682,7 @@ async fn a_typst_that_outlives_its_budget_fails_naming_the_size_and_ships_no_pdf
     )
     .expect("write the fake typst");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let data = serde_json::json!({
-        "curated_findings": [{"sites": [{}, {}, {}, {}, {}]}],
-        "held_for_review_findings": []
-    })
-    .to_string();
+    let data = serde_json::json!({ "site_total": 5 }).to_string();
     let started = std::time::Instant::now();
     let result = TYPST_PROGRAM
         .scope(
@@ -817,15 +746,20 @@ fn shipped_template_priority_grid_counts_findings_instead_of_listing_them_again(
         "the grid cell must count its findings"
     );
     assert!(
-        template.contains("listed once, in Curated findings"),
-        "the grid must say where the findings are listed"
+        template.contains("d.priority_grid.footnote"),
+        "the grid must say where the problems are listed"
+    );
+    let footnote = build_priority_grid(&MatrixJson::default()).footnote;
+    assert!(
+        footnote.contains(crate::xlsx_export::vocabulary::ALL_PROBLEMS),
+        "{footnote}"
     );
 }
 
 #[tokio::test]
-async fn compile_pdf_prints_each_action_site_exactly_once() {
+async fn compile_pdf_prints_no_place_of_a_report_with_no_escalation_and_counts_them_all() {
     if which_typst().is_none() {
-        eprintln!("skipping compile_pdf_prints_each_action_site_exactly_once: typst not on PATH");
+        eprintln!("skipping: typst not on PATH");
         return;
     }
     let findings: Vec<Finding> = (0..8)
@@ -851,20 +785,15 @@ async fn compile_pdf_prints_each_action_site_exactly_once() {
         .flat_map(|r| r.cells.iter())
         .map(|c| c.findings.len())
         .sum();
-    let on_cards: usize = json.curated_findings.iter().map(|g| g.sites.len()).sum();
     assert_eq!(in_grid, 8, "all eight reach the grid");
-    assert_eq!(on_cards, 8, "all eight have a card");
 
     let pdf = compile_pdf(&json).await.expect("the report must compile");
     let text = pdf_extract::extract_text_from_mem(&pdf).expect("text of the compiled PDF");
-    for i in 0..8 {
-        let path = format!("handler_{i}.rs");
-        assert_eq!(
-            text.matches(&path).count(),
-            1,
-            "{path} must be printed exactly once in the PDF: {text}"
-        );
-    }
+    assert_eq!(
+        text.matches("handler_").count(),
+        0,
+        "the PDF is a summary: no place is listed unless it is escalated or in the top three: {text}"
+    );
 }
 
 /// Branding regression: no hardcoded agency/"Camerata" cover title, no "Brownfield".
@@ -883,7 +812,9 @@ fn shipped_template_has_no_hardcoded_cover_title() {
 fn shipped_template_cover_table_omits_audit_and_calibration_model() {
     let template = include_str!("../../../templates/audit_report.typ");
     let cover_start = template.find("── 1. Cover").expect("cover section marker");
-    let cover_end = template.find("── ToC").expect("ToC section marker");
+    let cover_end = template
+        .find("── 2. Contents")
+        .expect("contents section marker");
     let cover_section = &template[cover_start..cover_end];
     assert!(!cover_section.contains("Audit model"));
     assert!(!cover_section.contains("Calibration model"));

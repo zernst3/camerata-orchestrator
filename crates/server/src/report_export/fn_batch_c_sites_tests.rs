@@ -97,33 +97,3 @@ fn a_rule_that_survived_only_as_an_absorbed_site_is_not_counted_clean_in_the_sco
         "the absorbed rule fired, so it cannot be clean: {row:?}"
     );
 }
-
-#[tokio::test]
-async fn the_pdf_lists_every_absorbed_site_up_to_ten_and_counts_the_rest() {
-    if super::tests::which_typst().is_none() {
-        eprintln!("skipping the PDF absorbed-sites test: typst not on PATH");
-        return;
-    }
-    let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(
-            &report_with_absorbed_sites(12).seal(),
-            &HashMap::new(),
-        ),
-        None,
-        &empty_opts(),
-    );
-    let pdf = compile_pdf(&json).await.expect("the PDF compiles");
-    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
-    let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(joined.contains("Alsofoundat12othersites"), "{text}");
-    assert!(joined.contains("src/other0.rs"), "{text}");
-    assert!(joined.contains("src/other9.rs"), "{text}");
-    assert!(
-        !joined.contains("src/other10.rs"),
-        "the PDF names ten: {text}"
-    );
-    assert!(
-        joined.contains("and2more,listedinfullintheworkbookandfindings.json"),
-        "{text}"
-    );
-}

@@ -230,6 +230,13 @@ pub struct ThreeThingsItemJson {
     pub repo: String,
     pub path: String,
     pub line: usize,
+    /// The place as the PDF prints it, with the rule id: `repo / path, line 12 (RULE)`, or
+    /// `whole file`. Built from the vocabulary; never "line 0".
+    pub place: String,
+    /// "Closes 6 rules: A, B": empty for a Fix of one rule.
+    pub closes_line: String,
+    /// "3 places": empty for a Fix of one place.
+    pub places_line: String,
     pub rule_id: String,
     pub severity: String,
     /// A rough, LABELED-as-rough hour estimate (e.g. `"2 to 4 hours"`), never a bare number
@@ -414,6 +421,8 @@ pub struct PriorityGridJson {
     pub rows: Vec<GridRowJson>,
     pub accepted_count: usize,
     pub informational_count: usize,
+    /// The line under the grid: each cell counts, the rows are on the All problems sheet.
+    pub footnote: String,
 }
 
 /// Normalize an OPTIONAL calibrated effort into one of the grid's 4 fixed column keys. `None`
@@ -496,6 +505,10 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
         rows,
         accepted_count: matrix.accepted.len(),
         informational_count: matrix.informational.len(),
+        footnote: format!(
+            "Each cell counts the problems in it. Every problem is on the {} sheet, with its severity, effort and place.",
+            crate::xlsx_export::vocabulary::ALL_PROBLEMS
+        ),
     }
 }
 
@@ -915,6 +928,12 @@ pub struct DependencySnapshotJson {
     /// Honesty line(s) about dep-audit coverage (e.g. osv-scanner unavailable this run).
     pub coverage_notes: Vec<String>,
     pub clean: bool,
+    /// "4 advisories: 1 critical, 3 high": the count the PDF states. Empty when there are none.
+    pub summary_line: String,
+    /// The worst few advisories ([`PDF_MAX_DEPENDENCIES`]), the PDF's only dependency rows.
+    pub worst: Vec<DependencyFindingJson>,
+    /// "and 12 more in the Dependencies sheet"; empty when none are left out.
+    pub more_line: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -946,6 +965,73 @@ pub struct MethodologyJson {
     pub citation_note: String,
 }
 
+/// One question of "Where the details are" and the sheet that answers it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetailMapEntryJson {
+    pub question: String,
+    pub sheet: String,
+}
+
+/// The words the PDF prints that the vocabulary module owns, so the PDF and the workbook name
+/// every thing the same way. The template reads them from here and spells none of them itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct PdfWordsJson {
+    /// The PDF's fifteen sections, in order ([`crate::xlsx_export::vocabulary::PDF_SECTIONS`]).
+    pub sections: Vec<String>,
+    pub detail_map: Vec<DetailMapEntryJson>,
+    pub whole_file: String,
+    pub rules: String,
+    pub what_to_do: String,
+    pub effort: String,
+    pub decision_so_far: String,
+    pub fix_order: String,
+    pub severity: String,
+    pub area: String,
+    /// How many skipped files the PDF names before it points at the Not checked sheet.
+    pub skipped_files_cap: usize,
+    /// "and N more skipped files, listed in full on the Not checked sheet and in findings.json":
+    /// the part after "N".
+    pub skipped_files_more: String,
+    /// The sentence that opens "Where the details are".
+    pub details_intro: String,
+    pub patterns_across_services: String,
+}
+
+impl PdfWordsJson {
+    pub(crate) fn new() -> Self {
+        use crate::xlsx_export::vocabulary as v;
+        Self {
+            sections: v::PDF_SECTIONS.iter().map(ToString::to_string).collect(),
+            detail_map: v::DETAIL_MAP
+                .iter()
+                .map(|(question, sheet)| DetailMapEntryJson {
+                    question: (*question).to_string(),
+                    sheet: (*sheet).to_string(),
+                })
+                .collect(),
+            whole_file: v::WHOLE_FILE.to_string(),
+            rules: v::H_RULES.to_string(),
+            what_to_do: v::H_WHAT_TO_DO.to_string(),
+            effort: v::H_EFFORT.to_string(),
+            decision_so_far: v::H_DECISION_SO_FAR.to_string(),
+            fix_order: v::H_FIX_ORDER.to_string(),
+            severity: v::H_SEVERITY.to_string(),
+            area: v::H_AREA.to_string(),
+            details_intro: format!(
+                "Every row behind this report is in the workbook, one tab for each question below. \
+                 The {} sheet is the place to start.",
+                v::START_HERE
+            ),
+            patterns_across_services: v::PATTERNS_ACROSS_SERVICES.to_string(),
+            skipped_files_cap: PDF_MAX_SKIPPED_FILES,
+            skipped_files_more: format!(
+                "more skipped files, listed in full on the {} sheet and in findings.json",
+                v::NOT_CHECKED
+            ),
+        }
+    }
+}
+
 /// The serializer's single output type — mirrors the §4 anatomy sections in
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
@@ -955,17 +1041,19 @@ pub struct AuditReportJson {
     /// group reviewer's triage columns go in.
     #[serde(skip)]
     pub internal: bool,
-    /// The sites the full PDF would print (design A14 item 4).
+    /// The places the report covers (every place of every problem).
     pub site_total: usize,
-    /// True above [`FULL_PDF_SITE_LIMIT`] sites: only the reshaped PDF is rendered. The per-site
-    /// cards, the held-for-review cards and the matrix lists are empty, and
-    /// [`Self::reduced_matrix`] carries the counts they would have given.
-    pub reduced: bool,
-    /// The matrix rows' counts by bucket, severity and kind. Filled only when [`Self::reduced`].
-    pub reduced_matrix: Vec<MatrixTallyJson>,
-    /// The sites the group reviewer escalated, with their decisions.
+    /// The words the PDF prints that the vocabulary module owns: the section titles, the labels,
+    /// the sheet names of "Where the details are".
+    pub words: PdfWordsJson,
+    /// The places the group reviewer escalated, with their decisions.
     pub escalations: EscalationsJson,
-    /// One entry for each sub-group: its summary, cause, fix once and a worked example.
+    /// "The other fixes": one line for each Fix that is not one of the most serious problems.
+    pub other_fixes: OtherFixesJson,
+    /// "Your conventions": counts and short lines.
+    pub conventions: ConventionsSummaryJson,
+    /// One entry for each Fix: its summary, cause, fix once and a worked example. The workbook
+    /// and the tickets read it; the PDF prints [`Self::other_fixes`] and the escalations.
     pub sub_group_patterns: Vec<PatternJson>,
     /// Said in the Patterns section when the report has findings and no review tree (so no
     /// pattern), empty otherwise.

@@ -270,7 +270,10 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
         "no runtime row is dropped from the report"
     );
 
-    let data = render_data_json(&report_json).unwrap();
+    // The report data holds every row. (The PDF's own data holds only the headlines of the top
+    // three and the escalated places: it is a summary, and every row is on the All problems
+    // sheet.)
+    let data = serde_json::to_string(&report_json).unwrap();
     let data = squeezed(&data);
     for sentence in [
         "Node.js 18 has received no security fixes since 2025-04-30.",
@@ -279,7 +282,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
         "Node.js 18.17.0 has 4 known vulnerabilities recorded in the National Vulnerability Database.",
         "Known exploited: CVE-2023-44487 is listed in the CISA KEV catalog (added 2023-10-10). Severity raised from high to critical.",
     ] {
-        assert!(data.contains(&squeezed(sentence)), "the PDF data lacks: {sentence}");
+        assert!(data.contains(&squeezed(sentence)), "the report data lacks: {sentence}");
     }
     // The rule's own authored remediation reaches the report.
     assert!(
@@ -388,15 +391,14 @@ async fn the_rendered_pdf_and_readme_carry_the_findings_and_the_stamp() {
     .expect("the package assembles");
     let text = pdf_extract::extract_text_from_mem(&package.pdf).expect("the PDF's text extracts");
     let flat = squeezed(&text);
-    for sentence in [
-        "Node.js 18 has received no security fixes since 2025-04-30.",
-        "Node.js 18.17.0 has 4 known vulnerabilities",
-    ] {
-        assert!(
-            flat.contains(&squeezed(sentence)),
-            "the rendered PDF lacks: {sentence}"
-        );
-    }
+    // The PDF is a summary: it prints the headline of the known-exploited runtime (a critical, so
+    // one of the top three) and not the rows of lower severity, which are on the All problems
+    // sheet and in the CSV files.
+    let sentence = "Node.js 18.17.0 has 4 known vulnerabilities";
+    assert!(
+        flat.contains(&squeezed(sentence)),
+        "the rendered PDF lacks: {sentence}"
+    );
     // A client README carries no provenance line; the stamps are in the manifest's inspection
     // block.
     assert!(!package.readme.contains("Vulnerability data ("));

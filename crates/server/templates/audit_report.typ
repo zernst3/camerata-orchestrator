@@ -239,10 +239,17 @@
   #text(size: 8.5pt, weight: 600, tracking: 0.09em, fill: accent)[#upper(label)]
 ]
 
-// One report section: the eyebrow, then the level-1 heading the contents page lists.
-#let section(label, title) = {
+// The words the vocabulary module owns: the section titles, the labels and the sheet names. The
+// template spells none of them itself, so the PDF and the workbook name every thing alike.
+#let W = d.words
+#let sec(i) = W.sections.at(i)
+
+// One report section: the eyebrow, then the level-1 heading the contents page lists. A section
+// that is not listed on the contents page (the contents page itself) is still a bookmark in the
+// PDF outline, so the outline is always the whole list of sections.
+#let section(label, title, outlined: true) = {
   eyebrow(label)
-  heading(level: 1, title)
+  heading(level: 1, outlined: outlined, bookmarked: true, title)
 }
 
 // Sub-heading (h3): 13 pt, 600, tracking -0.012em, ink.
@@ -318,122 +325,6 @@
   ]
 }
 
-// The card's location strip: the severity chip, then `repo / path, line N` in mono, ink-faint,
-// on a 3.5% ink tint with a 4 pt radius (the site's report-excerpt shape).
-// A place: `line N`, or "whole file" for a problem in a whole file (the report records it as
-// line 0, and a reader must never see "line 0").
-#let place_label(line) = if line == 0 { "whole file" } else { "line " + str(line) }
-
-// A place as one string, `path:line`, or `path (whole file)` for line 0.
-#let place_of(path, line) = if line == 0 { path + " (whole file)" } else { path + ":" + str(line) }
-
-#let location_strip(sev, repo, path, line) = block(fill: tint, radius: 4pt, inset: (x: 6pt, y: 4pt), width: 100%, below: 8pt)[
-  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), #place_label(line)]
-]
-
-// One curated-finding site, as a finding card — factored out so the FIRST site of a group can
-// be kept together with its heading (S4) while later sites are free to break across pages.
-//
-// FIX 8 (2026-09-13 review): "the plain-English headline leads; the engineer-normative rule
-// title renders smaller/grey BENEATH it." `site.headline` was already the primary bold
-// heading (Item 1, above) — but for a group's FIRST site, the once-per-group `rule_id: title`
-// subtitle used to render ABOVE it (see the curated-findings loop below), so the reading order
-// put the engineer-facing rule id first after all. `after_headline` lets the caller inject
-// that subtitle (plus the citation) directly UNDER this site's headline instead, so it always
-// reads headline-first regardless of which site in the group is rendering.
-//
-// W27 card order (brand guide, "Finding card"): location strip, headline, impact, a divider,
-// the "Fix:" line in accent, then the card footer in mono ink-faint.
-#let render_site(site, after_headline: none) = {
-  block(above: 10pt, below: 0pt, card[
-    #location_strip(site.severity, site.repo, site.path, site.line)
-    // Item 1: the DEFECT at this object is the primary, bold heading — never the rule's own
-    // invariant title (that reads as a clean bill of health out of context).
-    #subheading[#site.headline]
-    #if after_headline != none [
-      #v(2pt)
-      #after_headline
-    ]
-    #if site.snippet != "" [
-      #block(fill: tint, inset: 6pt, radius: 4pt, width: 100%)[#breakable(site.snippet, n: 70)]
-    ]
-    #site.detail
-    // FIX 1 contract (report_export.rs's `CuratedSiteJson.fix`): `Option<String>` serializes
-    // to JSON `null`, which Typst's `json()` parses as `none` — NOT an empty string. Every
-    // check below must be `!= none`; a `!= ""` check would let a `none` value fall into the
-    // branch and render a bare "Fix:" label with nothing after it.
-    //
-    // P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix — see that field's
-    // doc comment in report_export.rs) is now the PRIMARY "Fix:" line whenever it's present;
-    // the rule's generic authored `fix` demotes to a secondary "General guidance:" line
-    // underneath it. When fix-generation never ran or gave up (`fix_for_this_finding ==
-    // none` — a deterministic-only scan, or a needs-review "fix not generated" finding), the
-    // generic `fix` — if any — is still shown, as the ONLY "Fix:" line, exactly like before
-    // this pass. Nothing renders when BOTH are `none`.
-    #if site.fix_for_this_finding != none or site.fix != none [
-      #line(length: 100%, stroke: 0.5pt + line_c)
-    ]
-    // D8: the label is the row's `fix_type` ("Tailored fix" or "Standard fix"). A standard fix IS
-    // the rule's own guidance, so the "General guidance" line (the same text) is not repeated.
-    #if site.fix_for_this_finding != none [
-      #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix_for_this_finding)
-      #if site.fix != none and site.fix_type != "Standard fix" [
-        #v(0.05cm)
-        #text(size: 8.5pt, fill: ink_faint)[General guidance: #fix_body(site.fix)]
-      ]
-    ] else if site.fix != none [
-      #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix)
-    ]
-    #v(2pt)
-    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition#if site.why_waiting != none [ · Why it is waiting: #site.why_waiting]]
-    // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
-    // `report_export::also_matches_titles`'s doc comment.
-    #if site.also_matches_titles.len() > 0 [
-      #linebreak()
-      #text(size: 8pt, fill: ink_faint)[Also violates: #site.also_matches_titles.join(", ")]
-    ]
-    // M2/M8: when a rule's ceiling, floor or the unlocated safety net moved this row's
-    // severity, say what it was and why. Prints nothing for a row no bound moved.
-    #if site.severity_adjustments.len() > 0 [
-      #for note in site.severity_adjustments [
-        #linebreak()
-        #text(size: 8pt, fill: ink_faint)[#note]
-      ]
-    ]
-    // H6: every site a merge folded into this row, so a row that stands for several places
-    // says so. The first ten are named; the rest are counted and point to the workbook, which
-    // lists them all.
-    #if site.also_sites.len() > 0 [
-      #linebreak()
-      #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
-      #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
-        #linebreak()
-        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), #place_label(also.line)]
-        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]] else if also.headline != none [#text(size: 8pt, fill: ink_faint)[(#also.headline)]]
-        #if also.severity != none [#text(size: 8pt, fill: ink_faint)[(rated #also.severity)]]
-        #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
-      ]
-      #if site.also_sites.len() > 10 [
-        #linebreak()
-        #text(size: 8pt, fill: ink_faint)[and #str(site.also_sites.len() - 10) more, listed in full in the workbook and findings.json]
-      ]
-    ]
-    // Members of a merge flagged at this row's own place are the same site, not another one.
-    #if site.also_flagged_here.len() > 0 [
-      #for note in site.also_flagged_here [
-        #linebreak()
-        #text(size: 8pt, fill: ink_faint)[#note]
-      ]
-    ]
-    // A credential another repo of the project also flags under the same name. Display only:
-    // each service's row stays its own.
-    #if site.same_credential_note != "" [
-      #linebreak()
-      #text(size: 8pt, fill: ink_faint)[#site.same_credential_note]
-    ]
-  ])
-}
-
 // ── 1. Cover ─────────────────────────────────────────────────────────────
 // Branding (2026-09-13 review): the cover title is `brand_title` (computed above from the
 // resolved `d.cover.brand`, never a hardcoded agency or "Camerata" literal), and the old
@@ -442,6 +333,8 @@
 // Camerata-version row have moved off the cover into Methodology further down (see "Scanned
 // with Camerata v..." there): Camerata is the auditing INSTRUMENT, legitimately named where
 // methodology is discussed, not on the client-facing cover.
+// The cover is the first section of the PDF outline. Its heading takes no room on the page.
+#place(top + left, hide(heading(level: 1, outlined: false, bookmarked: true, sec(0))))
 #brand_lockup(34pt, "brand-mark.svg", size: 10pt)
 #v(2.2cm)
 #block[
@@ -546,14 +439,16 @@
 
 #pagebreak()
 
-// ── ToC (nice-to-have): one line of Typst, clickable bookmarks in every viewer ───────
-#eyebrow("Contents")
+// ── 2. Contents ──────────────────────────────────────────────────────────────────────────
+// One line of Typst, clickable bookmarks in every viewer. The contents page is a bookmark too,
+// but not a line of its own list.
+#section("Contents", sec(1), outlined: false)
 #outline(title: none, depth: 1)
 
 #pagebreak()
 
-// ── 2. Executive summary ──────────────────────────────────────────────────
-#section("Summary", [Executive summary])
+// ── 3. Executive summary ─────────────────────────────────────────────────────────────────
+#section("Summary", sec(2))
 
 #d.executive_summary.narrative
 
@@ -562,7 +457,7 @@
 ]
 
 // W6: a failed/timed-out pass must be disclosed, never omitted silently. Rendered here
-// (the summary) AND again in Methodology & limitations below — the same strings both times,
+// (the summary) AND again in the methodology below — the same strings both times,
 // see `report_export::failed_pass_disclosures`. Gated on non-empty so a clean run renders
 // nothing extra.
 #if d.executive_summary.failed_passes.len() > 0 [
@@ -574,46 +469,33 @@
   ]
 ]
 
-// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the executive summary used
-// to ALSO restate the top do-now findings as its own bulleted "priority items" list right
-// here — on top of the narrative's own blast-radius lead sentence (dropped, see
-// `report_export::default_narrative`'s doc comment) and the "Three things this week" box
-// immediately below. The exec summary is now curation + counts only; the box below is the ONE
-// place that names the top items.
-
-// ── Item 7: "If you only do three things this week" ───────────────────────
-// A buyer pricing remediation reads "these two criticals are about four hours of work total"
-// as the sentence that converts anxiety into a purchase order — a half-page box, not a whole
-// new page, right after the executive summary.
+// ── 4. If you only do three things this week ─────────────────────────────────────────────
+// One entry is one fix, so the box never lists one change several times. The total counts each
+// fix's effort once.
 #v(0.4cm)
-#section("Priorities", [If you only do three things this week])
+#section("Priorities", sec(3))
 
 #if d.three_things.items.len() == 0 [
-  No do-now items this run.
+  No fix is due first this run.
 ] else [
   #panel[
     #for item in d.three_things.items [
       #block(above: 4pt, below: 10pt)[
         #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
         #linebreak()
-        #text(font: mono, size: 8pt, fill: ink_faint)[
-          #item.repo / #breakable(item.path), #place_label(item.line) (#item.rule_id)
-        ]
-        // Item #1: one entry is one fix. Every rule the fix closes is named, and its places are
-        // counted, so the box never lists one change several times.
-        #if item.rules.len() > 1 [
+        #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
+        #if item.closes_line != "" [
           #linebreak()
-          #text(size: 8.5pt, fill: ink_soft)[Closes #item.rules.len() rules: #item.rules.join(", ")]
+          #text(size: 8.5pt, fill: ink_soft)[#item.closes_line]
         ]
-        #if item.places > 1 [
+        #if item.places_line != "" [
           #linebreak()
-          #text(size: 8.5pt, fill: ink_soft)[#item.places places]
+          #text(size: 8.5pt, fill: ink_soft)[#item.places_line]
         ]
         #linebreak()
         #text(size: 9pt)[Rough estimate: #item.hours_label]
         // FIX 7 (2026-09-13 review): one factual sentence of what the exposure MEANS, when
-        // one is authored for this rule (`report_export::business_impact_for_rule`) — omitted
-        // gracefully (no blank line, no "impact unknown" filler) when it isn't.
+        // one is authored for this rule — omitted gracefully when it isn't.
         #if item.impact != none [
           #linebreak()
           #text(size: 8.5pt, style: "italic", fill: ink_soft)[#item.impact]
@@ -626,28 +508,25 @@
   ]
 ]
 
-#pagebreak()
+#pagebreak(weak: true)
 
-// ── 3. Category scorecard ─────────────────────────────────────────────────
-#section("Scorecard", [Category scorecard])
+// ── 5. Area scorecard ────────────────────────────────────────────────────────────────────
+#section("Scorecard", sec(4))
 
 #if d.scorecard.rows.len() == 0 [
-  No findings were produced by any inspected category.
+  No problem was found in any inspected area.
 ] else [
   #table(
-    // Item 6: the critical/high/medium/low columns get a FIXED width (not "auto") because
-    // heat_cell's box is itself fixed-width — an "auto" column sized against a 100%-relative
-    // child creates a circular sizing problem that corrupts the whole table's row layout.
-    // FIX 5 (2026-09-13 review): the "checked/clean" column is now spelled out in words
-    // ("N checked, M clean") rather than a bare "N/M" fraction that reads as a grade — widened
-    // from `auto` to a fixed width to keep that longer text from cramping the table.
-    columns: (1.3fr, 2.1cm, 2.1cm, 2.1cm, 2.1cm, 2.9cm, 1.1fr),
+    // The severity columns get a FIXED width because `heat_cell`'s box is itself fixed-width.
+    // The status column is wide enough for its longest chip, so no word breaks mid-word, and the
+    // area name wraps when it has no natural break.
+    columns: (1fr, 1.7cm, 1.7cm, 1.7cm, 1.7cm, 3.7cm, 3.3cm),
     stroke: table_stroke,
-    inset: (x: 4pt, y: 6pt),
+    inset: (x: 4pt, y: 5pt),
     align: horizon,
-    table.header(th[Category], th[Critical], th[High], th[Medium], th[Low], th[Rules checked · Rules clean], th[Status]),
+    table.header(th[#W.area], th[Critical], th[High], th[Medium], th[Low], th[Rules checked · Rules clean], th[Status]),
     ..d.scorecard.rows.map(row => (
-      [#row.category],
+      [#breakable(row.category, n: 18)],
       heat_cell(row.critical, "critical"),
       heat_cell(row.high, "high"),
       heat_cell(row.medium, "medium"),
@@ -658,16 +537,13 @@
   )
 ]
 
-#pagebreak()
+#v(0.6cm)
 
-// ── 4. Severity × effort matrix ───────────────────────────────────────────
-// FIX 6 (2026-09-13 review, "build the real 2-D grid"): this used to be 4 unrelated boxes
-// (Do now / Do next / Plan / Accepted) under a heading that promised a 2-D placement it never
-// delivered — and it duplicated page 3's "Three things this week" box. `d.priority_grid`
-// (`report_export::build_priority_grid`) is the ACTUAL severity-rows x effort-columns grid:
-// each open finding sits in exactly one cell. Accepted and Informational findings are
-// deliberately out of scope (a footnote, not a row/column) — see the struct's doc comment.
-#section("Prioritization", [Severity by effort matrix])
+// ── 6. Severity by effort matrix ─────────────────────────────────────────────────────────
+// Each problem sits in exactly one cell (`d.priority_grid`, built by
+// `report_export::build_priority_grid`). A cell counts; it lists no problem. A cell with no
+// problem in it is blank: the row and column headers already say which bucket it is.
+#section("Prioritization", sec(5))
 
 #let effort_col_label(key) = {
   if key == "low" { "Low effort" }
@@ -676,31 +552,21 @@
   else { "Not yet estimated" }
 }
 
-// C4-R3: a cell with no findings in it used to render the literal word "None" — read by a
-// non-engineer client as something having GONE WRONG (a stringified absent value), not as the
-// intended "nothing landed in this severity x effort bucket" empty state. An empty cell now
-// renders as blank — the row/column headers already say which bucket it is, so a blank cell at
-// their intersection reads as "zero" without needing a word for it (and this house style never
-// uses an em/en dash as a placeholder either, see `or_na` above).
 #let grid_cell_content(cell) = {
-  // M8: a cell COUNTS its findings. It used to list each one's headline and location a second
-  // time, beside the curated card that is the one place a site is described in full; at report
-  // scale that doubled the document. The cards carry the severity, effort and location, in the
-  // order the grid is read.
   let n = cell.findings.len()
   if n == 0 [] else [
-    #text(size: 9pt, weight: 600, fill: ink)[#str(n)] #text(size: 8pt, fill: ink_faint)[#plural(n, "finding", "findings")]
+    #text(size: 9pt, weight: 600, fill: ink)[#str(n)] #text(size: 8pt, fill: ink_faint)[#plural(n, "problem", "problems")]
   ]
 }
 
 #if d.priority_grid.rows.len() == 0 [
-  No do-now, do-next or plan findings this run.
+  No problem is due First, Next or Later this run.
 ] else [
   #table(
     columns: (auto,) + d.priority_grid.columns.map(c => 1fr),
     stroke: table_stroke,
     inset: (x: 5pt, y: 6pt),
-    table.header(th[Severity], ..d.priority_grid.columns.map(c => th[#effort_col_label(c)])),
+    table.header(th[#W.severity], ..d.priority_grid.columns.map(c => th[#effort_col_label(c)])),
     ..d.priority_grid.rows.map(row => (
       [#severity_chip(row.severity)],
       ..row.cells.map(cell => grid_cell_content(cell)),
@@ -710,243 +576,131 @@
 
 #if d.priority_grid.rows.len() > 0 [
   #v(0.3cm)
-  #text(size: 8.5pt, fill: ink_faint)[Each cell counts the findings in it. Every finding is listed once, in Curated findings, with its severity, effort and location.]
+  #text(size: 8.5pt, fill: ink_faint)[#d.priority_grid.footnote]
 ]
 
 #if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 [
   #v(0.3cm)
   #text(size: 8.5pt, fill: ink_faint)[
     #if d.priority_grid.accepted_count > 0 [
-      #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "finding is", "findings are") accepted risk and out of scope for this grid (see Curated findings).
+      #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "problem is", "problems are") accepted risk and out of scope for this grid.
     ]
     #if d.priority_grid.informational_count > 0 [
-      #str(d.priority_grid.informational_count) further #plural(d.priority_grid.informational_count, "item is", "items are") informational and out of scope for this grid.
+      #str(d.priority_grid.informational_count) further #plural(d.priority_grid.informational_count, "item is", "items are") information only and out of scope for this grid.
     ]
   ]
 ]
 
-#pagebreak()
+#pagebreak(weak: true)
 
-// One curated-findings GROUP (one rule, its citation/title header, and every site it covers) —
-// factored out so "Curated findings" and the separate "Held for review" section (C4-P4 residual
-// defect 5) render identically instead of maintaining two copies of this block.
-//
-// S4: keep the group heading + citation + FIRST site together (orphan control) — later sites in
-// the same group are free to break across pages normally.
-//
-// FIX 8 (2026-09-13 review): the BOLD, primary heading for each finding is the per-site defect
-// headline (`render_site`'s own `site.headline`, Item 1) and now LEADS the block outright — the
-// rule id + its own invariant title, plus the citation, render as a small gray SUBTITLE directly
-// BENEATH that headline (via `render_site`'s `after_headline`), kept for registry traceability,
-// never as the thing a reader sees first.
-#let render_curated_group(group) = {
-  block(breakable: false)[
-    #block(above: 12pt, below: 2pt)[
-      #if group.sites.len() > 0 [
-        #render_site(group.sites.at(0), after_headline: [
-          #text(size: 8.5pt, fill: ink_faint)[#group.rule_id: #group.title] #text(size: 8.5pt, fill: ink_faint)[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
-          // Item 5: show the citation ONCE. When real external sources exist, the bulleted
-          // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
-          // those same titles) is dropped. `label` is shown only when there are no external
-          // sources to bullet (the advisory/preview case), where it is the sole honesty note.
-          #if group.citation.sources.len() > 0 [
-            // H5: a keyword-matched standard is labelled as related, never as a rule check.
-            #if group.citation.kind == "related" [
-              #text(size: 8.5pt, fill: rgb("#555555"))[Related standard (matched by keyword, not a rule check):]
-            ]
-            #for s in group.citation.sources [
-              #text(size: 8.5pt, fill: ink_faint)[- #s.title #if s.url != "" [(#s.url)]]
-            ]
-          ] else [
-            #text(size: 8.5pt, fill: ink_faint)[#group.citation.label]
-          ]
-        ])
-      ]
-    ]
-  ]
-  for site in group.sites.slice(1) [
-    #render_site(site)
-  ]
-}
+// ── 7. The most serious problems ─────────────────────────────────────────────────────────
+// The places reviewed in person, worst first, at most the cap: one short entry for each place,
+// whatever the number of rules at it. Every other place is on the All problems sheet.
+#section("Escalations", sec(6))
 
-// ── Escalations and patterns (WO9, design 3B item 1) ───────────────────────────────────
-// The sites the architect reviewed in person, with the decision on each, and one entry for each
-// sub-group: what its sites share, the fix written once and a worked example. The sentence and the
-// counts come from the reviewed tree. No individual site is listed in a pattern: it points at the
-// Sites sheet of the workbook, filtered on the group.
-#if d.escalations.sentence != "" or d.escalations.items.len() > 0 [
-  #section("Escalations", [Sites reviewed in person])
-  #if d.escalations.sentence != "" [
-    #text(size: 9.5pt)[#d.escalations.sentence.]
-    #v(6pt)
-  ]
-  #if d.escalations.items.len() == 0 [
-    No site is above the line this run.
-  ] else [
-    #table(
-      columns: (auto, 2fr, 1fr, 2fr),
-      stroke: table_stroke,
-      inset: (x: 5pt, y: 4pt),
-      table.header(th[Severity], th[Finding], th[Location], th[Decision]),
-      ..d.escalations.items.map(item => (
-        [#severity_chip(lower(item.severity))],
-        [#item.headline#if item.rules.len() > 1 [
-          #linebreak()
-          #text(size: 8.5pt, fill: ink_soft)[#item.rules.join(", ")]
-        ]],
-        [#breakable(place_of(item.path, item.line))],
-        [#item.decision],
-      )).flatten()
-    )
-  ]
-  #pagebreak()
-]
-
-#if d.sub_group_patterns.len() == 0 and d.sub_group_patterns_note != "" [
-  #section("Patterns", [What the findings have in common])
-  #text(size: 9.5pt)[#d.sub_group_patterns_note]
-  #pagebreak()
-]
-
-#if d.sub_group_patterns.len() > 0 [
-  #section("Patterns", [What the findings have in common])
-  #text(size: 9pt, style: "italic", fill: ink_faint)[
-    Each entry is one kind of violation with one cause. It states the fix once. The sites it covers are in the Sites sheet of the workbook.
-  ]
-  #v(6pt)
-  #for p in d.sub_group_patterns [
-    #block(breakable: false, below: 12pt)[
-      #text(weight: 600, fill: ink)[#p.rule_title] #text(size: 8.5pt, fill: ink_faint)[#p.rule_id]
-      #h(6pt) #severity_chip(lower(p.severity))
-      #if p.rules.len() > 1 [
-        #v(2pt)
-        #text(size: 8.5pt, fill: ink_faint)[Closes #p.rules.len() rules: #p.rules.join(", ")]
-      ]
-      #if p.cause != "" [
-        #v(2pt)
-        #text(size: 9.5pt)[#p.cause]
-      ]
-      #if p.summary != "" [
-        #v(2pt)
-        #text(size: 9.5pt)[#p.summary]
-      ]
-      #v(2pt)
-      #text(size: 9pt, fill: ink_faint)[#p.pointer. Fix #p.sequence#if p.effort != "" [, effort #p.effort].]
-      #if p.fix != "" [
-        #v(3pt)
-        #text(weight: 600, size: 9pt)[Fix:] #fix_body(p.fix)
-      ]
-      #if p.worked_example != "" [
-        #v(3pt)
-        #text(weight: 600, size: 9pt)[Worked example:] #fix_body(p.worked_example)
-      ]
-      #if p.folders.len() > 0 [
-        #v(2pt)
-        #text(size: 8.5pt, fill: ink_faint)[Mostly in #p.folders.join(", ")]
-      ]
-    ]
-  ]
-  #pagebreak()
-]
-
-#if d.reduced [
-  #section("Findings", [Where the individual findings are])
-  This report covers #thousands(d.site_total) sites. The individual sites are not listed here: they are in the Sites sheet of the workbook and in the ticket file, one row for each site and one ticket for each pattern above.
+#if d.escalations.items.len() == 0 [
+  No place was sent for review in person in this inspection.
 ] else [
-// ── 5. Curated findings ───────────────────────────────────────────────────
-// C4-P4 (residual defect 5): `d.curated_findings` is already ordered by the server (severity
-// desc, then bucket do_now -> do_next -> plan -> accepted, then confidence) — see
-// `report_export::curated_group_sort_key` — never re-sorted (alphabetically or otherwise) here.
-#section("Findings", [Curated findings])
-
-#if d.curated_findings.len() == 0 [
-  No open code findings survived triage.
-] else [
-  #for group in d.curated_findings [
-    #render_curated_group(group)
-  ]
-]
-
-#pagebreak()
-
-// ── Held for review ─────────────────────────────────────────────────────────
-// C4-P4 (residual defect 5) / C5-4: a group whose sites are ALL informational (the severity-
-// capped, <= medium conventions-to-consider appendix) or ALL held (a calibration hedge at ANY
-// severity, including high/critical — see report_export::is_held_for_review) never renders under
-// "Curated findings" — that heading promises action items. Both route here, matching the
-// executive summary's own "held for a human reviewer's judgment call" framing. `render_site`
-// renders each site's own real severity via `severity_chip` and its own `disposition` label
-// (computed server-side, distinct wording for "informational" vs "held") — no bucket-specific
-// branching needed here. Same row-level content, own heading, own page, strictly AFTER every
-// curated finding above.
-#section("Review", [Held for review])
-
-#if d.held_for_review_findings.len() == 0 [
-  No findings held for a reviewer's judgment call this run.
-] else [
-  #text(size: 9pt, style: "italic", fill: ink_faint)[
-    Held for a human reviewer's judgment call. These are not open action items, but they are \
-    worth a second look.
-  ]
+  #text(size: 9pt, style: "italic", fill: ink_faint)[#d.escalations.intro]
   #v(4pt)
-  #for group in d.held_for_review_findings [
-    #render_curated_group(group)
+  #for item in d.escalations.items.slice(0, calc.min(d.escalations.items.len(), d.escalations.cap)) [
+    #block(breakable: false, above: 6pt, below: 8pt)[
+      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
+      #linebreak()
+      #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
+      #linebreak()
+      #text(size: 8.5pt, fill: ink_soft)[#item.rules_line]
+      #if item.what_to_do != "" [
+        #linebreak()
+        #text(weight: 600, size: 9pt, fill: accent)[#W.what_to_do: ]#text(size: 9pt)[#fix_body(item.what_to_do)]
+      ]
+      #linebreak()
+      #text(font: mono, size: 8pt, fill: ink_faint)[#W.effort: #or_not_estimated(item.effort) · #W.decision_so_far: #item.decision]
+    ]
+  ]
+  #if d.escalations.more_line != "" [
+    #text(size: 9pt, fill: ink_soft)[#d.escalations.more_line]
   ]
 ]
+
+// ── 8. The other fixes ───────────────────────────────────────────────────────────────────
+// One line for each fix that is not above, grouped by area, with a cap; the rest are counted.
+// Multi-repo observations fold in as short lines at the end. No fix text, no place list.
+#v(0.5cm)
+#section("Fixes", sec(7))
+
+#if d.other_fixes.groups.len() == 0 [
+  No other fix is due this run.
+] else [
+  #text(size: 9pt, style: "italic", fill: ink_faint)[#d.other_fixes.intro]
+  #v(4pt)
+  #for group in d.other_fixes.groups [
+    #block(breakable: false, above: 8pt, below: 2pt, sticky: true)[
+      #text(weight: 600, fill: ink)[#breakable(group.area, n: 40)]
+    ]
+    #for line in group.lines [
+      #block(above: 3pt, below: 3pt)[
+        #severity_chip(lower(line.severity)) #h(3pt) #line.name #text(size: 8.5pt, fill: ink_faint)[ · #line.places#if line.effort != "" [ · #line.effort effort] · #line.fix_order]
+      ]
+    ]
+  ]
+  #if d.other_fixes.more_line != "" [
+    #v(4pt)
+    #text(size: 9pt, fill: ink_soft)[#d.other_fixes.more_line]
+  ]
 ]
 
-// ── Patterns across services ──────────────────────────────────────────────────────────
-// Present only for a project of more than one repo. An observation after the findings: no
-// severity glyph, no chip, in no total (`report_export::PatternsAcrossServicesJson`). A cell
-// that is not applicable or not reviewed is printed as such, never as clean.
 #if d.patterns_across_services != none [
-  #pagebreak()
-  #section("Observations", [Patterns across services])
+  #v(0.4cm)
+  #subheading[#W.patterns_across_services]
+  #v(2pt)
   #text(size: 9pt, style: "italic", fill: ink_faint)[#d.patterns_across_services.note]
-  #v(6pt)
-  #if d.patterns_across_services.rows.len() == 0 [
+  #v(4pt)
+  #if d.patterns_across_services.summary_lines.len() == 0 [
     No rule was found violated in one service and clean in another.
   ] else [
-    #for row in d.patterns_across_services.rows [
-      #block(breakable: false, below: 10pt)[
-        #text(weight: 600, fill: ink)[#row.title]
-        #v(2pt)
-        #text(size: 9.5pt)[#row.statement]
-        #v(3pt)
-        #table(
-          columns: (auto, 1fr),
-          stroke: table_stroke,
-          inset: (x: 5pt, y: 4pt),
-          table.header(th[Service], th[Result]),
-          ..row.cells.map(cell => (
-            [#cell.repo],
-            [#cell.label],
-          )).flatten()
-        )
-      ]
+    #for line in d.patterns_across_services.summary_lines [
+      #block(above: 3pt, below: 3pt)[#line]
     ]
-    #for theme in d.patterns_across_services.themes [
-      #block(below: 6pt)[
-        #text(weight: 600, fill: ink)[#theme.name]: #theme.note
-      ]
+    #if d.patterns_across_services.more_line != "" [
+      #text(size: 9pt, fill: ink_soft)[#d.patterns_across_services.more_line]
     ]
   ]
 ]
 
-#pagebreak()
+#pagebreak(weak: true)
 
-// ── 6 + 7. What's healthy + Dependency snapshot (S1: share a page — each was ~85-90% ──
-// blank on its own) ─────────────────────────────────────────────────────────────────
-#section("Strengths", [What's healthy])
+// ── 9. Your conventions ──────────────────────────────────────────────────────────────────
+// Counts and short lines: what the code does consistently, where it has no single habit and
+// where it departs from itself. Every row is on the Your conventions and Departures sheets.
+#section("Conventions", sec(8))
+
+#if not d.conventions.any [
+  This inspection derived no conventions and found no departure from one.
+] else [
+  #if d.conventions.followed_line != "" [#d.conventions.followed_line #linebreak()]
+  #if d.conventions.none_adopted_line != "" [#d.conventions.none_adopted_line #linebreak()]
+  #if d.conventions.departures_line != "" [#d.conventions.departures_line]
+  #for line in d.conventions.departures [
+    #block(above: 3pt, below: 3pt)[- #line]
+  ]
+  #if d.conventions.more_line != "" [
+    #text(size: 9pt, fill: ink_soft)[#d.conventions.more_line]
+  ]
+]
+
+// ── 10. What is healthy ──────────────────────────────────────────────────────────────────
+#v(0.6cm)
+#section("Strengths", sec(9))
 
 #if d.whats_healthy.rules.len() == 0 and not d.whats_healthy.dependency_clean [
-  No zero-finding rules to report this run.
+  No rule came back clean this run.
 ] else [
   #if d.whats_healthy.dependency_clean [
     - No known vulnerable dependencies detected in this scan.
   ]
   #for r in d.whats_healthy.rules [
-    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: ink_faint, size: 8.5pt)[(#r.citation.label)]]#if r.clean_in.len() > 0 [ #text(fill: ink_faint, size: 8.5pt)[Clean in #r.clean_in.join(", ")#if r.not_applicable_in.len() > 0 [; not applicable in #r.not_applicable_in.join(", ")].]]
+    - #r.title #text(fill: ink_faint, size: 8.5pt)[(#r.rule_id)]#if r.clean_in.len() > 0 [ #text(fill: ink_faint, size: 8.5pt)[Clean in #r.clean_in.join(", ")#if r.not_applicable_in.len() > 0 [; not applicable in #r.not_applicable_in.join(", ")].]]
   ]
   #if d.whats_healthy.further_clean_count > 0 [
     #text(size: 8.5pt, fill: ink_faint)[#str(d.whats_healthy.further_clean_count) further #plural(d.whats_healthy.further_clean_count, "rule", "rules") verified clean this run.]
@@ -956,8 +710,9 @@
   ]
 ]
 
+// ── 11. Dependencies ─────────────────────────────────────────────────────────────────────
 #v(0.6cm)
-#section("Dependencies", [Dependency & CVE snapshot])
+#section("Dependencies", sec(10))
 
 #if d.dependency_snapshot.clean [
   No known vulnerable dependencies detected.
@@ -966,18 +721,15 @@
   // this section cannot say that no dependency is vulnerable.
   Dependencies were not fully checked in this scan, so this report cannot say that none are vulnerable. The notes below say what was not checked.
 ] else [
-  #table(
-    columns: (1fr, auto, 2fr, auto),
-    stroke: table_stroke,
-    inset: (x: 5pt, y: 6pt),
-    table.header(th[Package], th[Repo], th[Advisory], th[Severity]),
-    ..d.dependency_snapshot.rows.map(row => (
-      [#breakable(row.package, n: 24)],
-      [#row.repo],
-      [#row.advisory],
-      [#severity_chip(row.severity)],
-    )).flatten()
-  )
+  #d.dependency_snapshot.summary_line.
+  #for row in d.dependency_snapshot.worst [
+    #block(above: 3pt, below: 3pt)[
+      #severity_chip(lower(row.severity)) #h(3pt) #breakable(row.package, n: 30) #text(size: 8.5pt, fill: ink_faint)[#row.advisory]
+    ]
+  ]
+  #if d.dependency_snapshot.more_line != "" [
+    #text(size: 9pt, fill: ink_soft)[#d.dependency_snapshot.more_line]
+  ]
 ]
 
 #for note in d.dependency_snapshot.coverage_notes [
@@ -986,21 +738,28 @@
   ]
 ]
 
-#pagebreak()
-
-// ── Next steps (FIX 3, 2026-09-13 review) ───────────────────────────────────────────
-// A short, FACTUAL "what happens after this report" paragraph, opening the ladder before the
-// reader gets to Methodology's more technical detail. `d.methodology.next_steps` is authored
-// prose (`report_export::next_steps_note`, which also computes and states the run's real
-// numeric fix rate per promise 2), never an LLM call, same pattern as the deterministic/ai-tier
-// notes below.
-#section("After this report", [Next steps])
+// ── 12. Next steps ───────────────────────────────────────────────────────────────────────
+// A short, factual "what happens after this report" paragraph (`report_export::next_steps_note`,
+// authored prose, never an LLM call).
+#v(0.6cm)
+#section("After this report", sec(11))
 
 #d.methodology.next_steps
 
-// ── 8 + 9. Methodology & limitations + Disclaimer (S1: share a page) ────────────────
+// ── 13. Where the details are ────────────────────────────────────────────────────────────
+// Each question and the exact workbook tab that answers it. The tab names are the vocabulary's,
+// the same constants the workbook names its sheets from.
 #v(0.6cm)
-#section("How this was done", [Methodology & limitations])
+#section("Details", sec(12))
+
+#d.words.details_intro
+#for entry in W.detail_map [
+  #block(above: 3pt, below: 3pt)[#entry.question #h(4pt) #text(weight: 600, fill: accent)[#entry.sheet]]
+]
+
+// ── 14. How this was done and its limits ─────────────────────────────────────────────────
+#v(0.6cm)
+#section("How this was done", sec(13))
 
 #d.methodology.deterministic_note
 
@@ -1008,22 +767,14 @@
 
 #d.methodology.citation_note
 
-// Branding (2026-09-13 review): Audit model / Calibration model / Camerata version used to sit
-// on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,
-// legitimately named where methodology is discussed, never on the client-facing cover (see
-// `brand_title` above) and never a substitute for the agency's own resolved brand.
-Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model). Model backend: #or_na(d.cover.model_backend).
-
-// H4: the exact engine build and rule library behind this report, the same values the README,
-// manifest.json and findings.json state. Each line renders only when the value was recorded.
-#if d.cover.engine_commit != none [Engine commit: #raw(d.cover.engine_commit). ]#if d.cover.corpus_version != none [Rule library lock hash: #raw(d.cover.corpus_version).]
+// The engine build, the rule library hash and the calibration model are in manifest.json, not
+// here: a reader of this report has no use for them.
+Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Model backend: #or_na(d.cover.model_backend).
 
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
 // auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
-// each show EVERY number in the partition (curated total is implied by the do-now/next/plan/
-// accepted breakdown above; this line adds the two counts that used to be invisible: held for
-// review and false positives), so `candidates_reviewed` always reconciles on the page.
+// each show EVERY number in the partition, so `candidates_reviewed` always reconciles on the page.
 #if d.review_state == "reviewed" [
   *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
 ] else [
@@ -1039,7 +790,7 @@ Not performed in this engagement:
 
 // W6: a failed/timed-out pass must be disclosed, never omitted silently — same strings as
 // the Executive summary's box above (see `report_export::failed_pass_disclosures`), restated
-// here for the more technical Methodology reader. Gated on non-empty.
+// here for the more technical reader. Gated on non-empty.
 #if d.methodology.failed_passes.len() > 0 [
   #v(0.2cm)
   Not run this inspection:
@@ -1049,10 +800,9 @@ Not performed in this engagement:
 ]
 
 // H4: what this scan did not review, by pass and by path (`report_export::coverage_gaps`, the
-// same data the workbook's Coverage sheet and findings.json carry). A failed AI pass names how
-// many files it did not review; a skipped file is listed by path. The PDF lists the first 100
-// skipped files and points to the full list, which itself holds the first 1,000 per reason; the
-// rest are counted ("and K more").
+// same data the workbook's Not checked sheet and findings.json carry). A failed AI pass names how
+// many files it did not review; a skipped file is listed by path, the first few only. The rest
+// are counted and the Not checked sheet lists them all.
 #let gaps = d.coverage_gaps
 #if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or gaps.file_limit_notes.len() > 0 or "skipped_summary" in gaps or "evidence_note" in gaps or "scope_limited_note" in gaps [
   #v(0.2cm)
@@ -1076,12 +826,12 @@ Not performed in this engagement:
     #if "evidence_note" in gaps [
       - #gaps.evidence_note
     ]
-    #let shown = calc.min(gaps.skipped_files.len(), 100)
+    #let shown = calc.min(gaps.skipped_files.len(), W.skipped_files_cap)
     #for skipped in gaps.skipped_files.slice(0, shown) [
-      - #skipped.repo, #raw(skipped.path)#if skipped.size != "" [ (#skipped.size)]: #skipped.reason
+      - #skipped.repo, #breakable(skipped.path, n: 50)#if skipped.size != "" [ (#skipped.size)]: #skipped.reason
     ]
     #if gaps.skipped_files.len() > shown [
-      - and #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json
+      - and #str(gaps.skipped_files.len() - shown) #W.skipped_files_more
     ]
     #if "skipped_beyond_cap_note" in gaps [
       - #gaps.skipped_beyond_cap_note
@@ -1092,8 +842,9 @@ Not performed in this engagement:
   ]
 ]
 
+// ── 15. Disclaimer ───────────────────────────────────────────────────────────────────────
 #v(0.6cm)
-#section("Terms", [Disclaimer])
+#section("Terms", sec(14))
 
 #card[
   #d.disclaimer
@@ -1104,13 +855,9 @@ Not performed in this engagement:
 // (`report_export::resolve_prepared_by`) with a real default name as its final fallback — it
 // is NEVER blank, so this block always names an actual person, never "N/A".
 //
-// W5 (2026-09-30): this block used to render the same NAME-plus-DATE attestation no matter
-// what, including on a raw (nobody-has-looked-at-this-yet) export — contradicting the DRAFT
-// banner above and reading to a client as a completed human sign-off that never happened. Now
-// gated on `is_draft` (the exact same `d.review_state` signal the draft banner reads, defined
-// once near the top of this file) so the banner and this block can never disagree again: a
-// reviewed run keeps the real name+date sign-off below; a raw/unreviewed draft gets no
-// name+date attestation at all, just an explicit unreviewed-draft label.
+// W5 (2026-09-30): gated on `is_draft` (the exact same `d.review_state` signal the draft banner
+// reads) so the banner and this block can never disagree: a reviewed run keeps the real
+// name+date sign-off below; a raw/unreviewed draft gets an explicit unreviewed-draft label.
 #v(0.5cm)
 #block(stroke: 0.75pt + line_strong, inset: 12pt, radius: 8pt, width: 100%)[
   #text(size: 9pt)[

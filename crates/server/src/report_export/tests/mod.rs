@@ -9,6 +9,7 @@ mod citations_fixes;
 mod headlines;
 mod headlines_scorecard;
 mod healthy_pdf_marking;
+mod pdf_summary;
 mod serial_commas;
 mod severity_dispositions;
 mod text_hygiene;

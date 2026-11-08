@@ -480,15 +480,25 @@ async fn the_pdf_has_the_patterns_section_for_several_repos_and_not_for_one() {
         .expect("compiles");
     let text = text_of(&pdf);
     assert!(text.contains("Patterns across services"), "{text}");
-    assert!(text.contains("handle"), "the row sentence is printed");
+    // One line for each rule the services differ on says how each service follows it.
+    let line = &multi
+        .patterns_across_services
+        .as_ref()
+        .expect("a patterns section")
+        .summary_lines[0];
+    let squeeze = |t: &str| t.split_whitespace().collect::<String>();
+    assert!(
+        squeeze(&text).contains(&squeeze(line)),
+        "the summary line is printed: {line:?} in {text}"
+    );
     assert!(text.contains("acme/api"), "the services are named");
     assert!(
         text.contains("Clean in acme/web; not applicable in acme/api"),
         "What's healthy names where the rule applied: {text}"
     );
-    // The section comes after the findings and before the healthy list.
+    // The section comes after the other fixes and before the healthy list.
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle}"));
-    assert!(at("Held for review") < at("Patterns across services"));
+    assert!(at("The other fixes") < at("Patterns across services"));
     assert!(at("Patterns across services") < at("Clean in acme/web"));
 
     let single = build_report_json(
@@ -802,13 +812,18 @@ fn start_here_does_not_count_pattern_rows_in_the_scorecard() {
         .iter()
         .map(|c| c.parse::<usize>().unwrap())
         .sum();
-    // The scorecard counts every row that is not ruled out, whatever its kind (the PDF scorecard
-    // counts the same way; moving both to problems only is the PDF work order's, W2). Pattern
-    // rows are in no count, so the total is exactly the rows of all-findings.json.
-    let rows = dataset(&report, "json/all-findings.json").len();
+    // The scorecard counts problems, one for each place, exactly as the All problems sheet lists
+    // them: its Total is the row count Start here states for that sheet (W2). Pattern rows are in
+    // no count.
+    let listed: usize = start
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == "All problems"))
+        .and_then(|r| r.get(2))
+        .map(|c| c.parse::<usize>().unwrap())
+        .expect("Start here lists All problems with its row count");
     assert_eq!(
-        scorecard_problems, rows,
-        "the scorecard counts the rows of all-findings.json, not the pattern rows"
+        scorecard_problems, listed,
+        "the scorecard Total is the All problems row count"
     );
 }
 

@@ -193,6 +193,28 @@ pub const DETAIL_MAP: [(&str, &str); 8] = [
     ("What did we not check?", NOT_CHECKED),
 ];
 
+// ── The PDF: its fifteen sections ───────────────────────────────────────────────────────
+
+/// The PDF's sections, in order, as the PDF outline names them. The template reads these from
+/// its data, so the outline and this list cannot differ.
+pub const PDF_SECTIONS: [&str; 15] = [
+    "Cover",
+    "Contents",
+    "Executive summary",
+    "If you only do three things this week",
+    "Area scorecard",
+    "Severity by effort matrix",
+    "The most serious problems",
+    "The other fixes",
+    "Your conventions",
+    "What is healthy",
+    "Dependencies",
+    "Next steps",
+    "Where the details are",
+    "How this was done and its limits",
+    "Disclaimer",
+];
+
 // ── Fix order: the one priority vocabulary ──────────────────────────────────────────────
 
 pub const FIX_ORDER_FIRST: &str = "First";
@@ -386,6 +408,45 @@ pub fn places_word(n: usize) -> &'static str {
     } else {
         "places"
     }
+}
+
+/// A place's position as the PDF and the sheets say it: "line 12", or "whole file" for a problem
+/// in a whole file (the report records that as line 0, and no reader ever sees "line 0").
+pub fn place_label(line: usize) -> String {
+    if line == 0 {
+        WHOLE_FILE.to_string()
+    } else {
+        format!("line {line}")
+    }
+}
+
+/// A place as one string for the PDF: `repo / path, line 12` or `repo / path, whole file`.
+pub fn place_text(repo: &str, path: &str, line: usize) -> String {
+    if repo.is_empty() {
+        format!("{path}, {}", place_label(line))
+    } else {
+        format!("{repo} / {path}, {}", place_label(line))
+    }
+}
+
+/// "3 places", "1 place".
+pub fn places_count(n: usize) -> String {
+    format!("{n} {}", places_word(n))
+}
+
+/// What a fix that closes several rules says of them: "Closes 6 rules: A, B". Empty for a fix
+/// of one rule, which has nothing to add.
+pub fn closes_rules(rules: &[String]) -> String {
+    if rules.len() < 2 {
+        String::new()
+    } else {
+        format!("Closes {} rules: {}", rules.len(), rules.join(", "))
+    }
+}
+
+/// The line that points at the rest of a capped list: "and 4 more in the Fix plan sheet".
+pub fn more_in_sheet(n: usize, sheet: &str) -> String {
+    format!("and {n} more in the {sheet} sheet")
 }
 
 /// A rule line of a fix that covers only some of the fix's places: the rule, then where.
@@ -1439,6 +1500,18 @@ mod tests {
         for (question, _) in DETAIL_MAP {
             strings.push(question.to_string());
         }
+        // The PDF's section titles and the phrases it prints, every one built here.
+        strings.extend(PDF_SECTIONS.iter().map(ToString::to_string));
+        let words = crate::report_export::PdfWordsJson::new();
+        strings.extend([
+            words.details_intro.clone(),
+            words.skipped_files_more.clone(),
+            closes_rules(&["A".to_string(), "B".to_string()]),
+            places_count(3),
+            more_in_sheet(4, FIX_PLAN),
+            place_text("owner/repo", "src/a.rs", 0),
+            place_text("owner/repo", "src/a.rs", 7),
+        ]);
         for s in &strings {
             assert_eq!(
                 banned_synonym_in(s),
@@ -1446,6 +1519,44 @@ mod tests {
                 "{s:?} uses a retired word; use the term that replaced it"
             );
         }
+    }
+
+    #[test]
+    fn the_pdf_sections_are_fifteen_distinct_titles_with_no_dash() {
+        let unique: std::collections::HashSet<_> = PDF_SECTIONS.iter().collect();
+        assert_eq!(unique.len(), 15);
+        for s in PDF_SECTIONS {
+            assert!(!s.contains(['\u{2014}', '\u{2013}', '\u{00D7}']), "{s:?}");
+        }
+        // The titles the sheets own are the sheets' own names.
+        assert!(PDF_SECTIONS.contains(&DEPENDENCIES));
+        assert!(PDF_SECTIONS.contains(&YOUR_CONVENTIONS));
+    }
+
+    #[test]
+    fn a_whole_file_place_is_said_in_words_and_never_as_line_zero() {
+        assert_eq!(place_label(0), "whole file");
+        assert_eq!(place_label(12), "line 12");
+        assert_eq!(
+            place_text("owner/repo", "src/a.rs", 0),
+            "owner/repo / src/a.rs, whole file"
+        );
+        assert_eq!(place_text("", "src/a.rs", 4), "src/a.rs, line 4");
+    }
+
+    #[test]
+    fn the_counted_phrases_are_built_here() {
+        assert_eq!(closes_rules(&["A".to_string()]), "");
+        assert_eq!(
+            closes_rules(&["A".to_string(), "B".to_string()]),
+            "Closes 2 rules: A, B"
+        );
+        assert_eq!(places_count(1), "1 place");
+        assert_eq!(places_count(3), "3 places");
+        assert_eq!(
+            more_in_sheet(4, FIX_PLAN),
+            "and 4 more in the Fix plan sheet"
+        );
     }
 
     #[test]

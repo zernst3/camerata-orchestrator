@@ -621,12 +621,13 @@ pub(crate) fn disposition_label(
         // this label is deliberately reason-agnostic rather than naming "calibration"
         // specifically; the row's `why_waiting` states the concrete reason right next to it.
         Disposition::Unresolved if bucket == "held" => {
-            "Held for review (a human reviewer's judgment call is needed before this can be \
-             actioned)"
-                .to_string()
+            format!(
+                "{} (a human reviewer's judgment call is needed before this can be actioned)",
+                crate::xlsx_export::vocabulary::NEEDS_A_DECISION
+            )
         }
         Disposition::Unresolved if bucket == "informational" => {
-            "Convention to consider (informational)".to_string()
+            "Convention to consider (Info)".to_string()
         }
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
         // The affirmative call, stated as the auditor's own and nobody else's. It names the
@@ -661,15 +662,17 @@ pub(crate) fn disposition_label(
     }
 }
 
-/// Human title for a `matrix_bucket(...)` result (`"do_now"` -> `"Do now"`, etc.) — shared by
-/// `disposition_label` (M7) and anywhere else a bucket needs a reader-facing label.
+/// Human title for a `matrix_bucket(...)` result (`"do_now"` -> `"First"`, etc.) — shared by
+/// `disposition_label` (M7) and anywhere else a bucket needs a reader-facing label. The words are
+/// the vocabulary's: the fix order (First, Next, Later), Info and Needs a decision.
 pub(crate) fn bucket_title(bucket: &str) -> &'static str {
+    use crate::xlsx_export::vocabulary as v;
     match bucket {
-        "do_now" => "Do now",
-        "do_next" => "Do next",
-        "plan" => "Plan",
-        "informational" => "Informational",
-        "held" => "Held for review",
+        "do_now" => v::FIX_ORDER_FIRST,
+        "do_next" => v::FIX_ORDER_NEXT,
+        "plan" => v::FIX_ORDER_LATER,
+        "informational" => "Info",
+        "held" => v::NEEDS_A_DECISION,
         _ => "Accepted",
     }
 }
@@ -1072,7 +1075,7 @@ pub fn build_report_json(
                     .map(String::as_str);
                 // Bug 4 / C3-6: keep the curated-site LABEL in lockstep with the matrix cell
                 // this finding actually lands in — an informational row reads "Convention to
-                // consider", never "Open (recommended: Plan)". `effective_bucket` is the SAME
+                // consider", never "Open (recommended: Later)". `effective_bucket` is the SAME
                 // call the matrix-building pass above makes for this finding, so the two can
                 // never compute a different answer for the same row.
                 let bucket = effective_bucket(
@@ -1331,12 +1334,19 @@ pub fn build_report_json(
                 .insert(site.rule_id.clone());
         }
     }
+    // The Fixes, the escalated places, the conventions and the problems by area of the reviewed
+    // report, worked out once from one partition of its rows. The scorecard and the cover count
+    // problems (one for each place) from it, the way the workbook's scorecard does.
+    let crate::xlsx_export::PdfSections {
+        escalated: escalated_items,
+        patterns: sub_group_patterns,
+        fixes: fix_facts,
+        conventions,
+        problem_counts,
+    } = crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
-        let mut critical = 0usize;
-        let mut high = 0usize;
-        let mut medium = 0usize;
-        let mut low = 0usize;
+        let [critical, high, medium, low] = problem_counts.get(category).copied().unwrap_or([0; 4]);
         let mut open_high_or_critical = false;
         let mut open_medium = false;
         let mut rule_ids_with_findings: std::collections::HashSet<String> =
@@ -1345,12 +1355,6 @@ pub fn build_report_json(
             let f = entry.0;
             let disposition = entry.1;
             let severity = entry.3.as_str();
-            match severity {
-                "critical" => critical += 1,
-                "high" => high += 1,
-                "medium" => medium += 1,
-                _ => low += 1,
-            }
             rule_ids_with_findings.insert(f.rule_id.clone());
             // `Confirmed` is still open: the auditor has established that the finding is real,
             // which is the opposite of it having been dealt with. Omitting it here would let a
@@ -1438,7 +1442,7 @@ pub fn build_report_json(
     // Capped (S6) at grounded-citation rules first, then whatever else fits, so a large
     // corpus doesn't turn this section into dozens of bullets that read as padding; the
     // remainder is summarized in one honest count line instead of silently dropped.
-    const WHATS_HEALTHY_CAP: usize = 10;
+    const WHATS_HEALTHY_CAP: usize = PDF_MAX_HEALTHY_RULES;
     // C5-1: a rule that only survived a merge as an absorbed `also_matches` member (never its
     // own primary row) still genuinely fired this run — see `matched_rule_ids_by_category`'s doc
     // comment above for the full "0 in Coverage, listed as verified clean" bug this closes.
@@ -1563,10 +1567,14 @@ pub fn build_report_json(
             .iter()
             .filter(|n| n.tool == "osv-scanner")
             .all(crate::dep_audit::note_proves_clean);
+    let (dep_summary_line, dep_worst, dep_more_line) = dependency_summary(&dep_rows);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
         clean: dependency_clean,
+        summary_line: dep_summary_line,
+        worst: dep_worst,
+        more_line: dep_more_line,
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
@@ -1621,8 +1629,6 @@ pub fn build_report_json(
     // The Fixes, the escalated places and the patterns of the reviewed report, worked out once. The
     // top three below reads the Fix facts, so an effort is counted once for a Fix however many
     // rules it closes.
-    let (escalated_items, sub_group_patterns, fix_facts) =
-        crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
     // below (the ONE place these findings are now named) — the exec-summary's own
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
@@ -1817,14 +1823,27 @@ pub fn build_report_json(
         .map(|(f, effort)| {
             let (_, hours_label) = effort_hours_bounds(effort.as_deref());
             let fix = fix_facts.get(&f.fix_id);
+            let rules: Vec<String> = fix.map(|x| x.rules.clone()).unwrap_or_default();
+            let places = fix.map_or(1, |x| x.places.max(1));
             ThreeThingsItemJson {
                 fix_id: f.fix_id.clone(),
-                rules: fix.map(|x| x.rules.clone()).unwrap_or_default(),
-                places: fix.map_or(1, |x| x.places.max(1)),
+                closes_line: crate::xlsx_export::vocabulary::closes_rules(&rules),
+                places_line: if places > 1 {
+                    crate::xlsx_export::vocabulary::places_count(places)
+                } else {
+                    String::new()
+                },
+                rules,
+                places,
                 headline: f.headline.clone(),
                 repo: f.repo.clone(),
                 path: f.path.clone(),
                 line: f.line,
+                place: format!(
+                    "{} ({})",
+                    crate::xlsx_export::vocabulary::place_text(&f.repo, &f.path, f.line),
+                    f.rule_id
+                ),
                 rule_id: f.rule_id.clone(),
                 severity: f.severity.clone(),
                 hours_label,
@@ -1990,54 +2009,41 @@ pub fn build_report_json(
         .escalation()
         .map(crate::scan_ledger::EscalationBlock::sentence)
         .unwrap_or_default();
-    // Amendment A14 item 4: above the limit only the reshaped PDF is rendered. The per-site
-    // cards, the held-for-review cards and the matrix lists are left out, and the matrix's counts
-    // stay so the release gate can still reconcile the PDF with the other files.
+    // The PDF is a summary at every size: it lists no place, no card and no table of problems.
+    // The matrix and the curated and held groups stay in the data for the release gate's dataset
+    // checks, but `render_data_json` leaves them out of what the template reads.
     let site_total: usize = code_findings
         .iter()
         .map(|(f, _, _, _)| f.distinct_site_count())
         .sum();
-    let reduced = site_total > FULL_PDF_SITE_LIMIT;
-    let mut reduced_matrix = Vec::new();
-    if reduced {
-        for (bucket, list) in [
-            ("do_now", &matrix.do_now),
-            ("do_next", &matrix.do_next),
-            ("plan", &matrix.plan),
-            ("accepted", &matrix.accepted),
-            ("informational", &matrix.informational),
-            ("held", &matrix.held),
-        ] {
-            let mut counts: std::collections::BTreeMap<(String, String), usize> =
-                std::collections::BTreeMap::new();
-            for f in list {
-                *counts
-                    .entry((f.severity.clone(), f.kind.tag().to_string()))
-                    .or_default() += 1;
-            }
-            reduced_matrix.extend(counts.into_iter().map(|((severity, kind), count)| {
-                MatrixTallyJson {
-                    bucket: bucket.to_string(),
-                    severity,
-                    kind,
-                    count,
-                }
-            }));
-        }
-        matrix = MatrixJson::default();
-        curated_findings = Vec::new();
-        held_for_review_findings = Vec::new();
-    }
+    let escalation_cap = PDF_MAX_SERIOUS_PROBLEMS;
+    let escalation_more_line = if escalated_items.len() > escalation_cap {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            escalated_items.len() - escalation_cap,
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+        )
+    } else {
+        String::new()
+    };
+    let other_fixes = other_fixes_of(&sub_group_patterns, &escalated_items, escalation_cap);
 
     AuditReportJson {
         internal: opts.internal,
         site_total,
-        reduced,
-        reduced_matrix,
+        words: PdfWordsJson::new(),
         escalations: EscalationsJson {
             sentence: escalation_sentence,
             items: escalated_items,
+            cap: escalation_cap,
+            more_line: escalation_more_line,
+            intro: format!(
+                "Reviewed in person, worst first. Each entry is one place, whatever the number of \
+                 rules it breaks. Every place is on the {} sheet.",
+                crate::xlsx_export::vocabulary::ALL_PROBLEMS
+            ),
         },
+        other_fixes,
+        conventions,
         sub_group_patterns,
         sub_group_patterns_note: crate::xlsx_export::no_tree_note(reviewed).to_string(),
         review_state,
@@ -2067,6 +2073,145 @@ pub fn build_report_json(
     }
 }
 
+/// The advisories the PDF states: a count by severity, the worst few and a pointer to the
+/// Dependencies sheet for the rest.
+fn dependency_summary(
+    rows: &[DependencyFindingJson],
+) -> (String, Vec<DependencyFindingJson>, String) {
+    if rows.is_empty() {
+        return (String::new(), Vec::new(), String::new());
+    }
+    let mut sorted: Vec<&DependencyFindingJson> = rows.iter().collect();
+    sorted.sort_by(|a, b| {
+        severity_rank(&a.severity.to_ascii_lowercase())
+            .cmp(&severity_rank(&b.severity.to_ascii_lowercase()))
+            .then_with(|| a.package.cmp(&b.package))
+    });
+    let mut by_severity: Vec<(String, usize)> = Vec::new();
+    for r in &sorted {
+        let sev = r.severity.to_ascii_lowercase();
+        match by_severity.iter_mut().find(|(s, _)| *s == sev) {
+            Some((_, n)) => *n += 1,
+            None => by_severity.push((sev, 1)),
+        }
+    }
+    let counts: Vec<String> = by_severity
+        .iter()
+        .map(|(sev, n)| format!("{n} {sev}"))
+        .collect();
+    let summary = format!(
+        "{}: {}",
+        noun(rows.len(), "known vulnerability", "known vulnerabilities"),
+        counts.join(", ")
+    );
+    let worst: Vec<DependencyFindingJson> = sorted
+        .iter()
+        .take(PDF_MAX_DEPENDENCIES)
+        .map(|r| DependencyFindingJson {
+            package: r.package.clone(),
+            advisory: first_sentences(&r.advisory, 1, 160),
+            severity: r.severity.clone(),
+            repo: r.repo.clone(),
+        })
+        .collect();
+    let more = if rows.len() > PDF_MAX_DEPENDENCIES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            rows.len() - PDF_MAX_DEPENDENCIES,
+            crate::xlsx_export::vocabulary::DEPENDENCIES,
+        )
+    } else {
+        String::new()
+    };
+    (summary, worst, more)
+}
+
+/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`.
+pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = flat.chars().collect();
+    let mut end = chars.len();
+    let mut seen = 0;
+    for (i, c) in chars.iter().enumerate() {
+        let ends_sentence = matches!(c, '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+            && chars
+                .get(i + 2)
+                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic());
+        if ends_sentence {
+            seen += 1;
+            if seen == sentences {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    let mut out: String = chars[..end].iter().collect();
+    if out.chars().count() > max_chars {
+        let cut: String = out.chars().take(max_chars).collect();
+        out = match cut.rfind(' ') {
+            Some(at) => cut[..at].trim_end_matches([',', ';', ':']).to_string() + "...",
+            None => cut + "...",
+        };
+    }
+    out
+}
+
+/// "The other fixes": a line for each Fix that is not one of the entries "The most serious
+/// problems" prints, grouped by area in the order the areas first appear, at most
+/// [`PDF_MAX_OTHER_FIXES`] lines. The Fixes are in plan order (First, then Next, then Later).
+fn other_fixes_of(
+    patterns: &[PatternJson],
+    escalated: &[EscalatedSiteJson],
+    escalation_cap: usize,
+) -> OtherFixesJson {
+    let printed: std::collections::HashSet<&str> = escalated
+        .iter()
+        .take(escalation_cap)
+        .map(|e| e.fix_id.as_str())
+        .collect();
+    let remaining: Vec<&PatternJson> = patterns
+        .iter()
+        .filter(|p| p.open_sites > 0 && !printed.contains(p.group.as_str()))
+        .collect();
+    let mut groups: Vec<OtherFixGroupJson> = Vec::new();
+    for p in remaining.iter().take(PDF_MAX_OTHER_FIXES) {
+        let line = OtherFixLineJson {
+            name: p.name.clone(),
+            severity: p.severity.clone(),
+            places: crate::xlsx_export::vocabulary::places_count(p.open_sites),
+            effort: p.effort.clone(),
+            fix_order: p.sequence.clone(),
+        };
+        match groups.iter_mut().find(|g| g.area == p.area) {
+            Some(g) => g.lines.push(line),
+            None => groups.push(OtherFixGroupJson {
+                area: p.area.clone(),
+                lines: vec![line],
+            }),
+        }
+    }
+    let shown = remaining.len().min(PDF_MAX_OTHER_FIXES);
+    let more_line = if remaining.len() > shown {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            remaining.len() - shown,
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+        )
+    } else {
+        String::new()
+    };
+    OtherFixesJson {
+        groups,
+        intro: format!(
+            "One line for each other fix, grouped by area and in the order to do them. Each fix's \
+             text and places are on the {} and {} sheets.",
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+            crate::xlsx_export::vocabulary::ALL_PROBLEMS
+        ),
+        shown,
+        more_line,
+    }
+}
+
 // ── Typst compile ────────────────────────────────────────────────────────────────
 
 /// The UNIX timestamp to stamp into the compiled PDF, read back out of the report's OWN stated
@@ -2089,8 +2234,23 @@ fn creation_epoch(data_json: &str) -> Option<i64> {
 /// Serialize the PDF's data: the ONE `data.json` the Typst template reads. The release gate
 /// inspects these exact bytes, so what it checks is byte-identical to what Typst renders.
 pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
-    serde_json::to_string(json).context("could not serialize the report to JSON")
+    let mut value = serde_json::to_value(json).context("could not serialize the report to JSON")?;
+    // The PDF lists no problem, so the template reads none of the per-place lists. They stay in
+    // the report for the release gate's dataset checks and are left out of the data Typst parses,
+    // which keeps the PDF's data small at any size.
+    if let Some(map) = value.as_object_mut() {
+        for unread in UNREAD_BY_THE_TEMPLATE {
+            map.remove(unread);
+        }
+    }
+    serde_json::to_string(&value).context("could not serialize the report to JSON")
 }
+
+/// The members of [`AuditReportJson`] that hold one entry for each problem or place. The
+/// template reads none of them: the PDF is a summary, and every row is in the workbook and the
+/// CSV files.
+const UNREAD_BY_THE_TEMPLATE: [&str; 3] =
+    ["matrix", "curated_findings", "held_for_review_findings"];
 
 /// [`compile_pdf_from_data`] over a structured report. For tests and diagnostics: production
 /// exports go through `release_gate::build_product_package`, which keeps the `data.json` bytes
@@ -2216,31 +2376,16 @@ pub(crate) fn typst_timeout(sites: usize) -> Duration {
     }
 }
 
-/// How many sites the PDF prints: every site on a curated card and on a held-for-review card.
-/// The size the time budget scales with. Zero for data that does not parse, which gets the base
+/// How many places the report covers, which the time budget scales with: the data Typst parses
+/// holds a Fix for each group of them. Zero for data that does not parse, which gets the base
 /// budget; a malformed document fails in Typst quickly, not slowly.
 fn pdf_site_count(data_json: &str) -> usize {
     #[derive(serde::Deserialize, Default)]
-    struct Group {
-        #[serde(default)]
-        sites: Vec<serde::de::IgnoredAny>,
-    }
-    #[derive(serde::Deserialize, Default)]
     struct Probe {
         #[serde(default)]
-        curated_findings: Vec<Group>,
-        #[serde(default)]
-        held_for_review_findings: Vec<Group>,
+        site_total: usize,
     }
-    serde_json::from_str::<Probe>(data_json)
-        .map(|p| {
-            p.curated_findings
-                .iter()
-                .chain(&p.held_for_review_findings)
-                .map(|g| g.sites.len())
-                .sum()
-        })
-        .unwrap_or(0)
+    serde_json::from_str::<Probe>(data_json).map_or(0, |p| p.site_total)
 }
 
 /// The error for a compile that outlived its budget: the size of the report, the time it was

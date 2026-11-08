@@ -1667,18 +1667,43 @@ pub(super) fn code_volume_label(report: &crate::onboard::ScanReport) -> Option<S
     Some(base)
 }
 
-/// The scorecard: one row for each area, its problems by severity. The PDF scorecard counts the
-/// same rows the same way.
+/// The rows that head the places of the problem sheets: for each (repo, file, line) of a row that
+/// is not ruled out and is a problem (not a convention and not a rule that could not be
+/// completed), the first row there. The scorecard, the PDF cover and the All problems sheet count
+/// these and no others, so the three agree by construction.
+pub(super) fn problem_heads<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> Vec<&'a FindingRow> {
+    let mut seen: std::collections::HashSet<(&str, &str, usize)> = std::collections::HashSet::new();
+    rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
+        .filter(|r| seen.insert((r.repo.as_str(), r.path.as_str(), r.line)))
+        .collect()
+}
+
+/// The scorecard: one row for each area, its problems by severity. A problem is a place: the
+/// place counts once, at the severity and in the area of the row that heads it, which is the row
+/// All problems prints. The PDF scorecard and cover count the same places the same way, so the
+/// Total of this card is the number of rows on All problems.
 pub(super) fn scorecard(
     live_rows: &[&FindingRow],
     report: &crate::onboard::ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> BTreeMap<String, [usize; 4]> {
-    // KNOWN GAP (follow-up with the PDF work order): this counts every row that is not ruled out,
-    // conventions and the Info row (as Low) included, exactly as the PDF scorecard does, so the
-    // Total can exceed the All problems row count. Both move to problems only together.
+    let mut by_area = problem_counts(live_rows.iter().copied());
+    // An area with rules checked and nothing found still gets its row of zeros, as in the PDF.
+    for rid in &report.provenance.audited_rule_ids {
+        by_area
+            .entry(crate::report_export::category_for(rid, corpus))
+            .or_insert([0; 4]);
+    }
+    by_area
+}
+
+/// Problems by area and severity (critical, high, medium, low), one for each place. See
+/// [`scorecard`].
+pub(crate) fn problem_counts<'a>(
+    rows: impl Iterator<Item = &'a FindingRow>,
+) -> BTreeMap<String, [usize; 4]> {
     let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
-    for row in live_rows {
+    for row in problem_heads(rows) {
         let counts = by_area.entry(row.category.clone()).or_insert([0; 4]);
         match row.severity.as_str() {
             "critical" => counts[0] += 1,
@@ -1686,12 +1711,6 @@ pub(super) fn scorecard(
             "medium" => counts[2] += 1,
             _ => counts[3] += 1,
         }
-    }
-    // An area with rules checked and nothing found still gets its row of zeros, as in the PDF.
-    for rid in &report.provenance.audited_rule_ids {
-        by_area
-            .entry(crate::report_export::category_for(rid, corpus))
-            .or_insert([0; 4]);
     }
     by_area
 }

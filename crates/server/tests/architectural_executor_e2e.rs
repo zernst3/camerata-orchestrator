@@ -292,7 +292,7 @@ async fn architectural_finding_rides_through_report_to_pdf() {
     assert!(site.detail.to_lowercase().contains("confirm against"));
     // M3: an uncalibrated critical finding always recommends "Do now" (M7 names the bucket).
     assert_eq!(
-        site.disposition, "Open (recommended: Do now)",
+        site.disposition, "Open (recommended: First)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
     );
     assert_eq!(
