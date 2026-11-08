@@ -222,7 +222,7 @@ pub struct ExecutiveSummaryJson {
 pub struct ThreeThingsItemJson {
     /// The Fix this item is. Three items are three distinct Fixes.
     pub fix_id: String,
-    /// Every rule the Fix closes, by title, the worst first.
+    /// Every rule the Fix closes, by id, the worst first.
     pub rules: Vec<String>,
     /// How many places the Fix covers.
     pub places: usize,

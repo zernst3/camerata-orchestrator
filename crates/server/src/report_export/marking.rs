@@ -22,7 +22,7 @@ pub struct EscalatedSiteJson {
     pub path: String,
     pub line: usize,
     pub rule_id: String,
-    /// Every rule at the place, by title, the worst first. One entry is one place (one escalation
+    /// Every rule at the place, by id, the worst first. One entry is one place (one escalation
     /// slot), whatever the number of rules at it.
     pub rules: Vec<String>,
     /// The decision on the place, as its rows state it ("Confirmed by the reviewer ...", "Open ...").
@@ -46,7 +46,7 @@ pub struct PatternJson {
     pub group: String,
     pub rule_id: String,
     pub rule_title: String,
-    /// Every rule the Fix satisfies, by title, the worst first.
+    /// Every rule the Fix satisfies, by id, the worst first.
     pub rules: Vec<String>,
     pub label: String,
     pub cause: String,

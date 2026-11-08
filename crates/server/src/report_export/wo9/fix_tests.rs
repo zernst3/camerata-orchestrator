@@ -158,6 +158,11 @@ fn six_rules_at_one_line_and_the_file_are_one_fix_everywhere() {
     let item = &json.three_things.items[0];
     assert_eq!(item.hours_label, "2 to 4 hours");
     assert_eq!(item.rules.len(), 7, "{:?}", item.rules);
+    assert!(
+        item.rules.contains(&"SEC-NO-VENDOR-TOKEN-1".to_string()),
+        "rules are named by id: {:?}",
+        item.rules
+    );
     assert_eq!(item.places, 2);
     assert!(
         json.three_things

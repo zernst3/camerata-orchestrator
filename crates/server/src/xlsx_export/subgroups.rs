@@ -985,25 +985,11 @@ pub(crate) fn in_plan_order(facts: Vec<FixFacts>) -> Vec<FixFacts> {
 /// counted once. The top three reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PdfFixFacts {
+    /// The rule ids the Fix closes, worst severity first.
     pub rules: Vec<String>,
     pub places: usize,
     pub effort: String,
     pub severity: String,
-}
-
-/// The rules as the PDF names them: by title, and by title with the rule id after it where two
-/// rules share a title, so every rule is its own entry.
-fn rule_labels(rules: &[(String, String)]) -> Vec<String> {
-    rules
-        .iter()
-        .map(|(id, title)| {
-            if rules.iter().filter(|(_, t)| t == title).count() > 1 {
-                format!("{title} ({id})")
-            } else {
-                title.clone()
-            }
-        })
-        .collect()
 }
 
 /// The escalated places as the PDF prints them, one entry for each place whatever the number of
@@ -1029,17 +1015,18 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
         else {
             continue;
         };
-        let mut pairs: Vec<(String, String)> = Vec::new();
+        // The rules are named by id in the PDF: a rule's title is a sentence, and a place can have
+        // six of them.
+        let mut rules: Vec<String> = Vec::new();
         let mut decisions: Vec<String> = Vec::new();
         for r in &at {
-            if !pairs.iter().any(|(id, _)| *id == r.rule_id) {
-                pairs.push((r.rule_id.clone(), r.rule_title.clone()));
+            if !rules.contains(&r.rule_id) {
+                rules.push(r.rule_id.clone());
             }
             if !decisions.contains(&r.disposition_label) {
                 decisions.push(r.disposition_label.clone());
             }
         }
-        let rules = rule_labels(&pairs);
         out.push(crate::report_export::EscalatedSiteJson {
             group: head.facts.group.clone(),
             fix_id: head.facts.fix_id.clone(),
@@ -1084,12 +1071,7 @@ pub(crate) fn pdf_sections(
             (
                 g.id.clone(),
                 PdfFixFacts {
-                    rules: rule_labels(
-                        &g.rules
-                            .iter()
-                            .map(|r| (r.rule_id.clone(), r.title.clone()))
-                            .collect::<Vec<_>>(),
-                    ),
+                    rules: g.rules.iter().map(|r| r.rule_id.clone()).collect(),
                     places: g.open_site_total,
                     effort: g.effort.clone(),
                     severity: g.severity.clone(),
@@ -1106,12 +1088,7 @@ pub(crate) fn pdf_sections(
                 vocabulary::places_word(g.live_sites),
                 g.id
             ),
-            rules: rule_labels(
-                &g.rules
-                    .iter()
-                    .map(|r| (r.rule_id.clone(), r.title.clone()))
-                    .collect::<Vec<_>>(),
-            ),
+            rules: g.rules.iter().map(|r| r.rule_id.clone()).collect(),
             group: g.id,
             rule_id: g.rule_id,
             rule_title: g.rule_title,
