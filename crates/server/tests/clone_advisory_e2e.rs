@@ -108,6 +108,7 @@ impl LlmPort for Scripted {
                 .to_string()
         };
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

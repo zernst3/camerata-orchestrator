@@ -871,6 +871,7 @@ async fn call_openrouter_with_tools(
     }
 
     Ok(LlmResponse {
+        reported_model: None,
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
@@ -1083,6 +1084,7 @@ async fn call_anthropic_with_tools(
     let model_returned = v["model"].as_str().unwrap_or(model).to_string();
 
     Ok(LlmResponse {
+        reported_model: None,
         text: raw_json,
         model: model_returned,
         backend: "anthropic/api/agentic".to_string(),
@@ -2902,6 +2904,7 @@ mod tests {
     impl LlmPort for StubCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(LlmResponse {
+                reported_model: None,
                 text: self.0.clone(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -2984,6 +2987,7 @@ mod tests {
             };
 
             Ok(LlmResponse {
+                reported_model: None,
                 text: raw,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -3491,6 +3495,7 @@ mod tests {
     fn parse_response_handles_openai_final_text() {
         // OpenAI shape with text content and no tool_calls.
         let resp = LlmResponse {
+            reported_model: None,
             text: serde_json::json!({
                 "message": {"role": "assistant", "content": "Task complete!"}
             })
@@ -3514,6 +3519,7 @@ mod tests {
     #[test]
     fn parse_response_handles_openai_tool_calls() {
         let resp = LlmResponse {
+            reported_model: None,
             text: serde_json::json!({
                 "message": {
                     "role": "assistant",
@@ -3552,6 +3558,7 @@ mod tests {
     #[test]
     fn parse_response_handles_anthropic_tool_use() {
         let resp = LlmResponse {
+            reported_model: None,
             text: serde_json::json!({
                 "content": [
                     {
@@ -3587,6 +3594,7 @@ mod tests {
     #[test]
     fn parse_response_falls_back_to_plain_text() {
         let resp = LlmResponse {
+            reported_model: None,
             text: "plain response with no JSON".to_string(),
             model: "m".into(),
             backend: "b".into(),
@@ -3851,6 +3859,7 @@ mod tests {
                 }
             });
             Ok(LlmResponse {
+                reported_model: None,
                 text: tc.to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -4159,6 +4168,7 @@ mod tests {
     #[test]
     fn llm_response_or_cache_discount_field_exists_and_defaults_none() {
         let resp = LlmResponse {
+            reported_model: None,
             text: "t".to_string(),
             model: "m".to_string(),
             backend: "stub".to_string(),
@@ -4719,6 +4729,7 @@ mod tests {
         // call_anthropic_with_tools passes the FULL response object (with `content`)
         // through as `text`. The normalizer's Anthropic branch must parse it.
         let resp = LlmResponse {
+            reported_model: None,
             text: serde_json::json!({
                 "id": "msg_01",
                 "type": "message",

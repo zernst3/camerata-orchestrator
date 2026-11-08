@@ -266,6 +266,7 @@ mod tests {
     /// An Anthropic-shaped response: a dollar cost is present (the CLI reports it).
     fn anthropic_resp(model: &str, input: u64, output: u64, cost: f64) -> LlmResponse {
         LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: model.to_string(),
             backend: "cli".to_string(),
@@ -282,6 +283,7 @@ mod tests {
     /// A Gemini-shaped response: tokens reported, but NO dollar cost field (cost_usd=None).
     fn gemini_shape_resp(model: &str, input: u64, output: u64) -> LlmResponse {
         LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: model.to_string(),
             backend: "api".to_string(),

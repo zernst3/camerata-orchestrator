@@ -56,6 +56,7 @@ impl LlmPort for Stub {
             anyhow::bail!("the model refused this repository");
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),

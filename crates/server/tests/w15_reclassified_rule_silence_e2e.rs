@@ -104,6 +104,7 @@ impl StubModel {
 impl LlmPort for StubModel {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
             text: self.canned(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

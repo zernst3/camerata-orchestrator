@@ -53,6 +53,7 @@ impl LlmPort for StubLlm {
         }
         self.events.lock().unwrap().push(("end", b));
         Ok(LlmResponse {
+            reported_model: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -357,6 +358,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
     meter.record_stage(
         Stage::ScanPass,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -395,6 +397,7 @@ fn spend(meter: &UsageMeter, dollars: f64) {
     meter.record_stage(
         Stage::ScanPass,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -852,6 +855,7 @@ fn response(
     output: Option<u64>,
 ) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),

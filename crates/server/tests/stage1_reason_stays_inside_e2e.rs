@@ -47,6 +47,7 @@ impl LlmPort for StubModel {
             "{}".to_string()
         };
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),

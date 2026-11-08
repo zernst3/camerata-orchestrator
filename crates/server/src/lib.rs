@@ -2873,7 +2873,7 @@ pub(crate) async fn start_audit_job(
                         // The baseline the run started from, not one an attempt since replaced.
                         prior = store.load_prior_manifest();
                         // The spend limit counts the whole run: the stored replies' cost joins it.
-                        run_controls.stored_spend_usd = store.stored_unmetered_usd();
+                        run_controls.stored_spend_usd = store.stored_usd();
                         Some(store)
                     }
                     Err(e) => {

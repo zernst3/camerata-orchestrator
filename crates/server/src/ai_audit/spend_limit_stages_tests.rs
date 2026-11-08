@@ -408,6 +408,7 @@ async fn stored_spend_and_new_spend_add_up_against_the_limit() {
     meter.record_stage(
         Stage::ScanPass,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),

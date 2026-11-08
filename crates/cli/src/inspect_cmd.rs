@@ -1008,9 +1008,10 @@ pub async fn run_inspect_pipeline_with(
         None => None,
     };
     // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
-    // `--max-cost-usd`, the part the meter does not see again included.
+    // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
+    // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
     if let Some((store, _)) = &resumed {
-        controls.stored_spend_usd = store.stored_unmetered_usd();
+        controls.stored_spend_usd = store.stored_usd();
     }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.
@@ -2666,6 +2667,7 @@ mod tests {
             cost_complete: true,
             cache_read_input_tokens: 50_000,
             cache_creation_input_tokens: 1_000,
+            resumed_cost_usd: 0.0,
         }
     }
 
@@ -2857,6 +2859,7 @@ mod tests {
         meter.record(
             camerata_server::stage_telemetry::Stage::ScanPass,
             &camerata_server::llm::LlmResponse {
+                reported_model: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),

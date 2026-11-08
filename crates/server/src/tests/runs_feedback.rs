@@ -31,6 +31,7 @@ async fn usage_endpoint_shape_and_accumulation() {
     state.usage_ledger.record(
         "claude-opus-5",
         &crate::llm::LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "claude-opus-5".to_string(),
             backend: "cli".to_string(),
@@ -47,6 +48,7 @@ async fn usage_endpoint_shape_and_accumulation() {
     state.usage_ledger.record(
         "claude-sonnet-5",
         &crate::llm::LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "claude-sonnet-5".to_string(),
             backend: "api".to_string(),

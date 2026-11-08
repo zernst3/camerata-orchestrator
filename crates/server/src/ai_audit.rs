@@ -366,6 +366,9 @@ mod efficiency_cap_tests;
 mod spend_limit_stages_tests;
 
 #[cfg(test)]
+mod resume_limit_tests;
+
+#[cfg(test)]
 mod fix_model_tests;
 
 #[cfg(test)]

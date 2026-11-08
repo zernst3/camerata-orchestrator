@@ -43,6 +43,7 @@ impl LlmPort for Stub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -649,6 +650,7 @@ impl LlmPort for ProcessDefaultStub {
             camerata_server::llm::PriceBasis::realtime(),
         );
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model,
@@ -752,6 +754,7 @@ impl LlmPort for UnpricedReplyStub {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: "claude-unlisted-9".to_string(),

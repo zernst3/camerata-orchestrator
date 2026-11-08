@@ -37,6 +37,7 @@ impl LlmPort for Scripted {
             self.calls.fetch_add(1, Ordering::SeqCst);
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -149,6 +150,7 @@ impl BatchApi for FakeBatches {
             .map(|custom_id| BatchResultRow {
                 custom_id,
                 response: Some(LlmResponse {
+                    reported_model: None,
                     text: r#"{"findings":[],"needs_files":[]}"#.to_string(),
                     model: "stub".to_string(),
                     backend: "api/batch".to_string(),

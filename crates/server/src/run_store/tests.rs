@@ -10,6 +10,7 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 fn response(text: &str, cost: f64) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -1654,6 +1655,7 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
                 truncated,
+                reported_model: None,
             }),
             error: None,
             class: None,
@@ -2085,7 +2087,7 @@ async fn a_fresh_transcript_holding_an_object_is_stored_unusable() {
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn the_estimate_separates_the_stored_spend_the_meter_will_not_see_again() {
+async fn the_estimate_and_the_store_name_the_whole_stored_spend() {
     seeded(async {
         let (_s, _g) = state_dir();
         let repo = git_repo();
@@ -2093,13 +2095,9 @@ async fn the_estimate_separates_the_stored_spend_the_meter_will_not_see_again() 
         let model = Scripted::new();
         {
             let j = JournalLlm::new(&model, store.clone());
-            // A calibration call: its stage keeps a checkpoint and puts its stored usage on the
-            // meter itself, so the limit must not add it a second time.
             j.complete(ask("calibrate this").with_system(crate::ai_audit::verify_system_prompt()))
                 .await
                 .unwrap();
-            // Another model call (the clone judge, a deep lens): the journal answers it at no
-            // cost, so the limit has to add its stored cost.
             j.complete(ask("judge this")).await.unwrap();
         }
         let id = store.run_id();
@@ -2107,16 +2105,114 @@ async fn the_estimate_separates_the_stored_spend_the_meter_will_not_see_again() 
         let e = estimate_resume(&id).unwrap();
         assert!((e.stored_usd - 0.10).abs() < 1e-9, "{e:?}");
         assert!(
-            (e.stored_unmetered_usd - 0.05).abs() < 1e-9,
-            "only the journal-only call: {e:?}"
-        );
-        assert!(
             e.render().contains("stored calls cost $0.10"),
             "the text a resume shows says what is already spent: {}",
             e.render()
         );
         let reopened = RunStore::open(&id).unwrap();
-        assert!((reopened.stored_unmetered_usd() - 0.05).abs() < 1e-9);
+        assert!(
+            (reopened.stored_usd() - 0.10).abs() < 1e-9,
+            "the whole stored figure, which a spend limit counts up front"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_call_of_a_finished_part_is_not_counted_as_to_send_again() {
+    // The saved tutorly run: a first try of a group review call came back unusable, its item was
+    // read on a later try, and the part finished. The resume said "1 to send again" for it.
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Scripted::new();
+        model.fail_boom.store(true, Ordering::SeqCst);
+        {
+            let j = JournalLlm::new(&model, store.clone());
+            let _ = j
+                .complete(
+                    ask("Repository: acme/api\nBOOM")
+                        .with_system(crate::ai_audit::verify_system_prompt()),
+                )
+                .await;
+        }
+        let id = store.run_id();
+        let open_part = estimate_resume(&id).unwrap();
+        assert_eq!(
+            open_part.calls_to_send_again, 1,
+            "while its part is open the call is owed: {open_part:?}"
+        );
+        store.set_part("acme/api", PartKind::Calibration, PartStatus::Done, None);
+        let done_part = estimate_resume(&id).unwrap();
+        assert_eq!(
+            done_part.calls_to_send_again, 0,
+            "a part that finished owes nothing: {done_part:?}"
+        );
+        assert!(
+            done_part.render().contains("0 to send again"),
+            "{}",
+            done_part.render()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_model_the_backend_reported_is_stored_beside_the_requested_one() {
+    struct Reports;
+    #[async_trait::async_trait]
+    impl LlmPort for Reports {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let mut r = response("{}", 0.05);
+            r.model = req.model.clone();
+            r.reported_model = Some("claude-opus-5-5".to_string());
+            Ok(r)
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        {
+            let j = JournalLlm::new(&Reports, store.clone());
+            let req = ask("one").with_model("claude-haiku-5-5".to_string());
+            j.complete(req).await.unwrap();
+        }
+        let id = store.run_id();
+        drop(store);
+        let dir = runs_dir().join(&id).join("calls");
+        let file = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .next()
+            .expect("a stored call");
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("\"model\":\"claude-haiku-5-5\""), "{text}");
+        assert!(
+            text.contains("\"reported_model\":\"claude-opus-5-5\""),
+            "{text}"
+        );
+        // And a replay hands it back.
+        let again = RunStore::open(&id).unwrap();
+        let j = JournalLlm::new(&Reports, again);
+        let replayed = j
+            .complete(ask("one").with_model("claude-haiku-5-5".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(replayed.reported_model.as_deref(), Some("claude-opus-5-5"));
     })
     .await;
 }

@@ -149,6 +149,7 @@ impl Scripted {
             _ => r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string(),
         };
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

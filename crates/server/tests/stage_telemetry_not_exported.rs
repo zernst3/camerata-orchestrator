@@ -91,6 +91,7 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     meter.record(
         Stage::ScanPass,
         &camerata_server::llm::LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".to_string(),
             backend: "api".to_string(),

@@ -767,6 +767,7 @@ fn line_for(key: &str, resp: &LlmResponse) -> AbsorbedLine {
 
 fn response_from(line: &AbsorbedLine) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: line.text.clone(),
         model: line.model.clone(),
         backend: line.backend.clone(),
@@ -783,6 +784,7 @@ fn response_from(line: &AbsorbedLine) -> LlmResponse {
 /// A reply's usage without its text, for marking a turned-down reply as wasted spend.
 fn usage_only(resp: &LlmResponse) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: String::new(),
         model: resp.model.clone(),
         backend: resp.backend.clone(),
@@ -832,7 +834,7 @@ fn replay_checkpoint<S: StageItems>(
         }
         let resp = response_from(&line);
         if let Some(m) = ctx.meter {
-            m.record_stage(stage, &resp);
+            m.record_resumed(stage, &resp);
         }
         if s.already_absorbed(id) || s.absorb(id, resp).is_ok() {
             book.done.insert(id.clone());
@@ -1172,12 +1174,16 @@ async fn run_parallel<S>(
             };
             in_flight.push(
                 async move {
+                    // A request the run store already holds a reply for costs nothing new: the
+                    // limit has nothing to refuse, and refusing it would drop paid work.
                     let permit = match meter {
-                        Some(m) => match m.admit_for_stage(repo, label).await {
-                            Ok(permit) => Some(permit),
-                            Err(_) => return (work, Called::Refused),
-                        },
-                        None => None,
+                        Some(m) if !realtime.replays(&req) => {
+                            match m.admit_for_stage(repo, label).await {
+                                Ok(permit) => Some(permit),
+                                Err(_) => return (work, Called::Refused),
+                            }
+                        }
+                        _ => None,
                     };
                     if let Some(m) = meter {
                         m.note_request(&req);
@@ -1796,7 +1802,7 @@ pub async fn resume_held<H: HeldRows>(stage: Stage, h: &mut H, ctx: &StageCtx<'_
         }
         let resp = response_from(&line);
         if let Some(m) = ctx.meter {
-            m.record_stage(stage, &resp);
+            m.record_resumed(stage, &resp);
         }
         read_held_reply(
             stage,

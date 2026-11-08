@@ -47,6 +47,7 @@ impl Scripted {
                 Err(anyhow::Error::new(f))
             }
             Mode::Malformed => Ok(LlmResponse {
+                reported_model: None,
                 text: "I could not produce JSON for this.".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),

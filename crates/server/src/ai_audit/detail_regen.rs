@@ -1862,7 +1862,13 @@ pub(crate) async fn regenerate_full_details_in(
     let mut held: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
-    let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
+    let blocked = meter.is_some_and(|m| {
+        m.stage_blocked_unless_stored(
+            repo,
+            STAGE_DETAIL,
+            crate::checkpoint::stage_has_stored_work(&format!("detail_{repo}")),
+        )
+    });
     if !blocked {
         // What an earlier process stored (replies, batches left live) reaches its findings first.
         pending = resume_held_details(

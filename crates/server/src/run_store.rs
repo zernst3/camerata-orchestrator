@@ -907,15 +907,10 @@ impl RunStore {
         read_json(&self.dir.join("prior_manifest.json"))
     }
 
-    /// What a spend limit adds to this attempt's meter on a resume (see
-    /// [`crate::cost_cap::RunControls::stored_spend_usd`]).
-    pub fn stored_unmetered_usd(&self) -> f64 {
-        journal::stored_spend(&self.dir).1
-    }
-
-    /// What every stored call of this run cost, the whole figure a spend limit counts on a resume.
+    /// What every stored call of this run cost: the figure a spend limit counts up front on a
+    /// resume ([`crate::cost_cap::RunControls::stored_spend_usd`]).
     pub fn stored_usd(&self) -> f64 {
-        journal::stored_spend(&self.dir).0
+        journal::stored_spend(&self.dir)
     }
 
     pub fn run_id(&self) -> String {
@@ -1458,11 +1453,6 @@ pub struct ResumeEstimate {
     pub usd: f64,
     /// What the stored calls cost when they were made, in US dollars.
     pub stored_usd: f64,
-    /// The part of [`Self::stored_usd`] this attempt's usage meter does not see again, because the
-    /// journal answers those calls at no cost (the scan passes and the other model calls): the
-    /// figure a spend limit adds to the meter's own, see
-    /// [`crate::cost_cap::RunControls::stored_spend_usd`].
-    pub stored_unmetered_usd: f64,
     /// How the figure was reached, in one sentence.
     pub basis: String,
 }

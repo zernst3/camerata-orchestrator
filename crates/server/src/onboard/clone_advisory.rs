@@ -329,8 +329,10 @@ async fn judge_rule(
         // check in the caller only decides whether the judge starts). A batch the limit refuses
         // is not sent, nor is any later one; its candidates stay undecided (not assessed, not
         // clean) and the stage is recorded as stopped part way.
+        // A batch the run store already holds a verdict for is answered from the store and
+        // costs nothing, so the limit has nothing to refuse (a resume past its limit replays it).
         let _permit = match meter {
-            Some(m) => match m
+            Some(m) if !llm.replays(&request) => match m
                 .admit_for_stage(req.repo, crate::ai_audit::STAGE_CLONE_JUDGE)
                 .await
             {
@@ -347,7 +349,7 @@ async fn judge_rule(
                     break;
                 }
             },
-            None => None,
+            _ => None,
         };
         if let Some(m) = meter {
             m.note_request(&request);

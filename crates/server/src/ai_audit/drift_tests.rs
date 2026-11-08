@@ -21,6 +21,7 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.seen.lock().unwrap().push(req);
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[{"rule":"ARCH-NO-DIRECT-DB-1","severity":"high","path":"src/a.rs","code":"db.execute(query)","title":"direct DB call","detail":"controller calls the database directly"}],"verdicts":[]}"#
                 .to_string(),
             model: "stub".to_string(),

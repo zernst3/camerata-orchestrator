@@ -286,6 +286,35 @@ pub fn representative_scan_sample(
     })
 }
 
+/// The request one scan pass sends, built from its prompt. Its own function so the pass can ask
+/// whether the run store already holds a reply to exactly this request before the spend limit
+/// admits it ([`LlmPort::replays`]).
+pub(super) fn build_audit_request(
+    audit_model: Option<&str>,
+    prompt: String,
+    cache_breakpoints: Vec<usize>,
+    nonce: &crate::prompt_frame::FrameNonce,
+    meter: Option<&UsageMeter>,
+    n_rules: usize,
+) -> LlmRequest {
+    let mut req = with_stage_effort(
+        LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                audit_system_prompt_with(terse_output_of(meter)),
+                nonce,
+            ))
+            .with_max_tokens(scan_max_tokens(n_rules))
+            .with_temperature(AUDIT_TEMPERATURE)
+            .with_response_schema(reply_schemas::scan_reply_schema())
+            .with_model(stage_model(audit_model)),
+        Stage::ScanPass,
+    );
+    if !cache_breakpoints.is_empty() {
+        req = req.with_cache_breakpoints(cache_breakpoints);
+    }
+    req
+}
+
 /// One audit pass: build the request, run it (streaming into the transcript when feedback
 /// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
 /// by the primary chunk loop and the resolution round so neither duplicates the call logic.
@@ -310,21 +339,14 @@ pub(super) async fn audit_pass(
     // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
     n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
-    let mut req = with_stage_effort(
-        LlmRequest::new(prompt)
-            .with_system(crate::prompt_frame::with_untrusted_clause(
-                audit_system_prompt_with(terse_output_of(meter)),
-                nonce,
-            ))
-            .with_max_tokens(scan_max_tokens(n_rules))
-            .with_temperature(AUDIT_TEMPERATURE)
-            .with_response_schema(reply_schemas::scan_reply_schema())
-            .with_model(stage_model(audit_model)),
-        Stage::ScanPass,
+    let req = build_audit_request(
+        audit_model,
+        prompt,
+        cache_breakpoints,
+        nonce,
+        meter,
+        n_rules,
     );
-    if !cache_breakpoints.is_empty() {
-        req = req.with_cache_breakpoints(cache_breakpoints);
-    }
     let resp = match send_audit_request(llm, req.clone(), feedback, session, meter).await {
         Ok(r) => r,
         Err(e) => {
@@ -691,7 +713,10 @@ pub(super) async fn retry_unusable_scan_reply(
     meter: Option<&UsageMeter>,
     malformed_retries_allowed: usize,
 ) -> ScanReply {
-    let cap_reached = || meter.is_some_and(UsageMeter::retry_blocked);
+    // The limit refuses a retry only if the retry would be a FRESH send: one the run store holds
+    // a reply for is answered from the store and costs nothing.
+    let cap_reached =
+        |next: &LlmRequest| meter.is_some_and(UsageMeter::retry_blocked) && !llm.replays(next);
     let mut wasted_counted = false;
     let mut stopped_by_cap = false;
     let mut truncation_retried = false;
@@ -703,7 +728,7 @@ pub(super) async fn retry_unusable_scan_reply(
         .saturating_mul(2)
         .min(AGGREGATE_MAX_TOKENS_CEILING);
     if resp.truncated && efficiency_of(meter).truncation_retry && retry_cap > req.max_tokens {
-        if cap_reached() {
+        if cap_reached(&req.clone().with_max_tokens(retry_cap)) {
             stopped_by_cap = true;
         } else {
             truncation_retried = true;
@@ -738,7 +763,12 @@ pub(super) async fn retry_unusable_scan_reply(
         && scan_output_is_malformed(&resp.text)
         && malformed_retries < malformed_retries_allowed
     {
-        if cap_reached() {
+        // Never the same request again: the retry says what was wrong with the reply. Built
+        // from the ORIGINAL request each time, so the note appears once whatever the count.
+        let mut retry_req = req.clone();
+        retry_req.prompt.push_str("\n\n");
+        retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
+        if cap_reached(&retry_req) {
             stopped_by_cap = true;
             break;
         }
@@ -746,11 +776,6 @@ pub(super) async fn retry_unusable_scan_reply(
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
-        // Never the same request again: the retry says what was wrong with the reply. Built
-        // from the ORIGINAL request each time, so the note appears once whatever the count.
-        let mut retry_req = req.clone();
-        retry_req.prompt.push_str("\n\n");
-        retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
         match send_audit_request(llm, retry_req, feedback, session, meter).await {
             Ok(retry) => {
                 if let Some(m) = meter {
@@ -1067,36 +1092,6 @@ pub(super) async fn run_passes(
         let batch = batches[bi];
         let second_try = &second_try;
         async move {
-            // SPEND CAP: asked before anything is built or sent, and held until the pass
-            // (its truncation retry included) has finished, so a pass is never cut off
-            // mid-response. A refused pass is recorded as NOT RUN, never skipped silently.
-            let _permit = match admit_pass(meter).await {
-                Err(CapReached) => {
-                    // The end-of-round second try of a pass that already failed: the failure
-                    // stands as its record, so the refusal is not recorded a second time.
-                    if second_try.load(std::sync::atomic::Ordering::SeqCst) {
-                        return (ci, bi, None);
-                    }
-                    if let Some(m) = meter {
-                        m.record_not_run(crate::cost_cap::NotRunPass {
-                            repo: repo.to_string(),
-                            group: label.to_string(),
-                            chunk: ci + 1,
-                            n_chunks: n_c,
-                            rule_batch: bi + 1,
-                            n_rule_batches: n_b,
-                            rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
-                            files: chunks[ci].iter().map(|(path, _)| path.clone()).collect(),
-                            class: camerata_llm::failure::FailureClass::SpendLimit,
-                        });
-                    }
-                    if let Some((jstore, jid)) = job {
-                        jstore.inc_not_run(jid, 1);
-                    }
-                    return (ci, bi, None);
-                }
-                Ok(permit) => permit,
-            };
             let rb = build_rules_block(batch);
             // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
             // issues beyond the adopted rules" task only depends on the code (the whole
@@ -1146,6 +1141,50 @@ pub(super) async fn run_passes(
                 &task_line,
                 &rb,
             );
+            // SPEND CAP: asked before anything is sent, and held until the pass (its truncation
+            // retry included) has finished, so a pass is never cut off mid-response. A refused
+            // pass is recorded as NOT RUN, never skipped silently. A pass the run store already
+            // holds a reply for is not a send at all: it is answered from the store whatever the
+            // run's spend, so a resume past its limit still replays what it paid for.
+            let replayed = llm.replays(&build_audit_request(
+                audit_model,
+                prompt.clone(),
+                cache_bps.clone(),
+                nonce,
+                meter,
+                batch.len(),
+            ));
+            let _permit = if replayed {
+                None
+            } else {
+                match admit_pass(meter).await {
+                    Err(CapReached) => {
+                        // The end-of-round second try of a pass that already failed: the failure
+                        // stands as its record, so the refusal is not recorded a second time.
+                        if second_try.load(std::sync::atomic::Ordering::SeqCst) {
+                            return (ci, bi, None);
+                        }
+                        if let Some(m) = meter {
+                            m.record_not_run(crate::cost_cap::NotRunPass {
+                                repo: repo.to_string(),
+                                group: label.to_string(),
+                                chunk: ci + 1,
+                                n_chunks: n_c,
+                                rule_batch: bi + 1,
+                                n_rule_batches: n_b,
+                                rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
+                                files: chunks[ci].iter().map(|(path, _)| path.clone()).collect(),
+                                class: camerata_llm::failure::FailureClass::SpendLimit,
+                            });
+                        }
+                        if let Some((jstore, jid)) = job {
+                            jstore.inc_not_run(jid, 1);
+                        }
+                        return (ci, bi, None);
+                    }
+                    Ok(permit) => permit,
+                }
+            };
             note_map_use(meter, repo, label, ci, sym);
             let session = format!("{session_prefix}-c{ci}-b{bi}");
             if let Some((store, key)) = feedback {

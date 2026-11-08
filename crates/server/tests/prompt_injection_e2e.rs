@@ -83,6 +83,7 @@ impl LlmPort for ObedientModel {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.seen.lock().unwrap().push(req);
         Ok(LlmResponse {
+            reported_model: None,
             text: self
                 .reply
                 .clone()

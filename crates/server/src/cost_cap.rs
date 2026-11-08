@@ -25,10 +25,13 @@
 //!   stage that sends a model call admits it that way (the group reviewer and the clone judge
 //!   included); `ai_audit::spend_limit_stages_tests` runs all eight on a meter already past its
 //!   limit and counts the calls.
-//! * **A resume counts the whole run.** The limit is checked against this attempt's spend plus
-//!   what the stored replies cost ([`RunControls::stored_spend_usd`] for the replies the journal
-//!   answers at no cost; the stages with a checkpoint put their stored usage on the meter
-//!   themselves). A resume whose stored replies already pass the limit sends nothing.
+//! * **A resume counts the whole run, and refuses only fresh sends.** The limit is checked
+//!   against `fresh spend + stored spend - replayed` ([`RunControls::stored_spend_usd`], the
+//!   meter's resumed counter), the same figure [`resume_limit_line`] prints. A reply the run
+//!   already holds is never refused: the journal's replay ([`camerata_llm::LlmPort::replays`])
+//!   is asked before admission, and a stage with stored work starts and replays it whatever the
+//!   spend. A resume whose stored replies already pass the limit replays them all and sends
+//!   nothing.
 //! * **Message Batches** cannot be cancelled cheaply once submitted, so the cap is checked
 //!   BEFORE a submission, against a projection (see
 //!   [`crate::ai_audit::UsageMeter::refuse_batch_submission`]). A batch that was submitted runs
@@ -86,11 +89,11 @@ pub struct RunControls {
     pub efficiency: EfficiencyConfig,
     /// `--max-cost-usd`. `None` = no cap.
     pub max_cost_usd: Option<f64>,
-    /// On a resumed run: what the run's stored replies cost, for the replies this attempt's meter
-    /// does NOT record when it replays them (the journal answers a scan pass or a clone-judge
-    /// batch at no cost; the stages with a checkpoint put their stored usage on the meter
-    /// themselves). The spend limit counts it, so a resume is held to the whole run's spend and
-    /// not only to what this attempt has paid. Zero for a run that is not resumed.
+    /// On a resumed run: everything the run's stored replies cost. The spend limit counts it
+    /// from the first moment, so a resume is held to the whole run's spend at every stage, and
+    /// the meter takes off the share a checkpoint replays onto it
+    /// ([`crate::ai_audit::UsageMeter::record_resumed`]) so a stored dollar is counted once. It is
+    /// the figure [`resume_limit_line`] prints. Zero for a run that is not resumed.
     pub stored_spend_usd: f64,
     /// The pre-flight estimate of the whole run, when the caller computed one. Used ONLY to
     /// decide whether a non-cancellable batch may be submitted (a real-time run is capped on

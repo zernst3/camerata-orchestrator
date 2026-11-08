@@ -822,6 +822,7 @@ async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unen
     meter.record_stage(
         Stage::Alternatives,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "claude-sonnet-4-6".to_string(),
             backend: "api".to_string(),

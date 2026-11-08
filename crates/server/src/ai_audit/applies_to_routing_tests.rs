@@ -25,6 +25,7 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.prompts.lock().unwrap().push(req.prompt.clone());
         Ok(LlmResponse {
+            reported_model: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),

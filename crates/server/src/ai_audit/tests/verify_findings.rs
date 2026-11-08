@@ -158,6 +158,7 @@ impl LlmPort for SeamRecordingCompleter {
         self.complete_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(LlmResponse {
+            reported_model: None,
             text: self.text.clone(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -180,6 +181,7 @@ impl LlmPort for SeamRecordingCompleter {
         let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
         on_delta(&text);
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -428,6 +430,7 @@ impl LlmPort for SalvagingFixCompleter {
         let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
         on_delta(&text);
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),

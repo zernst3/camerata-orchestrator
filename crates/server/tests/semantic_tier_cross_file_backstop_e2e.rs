@@ -105,6 +105,7 @@ fn answer(req: &LlmRequest, canned: String) -> String {
 impl LlmPort for StubModel {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
             text: answer(&req, CANNED_FINDING_JSON.to_string()),
             model: "stub".to_string(),
             backend: "stub".to_string(),

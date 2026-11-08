@@ -25,6 +25,7 @@ const OUTPUT_TOKENS: u64 = 10;
 
 fn reply_of(text: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),

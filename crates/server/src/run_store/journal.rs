@@ -102,6 +102,10 @@ pub struct StoredResponse {
     pub or_cache_discount: Option<f64>,
     #[serde(default)]
     pub truncated: bool,
+    /// The model the backend said answered, beside the requested `model` above (see
+    /// `LlmResponse::reported_model`).
+    #[serde(default)]
+    pub reported_model: Option<String>,
 }
 
 impl StoredResponse {
@@ -117,14 +121,16 @@ impl StoredResponse {
             cache_creation_input_tokens: r.cache_creation_input_tokens,
             or_cache_discount: r.or_cache_discount,
             truncated: r.truncated,
+            reported_model: r.reported_model.clone(),
         }
     }
 
     /// The reply as a replay returns it: the same text, and no cost, because this attempt did not
-    /// pay for it. The usage meter and the spend limit therefore count only what this attempt
-    /// sends.
+    /// pay for it. The usage meter therefore counts only what this attempt sends; a spend limit
+    /// adds the stored cost separately (`RunControls::stored_spend_usd`).
     fn replayed(&self) -> LlmResponse {
         LlmResponse {
+            reported_model: self.reported_model.clone(),
             text: self.text.clone(),
             model: self.model.clone(),
             backend: self.backend.clone(),
@@ -523,6 +529,35 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
     planned
 }
 
+/// Whether `plan_call` would answer `req` from the store right now: the same key, the same
+/// position among this attempt's asks, the same test of a stored reply, with nothing recorded.
+/// A spend limit asks this before admitting a call, because a replay costs nothing and refusing
+/// it would drop a reply the run already paid for.
+fn would_replay(store: &RunStore, req: &LlmRequest) -> bool {
+    let req = camerata_llm::model_input::guarded(req);
+    let key = request_key(&req);
+    let (kind, repo, files) = classify(&req);
+    let mut st = store.lock_state();
+    let idx = st.asked.get(&key).copied().unwrap_or(0);
+    let dir = store.dir().to_path_buf();
+    let st = &mut *st;
+    let file = st.calls.entry(key.clone()).or_insert_with(|| {
+        load_call_file(&dir, &key).unwrap_or_else(|| CallFile {
+            key: key.clone(),
+            kind,
+            repo: repo.clone(),
+            files: files.clone(),
+            entries: BTreeMap::new(),
+        })
+    });
+    let file_kind = file.kind;
+    file.entries
+        .values()
+        .filter(|e| entry_replays(e, file_kind) && e.response.is_some())
+        .nth(idx)
+        .is_some()
+}
+
 impl FreshCall {
     /// The repo whose part this call belongs to: the one its prompt names, else the only repo.
     fn repo_for_plan(&self, store: &RunStore) -> String {
@@ -712,6 +747,10 @@ impl LlmPort for JournalLlm<'_> {
         reject_reply(&self.store, request_key, reason, whole);
     }
 
+    fn replays(&self, req: &LlmRequest) -> bool {
+        would_replay(&self.store, req)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         // A borrowed completer cannot be downcast (it is not 'static), and a plain completer has
         // no batch path anyway: the batch dispatch asks for a concrete client and says so.
@@ -766,6 +805,10 @@ impl LlmPort for JournalRealtime {
 
     fn note_rejected_reply(&self, request_key: &str, reason: &str, whole: bool) {
         reject_reply(&self.store, request_key, reason, whole);
+    }
+
+    fn replays(&self, req: &LlmRequest) -> bool {
+        would_replay(&self.store, req)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1073,27 +1116,11 @@ pub(crate) fn count_calls(store: &RunStore) {
     let _ = store.persist();
 }
 
-/// Whether a resume's usage meter sees the stored calls of a `kind` again. The stages that keep a
-/// checkpoint (calibration, alternatives, detail, fix, group review) put an absorbed item's stored
-/// usage on the meter themselves; the journal answers every other call at no cost
-/// ([`StoredResponse::replayed`]), so its stored cost is on no meter unless a spend limit adds it.
-fn meter_replays_usage(kind: PartKind) -> bool {
-    matches!(
-        kind,
-        PartKind::Calibration
-            | PartKind::Alternatives
-            | PartKind::Detail
-            | PartKind::Fix
-            | PartKind::GroupReview
-    )
-}
-
-/// What the stored calls of the run in `dir` cost in all, and the part of it a resume's meter does
-/// not see again (see [`meter_replays_usage`]). Every stored call counts, a reply later set aside
-/// included: the money was paid either way.
-pub(crate) fn stored_spend(dir: &Path) -> (f64, f64) {
+/// What the stored calls of the run in `dir` cost in all. Every stored call counts, a reply later
+/// set aside included: the money was paid either way. A spend limit on a resume counts this whole
+/// figure up front ([`crate::cost_cap::RunControls::stored_spend_usd`]).
+pub(crate) fn stored_spend(dir: &Path) -> f64 {
     let mut all = 0.0f64;
-    let mut unmetered = 0.0f64;
     if let Ok(entries) = std::fs::read_dir(dir.join("calls")) {
         for file in entries
             .filter_map(Result::ok)
@@ -1101,13 +1128,21 @@ pub(crate) fn stored_spend(dir: &Path) -> (f64, f64) {
         {
             for entry in file.entries.values() {
                 all += entry.cost_usd;
-                if !meter_replays_usage(file.kind) {
-                    unmetered += entry.cost_usd;
-                }
             }
         }
     }
-    (all, unmetered)
+    all
+}
+
+/// Whether every part of `kind` for `repo` in the plan is done. A call whose repo the prompt did
+/// not name is matched against the parts of that kind in any repo.
+fn part_finished(record: &RunRecord, kind: PartKind, repo: &str) -> bool {
+    let mut parts = record
+        .plan
+        .iter()
+        .filter(|p| p.kind == kind && (repo.is_empty() || p.repo.is_empty() || p.repo == repo))
+        .peekable();
+    parts.peek().is_some() && parts.all(|p| p.status == PartStatus::Done)
 }
 
 /// What a resume of `record` would cost, from the stored files of `dir`.
@@ -1115,7 +1150,7 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
     let mut stored = 0usize;
     let mut again = 0usize;
     let mut spent = 0.0f64;
-    let (stored_usd, stored_unmetered_usd) = stored_spend(dir);
+    let stored_usd = stored_spend(dir);
     if let Ok(entries) = std::fs::read_dir(dir.join("calls")) {
         for file in entries
             .filter_map(Result::ok)
@@ -1125,7 +1160,10 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
                 if entry_replays(entry, file.kind) {
                     stored += 1;
                     spent += entry.cost_usd;
-                } else {
+                } else if !part_finished(record, file.kind, &file.repo) {
+                    // A call that came back unusable or failed is owed again only while its part
+                    // is open. A finished part read its item on a later try (under another
+                    // request): the entry is a superseded first try and owes nothing.
                     again += 1;
                 }
             }
@@ -1185,7 +1223,6 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
         calls_to_send_again: again,
         usd,
         stored_usd,
-        stored_unmetered_usd,
         basis,
     }
 }
