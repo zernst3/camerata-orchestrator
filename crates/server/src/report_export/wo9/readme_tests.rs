@@ -53,8 +53,8 @@ fn the_ticket_columns_use_the_vocabulary_terms() {
             "Estimate",
             // Per group until the plan is per Fix; then this becomes the Fix id.
             "Group id",
-            v::H_PLACE_COUNT,
             v::H_PLACES,
+            v::H_PLACE_LIST,
         ]
     );
     for header in TICKET_HEADERS {

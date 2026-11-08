@@ -16,7 +16,8 @@ pub const TICKETS_CSV: &str = "csv/tickets.csv";
 pub const INLINE_SITES: usize = 50;
 
 /// The ticket file's columns, in order. Every column that names a concept takes its word from
-/// the vocabulary, so a ticket says "places" where the workbook does. "Group id" stays for now:
+/// the vocabulary, so a ticket says "Places" for the count, as the workbook does, and "Place list"
+/// for the places it names. "Group id" stays for now:
 /// a ticket is one per group until the plan is per Fix (item #1), when this column becomes the
 /// vocabulary's "Fix id" ([`v::H_FIX_ID`]).
 pub const TICKET_HEADERS: [&str; 8] = [
@@ -26,8 +27,8 @@ pub const TICKET_HEADERS: [&str; 8] = [
     "Labels",
     "Estimate",
     "Group id",
-    v::H_PLACE_COUNT,
     v::H_PLACES,
+    v::H_PLACE_LIST,
 ];
 
 fn priority_of(severity: &str) -> &'static str {

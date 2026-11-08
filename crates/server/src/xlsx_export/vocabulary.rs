@@ -214,8 +214,9 @@ pub const H_EFFORT: &str = "Effort";
 pub const H_ESTIMATED_HOURS: &str = "Estimated hours";
 pub const H_CONFIDENCE: &str = "Confidence";
 pub const H_PLACES: &str = "Places";
-/// The ticket file's count of the places a ticket lists (`csv/tickets.csv`).
-pub const H_PLACE_COUNT: &str = "Place count";
+/// The ticket file's list of the places a ticket names (`csv/tickets.csv`), one per line. The
+/// count of places is [`H_PLACES`], as everywhere else.
+pub const H_PLACE_LIST: &str = "Place list";
 pub const H_AREA: &str = "Area";
 pub const H_AREAS: &str = "Areas";
 pub const H_RULE: &str = "Rule";
@@ -613,7 +614,12 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         "Places",
         "How many places a fix, a problem or a group covers.",
-        "Fix plan; All problems; How problems were grouped",
+        "Fix plan; All problems; How problems were grouped; the tickets file",
+    ),
+    e(
+        "Place list",
+        "The places a ticket names, one to a line: the file and line of each. Only in the tickets file.",
+        "The tickets file",
     ),
     e(
         "Rules",
@@ -1090,6 +1096,11 @@ pub const CONCEPTS: &[Concept] = &[
         "one file and line, or one whole file",
         "Place",
         &["site", "sites"],
+    ),
+    k(
+        "the places a ticket names, one to a line",
+        "Place list",
+        &[],
     ),
     k(
         "what was found at a place",

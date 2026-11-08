@@ -3944,7 +3944,7 @@ pub fn product_export_readme(
 
     // Every sheet the README names is spelled from the vocabulary, so a renamed sheet renames
     // the README with it.
-    let [title, description, priority, labels, estimate, group_id, place_count, places] =
+    let [title, description, priority, labels, estimate, group_id, places, place_list] =
         TICKET_HEADERS;
     // A project of several repos gets one more paragraph: where the services differ on a rule.
     let patterns = if provenance.repos.len() > 1 {
@@ -4010,11 +4010,12 @@ pub fn product_export_readme(
          csv/tickets.csv\n\
          \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
          \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
-         \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {place_count}\n\
-         \x20 and {places} (the first {INLINE_SITES} places, then a pointer to the {all_problems} sheet).\n\
-         \x20 {group_id} is the {fix_id} of the {all_problems} sheet. To import the file:\n\
+         \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {places}\n\
+         \x20 and {place_list}. {places} counts the places of the ticket and {place_list} names the\n\
+         \x20 first {INLINE_SITES}, then points to the {all_problems} sheet. {group_id} is the {fix_id}\n\
+         \x20 of the {all_problems} sheet. To import the file:\n\
          \x20 - Jira: map {title} to Summary, {description} to Description, {priority} to Priority\n\
-         \x20   (Highest, High, Medium or Low), {labels} to Labels (split on commas) and {places} to\n\
+         \x20   (Highest, High, Medium or Low), {labels} to Labels (split on commas) and {place_list} to\n\
          \x20   a text field of your choice. {estimate} is text, not a duration.\n\
          \x20 - Linear: {title}, {description} and {labels} map to the fields of the same name.\n\
          \x20   {priority} maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
