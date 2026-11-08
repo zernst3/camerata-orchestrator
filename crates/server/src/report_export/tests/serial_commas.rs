@@ -78,7 +78,7 @@ fn serial_commas(text: &str) -> Vec<String> {
 
 #[test]
 fn authored_prose_has_no_serial_comma() {
-    let sources: [(&str, &str, bool); 8] = [
+    let sources: [(&str, &str, bool); 11] = [
         (
             "report_export.rs",
             include_str!("../../report_export.rs"),
@@ -103,6 +103,21 @@ fn authored_prose_has_no_serial_comma() {
         ),
         ("fix_text.rs", include_str!("../fix_text.rs"), false),
         (
+            "vocabulary.rs",
+            include_str!("../../xlsx_export/vocabulary.rs"),
+            false,
+        ),
+        (
+            "sheets.rs",
+            include_str!("../../xlsx_export/sheets.rs"),
+            false,
+        ),
+        (
+            "tickets.rs",
+            include_str!("../../xlsx_export/tickets.rs"),
+            false,
+        ),
+        (
             "audit_report.typ",
             include_str!("../../../templates/audit_report.typ"),
             true,
@@ -121,6 +136,31 @@ fn authored_prose_has_no_serial_comma() {
         "serial commas in authored prose (write `a, b or c`):\n{}",
         offenders.join("\n")
     );
+}
+
+/// The README is scanned as the package prints it (the text in `lib.rs` is spliced from the
+/// vocabulary, so the source alone would not show it), for a project of one repo and of two.
+#[test]
+fn the_client_readme_has_no_serial_comma() {
+    use crate::{product_export_readme, ManifestProvenance, ProvenanceRepo};
+    for repos in [&["acme/portal"][..], &["acme/portal", "acme/billing"][..]] {
+        let provenance = ManifestProvenance {
+            repos: repos
+                .iter()
+                .map(|name| ProvenanceRepo {
+                    name: (*name).to_string(),
+                    ..ProvenanceRepo::default()
+                })
+                .collect(),
+            ..ManifestProvenance::default()
+        };
+        let readme = product_export_readme("acme-inspection", &provenance, false);
+        assert!(
+            serial_commas(&readme).is_empty(),
+            "{:?}",
+            serial_commas(&readme)
+        );
+    }
 }
 
 #[test]
