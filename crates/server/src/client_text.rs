@@ -157,32 +157,55 @@ fn rewrite(text: &str) -> String {
     out
 }
 
-/// `path:0` read as a place is a problem in a whole file, which a client reads as "whole file":
-/// `.env.production:0` becomes `.env.production (whole file)`. Only a colon and a lone zero after
-/// a letter are rewritten (`main.rs:0`), so a time (`10:05`), a ratio (`1:0`) and a line number
-/// (`main.rs:10`) are left alone. Borrows unchanged when there is none.
-pub fn whole_file_places(text: &str) -> Cow<'_, str> {
+/// Whether the token before the colon at `bytes[colon]` is a path: path characters only, with a
+/// dot or a slash in them (`.env.production`, `src/main.rs`). `margin` in CSS is not.
+fn path_like_head(bytes: &[u8], colon: usize) -> bool {
+    let mut start = colon;
+    let mut dotted = false;
+    while start > 0 {
+        let c = bytes[start - 1];
+        if !(c.is_ascii_alphanumeric() || matches!(c, b'.' | b'/' | b'_' | b'-')) {
+            break;
+        }
+        dotted |= matches!(c, b'.' | b'/');
+        start -= 1;
+    }
+    dotted
+}
+
+/// The byte offset of the colon in every `path:0` of `text`: a path (see [`path_like_head`]) that
+/// ends in a letter, a colon and a lone zero. A time (`10:05`), a ratio (`1:0`), a line number
+/// (`main.rs:10`) and a CSS declaration (`margin:0;`) are not.
+pub fn whole_file_colons(text: &str) -> Vec<usize> {
     let bytes = text.as_bytes();
-    let hit = |i: usize| {
-        bytes[i] == b':'
-            && i > 0
-            && bytes[i - 1].is_ascii_alphabetic()
-            && bytes.get(i + 1) == Some(&b'0')
-            && !bytes
-                .get(i + 2)
-                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b':')
-    };
-    if !(0..bytes.len()).any(hit) {
+    (1..bytes.len())
+        .filter(|&i| {
+            bytes[i] == b':'
+                && bytes[i - 1].is_ascii_alphabetic()
+                && bytes.get(i + 1) == Some(&b'0')
+                && !bytes
+                    .get(i + 2)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b':')
+                && path_like_head(bytes, i)
+        })
+        .collect()
+}
+
+/// `path:0` read as a place is a problem in a whole file, which a client reads as "whole file":
+/// `.env.production:0` becomes `.env.production (whole file)`. Only a path is rewritten
+/// ([`whole_file_colons`]), so code is left alone. This is for prose the report or a model wrote,
+/// never for a quoted snippet of the client's code. Borrows unchanged when there is none.
+pub fn whole_file_places(text: &str) -> Cow<'_, str> {
+    let colons = whole_file_colons(text);
+    if colons.is_empty() {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 16);
     let mut last = 0;
-    for i in 0..bytes.len() {
-        if hit(i) {
-            out.push_str(&text[last..i]);
-            out.push_str(" (whole file)");
-            last = i + 2;
-        }
+    for colon in colons {
+        out.push_str(&text[last..colon]);
+        out.push_str(" (whole file)");
+        last = colon + 2;
     }
     out.push_str(&text[last..]);
     Cow::Owned(out)
@@ -361,6 +384,15 @@ mod tests {
             "see main.rs (whole file), then lib.rs:10 at 10:05 and a 1:0 ratio"
         );
         assert!(matches!(whole_file_places("main.rs:10"), Cow::Borrowed(_)));
+        // Code is not a place: a CSS declaration has no path before the colon.
+        assert!(matches!(
+            whole_file_places("a { margin:0; } b { padding:0 }"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            whole_file_places("const x = {top:0}"),
+            Cow::Borrowed(_)
+        ));
         assert!(matches!(whole_file_places("main.rs:07"), Cow::Borrowed(_)));
     }
 

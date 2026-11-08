@@ -69,18 +69,11 @@ fn line_zero_offsets(text: &str) -> Vec<usize> {
         }
         from = i + 6;
     }
-    for (i, byte) in bytes.iter().enumerate() {
-        if *byte == b':'
-            && i > 0
-            && bytes[i - 1].is_ascii_alphabetic()
-            && bytes.get(i + 1) == Some(&b'0')
-            && !bytes
-                .get(i + 2)
-                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b':')
-        {
-            at.push(i - 1);
-        }
-    }
+    at.extend(
+        crate::client_text::whole_file_colons(text)
+            .into_iter()
+            .map(|colon| colon - 1),
+    );
     at
 }
 
@@ -185,11 +178,22 @@ fn json_hits(path: &str, value: &Value, hits: &mut Vec<Hit>) {
         Value::Object(map) => {
             for (key, item) in map {
                 hits_in(&format!("{path}.{key} (key)"), key, false, hits);
-                json_hits(&format!("{path}.{key}"), item, hits);
+                // The client's own code is quoted as it is; nothing can legitimately change it.
+                if !is_verbatim_code(key) {
+                    json_hits(&format!("{path}.{key}"), item, hits);
+                }
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+/// Names of the fields (JSON keys, CSV columns, workbook headers) that quote the client's own
+/// code verbatim. The producers cannot rewrite them (the text is also what the evidence check and
+/// the site key are made of), so the gate does not hold them to a rule about our prose.
+pub fn is_verbatim_code(name: &str) -> bool {
+    let name = name.trim();
+    name.eq_ignore_ascii_case("snippet") || name.eq_ignore_ascii_case("code seen")
 }
 
 /// A parsed JSON document: every string and every key, located by JSON path. Every `headline` in
@@ -278,12 +282,20 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
         };
         for (c, cell) in record.iter().enumerate() {
             let column = headers.get(c).unwrap_or("?");
-            hits_in(
-                &format!("row {}, column {column:?}", i + 1),
-                cell,
-                false,
-                &mut hits,
-            );
+            if is_verbatim_code(column) {
+                continue;
+            }
+            let at = format!("row {}, column {column:?}", i + 1);
+            // A nested list or object (`also_locations`) is JSON text: walk it, so the snippets
+            // inside it are exempt like any other.
+            let trimmed = cell.trim_start();
+            let nested = (trimmed.starts_with('[') || trimmed.starts_with('{'))
+                .then(|| serde_json::from_str::<Value>(cell).ok())
+                .flatten();
+            match nested {
+                Some(value) => json_hits(&at, &value, &mut hits),
+                None => hits_in(&at, cell, false, &mut hits),
+            }
         }
     }
     problems_of(file, hits)
@@ -294,9 +306,22 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
 pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     let mut hits = Vec::new();
     let mut unreadable = Vec::new();
+    let mut verbatim: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     match xlsx_cells(bytes) {
         Ok(cells) => {
+            // The client's own code sits in the column under a "Snippet" or "Code seen" header.
+            let header_cells: Vec<_> = cells
+                .iter()
+                .filter(|c| is_verbatim_code(&c.text))
+                .map(|c| (c.sheet.clone(), c.col, c.row))
+                .collect();
             for cell in cells {
+                if header_cells.iter().any(|(sheet, col, row)| {
+                    *sheet == cell.sheet && *col == cell.col && cell.row > *row
+                }) {
+                    verbatim.insert(cell.text.clone());
+                    continue;
+                }
                 hits_in(
                     &format!("sheet {:?} cell {}", cell.sheet, cell.reference),
                     &cell.text,
@@ -334,6 +359,9 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     if let Ok(strings) = xlsx_strings(bytes) {
         let located: Vec<String> = hits.iter().map(|h| h.context.clone()).collect();
         for (i, text) in strings.iter().enumerate() {
+            if verbatim.contains(text) {
+                continue;
+            }
             let mut own = Vec::new();
             hits_in(&format!("shared string #{i}"), text, false, &mut own);
             hits.extend(own.into_iter().filter(|h| !located.contains(&h.context)));

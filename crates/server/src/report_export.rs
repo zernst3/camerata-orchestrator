@@ -302,7 +302,9 @@ pub(crate) fn client_detail(detail: &str) -> String {
 pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     let mut f = finding.clone();
     f.path = strip_zero_width(&f.path).into_owned();
-    f.snippet = client_prose(&strip_zero_width(&f.snippet));
+    // `snippet` is the client's own code, verbatim: it is also the site key's fingerprint input.
+    // Zero-width characters are stripped and secrets redacted below; nothing is rewritten.
+    f.snippet = strip_zero_width(&f.snippet).into_owned();
     f.detail = client_detail(&strip_zero_width(&f.detail));
     for v in f.captures.values_mut() {
         *v = strip_zero_width(v).into_owned();
@@ -317,7 +319,7 @@ pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
         *rationale = client_prose(&strip_zero_width(rationale));
     }
     for site in &mut f.also_locations {
-        site.snippet = client_prose(&strip_zero_width(&site.snippet));
+        site.snippet = strip_zero_width(&site.snippet).into_owned();
         site.headline = client_prose(&site.headline);
     }
     // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from

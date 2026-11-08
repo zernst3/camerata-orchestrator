@@ -64,11 +64,11 @@ fn each_banned_character_planted_on_each_surface_is_refused_with_its_place() {
                 "findings.json",
                 "$.a_field_added_tomorrow",
             ),
-            (Surface::DatasetJson, "json/deviations.json", "$[0].snippet"),
+            (Surface::DatasetJson, "json/deviations.json", "$[0].detail"),
             (
                 Surface::DatasetCsv,
                 "csv/conventions.csv",
-                "row 1, column \"snippet\"",
+                "row 1, column \"detail\"",
             ),
             (
                 Surface::XlsxSharedString,
@@ -78,7 +78,7 @@ fn each_banned_character_planted_on_each_surface_is_refused_with_its_place() {
             (Surface::Readme, "README.txt", "line "),
         ] {
             let mut pkg = package();
-            plant(&mut pkg, surface, &planted_text(character));
+            plant_prose(&mut pkg, surface, &planted_text(character));
             let failure = failure_of(pkg);
             let problems = style_problems(&failure.report);
             let hit = problems
@@ -336,7 +336,7 @@ fn a_whole_file_problem_printed_as_line_zero_is_refused_in_every_kind_of_file() 
             Surface::Readme,
         ] {
             let mut pkg = package();
-            plant(&mut pkg, surface, text);
+            plant_prose(&mut pkg, surface, text);
             let failure = failure_of(pkg);
             let problems = style_problems(&failure.report);
             assert!(
@@ -380,4 +380,104 @@ fn an_internal_package_is_not_held_to_the_client_text_style() {
     let mut client = package();
     plant(&mut client, Surface::Readme, &planted_text(EM));
     assert!(!style_problems(&failure_of(client).report).is_empty());
+}
+
+// ---- the client's own code is not ours to rewrite, so the gate does not scan it ------------------
+
+fn code_with_a_dash() -> String {
+    format!("a {{ margin:0; }} // {EM} the client's own comment")
+}
+
+#[test]
+fn a_verbatim_code_field_is_not_held_to_the_text_style_in_json() {
+    let code = code_with_a_dash();
+    let doc = json!({ "findings": [{
+        "detail": "plain",
+        "snippet": code,
+        "also_locations": [{ "snippet": code }]
+    }]});
+    assert!(text_style::json_problems("findings.json", &doc).is_empty());
+    // The same text in any other field is refused.
+    let doc = json!({ "findings": [{ "detail": code }] });
+    assert!(!text_style::json_problems("findings.json", &doc).is_empty());
+}
+
+#[test]
+fn a_verbatim_code_column_is_not_held_to_the_text_style_in_csv() {
+    let code = code_with_a_dash();
+    let csv_of = |header: [&str; 2], row: [&str; 2]| {
+        let mut w = csv::Writer::from_writer(Vec::new());
+        w.write_record(header).expect("header");
+        w.write_record(row).expect("row");
+        w.into_inner().expect("csv")
+    };
+    let clean = csv_of(["snippet", "detail"], [&code, "plain"]);
+    assert!(text_style::csv_problems("csv/all-findings.csv", &clean).is_empty());
+    let dirty = csv_of(["snippet", "detail"], ["plain", &code]);
+    assert!(!text_style::csv_problems("csv/all-findings.csv", &dirty).is_empty());
+}
+
+#[test]
+fn a_verbatim_code_column_is_not_held_to_the_text_style_in_the_workbook() {
+    let code = code_with_a_dash();
+    // Two columns, "Code seen" first and "Detail" second; `code_in` says which holds the code.
+    let book = |code_under_code_seen: bool| {
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let ws = wb.add_worksheet();
+        ws.write_string(0, 0, "Code seen").expect("header");
+        ws.write_string(0, 1, "Detail").expect("header");
+        let (first, second) = if code_under_code_seen {
+            (code.as_str(), "plain")
+        } else {
+            ("plain", code.as_str())
+        };
+        ws.write_string(1, 0, first).expect("cell");
+        ws.write_string(1, 1, second).expect("cell");
+        wb.save_to_buffer().expect("workbook")
+    };
+    // In the code column the text is the client's; in another column it is ours.
+    assert!(text_style::xlsx_problems("w.xlsx", &book(true)).is_empty());
+    assert!(!text_style::xlsx_problems("w.xlsx", &book(false)).is_empty());
+}
+
+/// Plant `text` on a surface, in a field that is prose (a dataset's `snippet` is the client's code
+/// and is not held to the text style, so the datasets get a `detail` here).
+fn plant_prose(pkg: &mut ProductPackage, surface: Surface, text: &str) {
+    let name = match surface {
+        Surface::DatasetJson => "deviations",
+        Surface::DatasetCsv => "conventions",
+        other => return plant(pkg, other, text),
+    };
+    let json = serde_json::to_vec(&json!([{ "detail": text }])).expect("serializes");
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(["detail"]).expect("header");
+    writer.write_record([text]).expect("row");
+    let csv = writer.into_inner().expect("csv bytes");
+    for (path, bytes) in pkg.datasets.iter_mut() {
+        if *path == format!("json/{name}.json") {
+            *bytes = json.clone();
+        } else if *path == format!("csv/{name}.csv") {
+            *bytes = csv.clone();
+        }
+    }
+}
+
+#[test]
+fn css_with_a_zero_is_not_a_whole_file_problem() {
+    let mut pkg = package();
+    plant(
+        &mut pkg,
+        Surface::Readme,
+        "a { margin:0; } and main.rs:10 and 1:0",
+    );
+    let report = match release(pkg) {
+        Ok(z) => z.report,
+        Err(ReleaseError::Blocked(f)) => f.report,
+        Err(other) => panic!("{other}"),
+    };
+    let readme: Vec<_> = style_problems(&report)
+        .into_iter()
+        .filter(|p| p.file == "README.txt")
+        .collect();
+    assert!(readme.is_empty(), "{readme:?}");
 }

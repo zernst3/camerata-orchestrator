@@ -37,14 +37,14 @@ fn sanitizing_a_finding_leaves_no_banned_character_in_any_prose_field() {
         .with_rating("high", format!("Also {EM} there")),
     );
     let clean = sanitize_finding_text(&f);
+    // The snippets are the client's own code and are not prose: see
+    // `a_snippet_is_the_clients_own_code_and_ships_byte_identical`.
     let mut fields = vec![
         clean.detail.clone(),
-        clean.snippet.clone(),
         clean.fix_specific.clone().unwrap_or_default(),
         clean.calibration_rationale.clone().unwrap_or_default(),
     ];
     for site in &clean.also_locations {
-        fields.push(site.snippet.clone());
         fields.push(site.headline.clone());
     }
     for field in fields {
@@ -128,4 +128,41 @@ fn a_title_with_nothing_after_it_keeps_the_colon_that_says_so() {
     // A detail with no separator at all is left alone.
     let f = row("AI-X", "Raw SQL without a join");
     assert_eq!(sanitize_finding_text(&f).detail, "Raw SQL without a join");
+}
+
+#[test]
+fn a_snippet_is_the_clients_own_code_and_ships_byte_identical() {
+    // CSS with `margin:0;` and a comment with an em dash: neither is ours to rewrite.
+    let code = format!("a {{ margin:0; }} // {EM} keep the reset");
+    let mut f = row("AI-X", "Title");
+    f.snippet = code.clone();
+    f.also_locations.push(crate::onboard::MergedLocation::site(
+        "owner/repo",
+        "src/b.css",
+        3,
+        "AI-X",
+        code.clone(),
+        false,
+    ));
+    let clean = sanitize_finding_text(&f);
+    assert_eq!(clean.snippet, code);
+    assert_eq!(clean.also_locations[0].snippet, code);
+    // Zero-width characters are still stripped from it, as before.
+    f.snippet = format!("{code}\u{200B}");
+    assert_eq!(sanitize_finding_text(&f).snippet, code);
+}
+
+#[test]
+fn the_site_key_of_a_finding_is_not_moved_by_the_normaliser() {
+    // The snippet is the fingerprint input of the site key, so a baseline or a decision keyed on
+    // it must survive the export's sanitising.
+    let mut f = row("AI-X", "Title");
+    f.snippet = format!("a {{ margin:0; }} // {EM} keep the reset");
+    f.site_key = String::new();
+    let sanitized = sanitize_finding_text(&f);
+    assert_eq!(finding_key(&sanitized), finding_key(&f));
+    assert_eq!(
+        finding_key(&f),
+        camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, 0)
+    );
 }
