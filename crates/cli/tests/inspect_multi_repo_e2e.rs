@@ -112,7 +112,6 @@ fn zip_entry(path: &Path, name: &str) -> String {
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
     if !camerata_test_env::typst_on_path_for(
         "two_repos_with_the_same_path_are_one_project_one_report_one_cache",

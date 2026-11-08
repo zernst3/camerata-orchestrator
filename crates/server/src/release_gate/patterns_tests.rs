@@ -58,7 +58,6 @@ fn entries_of(package: ProductPackage) -> (BTreeMap<String, Vec<u8>>, AuditRepor
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_multi_repo_package_with_a_patterns_section_clears_the_gate() {
     let (entries, report) = entries_of(package_for(two_repo_report()));
     assert_eq!(
@@ -79,7 +78,6 @@ fn a_multi_repo_package_with_a_patterns_section_clears_the_gate() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_one_repo_package_has_no_patterns_key_and_the_gate_is_clean() {
     let (entries, report) = entries_of(package_for(scan_report()));
     assert!(report.patterns_across_services.is_none());
@@ -89,7 +87,6 @@ fn a_one_repo_package_has_no_patterns_key_and_the_gate_is_clean() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_gate_flags_a_pattern_row_counted_among_the_findings() {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));
     let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
@@ -111,7 +108,6 @@ fn the_gate_flags_a_pattern_row_counted_among_the_findings() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_gate_flags_a_severity_inside_the_section_and_a_missing_or_extra_key() {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));
     let original: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
@@ -163,7 +159,6 @@ fn the_gate_flags_a_severity_inside_the_section_and_a_missing_or_extra_key() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_gate_flags_a_workbook_sheet_the_report_does_not_have() {
     let (entries, report) = entries_of(package_for(two_repo_report()));
     let mut one_repo = report.clone();

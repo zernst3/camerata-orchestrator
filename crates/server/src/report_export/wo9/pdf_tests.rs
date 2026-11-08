@@ -219,7 +219,6 @@ fn futures_lite_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_reduced_package_clears_the_release_gate() {
     let over = apply_overlay(&report_of_sites(30_001), &[], &[], &[]);
     let entries = released_entries(&over, &client_options());

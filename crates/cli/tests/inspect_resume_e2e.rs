@@ -593,7 +593,6 @@ async fn a_fabricated_quote_refuses_the_release_with_exit_3_and_names_the_row() 
 /// back the resume sends only the fix calls and the export is the uninterrupted run's.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     if !typst_available("a_resume_after_a_failed_sub_pass") {
         return;
@@ -725,7 +724,6 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
 /// A scan pass down: the resume asks the model for that pass only.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_resume_after_a_failed_scan_pass_equals_the_uninterrupted_run() {
     if !typst_available("a_resume_after_a_failed_scan_pass") {
         return;
@@ -773,7 +771,6 @@ async fn a_resume_after_a_failed_scan_pass_equals_the_uninterrupted_run() {
 /// Two repos, a different part down in each: one resume finishes both.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_resume_of_two_repos_with_a_failure_in_each_equals_the_uninterrupted_run() {
     if !typst_available("a_resume_of_two_repos") {
         return;
@@ -851,7 +848,6 @@ async fn a_resume_is_refused_when_the_repo_is_not_as_it_was() {
 /// model for that pass again and for nothing else.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_malformed_answer_is_a_failed_part_and_the_resume_asks_for_that_part_only() {
     if !typst_available("a_malformed_answer_is_a_failed_part") {
         return;
@@ -1042,7 +1038,6 @@ mod batch {
     /// submits nothing new, and the export is the uninterrupted run's.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    #[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
     async fn a_batch_submitted_before_the_interruption_is_fetched_not_submitted_again() {
         if !typst_available("a_batch_submitted_before_the_interruption") {
             return;

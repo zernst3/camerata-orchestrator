@@ -195,7 +195,6 @@ fn the_release_gate_refuses_a_package_that_records_an_incomplete_run() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_complete_run_exports_exactly_as_before() {
     let package = package_from(scan_report(), &client_options()).expect("complete run builds");
     assert!(package.report_json.cover.internal_incomplete.is_none());

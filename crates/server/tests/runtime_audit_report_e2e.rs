@@ -368,7 +368,6 @@ async fn a_feed_that_could_not_be_fetched_is_disclosed_and_never_reads_as_clean(
 }
 
 #[tokio::test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn the_rendered_pdf_and_readme_carry_the_findings_and_the_stamp() {
     if !camerata_test_env::typst_on_path() {
         eprintln!(

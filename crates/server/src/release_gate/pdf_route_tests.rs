@@ -490,7 +490,6 @@ async fn the_pdf_route_refuses_an_incomplete_run_for_a_client() {
 }
 
 #[tokio::test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn the_pdf_route_still_renders_a_clear_report() {
     if !typst_on_path() {
         eprintln!("pdf route clear test: skipping, typst is not on PATH");

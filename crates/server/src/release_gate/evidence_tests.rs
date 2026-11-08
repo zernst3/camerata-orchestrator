@@ -100,7 +100,6 @@ fn an_unverified_row_with_no_reviewer_decision_refuses_the_export() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_row_the_reviewer_decided_in_any_state_is_allowed() {
     for state in ["Confirmed", "Ignored", "TechDebt", "FalsePositive"] {
         let dispositions = decision(state);
@@ -143,7 +142,6 @@ fn a_decision_about_another_row_does_not_cover_this_one() {
 /// The positive counterpart: the site key is line-independent (WO1), so a decision about the same
 /// site (same repo, file, rule and code) at another line covers the row.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_same_site_row_at_another_line_is_covered_by_the_decision() {
     let mut same_site = unverified_row();
     same_site.line = 99;
@@ -161,7 +159,6 @@ fn a_same_site_row_at_another_line_is_covered_by_the_decision() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_verified_row_is_never_affected() {
     let mut verified = unverified_row();
     verified.captures.clear();

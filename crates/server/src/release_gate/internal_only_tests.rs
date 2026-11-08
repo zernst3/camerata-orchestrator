@@ -80,7 +80,6 @@ fn released_hits(package: ProductPackage) -> Vec<(String, &'static str)> {
 /// THE TEST: a real package (workbook, `findings.json`, datasets, manifest, README, PDF data)
 /// carries none of the internal review-time names or phrases.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn no_review_time_data_reaches_a_client_export() {
     let found = released_hits(package());
     assert!(
@@ -94,7 +93,6 @@ fn no_review_time_data_reaches_a_client_export() {
 /// Skipped when Typst is not installed (the route needs it for the PDF).
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
     use camerata_api_types::review_timing::REVIEW_LOG_KEY;
     use http_body_util::BodyExt;
@@ -156,7 +154,6 @@ async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
 /// the clean package beside it is not. Without this, an empty result above could mean the scan
 /// never looked.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_scan_reaches_every_surface() {
     for surface in ALL_SURFACES {
         for planted in ["active_ms", "Review timer"] {

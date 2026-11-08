@@ -37,7 +37,6 @@ fn failure_of(package: ProductPackage) -> GateFailure {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_clean_package_clears_the_text_style_check() {
     let released = release(package()).expect("a clean package must clear the gate");
     assert!(released.report.is_clean());
@@ -50,7 +49,6 @@ fn a_clean_package_clears_the_text_style_check() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn each_banned_character_planted_on_each_surface_is_refused_with_its_place() {
     for character in [EM, EN, TIMES] {
         for (surface, file, location) in [
@@ -113,7 +111,6 @@ fn clean_entries() -> BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn an_audit_of_a_zip_refuses_a_banned_character_in_every_member_kind() {
     let cases: Vec<(&str, Edit)> = vec![
         (
@@ -185,7 +182,6 @@ fn an_audit_of_a_zip_refuses_a_banned_character_in_every_member_kind() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn an_audit_of_a_zip_refuses_a_banned_character_in_the_pdf_text() {
     let entries = clean_entries();
     let bytes = rezip(&entries);
@@ -200,7 +196,6 @@ fn an_audit_of_a_zip_refuses_a_banned_character_in_the_pdf_text() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_member_with_many_hits_reports_the_first_few_and_the_count() {
     let mut entries = clean_entries();
     let many = (0..40)

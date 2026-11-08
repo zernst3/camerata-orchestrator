@@ -117,14 +117,12 @@ fn an_internal_readme_carries_the_provenance_lines_and_the_disclaimer() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_client_package_clears_the_gate_and_an_internal_one_clears_it_as_internal() {
     release(package_for(false)).expect("a client package with a plain README is released");
     release_internal(package_for(true)).expect("an internal package with the full README");
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_gate_refuses_a_client_readme_that_carries_a_provenance_line() {
     let released = release(package_for(false)).expect("clean");
     let entries = read_zip_entries(&released.bytes).expect("zip");

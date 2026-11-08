@@ -106,7 +106,6 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 /// A credential in a merged site's snippet and headline is redacted in findings.json, every CSV
 /// and JSON dataset, the workbook and the PDF's data, and the export clears the gate.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_credential_in_a_merged_site_is_redacted_in_every_client_file() {
     for shape in [
         SecretShape::SupabaseSecretKey,
@@ -155,7 +154,6 @@ fn a_merged_site_shows_the_same_redacted_form_as_a_primary_row() {
 /// naming a key) turns the name into a "named secret literal" when the cell is scanned as one
 /// string. The gate's own refusal of a clean file is the bug.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn an_environment_variable_name_in_a_merged_site_does_not_block_the_export() {
     let name = "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=";
     let package = package_for(merged_report(

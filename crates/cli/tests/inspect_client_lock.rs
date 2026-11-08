@@ -273,7 +273,6 @@ async fn a_client_run_with_no_spend_limit_is_not_refused_by_any_cost_check() {
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_client_engagement_on_the_api_runs_and_records_backend_models_and_engagement() {
     if !typst_available(
         "a_client_engagement_on_the_api_runs_and_records_backend_models_and_engagement",

@@ -126,7 +126,6 @@ fn an_internal_export_carries_held_rows_marked_held_and_a_client_export_is_refus
 /// The internal workbook has a "Review flags" column; no client artifact has the column or any
 /// flag text anywhere.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn review_flags_are_in_the_internal_workbook_and_nowhere_in_a_client_package() {
     let rows = || report_with(vec![flagged()]);
 

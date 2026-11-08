@@ -50,7 +50,6 @@ fn cell<'a>(grid: &[Vec<String>], row: &'a [String], header: &str) -> &'a str {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_and_ignored() {
     let (reviewed, sealed) = reviewed_for_plan();
     let entries = released_entries(&reviewed, &client_options());
@@ -132,7 +131,6 @@ fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_an
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn ticket_csv_has_one_row_per_subgroup_and_excludes_false_positives() {
     let (reviewed, sealed) = reviewed_for_plan();
     let entries = released_entries(&reviewed, &client_options());
@@ -249,7 +247,6 @@ fn sealed_with_a_row_standing_for_three_sites() -> crate::onboard::SealedReport 
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
     let sealed = sealed_with_a_row_standing_for_three_sites();
     let group = sealed.findings[0].group_path[2].clone();
@@ -297,7 +294,6 @@ fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_report_with_no_tree_says_so_in_the_plan_the_tickets_and_the_pdf_patterns() {
     // A report with no tree: one stored before the review tree existed, exported as it is.
     let sealed = mixed_sealed().overlaid(|r| r.tree = None);

@@ -16,7 +16,6 @@ fn workbook(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     let sealed = mixed_sealed();
     let (records, edits) = mixed_review(&sealed);
@@ -131,7 +130,6 @@ fn merged_without_decision_reads_the_package_decisions_json() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_revoked_false_positive_prints_no_reason() {
     // The reviewer undid the ruling: its reason is reviewer text for a ruling that no longer
     // stands, so the record stays in the file (the history) without it.

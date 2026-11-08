@@ -419,7 +419,6 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn release_passes_a_clean_package_and_reports_fifteen_checks() {
     let z = released();
     assert!(z.report.is_clean());
@@ -569,7 +568,6 @@ fn secrets_check_locates_an_xlsx_hit_by_sheet_and_cell() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn secrets_check_ignores_twins_in_every_surface() {
     let twin = "SUPABASE_KEY=sb_secret_your_key_here_please";
     for surface in ALL_SURFACES {
@@ -652,7 +650,6 @@ fn a_problem_redacts_even_a_value_handed_to_it_by_mistake() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn the_failure_block_has_the_documented_shape() {
     let p = planted(SecretShape::SupabaseSecretKey);
     let mut pkg = package();
@@ -681,7 +678,6 @@ fn entries_of(z: &ReleasedZip) -> BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn dataset_set_check_flags_a_missing_and_an_extra_dataset() {
     let mut entries = entries_of(&released());
     assert!(dataset_set_problems(&entries).is_empty(), "control");
@@ -697,7 +693,6 @@ fn dataset_set_check_flags_a_missing_and_an_extra_dataset() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn dataset_set_check_flags_a_pdf_without_the_magic_and_an_empty_findings_json() {
     let mut entries = entries_of(&released());
     entries.insert(format!("{STEM}.pdf"), b"not a pdf".to_vec());
@@ -710,7 +705,6 @@ fn dataset_set_check_flags_a_pdf_without_the_magic_and_an_empty_findings_json() 
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn dataset_parity_check_flags_a_cell_disagreement() {
     let mut entries = entries_of(&released());
     assert!(dataset_parity_problems(&entries).is_empty(), "control");
@@ -730,7 +724,6 @@ fn dataset_parity_check_flags_a_cell_disagreement() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn dataset_parity_check_flags_findings_json_disagreeing_with_all_findings() {
     let mut entries = entries_of(&released());
     let mut doc: Value = serde_json::from_slice(&entries["findings.json"]).expect("parses");
@@ -787,7 +780,6 @@ pub(super) fn rezip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn manifest_check_flags_one_corrupted_byte_in_any_member() {
     let entries = entries_of(&released());
     assert!(verify_manifest(&entries).is_empty(), "control");
@@ -835,7 +827,6 @@ fn provenance_check_flags_a_readme_manifest_mismatch() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn audit_zip_over_a_released_zip_is_clean() {
     let z = released();
     let report = audit_zip(&z.bytes, None);
@@ -854,7 +845,6 @@ fn audit_zip_over_a_released_zip_is_clean() {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn audit_zip_flags_a_tampered_member_and_a_planted_secret_in_the_pdf_text() {
     let z = released();
     let mut entries = entries_of(&z);
@@ -1216,7 +1206,6 @@ async fn export_product_returns_422_with_the_problem_list_when_blocked() {
 }
 
 #[tokio::test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn export_product_success_names_the_release_checks_in_a_header() {
     if !typst_on_path() {
         eprintln!("export_product success test: skipping, typst is not on PATH");
@@ -1331,7 +1320,6 @@ async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() 
 
 #[cfg(unix)]
 #[tokio::test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn a_clean_package_still_reaches_the_compiler() {
     let (fake_bin, marker) = recording_typst();
     let fake_typst = fake_bin.path().join("typst");
@@ -1816,7 +1804,6 @@ fn count_problems(failure: &GateFailure) -> Vec<&Problem> {
 }
 
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_package_with_every_kind_reconciles_by_severity_and_kind() {
     let package = mixed_package();
     // Anti-vacuity: the JSON rows really span several kinds and severities.
@@ -1842,7 +1829,6 @@ fn a_package_with_every_kind_reconciles_by_severity_and_kind() {
 /// table has no header to read the severity column from, so the reconciliation reads it as zero
 /// rows instead of refusing the export.
 #[test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 fn a_scan_with_no_findings_reconciles_and_releases() {
     let mut report = scan_report();
     report.findings.clear();

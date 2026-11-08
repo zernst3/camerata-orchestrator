@@ -280,7 +280,6 @@ fn flatten_zip_entries(bytes: &[u8], prefix: &str, out: &mut BTreeMap<String, Ve
 }
 
 #[tokio::test]
-#[ignore = "WO-B: the workbook's own strings in xlsx_export.rs still carry dashes, so a real package is refused until that branch lands"]
 async fn cli_export_assembly_matches_the_server_product_export_path_byte_for_byte() {
     if !typst_on_path() {
         eprintln!(
