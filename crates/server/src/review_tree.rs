@@ -13,6 +13,7 @@
 
 mod build;
 mod collapse;
+mod fixes;
 mod grouping;
 mod mapping;
 mod types;
@@ -23,6 +24,10 @@ pub use build::{
     unplaced_summary, THROWN_OUT_SUFFIX,
 };
 pub use collapse::{collapse_identical, mark_located, same_place, CollapseOutcome, CollapsedRow};
+pub use fixes::{
+    fix_id_of, merge_fixes, FixIndex, FixMergeBlock, FixNode, FixPlace, FixShare, FIX_MERGE_STAGE,
+    FIX_PREFIX,
+};
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
 pub use mapping::{
     family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
@@ -497,6 +502,8 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
     rows
 }
 
+#[cfg(test)]
+mod fixes_tests;
 #[cfg(test)]
 mod outlier_tests;
 #[cfg(test)]

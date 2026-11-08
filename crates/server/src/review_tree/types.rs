@@ -179,6 +179,11 @@ pub struct ReviewTree {
     /// tree that no group reviewer has seen.
     #[serde(default)]
     pub group_reviewed: bool,
+    /// The Fixes: the sub-groups whose places are one change ([`super::merge_fixes`]). Worked out
+    /// from the rows and the tree alone, never from a decision, and stored with the tree. A tree
+    /// stored before Fixes existed has none; an export works them out from the rows then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<super::FixNode>,
 }
 
 impl ReviewTree {
@@ -281,6 +286,18 @@ impl ReviewTree {
     /// every node below it, sorted, each once. A possible-duplicate link is never followed, so a
     /// batch decision on a node can never reach a row outside the node.
     pub fn batch_members(&self, node_id: &str) -> Vec<String> {
+        // A Fix covers the members of every sub-group in it.
+        if node_id.starts_with(super::FIX_PREFIX) {
+            let mut keys: Vec<String> = self
+                .fix(node_id)
+                .into_iter()
+                .flat_map(|fx| fx.members.iter())
+                .flat_map(|sub| self.batch_members(sub))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            return keys;
+        }
         let mut keys: Vec<String> = Vec::new();
         let mut stack: Vec<&str> = vec![node_id];
         while let Some(id) = stack.pop() {
