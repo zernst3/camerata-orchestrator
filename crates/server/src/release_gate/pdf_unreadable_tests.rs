@@ -7,7 +7,7 @@ use super::*;
 /// Bytes that look like a real compiled PDF (a header, a body, a trailer) and are not one.
 fn a_real_looking_pdf_that_cannot_be_read() -> Vec<u8> {
     let mut bytes = b"%PDF-1.7\n".to_vec();
-    bytes.extend(std::iter::repeat(b'x').take(4000));
+    bytes.extend(std::iter::repeat_n(b'x', 4000));
     bytes.extend_from_slice(b"\n%%EOF\n");
     bytes
 }
