@@ -40,7 +40,7 @@ fn secret_row(rule: &str, area: &str, severity: &str, line: usize) -> Finding {
         rule_id: rule.to_string(),
         severity: severity.to_string(),
         snippet: format!("KEY_{rule}=redacted"),
-        detail: format!("{rule}. A real credential is committed to the repository."),
+        detail: format!("A real credential is committed to the repository, flagged by {rule}."),
         effort: Some("low".to_string()),
         category: Some(area.to_string()),
         fix_specific: Some(format!("Rotate the credential and remove it ({rule}).")),
@@ -341,4 +341,211 @@ fn a_fix_decision_writes_one_record_per_member_and_the_merge_gate_accepts_it() {
     assert!(rows
         .iter()
         .any(|d| d.scope == "node" && d.node_id == node_id));
+}
+
+// ---- the release gate's one-fix-per-row check ------------------------------------------------
+
+fn released_secret_entries() -> std::collections::BTreeMap<String, Vec<u8>> {
+    let reviewed = reviewed_of(&secret_report(), &[]);
+    released_entries(&reviewed, &options())
+}
+
+fn json_of(entries: &std::collections::BTreeMap<String, Vec<u8>>, name: &str) -> serde_json::Value {
+    serde_json::from_slice(&entries[name]).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+fn problems_text(problems: &[crate::release_gate::Problem]) -> String {
+    problems
+        .iter()
+        .map(|p| format!("{}: {}", p.location, p.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn every_open_row_has_a_fix_and_every_fix_member_exists() {
+    let entries = released_secret_entries();
+    let clean = crate::release_gate::fix_archive_problems(&entries);
+    assert!(clean.is_empty(), "{}", problems_text(&clean));
+
+    // A row naming a Fix that is not in the list is refused.
+    let mut tampered = entries.clone();
+    let mut findings = json_of(&entries, "findings.json");
+    findings["findings"][0]["fix_id"] = serde_json::json!("not-a-fix");
+    tampered.insert(
+        "findings.json".into(),
+        serde_json::to_vec(&findings).unwrap(),
+    );
+    let problems = crate::release_gate::fix_archive_problems(&tampered);
+    assert!(
+        problems_text(&problems).contains("not in the fixes list"),
+        "{problems:?}"
+    );
+
+    // A row of a rule group with no Fix id is refused.
+    let mut findings = json_of(&entries, "findings.json");
+    findings["findings"][0]["fix_id"] = serde_json::json!("");
+    tampered.insert(
+        "findings.json".into(),
+        serde_json::to_vec(&findings).unwrap(),
+    );
+    let problems = crate::release_gate::fix_archive_problems(&tampered);
+    assert!(
+        problems_text(&problems).contains("has no Fix id"),
+        "{problems:?}"
+    );
+
+    // A Fix naming a rule group the tree does not have is refused.
+    let mut findings = json_of(&entries, "findings.json");
+    findings["fixes"][0]["members"] = serde_json::json!(["sub:nowhere/0"]);
+    tampered.insert(
+        "findings.json".into(),
+        serde_json::to_vec(&findings).unwrap(),
+    );
+    let problems = crate::release_gate::fix_archive_problems(&tampered);
+    assert!(
+        problems_text(&problems).contains("not in the tree"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn tickets_equal_plan_rows_equal_fixes_with_open_places() {
+    let entries = released_secret_entries();
+    // One Fix with an open place: one ticket, one plan row.
+    let tickets = String::from_utf8(entries["csv/tickets.csv"].clone()).unwrap();
+    assert_eq!(tickets.lines().count() > 1, true);
+
+    // A second copy of the ticket names the same Fix twice, and the tickets then disagree with
+    // the plan.
+    let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
+    let headers = reader.headers().unwrap().clone();
+    let record = reader.records().next().unwrap().unwrap();
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(&headers).unwrap();
+    writer.write_record(&record).unwrap();
+    writer.write_record(&record).unwrap();
+    let mut doubled = entries.clone();
+    doubled.insert("csv/tickets.csv".into(), writer.into_inner().unwrap());
+    let problems = crate::release_gate::fix_archive_problems(&doubled);
+    assert!(
+        problems_text(&problems).contains("names the same Fix twice"),
+        "{problems:?}"
+    );
+
+    // No ticket at all: the plan has a Fix the tickets lack.
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(&headers).unwrap();
+    let mut none = entries.clone();
+    none.insert("csv/tickets.csv".into(), writer.into_inner().unwrap());
+    let problems = crate::release_gate::fix_archive_problems(&none);
+    assert!(
+        problems_text(&problems).contains("must be the same Fixes"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn escalation_entries_equal_slots_and_top_three_fix_ids_are_distinct() {
+    let reviewed = reviewed_of(&secret_report(), &[]);
+    let package = package_of(&reviewed, &options());
+    let clean =
+        crate::release_gate::fix_report_problems(&package.report_json, &package.findings_export);
+    assert!(clean.is_empty(), "{}", problems_text(&clean));
+
+    // An escalation entry listed twice, and one dropped, both disagree with the slots.
+    let mut report = package.report_json.clone();
+    let first = report.escalations.items[0].clone();
+    report.escalations.items.push(first);
+    let problems = crate::release_gate::fix_report_problems(&report, &package.findings_export);
+    let text = problems_text(&problems);
+    assert!(text.contains("names one place more than once"), "{text}");
+    assert!(text.contains("escalated places"), "{text}");
+    let mut report = package.report_json.clone();
+    report.escalations.items.pop();
+    let problems = crate::release_gate::fix_report_problems(&report, &package.findings_export);
+    assert!(
+        problems_text(&problems).contains("escalated places"),
+        "{problems:?}"
+    );
+
+    // The same Fix twice in the top three is refused.
+    let mut report = package.report_json.clone();
+    let item = report.three_things.items[0].clone();
+    report.three_things.items.push(item);
+    let problems = crate::release_gate::fix_report_problems(&report, &package.findings_export);
+    assert!(
+        problems_text(&problems).contains("names the Fix"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn the_ledger_records_the_merge_and_the_grouping_sheet_has_a_fix_level() {
+    let sealed = secret_report();
+    // Six rule groups went in (the two AI rules share one), one Fix came out, five were folded.
+    let block = sealed
+        .ledger
+        .fix_merge()
+        .expect("the merge is in the ledger");
+    assert_eq!(block.stage, crate::review_tree::FIX_MERGE_STAGE);
+    assert_eq!(
+        (block.sub_groups_in, block.fixes_out, block.folded.len()),
+        (6, 1, 5)
+    );
+    assert!(block.is_integral());
+
+    let reviewed = reviewed_of(&sealed, &[]);
+    let grid = sheet(&reviewed, v::HOW_PROBLEMS_WERE_GROUPED);
+    let within = col(&grid, v::H_WITHIN);
+    let fix_col = col(&grid, v::H_FIX_ID);
+    let levels: Vec<&str> = grid.iter().skip(1).map(|r| r[within].as_str()).collect();
+    assert_eq!(
+        levels.iter().filter(|l| **l == v::LEVEL_FIX).count(),
+        1,
+        "{levels:?}"
+    );
+    assert_eq!(
+        levels.iter().filter(|l| **l == v::LEVEL_RULE_GROUP).count(),
+        6,
+        "{levels:?}"
+    );
+    // Every rule group names the Fix it is in.
+    let fix_id = &sealed.tree.as_ref().unwrap().fixes[0].id;
+    for row in grid
+        .iter()
+        .skip(1)
+        .filter(|r| r[within] == v::LEVEL_RULE_GROUP)
+    {
+        assert_eq!(&row[fix_col], fix_id);
+    }
+}
+
+#[test]
+fn the_top_three_never_names_one_place_twice_even_when_two_fixes_share_it() {
+    // Rule 1 at a.ts and b.ts, rule 2 at a.ts and c.ts: neither contains the other, so they are two
+    // Fixes that share a.ts:6. The box names a.ts:6 once.
+    let mut report = crate::release_gate::test_scan_report();
+    let row = |rule: &str, path: &str| {
+        let mut f = secret_row(rule, "Universal", "critical", 6);
+        f.path = path.to_string();
+        f
+    };
+    report.findings = vec![
+        row("SEC-R1-1", "a.ts"),
+        row("SEC-R1-1", "b.ts"),
+        row("SEC-R2-1", "a.ts"),
+        row("SEC-R2-1", "c.ts"),
+    ];
+    let reviewed = reviewed_of(&report.seal(), &[]);
+    let plan = sheet(&reviewed, v::FIX_PLAN);
+    assert_eq!(plan.len() - 1, 2, "two Fixes: {plan:?}");
+    let json = build_report_json(&reviewed, None, &options());
+    let items = &json.three_things.items;
+    let places: std::collections::BTreeSet<(String, usize)> =
+        items.iter().map(|i| (i.path.clone(), i.line)).collect();
+    assert_eq!(places.len(), items.len(), "one place twice: {items:?}");
+    let fixes: std::collections::BTreeSet<&str> = items.iter().map(|i| i.fix_id.as_str()).collect();
+    assert_eq!(fixes.len(), items.len(), "one Fix twice: {items:?}");
+    assert_eq!(items.len(), 2, "{items:?}");
 }

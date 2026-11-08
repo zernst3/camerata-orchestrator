@@ -1628,7 +1628,7 @@ pub fn build_report_json(
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
     // `default_narrative`'s doc comment).
     //
-    // Item #1: the three are three DISTINCT FIXES. Walk `do_now_sorted` in rank order and skip a
+    // Item #1: the three are three DISTINCT FIXES at three distinct places. Walk `do_now_sorted` in rank order and skip a
     // row whose Fix is already chosen, so one committed secret that six rules flag is one entry
     // however the rules rank. A report with no review tree has no Fix ids; its rows fall back to
     // the older test, one rule at a time (W24: three tables missing RLS are one thing).
@@ -1643,9 +1643,15 @@ pub fn build_report_json(
         std::collections::HashSet::new();
     let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut selected_fixes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Two Fixes can share a place (a true partial overlap); the box still names a place once.
+    let mut selected_places: std::collections::HashSet<(&str, &str, usize)> =
+        std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
+        }
+        if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line)) {
+            continue;
         }
         let shares_selected_root_cause = !f.root_cause_keys.is_empty()
             && f.root_cause_keys
@@ -1665,6 +1671,7 @@ pub fn build_report_json(
             selected_fixes.insert(f.fix_id.as_str());
         }
         top3_do_now.push(f);
+        selected_places.insert((f.repo.as_str(), f.path.as_str(), f.line));
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
     let dependency_advisories = dependency_snapshot.rows.len();
