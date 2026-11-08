@@ -256,6 +256,40 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Model-written (or reviewer-written) prose as a client reads it: no em dash, no en dash, no
+/// multiplication sign ([`crate::client_text::plain`]) and no "line 0" for a problem in a whole
+/// file ([`crate::client_text::whole_file_places`]).
+pub(crate) fn client_prose(text: &str) -> String {
+    crate::client_text::whole_file_places(&crate::client_text::plain(text)).into_owned()
+}
+
+/// A finding's `detail` as a client reads it. The parser joins a title to its explanation with
+/// the engine's own separator (`ai_audit::HEADLINE_SEP`, an em dash that the detail stage splits
+/// on again); a client reads "Title: explanation", or "Title. Borderline: explanation" when the
+/// explanation opens with a label, and never the separator.
+pub(crate) fn client_detail(detail: &str) -> String {
+    let joined = match detail.split_once(crate::ai_audit::HEADLINE_SEP) {
+        Some((title, rest)) => {
+            let (title, rest) = (title.trim_end(), rest.trim_start());
+            if title.is_empty() {
+                rest.to_string()
+            } else if rest.is_empty() {
+                // A title with no explanation keeps the colon that says so (the content check
+                // reads it as an empty explanation); a reviewer holds such a row.
+                format!("{}:", title.trim_end_matches([':', '.']))
+            } else if title.ends_with(['.', '!', '?', ':']) {
+                format!("{title} {rest}")
+            } else if crate::client_text::opens_with_label(rest) {
+                format!("{title}. {rest}")
+            } else {
+                format!("{title}: {rest}")
+            }
+        }
+        None => detail.to_string(),
+    };
+    client_prose(&joined)
+}
+
 /// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
 /// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
@@ -268,8 +302,10 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     let mut f = finding.clone();
     f.path = strip_zero_width(&f.path).into_owned();
+    // `snippet` is the client's own code, verbatim: it is also the site key's fingerprint input.
+    // Zero-width characters are stripped and secrets redacted below; nothing is rewritten.
     f.snippet = strip_zero_width(&f.snippet).into_owned();
-    f.detail = strip_zero_width(&f.detail).into_owned();
+    f.detail = client_detail(&strip_zero_width(&f.detail));
     for v in f.captures.values_mut() {
         *v = strip_zero_width(v).into_owned();
     }
@@ -277,13 +313,14 @@ pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     // the model-written fix (`fix_specific`), every absorbed evidence site's snippet, and the
     // severity rationale. This gap is exactly where the sweep exports' leaked keys sat.
     if let Some(fix) = f.fix_specific.as_mut() {
-        *fix = strip_zero_width(fix).into_owned();
+        *fix = client_prose(&strip_zero_width(fix));
     }
     if let Some(rationale) = f.calibration_rationale.as_mut() {
-        *rationale = strip_zero_width(rationale).into_owned();
+        *rationale = client_prose(&strip_zero_width(rationale));
     }
     for site in &mut f.also_locations {
         site.snippet = strip_zero_width(&site.snippet).into_owned();
+        site.headline = client_prose(&site.headline);
     }
     // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from
     // the detector; then the secret redaction (belt and braces: every producer already redacted
@@ -515,6 +552,27 @@ impl ReviewState {
 /// fixture-content fix: the serializer itself cannot produce "confirmed" language without that
 /// explicit flag.
 ///
+/// Why a row held for a reviewer is waiting, in plain words for the client, or `None` when no
+/// concrete reason applies. The three gates are checked in the order that decides the bucket:
+/// no citation first, then no fix, then no effort estimate (see `effective_bucket`). Each reason
+/// ends in the same call to action, because the row is in the "needs a decision" state until a
+/// reviewer rules on it.
+pub(crate) fn waiting_reason(
+    uncited: bool,
+    no_fix: bool,
+    no_estimate: bool,
+) -> Option<&'static str> {
+    if uncited {
+        Some("No outside standard supports this problem yet, so a reviewer must rule on it before you act.")
+    } else if no_fix {
+        Some("No fix is available for it yet, so a reviewer must rule on it before you act.")
+    } else if no_estimate {
+        Some("No effort estimate is available for it yet, so a reviewer must rule on it before you act.")
+    } else {
+        None
+    }
+}
+
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
     disposition: Disposition,
@@ -529,8 +587,7 @@ pub(crate) fn disposition_label(
         // read like a style note. C5-7: the `held` bucket now also carries a SECOND, unrelated
         // reason (a high/critical uncited AI-tier finding — see `is_uncited_ai_finding`), so
         // this label is deliberately reason-agnostic rather than naming "calibration"
-        // specifically; the row's own headline already states the concrete reason ("calibration
-        // flagged..." / "Needs review (uncited...)") right next to it.
+        // specifically; the row's `why_waiting` states the concrete reason right next to it.
         Disposition::Unresolved if bucket == "held" => {
             "Held for review (a human reviewer's judgment call is needed before this can be \
              actioned)"
@@ -826,27 +883,19 @@ pub fn build_report_json(
         // true for the same row (no fix usually means no estimate either), so `gate_no_fix`'s
         // arm is checked first and wins the headline in that case — not an ordering ambiguity,
         // just a priority pick between two reasons that both land the SAME row in "held".
-        let headline = if gate_uncited {
-            format!("Needs review (uncited — no grounded citation found): {base_headline}")
-        } else if gate_no_fix {
-            format!(
-                "Needs review (fix not generated — no codebase-specific or rule-level \
-                 remediation available): {base_headline}"
-            )
-        } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
-            // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so this
-            // "why is this not curated" marker must only render when the row genuinely IS
-            // out of the action tier for some other reason. A curated action row that merely
-            // lacks an effort band keeps its own headline and renders an honest "not estimated
-            // this run" in its effort field instead — labelling it "Needs review" would be a
-            // false hedge on a confident finding.
-            format!(
-                "Needs review (effort not estimated — no calibrated or rule-level estimate \
-                 available): {base_headline}"
-            )
-        } else {
-            base_headline
-        };
+        // A row held for a reviewer keeps a plain headline. The concrete reason it is waiting is
+        // its own field (`why_waiting`), never a prefix on the headline: "Needs review (uncited
+        // ...)" is the engine talking to itself.
+        let headline = base_headline;
+        // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so the reason only
+        // applies when the row genuinely IS out of the action tier for some other reason. A
+        // curated action row that merely lacks an effort band keeps no reason and renders an
+        // honest "not estimated this run" in its effort field instead.
+        let why_waiting = waiting_reason(
+            gate_uncited,
+            gate_no_fix,
+            gate_no_estimate && (bucket == "held" || bucket == "informational"),
+        );
         // C3-6 item 3: provenance tier for the within-bucket sort, via `citation_for_finding`
         // (not the plain `resolve_citation`) so an AI-tier finding upgraded to a grounded class
         // (P3) sorts by the SAME resolved citation the curated-findings section shows for it.
@@ -858,17 +907,19 @@ pub fn build_report_json(
             f.path.clone(),
             f.line,
         );
-        bucketed.entry(bucket).or_default().push((
-            sort_key,
-            finding_ref(
-                f,
-                severity,
-                headline,
-                bucket,
-                corpus,
-                chosen_option_for_rule,
-            ),
-        ));
+        let mut reference = finding_ref(
+            f,
+            severity,
+            headline,
+            bucket,
+            corpus,
+            chosen_option_for_rule,
+        );
+        reference.why_waiting = why_waiting.map(str::to_string);
+        bucketed
+            .entry(bucket)
+            .or_default()
+            .push((sort_key, reference));
     }
     let mut matrix = MatrixJson::default();
     for (key, target) in [
@@ -1037,25 +1088,13 @@ pub fn build_report_json(
                 // gate's own "Deny…" enforcement prose.
                 let (base_headline, detail) =
                     client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
-                let headline = if gate_uncited {
-                    format!("Needs review (uncited — no grounded citation found): {base_headline}")
-                } else if gate_no_fix {
-                    format!(
-                        "Needs review (fix not generated — no codebase-specific or rule-level \
-                         remediation available): {base_headline}"
-                    )
-                } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
-                    // C6-B4 (amended) — see the identical guard in the matrix-bucketing loop:
-                    // a missing estimate no longer routes a row out of the action tier, so this
-                    // marker renders only when the row is genuinely held/informational for
-                    // another reason. A curated row simply shows "not estimated this run".
-                    format!(
-                        "Needs review (effort not estimated — no calibrated or rule-level \
-                         estimate available): {base_headline}"
-                    )
-                } else {
-                    base_headline
-                };
+                // The headline stays plain; the reason a row is waiting is `why_waiting`.
+                let headline = base_headline;
+                let why_waiting = waiting_reason(
+                    gate_uncited,
+                    gate_no_fix,
+                    gate_no_estimate && (bucket == "held" || bucket == "informational"),
+                );
                 let specific_fix = f
                     .fix_specific
                     .as_deref()
@@ -1095,6 +1134,7 @@ pub fn build_report_json(
                     // identical citation for every site.
                     citation: citation_for_finding(f, corpus),
                     headline,
+                    why_waiting: why_waiting.map(str::to_string),
                     // P2: `f.fix_specific` was generated at SCAN time by
                     // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
                     // no model access here, just a read) — a codebase-specific fix that the
@@ -1416,7 +1456,7 @@ pub fn build_report_json(
                 title: corpus
                     .and_then(|c| c.get_by_id(rid))
                     .map(|r| r.title.clone())
-                    .unwrap_or_else(|| rid.clone()),
+                    .unwrap_or_else(|| crate::client_text::plain_rule_name(rid)),
                 citation: resolve_citation(rid, None, corpus),
                 clean_in,
                 not_applicable_in,

@@ -449,7 +449,7 @@ pub fn confidentiality_marking(
 pub const AUDIT_REPORT_DISCLAIMER_MULTI: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository states identified on the cover page. It is not a \
-     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     certification, warranty or guarantee of security. Findings reflect evidence present in \
      the inspected code at scan time and may not represent the live production systems. All \
      remediation should be validated by the client's engineering team against the live \
      environments. The preparing reviewer accepts no liability for actions taken on the basis \
@@ -471,7 +471,7 @@ pub fn audit_report_disclaimer(repo_count: usize) -> &'static str {
 pub const AUDIT_REPORT_DISCLAIMER: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository state identified on the cover page. It is not a \
-     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     certification, warranty or guarantee of security. Findings reflect evidence present in \
      the inspected code at scan time and may not represent the live production system. All \
      remediation should be validated by the client's engineering team against the live \
      environment. The preparing reviewer accepts no liability for actions taken on the basis \
@@ -636,7 +636,7 @@ pub(crate) fn failed_pass_disclosures(
                 return format!("{pass} for {}: did not complete.", f.repo);
             }
             format!(
-                "{pass} for {}: not computed — pass failed ({}).",
+                "{pass} for {}: not computed, pass failed ({}).",
                 f.repo, f.reason
             )
         })

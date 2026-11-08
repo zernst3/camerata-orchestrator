@@ -841,7 +841,7 @@ pub(crate) fn conventions_observed_findings(
             severity: "info".to_string(),
             snippet,
             detail: format!(
-                "The codebase consistently follows \"{}\" for {} — zero violations were \
+                "The codebase consistently follows \"{}\" for {}. Zero violations were \
                  observed this scan. Reported so the convention can be adopted as an explicit \
                  decision and enforced going forward. {}",
                 opt.label, rec.rule_id, rec.recommendation_reasoning
@@ -942,8 +942,8 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
             severity: "info".to_string(),
             snippet: note.clone(),
             detail: format!(
-                "{rule_id} was armed for this scan but could not be evaluated: {note}. \
-                 Reported as not-assessed rather than silently reading as clean."
+                "This check could not be run on this codebase: {note}. It is reported as not \
+                 assessed, so it never reads as clean."
             ),
             located: false,
             kind: Some(FindingKind::NotAssessed(NotAssessedKind {

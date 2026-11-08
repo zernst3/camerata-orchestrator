@@ -791,6 +791,7 @@ pub(crate) fn finding_ref(
         line: f.line,
         severity: severity.to_string(),
         headline,
+        why_waiting: None,
         // C4-P3: calibration's effort, else the rule's authored band — see `resolve_effort`'s
         // doc comment. Keeps the matrix table AND the "three things this week" box (which reads
         // `FindingRefJson::effort` for its hour estimate / total) in lockstep with
@@ -1080,7 +1081,7 @@ pub(crate) fn ai_tier_note_for(
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. This export has not yet had a human triage pass: every \
              advisory finding here is the engine's own calibrated output, awaiting a human \
-             reviewer's judgment before any is accepted, marked tech debt, or ruled out. \
+             reviewer's judgment before any is accepted, marked tech debt or ruled out. \
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
@@ -1235,10 +1236,13 @@ pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
 /// so by carrying no location, which is what `located: false` exists to express.
 pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
     let trimmed = evidence.trim();
-    let head = trimmed
-        .split(" — ")
-        .next()
-        .and_then(|s| s.split(" - ").next())
+    // The note follows the place after an em dash, a spaced hyphen, a colon or a comma (the
+    // house form of a client citation is `path:line: note`, and the text the models write is
+    // rewritten to it at parse), so the place is what comes before the first of them.
+    let head = [" \u{2014} ", " - ", ": ", ", "]
+        .iter()
+        .filter_map(|separator| trimmed.split_once(separator).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
         .unwrap_or(trimmed)
         .trim();
     if let Some((path, line_str)) = head.rsplit_once(':') {
@@ -1349,10 +1353,9 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
             severity: "medium".to_string(),
             snippet: evidence.chars().take(200).collect(),
             detail: format!(
-                "This rule's own evaluation evidence reads \"{evidence}\", which appears to \
-                 negate the rule's own requirement, even though the rule reported zero \
-                 findings this run. Flagged here for manual confirmation rather than listed as \
-                 healthy."
+                "This rule found no violation, but the evidence recorded for it describes a \
+                 possible problem. The evidence reads \"{evidence}\". A reviewer must decide \
+                 whether it is a problem before you act on it."
             ),
             needs_review: true,
             confidence: Some("needs-review".to_string()),

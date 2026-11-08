@@ -320,8 +320,15 @@
 
 // The card's location strip: the severity chip, then `repo / path, line N` in mono, ink-faint,
 // on a 3.5% ink tint with a 4 pt radius (the site's report-excerpt shape).
+// A place: `line N`, or "whole file" for a problem in a whole file (the report records it as
+// line 0, and a reader must never see "line 0").
+#let place_label(line) = if line == 0 { "whole file" } else { "line " + str(line) }
+
+// A place as one string, `path:line`, or `path (whole file)` for line 0.
+#let place_of(path, line) = if line == 0 { path + " (whole file)" } else { path + ":" + str(line) }
+
 #let location_strip(sev, repo, path, line) = block(fill: tint, radius: 4pt, inset: (x: 6pt, y: 4pt), width: 100%, below: 8pt)[
-  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), line #str(line)]
+  #severity_chip(sev) #h(4pt) #text(font: mono, size: 8.5pt, fill: ink_faint)[#repo / #breakable(path), #place_label(line)]
 ]
 
 // One curated-finding site, as a finding card — factored out so the FIRST site of a group can
@@ -378,7 +385,7 @@
       #text(weight: 600, fill: accent)[#site.fix_type: ]#fix_body(site.fix)
     ]
     #v(2pt)
-    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition]
+    #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition#if site.why_waiting != none [ · Why it is waiting: #site.why_waiting]]
     // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
     // `report_export::also_matches_titles`'s doc comment.
     #if site.also_matches_titles.len() > 0 [
@@ -401,7 +408,7 @@
       #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
       #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
         #linebreak()
-        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
+        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), #place_label(also.line)]
         #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]] else if also.headline != none [#text(size: 8pt, fill: ink_faint)[(#also.headline)]]
         #if also.severity != none [#text(size: 8pt, fill: ink_faint)[(rated #also.severity)]]
         #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
@@ -590,7 +597,7 @@
         #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
         #linebreak()
         #text(font: mono, size: 8pt, fill: ink_faint)[
-          #item.repo / #breakable(item.path), line #str(item.line) (#item.rule_id)
+          #item.repo / #breakable(item.path), #place_label(item.line) (#item.rule_id)
         ]
         #linebreak()
         #text(size: 9pt)[Rough estimate: #item.hours_label]
@@ -650,7 +657,7 @@
 // (`report_export::build_priority_grid`) is the ACTUAL severity-rows x effort-columns grid:
 // each open finding sits in exactly one cell. Accepted and Informational findings are
 // deliberately out of scope (a footnote, not a row/column) — see the struct's doc comment.
-#section("Prioritization", [Severity × effort matrix])
+#section("Prioritization", [Severity by effort matrix])
 
 #let effort_col_label(key) = {
   if key == "low" { "Low effort" }
@@ -677,7 +684,7 @@
 }
 
 #if d.priority_grid.rows.len() == 0 [
-  No do-now, do-next, or plan findings this run.
+  No do-now, do-next or plan findings this run.
 ] else [
   #table(
     columns: (auto,) + d.priority_grid.columns.map(c => 1fr),
@@ -774,7 +781,7 @@
       ..d.escalations.items.map(item => (
         [#severity_chip(lower(item.severity))],
         [#item.headline],
-        [#breakable(item.path + ":" + str(item.line))],
+        [#breakable(place_of(item.path, item.line))],
         [#item.decision],
       )).flatten()
     )
@@ -861,8 +868,8 @@
   No findings held for a reviewer's judgment call this run.
 ] else [
   #text(size: 9pt, style: "italic", fill: ink_faint)[
-    Held for a human reviewer's judgment call — not an open action item, but worth a second \
-    look.
+    Held for a human reviewer's judgment call. These are not open action items, but they are \
+    worth a second look.
   ]
   #v(4pt)
   #for group in d.held_for_review_findings [

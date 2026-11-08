@@ -1176,9 +1176,11 @@ fn parse_alternative_recommendations_accepts_an_evidenced_applicable_pick() {
     let recs = parse_alternative_recommendations(raw, &[alt]);
     assert_eq!(recs.len(), 1);
     assert!(recs[0].applicable);
+    // The evidence is carried through, with the model's em dash written as a comma on the way in
+    // (a client reads `path:line, note`; `parse_evidence_citation` reads the place out of it).
     assert_eq!(
         recs[0].evidence.as_deref(),
-        Some("src/api/list_users.rs:42 — cursor param already threaded through")
+        Some("src/api/list_users.rs:42, cursor param already threaded through")
     );
     assert_eq!(recs[0].recommended_option_id, "opt-b");
     assert!(

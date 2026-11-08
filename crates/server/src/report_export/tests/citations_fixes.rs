@@ -425,12 +425,21 @@ fn curated_row_with_neither_fix_half_and_a_known_unauthored_rule_is_held_not_cur
         json.matrix.held[0].severity, "critical",
         "held never downgrades severity"
     );
+    // The reason is the row's own field, not a prefix on its headline.
     assert!(
         json.matrix.held[0]
+            .why_waiting
+            .as_deref()
+            .is_some_and(|why| why.contains("No fix is available")),
+        "the held row must disclose WHY: {:?}",
+        json.matrix.held[0].why_waiting
+    );
+    assert!(
+        !json.matrix.held[0]
             .headline
             .to_lowercase()
             .contains("fix not generated"),
-        "the held row's own headline must disclose WHY: {}",
+        "{}",
         json.matrix.held[0].headline
     );
     // It is still fully present in the held-for-review appendix group too, never dropped.
@@ -1886,12 +1895,22 @@ fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() 
         json.matrix.informational[0].rule_id,
         "AI-CUSTOM-ARCH-RULE-1"
     );
+    // The reason is the row's own field now, not a prefix on its headline (the headline of a
+    // client file never opens with the engine's note about the row).
     assert!(
         json.matrix.informational[0]
+            .why_waiting
+            .as_deref()
+            .is_some_and(|why| why.contains("No outside standard supports")),
+        "the appendix row must say WHY it's held out: {:?}",
+        json.matrix.informational[0].why_waiting
+    );
+    assert!(
+        !json.matrix.informational[0]
             .headline
             .to_lowercase()
             .contains("uncited"),
-        "the appendix row must say WHY it's held out: {}",
+        "{}",
         json.matrix.informational[0].headline
     );
     assert_eq!(json.executive_summary.held_for_review, 1);

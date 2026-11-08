@@ -65,7 +65,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
              whoever can reach that endpoint.",
         ),
         "SUPABASE-AUTH-USERS-EXPOSED-1" => Some(
-            "Exposing auth.users through a view or grant leaks every user's email, phone, and \
+            "Exposing auth.users through a view or grant leaks every user's email, phone and \
              identity metadata to anyone who can query it.",
         ),
         // ── Supabase: secrets, storage, exposure, functions ───────────────────────────
@@ -96,7 +96,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
         ),
         // ── Universal / deterministic-floor ────────────────────────────────────────
         "ARCH-NO-SECRETS-IN-URL-1" => Some(
-            "A credential carried in a URL is written into proxy logs, browser history, and \
+            "A credential carried in a URL is written into proxy logs, browser history and \
              server access logs by default, which is a durable exposure even after the \
              credential is rotated.",
         ),
@@ -106,7 +106,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
              is deleted.",
         ),
         "SEC-NO-SECRET-FILE-1" => Some(
-            "A committed secret-bearing file (a private key, keystore, or real .env) is \
+            "A committed secret-bearing file (a private key, keystore or real .env) is \
              exposed to everyone with repository access, past and future.",
         ),
         "SEC-NO-HARDCODED-SECRETS-1" => Some(
@@ -123,7 +123,7 @@ pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
         ),
         "SEC-NO-RAW-SQL-CONCAT-1" => Some(
             "String-concatenated SQL lets an attacker who controls any part of the input \
-             read, modify, or delete arbitrary rows in the database.",
+             read, modify or delete arbitrary rows in the database.",
         ),
         _ => None,
     }
@@ -468,8 +468,9 @@ pub(crate) fn citation_for_finding(
 ///    from for this finding's class, so the header and the citation underneath it describe the
 ///    SAME standard rather than a human-readable citation sitting under a header that is
 ///    nothing but the model's own invented id repeated;
-/// 3. the bare rule id — truly unclassifiable, last resort, never fabricated (identical to the
-///    pre-existing behavior for this case).
+/// 3. the rule id written as a plain name (`AI-PUBLIC-STORAGE-BUCKET` reads `Public storage
+///    bucket`): truly unclassifiable, last resort. The id itself is never a title, because a
+///    group headed `ID: ID` reads as the engine talking to itself.
 pub(crate) fn title_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -488,7 +489,7 @@ pub(crate) fn title_for_finding(
             }
         }
     }
-    finding.rule_id.clone()
+    crate::client_text::plain_rule_name(&finding.rule_id)
 }
 
 /// C4-P4 (residual defect 2): human-readable TITLES for a finding's `also_matches` list (other
@@ -760,10 +761,17 @@ pub(crate) fn client_headline_and_detail(
         overlay::reviewer_text(finding, field)
             .filter(|_| overlay::reviewer_edited_field(finding, field))
     };
-    (
+    // Whoever wrote it, a headline and a detail reach the client without a dash, a multiplication
+    // sign or a hedge label in front (`Borderline:`), and a whole-file place reads "whole file".
+    let (headline, detail) = (
         reviewer_text(camerata_api_types::edits::EditField::Headline)
             .map_or(headline, str::to_string),
         reviewer_text(camerata_api_types::edits::EditField::Detail).map_or(detail, str::to_string),
+    );
+    (
+        crate::client_text::without_hedge_label(&crate::report_export::client_prose(&headline))
+            .into_owned(),
+        crate::report_export::client_prose(&detail),
     )
 }
 

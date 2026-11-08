@@ -336,6 +336,9 @@ pub(crate) use calibration::{is_verdict_reply, mentions_exploit_precondition};
 mod redaction_tests;
 
 #[cfg(test)]
+mod dash_tests;
+
+#[cfg(test)]
 mod stage_telemetry_tests;
 
 #[cfg(test)]

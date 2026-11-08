@@ -50,11 +50,14 @@ pub enum CheckId {
     /// The review screen holds no change the decision store has not accepted. An undo whose
     /// revoke has not landed would export the decision the reviewer took back.
     UnsyncedReviewerChanges,
+    /// No em dash, en dash or multiplication sign in any file a client receives: the PDF's text,
+    /// every workbook string, every CSV and JSON file and the README.
+    ClientTextStyle,
 }
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 14] = [
+    pub const ALL: [CheckId; 15] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -69,6 +72,7 @@ impl CheckId {
         CheckId::Manifest,
         CheckId::Provenance,
         CheckId::UnsyncedReviewerChanges,
+        CheckId::ClientTextStyle,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -88,6 +92,7 @@ impl CheckId {
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
             CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
+            CheckId::ClientTextStyle => "client text style",
         }
     }
 }

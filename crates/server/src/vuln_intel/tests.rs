@@ -688,7 +688,7 @@ fn provenance_with(stamp: Option<VulnDataStamp>) -> crate::ManifestProvenance {
 #[test]
 fn the_stamp_appears_in_the_readme_and_the_manifest() {
     let provenance = provenance_with(Some(sample_stamp()));
-    let readme = crate::product_export_readme("acme-stem", &provenance);
+    let readme = crate::product_export_readme("acme-stem", &provenance, true);
     assert!(
         readme.contains("Vulnerability data (CISA KEV) as of 2026-10-27\n"),
         "{readme}"
@@ -921,7 +921,7 @@ async fn kev_present_and_epss_unavailable_labels_kev_attaches_no_epss_and_stamps
     }
     // The two stamp lines say so, in the README and in the manifest, and the gate agrees.
     let provenance = provenance_with(Some(stamp.clone()));
-    let readme = crate::product_export_readme("acme-stem", &provenance);
+    let readme = crate::product_export_readme("acme-stem", &provenance, true);
     assert!(
         readme.contains("Vulnerability data (CISA KEV) as of 2026-10-27\n"),
         "{readme}"

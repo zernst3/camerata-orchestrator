@@ -25,6 +25,7 @@ pub mod holds;
 pub mod junk;
 mod report;
 mod secrets;
+mod text_style;
 pub mod tool_claim;
 pub mod unsynced;
 
@@ -37,10 +38,10 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
-    dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
-    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems, row_parity,
-    verify_manifest, verify_readme_provenance, ReadmeProvenance,
+    client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
+    dataset_parity_problems, dataset_set_problems, marking_problems, package_stem,
+    parse_readme_provenance, patterns_section_problems, pdf_count_reconciliation_problems,
+    pdf_marking_problems, row_parity, verify_manifest, verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -195,7 +196,7 @@ pub(crate) fn assemble_package(
         &report_json,
         &options.chosen_options,
     );
-    let findings_json = serde_json::to_vec_pretty(&findings_export)
+    let mut findings_json = serde_json::to_vec_pretty(&findings_export)
         .map_err(|e| anyhow::anyhow!("could not serialize findings.json: {e}"))?;
 
     // The per-dataset machine-readable tables: the SAME `partition_rows` pass as the workbook
@@ -206,6 +207,10 @@ pub(crate) fn assemble_package(
         .map_err(|e| anyhow::anyhow!("could not build the machine-readable exports: {e}"))?;
     let mut datasets = csv;
     datasets.extend(json);
+    // The list and number fields beside the prose ones, and a header on every empty CSV. One pass
+    // over findings.json and the datasets, so they stay equal to each other.
+    crate::machine_files::finish(&mut findings_json, &mut datasets)
+        .map_err(|e| anyhow::anyhow!("could not finish the machine-readable exports: {e}"))?;
     // The decisions the report was reviewed with. The gate reads this file, not the records the
     // package was built from, to check that a merge has its decision (design 5.3).
     datasets.push((
@@ -224,7 +229,7 @@ pub(crate) fn assemble_package(
         .map(|m| m.with_models_from(&report.provenance));
     let client = crate::report_export::clean_client_name(&options.client_name);
     provenance.client_name = (!client.is_empty()).then_some(client);
-    let mut readme = crate::product_export_readme(stem, &provenance);
+    let mut readme = crate::product_export_readme(stem, &provenance, options.internal);
     // The tickets file of a report with no review tree is its header alone; the README says why.
     if !crate::xlsx_export::no_tree_note(reviewed).is_empty() {
         const TICKETS_PARAGRAPH_END: &str = " Sites sheet on.\n";
@@ -369,6 +374,16 @@ fn audit_zip_with(
         CheckId::Secrets,
         archive_secret_problems(&entries, pdf_text),
     );
+    // The operator's own review package (internal) carries engine notes, discarded rows and review
+    // flags; it is not a client file, so the text-style check is a client-package check.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::archive_problems(&entries, pdf_text)
+        },
+    );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
@@ -386,7 +401,10 @@ fn audit_zip_with(
         manifest_problems.extend(incomplete_run_problems(&entries));
     }
     report.record(CheckId::Manifest, manifest_problems);
-    report.record(CheckId::Provenance, provenance_problems(&entries));
+    report.record(
+        CheckId::Provenance,
+        provenance_problems(&entries, allow_incomplete),
+    );
     // A merge with no decision behind it, or a group decision missing a site's record, is a
     // structural defect whoever receives the package, so it is checked for an internal package
     // too. Read from the package's own decisions.json.
@@ -523,14 +541,23 @@ fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Ve
         .unwrap_or_default()
 }
 
-fn provenance_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+/// The README against the manifest. An INTERNAL package's README carries the provenance lines and
+/// they must equal the manifest's; a CLIENT package's README carries none of them (the models, the
+/// corpus hash, the engine commit and the release checks are the operator's, in `manifest.json`).
+fn provenance_problems(
+    entries: &std::collections::BTreeMap<String, Vec<u8>>,
+    internal: bool,
+) -> Vec<Problem> {
     let (Some(readme), Some(manifest)) = (entries.get("README.txt"), entries.get("manifest.json"))
     else {
         // The dataset-set check reports the missing file.
         return Vec::new();
     };
     match serde_json::from_slice::<serde_json::Value>(manifest) {
-        Ok(manifest) => verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest),
+        Ok(manifest) if internal => {
+            verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest)
+        }
+        Ok(_) => client_readme_problems(&String::from_utf8_lossy(readme)),
         Err(_) => vec![Problem::new(
             "manifest.json",
             "manifest",
@@ -611,6 +638,17 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     }
     report.record(CheckId::Content, package.tool_claim_problems.clone());
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    // The PDF's text is whatever its data and its template make of it; a banned character in the
+    // data is caught here before Typst is given anything, and the compiled PDF's own text is read
+    // by the archive pass above.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::json_bytes_problems("PDF data (data.json)", package.data_json.as_bytes())
+        },
+    );
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
     // confidentiality line to them.
@@ -664,6 +702,10 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
 pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     let mut report = GateReport::default();
     report.record(CheckId::Secrets, pdf_data_problems(data_json));
+    report.record(
+        CheckId::ClientTextStyle,
+        text_style::json_bytes_problems("PDF data (data.json)", data_json.as_bytes()),
+    );
     if report.is_clean() {
         Ok(())
     } else {
@@ -703,6 +745,18 @@ pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
 
 #[cfg(test)]
 mod patterns_tests;
+
+#[cfg(test)]
+mod text_style_tests;
+
+#[cfg(test)]
+mod readme_tests;
+
+#[cfg(test)]
+mod machine_files_tests;
+
+#[cfg(test)]
+mod pdf_unreadable_tests;
 
 #[cfg(test)]
 mod merged_site_tests;

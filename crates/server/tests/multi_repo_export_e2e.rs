@@ -713,7 +713,7 @@ fn the_readme_names_the_patterns_section_and_the_plural_disclaimer_only_for_seve
         repos: vec![repo(WEB)],
         ..ManifestProvenance::default()
     };
-    let readme = product_export_readme("acme", &multi);
+    let readme = product_export_readme("acme", &multi, true);
     assert!(readme.contains("Patterns across services"), "{readme}");
     assert!(
         readme.contains("the repository states identified"),
@@ -723,7 +723,7 @@ fn the_readme_names_the_patterns_section_and_the_plural_disclaimer_only_for_seve
         !readme.contains('\u{2014}'),
         "no em dash in buyer-facing text"
     );
-    let readme = product_export_readme("acme", &one);
+    let readme = product_export_readme("acme", &one, true);
     assert!(!readme.contains("Patterns across services"), "{readme}");
     assert!(
         readme.contains("the repository state identified"),
