@@ -331,3 +331,63 @@ fn thousands_of_rule_groups_merge_without_visiting_every_pair() {
     reversed.reverse();
     assert_eq!(first, fixes_of(&reversed));
 }
+
+#[test]
+fn an_incomparable_pair_folds_into_the_eligible_whole_file_container() {
+    // R-4a: C sits in B by place and in FILE by the whole-file ruling, and B and FILE do not
+    // contain each other. Exactly one of the two is a whole-file container of C's file at a
+    // severity that allows it, so C folds into FILE; B keeps its own places and stays apart.
+    let rows = vec![
+        row("sub:FILE/1", "FILE", "critical", ".env.production", 0),
+        row("sub:B/1", "B", "critical", ".env.production", 6),
+        row("sub:B/1", "B", "low", ".env.example", 6),
+        row("sub:C/1", "C", "critical", ".env.production", 6),
+    ];
+    assert_eq!(
+        members(&fixes_of(&rows)),
+        vec![names(&["sub:B/1"]), names(&["sub:C/1", "sub:FILE/1"])]
+    );
+    // A whole-file group less severe than the lines is no container: C stays alone.
+    let rows = vec![
+        row("sub:FILE/1", "FILE", "low", ".env.production", 0),
+        row("sub:B/1", "B", "critical", ".env.production", 6),
+        row("sub:B/1", "B", "low", ".env.example", 6),
+        row("sub:C/1", "C", "critical", ".env.production", 6),
+    ];
+    assert_eq!(
+        members(&fixes_of(&rows)),
+        vec![
+            names(&["sub:B/1", "sub:C/1"]),
+            names(&["sub:FILE/1"])
+        ]
+    );
+}
+
+#[test]
+fn a_whole_file_fix_and_the_fix_holding_its_lines_cross_reference() {
+    // The file group is less severe than the lines, so it cannot absorb them; it still lists the
+    // place (a.ts, line 6) its whole file contains, and so does the other Fix.
+    let rows = vec![
+        row("sub:FILE/1", "FILE", "low", "a.ts", 0),
+        row("sub:L/1", "L", "critical", "a.ts", 6),
+        row("sub:L/1", "L", "critical", "b.ts", 1),
+    ];
+    let fixes = fixes_of(&rows);
+    assert_eq!(fixes.len(), 2);
+    let (file, lines) = (&fixes[0], &fixes[1]);
+    assert_eq!(file.members, names(&["sub:FILE/1"]));
+    assert_eq!(
+        file.shares,
+        vec![FixShare {
+            fix: lines.id.clone(),
+            places: 1
+        }]
+    );
+    assert_eq!(
+        lines.shares,
+        vec![FixShare {
+            fix: file.id.clone(),
+            places: 1
+        }]
+    );
+}

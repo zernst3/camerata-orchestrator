@@ -310,6 +310,19 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
             .collect();
         if let [only] = minimal.as_slice() {
             parent[s] = Some(*only);
+        } else if minimal.len() > 1 {
+            // R-4a: two containers that do not contain each other. When exactly one of them holds
+            // the class only through a whole-file place (ruling 1's severity condition already
+            // holds, or it would not cover), and the rest hold it by place, the class folds into
+            // that whole-file container: the file and its lines are one change.
+            let by_whole_file: Vec<usize> = minimal
+                .iter()
+                .copied()
+                .filter(|&t| reps[s].places.iter().any(|p| !reps[t].places.contains(p)))
+                .collect();
+            if let [only] = by_whole_file.as_slice() {
+                parent[s] = Some(*only);
+            }
         }
     }
     let root_of = |start: usize| -> usize {
@@ -368,6 +381,29 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
         for (n, &a) in list.iter().enumerate() {
             for &b in &list[n + 1..] {
                 *shared.entry((a, b)).or_default() += 1;
+            }
+        }
+    }
+    // A whole-file place shares each line place of its file that another Fix holds.
+    let mut lines_in: HashMap<(&str, &str), Vec<(usize, usize)>> = HashMap::new();
+    for (i, fx) in fixes.iter().enumerate() {
+        let mut per_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for p in fx.places.iter().filter(|p| p.line > 0) {
+            *per_file.entry((p.repo.as_str(), p.path.as_str())).or_default() += 1;
+        }
+        for (file, n) in per_file {
+            lines_in.entry(file).or_default().push((i, n));
+        }
+    }
+    for (a, fx) in fixes.iter().enumerate() {
+        for p in fx.places.iter().filter(|p| p.line == 0) {
+            for &(b, n) in lines_in
+                .get(&(p.repo.as_str(), p.path.as_str()))
+                .into_iter()
+                .flatten()
+                .filter(|(b, _)| *b != a)
+            {
+                *shared.entry((a.min(b), a.max(b))).or_default() += n;
             }
         }
     }
