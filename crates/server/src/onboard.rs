@@ -1509,6 +1509,9 @@ impl ScanReport {
             &crate::review_tree::ToolMap::builtin(),
             &run_id,
         ));
+        if let Some(tree) = self.tree.as_ref() {
+            self.ledger.record_fix_merge(tree.fix_merge_block());
+        }
     }
 
     /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by

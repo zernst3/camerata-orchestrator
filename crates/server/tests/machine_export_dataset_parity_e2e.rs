@@ -624,7 +624,7 @@ fn problem_projection() -> Projection {
         c("Edit ids", |r| joined(r, "edit_ids", ", ")),
         c("Place id", |r| text(r, "site_id")),
         c("Review level", |r| text(r, "review_level")),
-        c("Fix id", |r| text(r, "group")),
+        c("Fix id", |r| text(r, "fix_id")),
         c("Merged into", |r| text(r, "merged_into")),
     ]
 }
@@ -643,12 +643,15 @@ const FINDING_DERIVED_KEYS: [&str; 5] = [
 /// Keys of a findings row that no All problems column carries: the machine-readable files are
 /// the complete record.
 /// - `in_test`, `sub_group`, `sub_group_cause`: the fix's label and cause are on Fix plan;
+/// - `group`: the rule group's id, listed on How problems were grouped (the Fix id column names
+///   the Fix, which is `fix_id`);
 /// - `also_locations`: flattened into Also found at (checked above) and listed in full on All
 ///   source rows; `flagged_by`: the collapsed sources, listed on All source rows;
 /// - `is_fp` / `fp_reason`: the Ruled out sheet's identity and reason;
 /// - the kind payload (`deviating_sites` ... `reason_detail`): rendered on Departures, Your
 ///   conventions and Not checked, which this test checks against their own datasets.
-const FINDING_JSON_ONLY: [&str; 16] = [
+const FINDING_JSON_ONLY: [&str; 17] = [
+    "group",
     "in_test",
     "sub_group",
     "sub_group_cause",
@@ -669,7 +672,7 @@ const FINDING_JSON_ONLY: [&str; 16] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 40] = [
+const FINDING_BASE_KEYS: [&str; 41] = [
     "severity",
     "headline",
     "repo",
@@ -704,6 +707,7 @@ const FINDING_BASE_KEYS: [&str; 40] = [
     "site_id",
     "review_level",
     "group",
+    "fix_id",
     "sub_group",
     "sub_group_cause",
     "escalated",
@@ -786,12 +790,106 @@ fn check_finding_datasets(
         "not-assessed.json must have one row per not-assessed row of all-findings.json"
     );
 
+    // All problems has one row for each place, whatever the number of rules there: the first row
+    // at a place (repo, file, line) stands for it. A place with one row is held to every column; a
+    // place with several is held to the columns the other rules do not add to, and the columns
+    // they do add to are checked against what the rows say between them.
+    let mut order: Vec<(String, String, String)> = Vec::new();
+    let mut at_place: HashMap<(String, String, String), Vec<&Value>> = HashMap::new();
+    for r in &on_findings_sheet {
+        let key = (text(r, "repo"), text(r, "path"), text(r, "line"));
+        at_place
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key.clone());
+                Vec::new()
+            })
+            .push(r);
+    }
+    let all_sheet = sheet_rows(xlsx, "All problems", "Place id");
+    assert_eq!(
+        all_sheet.len(),
+        order.len(),
+        "All problems has one row for each place"
+    );
+    let single: Vec<&Value> = order
+        .iter()
+        .filter(|k| at_place[*k].len() == 1)
+        .map(|k| at_place[k][0])
+        .collect();
+    let several: Vec<&Value> = order
+        .iter()
+        .filter(|k| at_place[*k].len() > 1)
+        .map(|k| at_place[k][0])
+        .collect();
+    let ids_of =
+        |rows: &[&Value]| -> BTreeSet<String> { rows.iter().map(|r| text(r, "site_id")).collect() };
+    let (single_ids, several_ids) = (ids_of(&single), ids_of(&several));
+    let sheet_of = |ids: &BTreeSet<String>| -> Vec<HashMap<String, String>> {
+        all_sheet
+            .iter()
+            .filter(|row| ids.contains(&row["Place id"]))
+            .cloned()
+            .collect()
+    };
     assert_sheet_matches(
-        "All problems",
-        &sheet_rows(xlsx, "All problems", "Place id"),
-        &on_findings_sheet,
+        "All problems (places with one row)",
+        &sheet_of(&single_ids),
+        &single,
         &problem_projection(),
     );
+    // What the other rules at a place add to: the cells that gather several rows.
+    const GATHERED: [&str; 10] = [
+        "Area",
+        "Effort",
+        "Estimated hours",
+        "Needs a decision",
+        "Standard cited",
+        "Standard links",
+        "What to do here",
+        "Reviewer edited",
+        "Edit ids",
+        "Fix id",
+    ];
+    let steady: Projection = problem_projection()
+        .into_iter()
+        .filter(|(h, _)| !GATHERED.contains(h))
+        .collect();
+    assert_sheet_matches(
+        "All problems (places with several rows)",
+        &sheet_of(&several_ids),
+        &several,
+        &steady,
+    );
+    for row in sheet_of(&several_ids) {
+        let members = order
+            .iter()
+            .map(|k| &at_place[k])
+            .find(|m| text(m[0], "site_id") == row["Place id"])
+            .expect("the place");
+        let any = |key: &str| members.iter().any(|m| m[key].as_bool().unwrap());
+        assert_eq!(row["Needs a decision"] == "Yes", any("needs_review"));
+        assert_eq!(row["Reviewer edited"] == "Yes", any("reviewer_edited"));
+        let areas: BTreeSet<String> = members.iter().map(|m| text(m, "category")).collect();
+        let shown: BTreeSet<String> = row["Area"].split(", ").map(str::to_string).collect();
+        assert_eq!(
+            shown, areas,
+            "All problems: Area lists every area at the place"
+        );
+        let fixes: BTreeSet<String> = members.iter().map(|m| text(m, "fix_id")).collect();
+        let shown: BTreeSet<String> = row["Fix id"].split(", ").map(str::to_string).collect();
+        assert_eq!(
+            shown, fixes,
+            "All problems: Fix id lists every Fix at the place"
+        );
+        let ids: BTreeSet<String> = row["Rule ids"].split(", ").map(str::to_string).collect();
+        for m in members {
+            assert!(
+                ids.contains(&text(m, "rule_id")),
+                "All problems: Rule ids lists every rule at the place"
+            );
+        }
+    }
     // The rule columns: the Rules cell opens with the rule's title and lists the other rules;
     // the Rule ids cell opens with the row's own rule id.
     for row in sheet_rows(xlsx, "All problems", "Place id") {
@@ -806,8 +904,13 @@ fn check_finding_datasets(
         );
         let also = text(json, "also_matches");
         if !also.is_empty() {
+            let lists = if several_ids.contains(&row["Place id"]) {
+                row["Rules"].contains(&also)
+            } else {
+                row["Rules"].ends_with(&also)
+            };
             assert!(
-                row["Rules"].ends_with(&also),
+                lists,
                 "All problems: Rules lists the other rules {also:?}, got {:?}",
                 row["Rules"]
             );
@@ -862,7 +965,7 @@ const PROBLEM_RENDERED_KEYS: [&str; 29] = [
     "edit_ids",
     "site_id",
     "review_level",
-    "group",
+    "fix_id",
     "merged_into",
 ];
 
@@ -979,7 +1082,7 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "path",
             "site_id",
             "review_level",
-            "group",
+            "fix_id",
             "reviewer_edited",
             "edit_ids",
         ],
@@ -988,6 +1091,7 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         // such column.
         &[
             "ownership",
+            "group",
             "sub_group",
             "sub_group_cause",
             "escalated",
@@ -1014,7 +1118,7 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
         c("File", |r| text(r, "path")),
         c("Place id", |r| text(r, "site_id")),
         c("Review level", |r| text(r, "review_level")),
-        c("Fix id", |r| text(r, "group")),
+        c("Fix id", |r| text(r, "fix_id")),
         c("Reviewer edited", |r| yes_or_blank(r, "reviewer_edited")),
         c("Edit ids", |r| joined(r, "edit_ids", ", ")),
     ];

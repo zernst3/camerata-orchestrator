@@ -220,6 +220,12 @@ pub struct ExecutiveSummaryJson {
 /// finding list does not do that job.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreeThingsItemJson {
+    /// The Fix this item is. Three items are three distinct Fixes.
+    pub fix_id: String,
+    /// Every rule the Fix closes, by id, the worst first.
+    pub rules: Vec<String>,
+    /// How many places the Fix covers.
+    pub places: usize,
     pub headline: String,
     pub repo: String,
     pub path: String,
@@ -269,6 +275,8 @@ pub struct ScorecardJson {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FindingRefJson {
+    /// The Fix the row's sub-group is in (empty for a report with no review tree).
+    pub fix_id: String,
     pub rule_id: String,
     pub repo: String,
     pub path: String,

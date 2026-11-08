@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use rust_xlsxwriter::{Color, Workbook, XlsxError};
 
-use super::subgroups::{Sequence, SubgroupFacts};
+use super::subgroups::{FixFacts, Sequence};
 use super::tables::{Cell, Col, Table};
 use super::vocabulary as v;
 use super::{
@@ -38,17 +38,66 @@ use crate::report_export::Disposition;
 
 // ── Which rows are problems, and in what order ──────────────────────────────────────────
 
-/// THE seam for the representative rows: the one place that decides which engine rows stand for a
-/// problem on every sheet except All source rows.
-///
-/// Today the engine collapses rows of one rule at one place and keeps the others under the same
-/// Place id, so each row it hands over is already a Primary row. The cross-rule merge (one row per
-/// place listing every rule) is a separate later branch: it replaces this function, and every
-/// sheet follows because none of them filters rows for itself.
-pub(super) fn representative_rows(rows: &[FindingRow]) -> Vec<&FindingRow> {
-    rows.iter()
+/// One place of the All problems sheet: the row that stands for it and every row at it, whatever
+/// the rule. Nothing is dropped: the rows behind the representative are on All source rows and
+/// their rules are listed on the place's own row.
+pub(super) struct PlaceRows<'a> {
+    /// The row that heads the place: the first of its rows in the order the engine sorted them
+    /// (worst severity, then the strongest source).
+    pub rep: &'a FindingRow,
+    /// Every row at the place, the representative first.
+    pub members: Vec<&'a FindingRow>,
+}
+
+/// THE seam for the problems of every sheet except All source rows: one entry for each place
+/// (repo, file and line), listing every row there. A committed secret that six rules flag at one
+/// line is one place, one row, six rules. Only All source rows repeats a problem.
+pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
+    let mut order: Vec<(String, String, usize)> = Vec::new();
+    let mut at: HashMap<(String, String, usize), Vec<&FindingRow>> = HashMap::new();
+    for r in rows
+        .iter()
         .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
+    {
+        let key = (r.repo.clone(), r.path.clone(), r.line);
+        at.entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key.clone());
+                Vec::new()
+            })
+            .push(r);
+    }
+    order
+        .into_iter()
+        .filter_map(|key| at.remove(&key))
+        .map(|members| PlaceRows {
+            rep: members[0],
+            members,
+        })
         .collect()
+}
+
+/// The Fixes that are fixes: those with a problem on All problems or an advisory on Dependencies.
+/// A Fix that holds only conventions, or only rules that could not be completed, is no fix. The
+/// Fix plan, the tickets and the PDF's top three all keep the Fixes in this set and no others, so
+/// a ticket is a plan row.
+pub(super) fn fixes_with_problems(
+    rows: &[FindingRow],
+    sorted_deps: &[DepRow],
+) -> std::collections::HashSet<String> {
+    let mut ids: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
+        .map(|r| r.facts.fix_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.extend(
+        sorted_deps
+            .iter()
+            .map(|d| d.facts.fix_id.clone())
+            .filter(|id| !id.is_empty()),
+    );
+    ids
 }
 
 /// Everything the sheets need to know about each other, worked out once: where a problem sits on
@@ -56,12 +105,17 @@ pub(super) fn representative_rows(rows: &[FindingRow]) -> Vec<&FindingRow> {
 pub(super) struct Layout<'a> {
     pub internal: bool,
     pub multi_repo: bool,
-    /// The fixes in plan order: the groups that have problems or dependency advisories to go to.
-    /// A group that holds only conventions, or only rules that could not be completed, is not a
+    /// The fixes in plan order: the fixes that have problems or dependency advisories to go to.
+    /// A fix that holds only conventions, or only rules that could not be completed, is not a
     /// fix and is not here.
-    pub plan: Vec<&'a SubgroupFacts>,
-    /// The problems in the order All problems prints them.
+    pub plan: Vec<&'a FixFacts>,
+    /// The problems in the order All problems prints them: one for each place.
     pub problems: Vec<&'a FindingRow>,
+    /// Every row at a place, the representative first, by the representative's Place id.
+    pub place_members: HashMap<String, Vec<&'a FindingRow>>,
+    /// The Fix ids of a place in plan order, by the representative's Place id. More than one only
+    /// where two fixes share the place.
+    pub place_fixes: HashMap<String, Vec<String>>,
     /// Place id to the sheet and zero-based row that stands for it.
     pub placement: HashMap<String, (String, u32)>,
     /// Fix id to its zero-based row on Fix plan, and its position in plan order.
@@ -81,28 +135,23 @@ pub(super) struct Layout<'a> {
 impl<'a> Layout<'a> {
     pub(super) fn new(
         rows: &'a [FindingRow],
-        all_groups: &'a [SubgroupFacts],
+        all_groups: &'a [FixFacts],
         sorted_deps: &[DepRow],
         internal: bool,
         multi_repo: bool,
     ) -> Self {
-        let mut problems = representative_rows(rows);
-        // A group is a fix only when something on All problems or Dependencies belongs to it.
-        let mut with_problems: std::collections::HashSet<&str> = problems
-            .iter()
-            .map(|r| r.facts.group.as_str())
-            .filter(|g| !g.is_empty())
-            .collect();
+        let places = place_rows(rows);
+        // A fix is a fix only when something on All problems or Dependencies belongs to it.
+        let with_problems = fixes_with_problems(rows, sorted_deps);
         let mut first_dep_of_fix = HashMap::new();
         for (i, d) in sorted_deps.iter().enumerate() {
-            if !d.facts.group.is_empty() {
-                with_problems.insert(d.facts.group.as_str());
+            if !d.facts.fix_id.is_empty() {
                 first_dep_of_fix
-                    .entry(d.facts.group.clone())
+                    .entry(d.facts.fix_id.clone())
                     .or_insert(i as u32 + 1);
             }
         }
-        let plan: Vec<&SubgroupFacts> = all_groups
+        let plan: Vec<&FixFacts> = all_groups
             .iter()
             .filter(|g| with_problems.contains(g.id.as_str()))
             .collect();
@@ -111,7 +160,32 @@ impl<'a> Layout<'a> {
             .enumerate()
             .map(|(i, g)| (g.id.clone(), (i as u32 + 1, i)))
             .collect();
-        problems.sort_by_key(|r| fix_order_key(r, &fix_at, &plan));
+        // A place's fixes, in plan order; a place in no fix of the plan has none.
+        let mut place_fixes: HashMap<String, Vec<String>> = HashMap::new();
+        for p in &places {
+            let mut ids: Vec<&str> = p
+                .members
+                .iter()
+                .map(|r| r.facts.fix_id.as_str())
+                .filter(|id| fix_at.contains_key(*id))
+                .collect();
+            ids.sort_by_key(|id| fix_at[*id].1);
+            ids.dedup();
+            place_fixes.insert(
+                p.rep.facts.site_id.clone(),
+                ids.into_iter().map(str::to_string).collect(),
+            );
+        }
+        let mut sorted: Vec<&PlaceRows> = places.iter().collect();
+        sorted.sort_by_key(|p| {
+            fix_order_key(p.rep, &place_fixes[&p.rep.facts.site_id], &fix_at, &plan)
+        });
+        let mut problems: Vec<&'a FindingRow> = Vec::with_capacity(sorted.len());
+        let mut place_members: HashMap<String, Vec<&'a FindingRow>> = HashMap::new();
+        for p in &sorted {
+            problems.push(p.rep);
+            place_members.insert(p.rep.facts.site_id.clone(), p.members.clone());
+        }
         let mut convention_place_of_rule = HashMap::new();
         let mut not_checked_rules = std::collections::HashSet::new();
         for r in rows.iter().filter(|r| !r.is_fp) {
@@ -132,23 +206,27 @@ impl<'a> Layout<'a> {
         let mut first_problem_of_rule = HashMap::new();
         for (i, row) in problems.iter().enumerate() {
             let at = i as u32 + 1;
-            placement
-                .entry(row.facts.site_id.clone())
-                .or_insert((v::ALL_PROBLEMS.to_string(), at));
-            if !row.facts.group.is_empty() {
-                first_problem_of_fix
-                    .entry(row.facts.group.clone())
+            for member in &place_members[&row.facts.site_id] {
+                placement
+                    .entry(member.facts.site_id.clone())
+                    .or_insert((v::ALL_PROBLEMS.to_string(), at));
+                if !member.facts.fix_id.is_empty() {
+                    first_problem_of_fix
+                        .entry(member.facts.fix_id.clone())
+                        .or_insert(at);
+                }
+                first_problem_of_rule
+                    .entry(member.rule_id.clone())
                     .or_insert(at);
             }
-            first_problem_of_rule
-                .entry(row.rule_id.clone())
-                .or_insert(at);
         }
         Self {
             internal,
             multi_repo,
             plan,
             problems,
+            place_members,
+            place_fixes,
             placement,
             fix_at,
             first_problem_of_fix,
@@ -160,14 +238,15 @@ impl<'a> Layout<'a> {
     }
 }
 
-/// The sort key of a problem: its fix order, then the position of its fix in the plan, then the
-/// worst severity first.
+/// The sort key of a place: the fix order of its first fix, the position of that fix in the plan,
+/// then the worst severity first.
 fn fix_order_key(
     row: &FindingRow,
+    fixes: &[String],
     fix_at: &HashMap<String, (u32, usize)>,
-    plan: &[&SubgroupFacts],
+    plan: &[&FixFacts],
 ) -> (Sequence, usize, u8, u8, String, String, usize) {
-    let (sequence, position) = match fix_at.get(&row.facts.group) {
+    let (sequence, position) = match fixes.first().and_then(|id| fix_at.get(id)) {
         Some((_, i)) => (plan[*i].sequence, *i),
         None => (Sequence::of(&row.severity, &row.effort), usize::MAX),
     };
@@ -182,9 +261,9 @@ fn fix_order_key(
     )
 }
 
-/// The fix order word of a row.
+/// The fix order word of a row: that of its Fix, or the one its severity and effort give.
 fn fix_order_word(row: &FindingRow, lay: &Layout) -> &'static str {
-    match lay.fix_at.get(&row.facts.group) {
+    match lay.fix_at.get(&row.facts.fix_id) {
         Some((_, i)) => lay.plan[*i].sequence.label(),
         None => Sequence::of(&row.severity, &row.effort).label(),
     }
@@ -278,13 +357,13 @@ fn review_level_label(wire: &str) -> &'static str {
 
 /// What a reviewer has already decided about a problem, in plain words. An open problem has no
 /// decision yet.
-fn decision_so_far(row: &FindingRow) -> String {
+pub(super) fn decision_so_far(row: &FindingRow) -> String {
     if !row.facts.merged_into.is_empty() {
         return row.disposition_label.clone();
     }
     match row.disposition_kind {
         None | Some(Disposition::Unresolved) => String::new(),
-        Some(Disposition::Confirmed) => "Confirmed by the reviewer".to_string(),
+        Some(Disposition::Confirmed) => v::CONFIRMED_BY_REVIEWER.to_string(),
         Some(_) => row.disposition_label.clone(),
     }
 }
@@ -327,7 +406,7 @@ fn rules_cell(row: &FindingRow) -> Cell {
 }
 
 /// Every rule id behind a row: its own, the ones collapsed into it and the ones absorbed.
-fn rule_ids_cell(row: &FindingRow) -> Cell {
+fn rule_id_list(row: &FindingRow) -> Vec<String> {
     let mut ids = vec![row.rule_id.clone()];
     for b in &row.flagged_by {
         if !ids.contains(&b.rule_id) {
@@ -339,7 +418,16 @@ fn rule_ids_cell(row: &FindingRow) -> Cell {
             ids.push(l.rule_id.clone());
         }
     }
-    Cell::wrap(ids.join(", "))
+    for id in &row.also_match_ids {
+        if !id.is_empty() && !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}
+
+fn rule_ids_cell(row: &FindingRow) -> Cell {
+    Cell::wrap(rule_id_list(row).join(", "))
 }
 
 fn also_found_cell(row: &FindingRow) -> String {
@@ -462,7 +550,7 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
         .put(v::H_ALSO_FOUND_AT, Cell::wrap(also_found_cell(row)))
         .put(v::H_SEVERITY_NOTE, Cell::wrap(&row.severity_adjustments))
         .put(v::H_PLACE_ID, Cell::text(&row.facts.site_id))
-        .put(v::H_FIX_ID, Cell::text(&row.facts.group))
+        .put(v::H_FIX_ID, Cell::text(&row.facts.fix_id))
         .put(v::H_RULE_IDS, rule_ids_cell(row))
         .put(v::H_KIND, Cell::text(row.kind.tag()))
         .put(v::H_STATUS, Cell::text(&row.status))
@@ -472,7 +560,7 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
         .put(v::H_REVIEWER_EDITED, yes(row.reviewer_edited))
         .put(v::H_EDIT_IDS, Cell::text(row.edit_ids.join(", ")))
         .put(v::H_CITATION_LINKS, Cell::wrap(&row.citation_urls));
-    if let Some((fix_row, at)) = lay.fix_at.get(&row.facts.group) {
+    if let Some((fix_row, at)) = lay.fix_at.get(&row.facts.fix_id) {
         c.put(
             v::H_FIX,
             Cell::link(v::FIX_PLAN, *fix_row, &lay.plan[*at].label),
@@ -494,14 +582,183 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
     c
 }
 
+/// Distinct non-empty strings in the order they come.
+fn distinct<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        if !item.is_empty() && !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+fn effort_order(effort: &str) -> u8 {
+    match effort {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+/// What the decisions of the rules at one place add up to: empty while none is made, the words all
+/// share, Mixed when they differ, and Open with counts while some rule is still undecided.
+fn place_decision(members: &[&FindingRow]) -> String {
+    let said: Vec<String> = members.iter().map(|r| decision_so_far(r)).collect();
+    let decided: Vec<&String> = said.iter().filter(|d| !d.is_empty()).collect();
+    if decided.is_empty() {
+        return String::new();
+    }
+    let alike = decided.iter().all(|d| **d == *decided[0]);
+    if decided.len() == said.len() {
+        return if alike {
+            decided[0].clone()
+        } else {
+            v::MIXED_SEE_RULES.to_string()
+        };
+    }
+    let state = if alike {
+        decided[0].clone()
+    } else {
+        v::DECIDED.to_string()
+    };
+    v::open_with_counts(
+        decided.len(),
+        said.len(),
+        &state,
+        said.len() - decided.len(),
+    )
+}
+
+/// The cells of a place on All problems: those of its representative row, with everything the
+/// other rules at the place add. One place is one row whatever the number of rules at it.
+fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
+    let mut c = problem_cells(rep, lay);
+    let members: &[&FindingRow] = lay
+        .place_members
+        .get(&rep.facts.site_id)
+        .map_or(&[], Vec::as_slice);
+    let fixes: &[String] = lay
+        .place_fixes
+        .get(&rep.facts.site_id)
+        .map_or(&[], Vec::as_slice);
+    if let Some((fix_row, at)) = fixes.first().and_then(|id| lay.fix_at.get(id)) {
+        c.put(v::H_FIX_ORDER, Cell::text(lay.plan[*at].sequence.label()))
+            .put(
+                v::H_FIX,
+                Cell::link(v::FIX_PLAN, *fix_row, &lay.plan[*at].label),
+            );
+    }
+    if !fixes.is_empty() {
+        c.put(v::H_FIX_ID, Cell::text(fixes.join(", ")));
+    }
+    if members.len() < 2 {
+        return c;
+    }
+    // One line for each rule, by its id: two rules can share a title.
+    let mut seen_rules: Vec<&str> = Vec::new();
+    let mut titles: Vec<String> = Vec::new();
+    for r in members {
+        if !seen_rules.contains(&r.rule_id.as_str()) {
+            seen_rules.push(r.rule_id.as_str());
+            titles.push(r.rule_title.clone());
+        }
+    }
+    let also = distinct(members.iter().map(|r| r.also_matches.clone()));
+    c.put(
+        v::H_RULES,
+        Cell::wrap(
+            titles
+                .into_iter()
+                .chain(also)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    );
+    let ids = distinct(members.iter().flat_map(|r| rule_id_list(r)));
+    c.put(v::H_RULE_IDS, Cell::wrap(ids.join(", ")));
+    c.put(
+        v::H_AREA,
+        Cell::text(distinct(members.iter().map(|r| r.category.clone())).join(", ")),
+    );
+    c.put(
+        v::H_WHAT_TO_DO_HERE,
+        Cell::wrap(
+            distinct(members.iter().map(|r| {
+                r.fix_specific
+                    .clone()
+                    .or_else(|| r.fix.clone())
+                    .unwrap_or_default()
+            }))
+            .join("\n\n"),
+        ),
+    );
+    if let Some(biggest) = members.iter().max_by_key(|r| effort_order(&r.effort)) {
+        c.put(v::H_EFFORT, Cell::text(&biggest.effort))
+            .put(v::H_ESTIMATED_HOURS, Cell::text(&biggest.est_hours));
+    }
+    c.put(
+        v::H_REVIEWED_IN_PERSON,
+        yes(members
+            .iter()
+            .any(|r| r.facts.review_level == "personally_reviewed")),
+    )
+    .put(
+        v::H_NEEDS_A_DECISION,
+        yes(members.iter().any(|r| r.needs_review)),
+    )
+    .put(v::H_DECISION_SO_FAR, Cell::wrap(place_decision(members)))
+    .put(
+        v::H_WHY_IT_IS_WAITING,
+        Cell::wrap(distinct(members.iter().map(|r| why_waiting(r, lay.internal))).join("\n")),
+    )
+    .put(
+        v::H_STANDARD_CITED,
+        Cell::wrap(distinct(members.iter().map(|r| r.citation_label.clone())).join("\n")),
+    )
+    .put(
+        v::H_CITATION_LINKS,
+        Cell::wrap(
+            distinct(
+                members
+                    .iter()
+                    .flat_map(|r| r.citation_urls.lines().map(str::to_string)),
+            )
+            .join("\n"),
+        ),
+    )
+    .put(
+        v::H_REVIEWER_EDITED,
+        yes(members.iter().any(|r| r.reviewer_edited)),
+    )
+    .put(
+        v::H_EDIT_IDS,
+        Cell::text(distinct(members.iter().flat_map(|r| r.edit_ids.clone())).join(", ")),
+    );
+    if lay.internal {
+        c.put(
+            v::H_REVIEW_FLAGS,
+            Cell::wrap(distinct(members.iter().map(|r| r.review_flags.clone())).join("; ")),
+        )
+        .put(
+            v::H_HELD,
+            Cell::wrap(distinct(members.iter().map(|r| r.held.clone())).join("\n")),
+        )
+        .put(
+            v::H_ESCALATED,
+            yes(members.iter().any(|r| r.facts.escalated)),
+        );
+    }
+    c
+}
+
 fn problems_table(name: &str, rows: &[&FindingRow], lay: &Layout, waiting: bool) -> Table {
     let cols = problem_cols(lay, waiting);
     let mut table = Table::new(name, cols);
     table.frozen_cols = 3;
     for row in rows {
-        table
-            .rows
-            .push(problem_cells(row, lay).assemble(&table.cols));
+        table.rows.push(place_cells(row, lay).assemble(&table.cols));
     }
     table.empty_note = Some(
         if waiting {
@@ -526,7 +783,11 @@ pub(super) fn needs_a_decision_table(lay: &Layout) -> Table {
         .problems
         .iter()
         .copied()
-        .filter(|r| r.needs_review)
+        .filter(|r| {
+            lay.place_members
+                .get(&r.facts.site_id)
+                .is_some_and(|m| m.iter().any(|x| x.needs_review))
+        })
         .collect();
     problems_table(v::NEEDS_A_DECISION, &waiting, lay, true)
 }
@@ -548,11 +809,13 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
             Col::plain(v::H_EFFORT, 9.0),
             Col::plain(v::H_PLACES, 8.0),
             Col::plain(v::H_AREAS, 18.0),
-            Col::plain(v::H_RULES, 34.0),
+            Col::plain(v::H_RULES, 44.0),
             Col::plain(v::H_FOLDERS, 44.0),
             Col::plain(v::H_REVIEWED_BY, 36.0),
+            Col::plain(v::H_DECISION_SO_FAR, 36.0),
+            Col::plain(v::H_SHARES_PLACES_WITH, 36.0),
             Col::plain(v::H_GO_TO_PLACES, 16.0),
-            Col::technical(v::H_FIX_ID, 34.0),
+            Col::technical(v::H_FIX_ID, 20.0),
         ],
     );
     table.frozen_cols = 2;
@@ -572,11 +835,7 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
                 format!(
                     "{} {}",
                     g.open_site_total,
-                    if g.open_site_total == 1 {
-                        "place"
-                    } else {
-                        "places"
-                    }
+                    v::places_word(g.open_site_total)
                 ),
             ),
             None => match lay.first_dep_of_fix.get(&g.id) {
@@ -622,9 +881,20 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
             .put(v::H_EFFORT, Cell::text(&g.effort))
             .put(v::H_PLACES, Cell::Num(g.open_site_total as f64))
             .put(v::H_AREAS, Cell::text(&g.category))
-            .put(v::H_RULES, Cell::wrap(&g.rule_title))
+            .put(
+                v::H_RULES,
+                Cell::wrap(
+                    g.rules
+                        .iter()
+                        .map(|r| r.line(g.open_site_total))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            )
             .put(v::H_FOLDERS, Cell::wrap(g.folders.join("\n")))
             .put(v::H_REVIEWED_BY, Cell::wrap(reviewed.join(", ")))
+            .put(v::H_DECISION_SO_FAR, Cell::wrap(&g.decision))
+            .put(v::H_SHARES_PLACES_WITH, Cell::wrap(g.shares.join("\n")))
             .put(v::H_GO_TO_PLACES, go)
             .put(v::H_FIX_ID, Cell::text(&g.id));
         table.rows.push(cells.assemble(&table.cols));
@@ -803,7 +1073,7 @@ pub(super) fn dependencies_table(sorted: &[DepRow]) -> Table {
                 yes(row.facts.review_level == "personally_reviewed"),
             )
             .put(v::H_PLACE_ID, Cell::text(&row.facts.site_id))
-            .put(v::H_FIX_ID, Cell::text(&row.facts.group))
+            .put(v::H_FIX_ID, Cell::text(&row.facts.fix_id))
             .put(v::H_REVIEW_LEVEL, Cell::text(&row.facts.review_level))
             .put(v::H_REVIEWER_EDITED, yes(row.reviewer_edited))
             .put(v::H_EDIT_IDS, Cell::text(row.edit_ids.join(", ")));
@@ -1252,7 +1522,7 @@ pub(super) fn source_rows_tables(
                 (SiteParent::Problem(_), false) => {
                     let mut lean = RowCells::default();
                     lean.put(v::H_PLACE_ID, Cell::text(&site.facts.site_id))
-                        .put(v::H_FIX_ID, Cell::text(&site.facts.group))
+                        .put(v::H_FIX_ID, Cell::text(&site.facts.fix_id))
                         .put(v::H_REVIEW_LEVEL, Cell::text(&site.facts.review_level));
                     lean
                 }
@@ -1297,7 +1567,7 @@ fn dep_source_cells(dep: &DepRow) -> RowCells {
             yes(dep.facts.review_level == "personally_reviewed"),
         )
         .put(v::H_PLACE_ID, Cell::text(&dep.facts.site_id))
-        .put(v::H_FIX_ID, Cell::text(&dep.facts.group))
+        .put(v::H_FIX_ID, Cell::text(&dep.facts.fix_id))
         .put(v::H_REVIEW_LEVEL, Cell::text(&dep.facts.review_level))
         .put(v::H_REVIEWER_EDITED, yes(dep.reviewer_edited))
         .put(v::H_EDIT_IDS, Cell::text(dep.edit_ids.join(", ")))

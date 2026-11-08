@@ -238,7 +238,7 @@ fn decide(state: &AppState, id: &str, req: &NewDecisionReq) -> Response {
             let Some(tree) = latest.report.tree.as_ref() else {
                 return store_refusal(&DecisionStoreError::UnknownNode(node_id.clone()));
             };
-            if tree.node(node_id).is_none() {
+            if !tree.is_decidable(node_id) {
                 return store_refusal(&DecisionStoreError::UnknownNode(node_id.clone()));
             }
             let members = tree.batch_members(node_id);

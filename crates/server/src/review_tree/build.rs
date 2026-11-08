@@ -415,14 +415,18 @@ pub fn build_tree(
     nodes.extend(thrown.rule_level);
     nodes.extend(sub_nodes);
     nodes.extend(thrown.subgroups);
-    ReviewTree {
+    let mut tree = ReviewTree {
         run_id: run_id.to_string(),
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
         nodes,
         budget,
         candidates,
         group_reviewed,
-    }
+        fixes: Vec::new(),
+    };
+    // The Fixes are worked out here, from the rows and the tree alone, so they are stored with it.
+    tree.fixes = super::merge_fixes(&tree, findings);
+    tree
 }
 
 /// The id suffix of a category's thrown-out node.

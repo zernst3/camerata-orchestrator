@@ -118,7 +118,9 @@ fn an_internal_export_carries_held_rows_marked_held_and_a_client_export_is_refus
         .map(|r| &r[held_col])
         .filter(|c| !c.is_empty())
         .collect();
-    assert_eq!(held.len(), 2, "{grid:?}");
+    // Both rows are at one place, so All problems has one row for them and its Held cell names
+    // both reasons: no held row goes unmarked.
+    assert_eq!(held.len(), 1, "{grid:?}");
     assert!(held.iter().any(|h| h.contains("evidence not verified")));
     assert!(held.iter().any(|h| h.contains("junk text")));
 }

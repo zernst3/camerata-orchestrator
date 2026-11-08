@@ -50,6 +50,10 @@ pub enum CheckId {
     /// The review screen holds no change the decision store has not accepted. An undo whose
     /// revoke has not landed would export the decision the reviewer took back.
     UnsyncedReviewerChanges,
+    /// One fix, one row (item #1): every row has a Fix, the tickets and the Fix plan list the same
+    /// Fixes once each, the PDF's escalation list has one entry for each escalated place, and its
+    /// top three are three distinct Fixes.
+    FixParity,
     /// No em dash, en dash or multiplication sign in any file a client receives: the PDF's text,
     /// every workbook string, every CSV and JSON file and the README.
     ClientTextStyle,
@@ -57,7 +61,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 15] = [
+    pub const ALL: [CheckId; 16] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -72,6 +76,7 @@ impl CheckId {
         CheckId::Manifest,
         CheckId::Provenance,
         CheckId::UnsyncedReviewerChanges,
+        CheckId::FixParity,
         CheckId::ClientTextStyle,
     ];
 
@@ -92,6 +97,7 @@ impl CheckId {
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
             CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
+            CheckId::FixParity => "one fix per row",
             CheckId::ClientTextStyle => "client text style",
         }
     }

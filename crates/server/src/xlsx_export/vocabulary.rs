@@ -237,6 +237,8 @@ pub const H_STANDARD_CITED: &str = "Standard cited";
 pub const H_CODE_SEEN: &str = "Code seen";
 pub const H_FIX_TYPE: &str = "Fix type";
 pub const H_ALSO_FOUND_AT: &str = "Also found at";
+/// The Fix plan column that names the other fixes a fix shares a place with.
+pub const H_SHARES_PLACES_WITH: &str = "Shares places with";
 pub const H_SEVERITY_NOTE: &str = "Why the severity changed";
 pub const H_WHAT_WE_CHECKED: &str = "What we checked";
 pub const H_WHAT_YOUR_CODE_DOES: &str = "What your code does";
@@ -316,6 +318,25 @@ pub const H_ROWS: &str = "Rows";
 
 // Values.
 pub const YES: &str = "Yes";
+/// The decision state of a fix or a place with a rule no reviewer has ruled on.
+pub const OPEN: &str = "Open";
+/// The decision state of a fix whose rules were decided differently.
+pub const MIXED_SEE_RULES: &str = "Mixed, see rules";
+/// The word for a fix some of whose rules were decided differently, in an Open count.
+pub const DECIDED: &str = "decided";
+/// The label before the reason a rule waits for a reviewer, on a Fix's decision cell.
+pub const WAITING: &str = "Waiting";
+/// What a confirmed problem reads as in a Decision so far cell.
+pub const CONFIRMED_BY_REVIEWER: &str = "Confirmed by the reviewer";
+/// What a kind of group is on How problems were grouped.
+pub const LEVEL_AREA: &str = "Area";
+pub const LEVEL_RULE: &str = "Rule";
+pub const LEVEL_RULE_GROUP: &str = "Rule group";
+pub const LEVEL_FIX: &str = "Fix";
+/// The tickets file's estimate suffix for a fix with several places.
+pub const PER_PLACE: &str = "per place";
+/// The line of a ticket that introduces the rules it closes.
+pub const TICKET_CLOSES: &str = "This ticket closes these rules:";
 pub const WHOLE_FILE: &str = "whole file";
 pub const ENGINE: &str = "Engine";
 pub const REVIEWER: &str = "Reviewer";
@@ -356,6 +377,61 @@ pub const P_PREPARED_FOR: &str = "Prepared for";
 /// The workbook's title line.
 pub const WORKBOOK_TITLE: &str = "Codebase Inspection: the details behind your report";
 
+// ── Phrases built from the terms above ──────────────────────────────────────────────────
+
+/// "place" or "places" for a count.
+pub fn places_word(n: usize) -> &'static str {
+    if n == 1 {
+        "place"
+    } else {
+        "places"
+    }
+}
+
+/// A rule line of a fix that covers only some of the fix's places: the rule, then where.
+/// `places` are the rule's own places, named when there are few.
+pub fn rule_at_places(title: &str, places: &[String], total: usize) -> String {
+    const NAMED: usize = 3;
+    if places.len() <= NAMED {
+        format!("{title}: at {} only", places.join(", "))
+    } else {
+        format!(
+            "{title}: at {} of {total} {} only",
+            places.len(),
+            places_word(total)
+        )
+    }
+}
+
+/// The decision state of a fix some of whose rules are decided: "Open, 4 of 6 rules confirmed by
+/// the reviewer, 2 open".
+pub fn open_with_counts(decided: usize, total: usize, state: &str, open: usize) -> String {
+    format!(
+        "{OPEN}, {decided} of {total} {} {}, {open} open",
+        if total == 1 { "rule" } else { "rules" },
+        state.to_lowercase_first()
+    )
+}
+
+/// What a fix says of another it shares places with.
+pub fn shares_places_with(fix_id: &str, places: usize) -> String {
+    format!("{places} {} with Fix {fix_id}", places_word(places))
+}
+
+trait LowercaseFirst {
+    fn to_lowercase_first(&self) -> String;
+}
+
+impl LowercaseFirst for str {
+    fn to_lowercase_first(&self) -> String {
+        let mut chars = self.chars();
+        match chars.next() {
+            Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+}
+
 // ── The Glossary ────────────────────────────────────────────────────────────────────────
 
 /// One term and what it means, with the places a reader meets it.
@@ -374,6 +450,26 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Fix",
         "One cause and one change that clears a whole set of problems, wherever they appear.",
         "Fix plan; the Fix column on All problems",
+    ),
+    e(
+        "Rule group",
+        "The places of one rule that share one cause. A fix is made of one or more rule groups.",
+        "How problems were grouped",
+    ),
+    e(
+        "Open",
+        "A fix or a place with at least one rule no reviewer has ruled on yet. The count says how many rules are decided.",
+        "The Decision so far column of Fix plan and All problems",
+    ),
+    e(
+        "Mixed",
+        "Shown as Mixed, see rules: the rules of a fix were decided differently, so the Rules column and the reviewer decisions say which way each went.",
+        "The Decision so far column of Fix plan and All problems",
+    ),
+    e(
+        "Shares places with",
+        "The other fixes that list the same place without one containing the other, with how many places they share.",
+        "Fix plan",
     ),
     e(
         "Place",
@@ -592,7 +688,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Group id",
-        "A code that names one group of problems: an area, a rule or a fix.",
+        "A code that names one group of problems: an area, a rule, a rule group or a fix.",
         "The technical columns",
     ),
     e(
@@ -868,12 +964,12 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Group",
-        "A group of problems: an area, a rule or a fix.",
+        "A group of problems: an area, a rule, a rule group or a fix.",
         "How problems were grouped",
     ),
     e(
         "Within",
-        "What kind of group it is: Area, Rule or Fix.",
+        "What kind of group it is: Area, Rule, Rule group or Fix.",
         "How problems were grouped",
     ),
     e(
@@ -999,7 +1095,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "How problems were grouped",
-        "How problems were gathered into areas, rules and fixes, with the counts at each step.",
+        "How problems were gathered into areas, rules, rule groups and fixes, with the counts at each step.",
         "The For reviewers tabs",
     ),
     // The technical band.
@@ -1085,8 +1181,19 @@ pub const CONCEPTS: &[Concept] = &[
     k(
         "one cause, one change, any number of places",
         "Fix",
-        &["sub-group", "subgroup", "sub group", "remediation item"],
+        &["remediation item"],
     ),
+    k(
+        "the places of one rule that share one cause",
+        "Rule group",
+        &["sub-group", "subgroup", "sub group"],
+    ),
+    k(
+        "a fix or place with a rule no reviewer has ruled on",
+        "Open",
+        &[],
+    ),
+    k("a fix whose rules were decided differently", "Mixed", &[]),
     k(
         "the fixes in the order to do them",
         "Fix plan",
@@ -1348,7 +1455,10 @@ mod tests {
             banned_synonym_in("the Remediation plan"),
             Some(("remediation plan", "Fix plan"))
         );
-        assert_eq!(banned_synonym_in("a Sub-group"), Some(("sub-group", "Fix")));
+        assert_eq!(
+            banned_synonym_in("a Sub-group"),
+            Some(("sub-group", "Rule group"))
+        );
         assert_eq!(banned_synonym_in("Sites sheet"), Some(("sites", "Place")));
         assert_eq!(banned_synonym_in("Rule ID"), Some(("Rule ID", "Rule id")));
         assert_eq!(banned_synonym_in("Backlog"), Some(("backlog", "Later")));

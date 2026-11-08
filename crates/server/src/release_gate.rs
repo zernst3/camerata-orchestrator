@@ -39,9 +39,10 @@ pub use archive::{
 };
 pub use consistency::{
     client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
-    dataset_parity_problems, dataset_set_problems, marking_problems, package_stem,
-    parse_readme_provenance, patterns_section_problems, pdf_count_reconciliation_problems,
-    pdf_marking_problems, row_parity, verify_manifest, verify_readme_provenance, ReadmeProvenance,
+    dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
+    marking_problems, package_stem, parse_readme_provenance, patterns_section_problems,
+    pdf_count_reconciliation_problems, pdf_marking_problems, row_parity, verify_manifest,
+    verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -389,6 +390,7 @@ fn audit_zip_with(
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
+    report.record(CheckId::FixParity, fix_archive_problems(&entries));
     report.record(
         CheckId::Content,
         if archive_content {
@@ -667,6 +669,10 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     report.record(
         CheckId::RowParity,
         row_parity(&package.report_json, &package.findings_export),
+    );
+    report.record(
+        CheckId::FixParity,
+        fix_report_problems(&package.report_json, &package.findings_export),
     );
     report.record(
         CheckId::EvidenceUnverified,

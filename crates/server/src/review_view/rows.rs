@@ -221,6 +221,10 @@ impl<'a> ReviewComposer<'a> {
             .map(|list| list.iter().map(|e| self.edit_view(e, f)).collect())
             .unwrap_or_default();
         let has_stale_edit = edits.iter().any(|e| e.stale);
+        let fix = self
+            .tree
+            .zip(f.group_path.get(2))
+            .and_then(|(tree, sub)| tree.fix_of(sub));
 
         SiteRow {
             site_key: f.site_key.clone(),
@@ -238,6 +242,8 @@ impl<'a> ReviewComposer<'a> {
             snippet: f.snippet.clone(),
             group_path: f.group_path.clone(),
             group_primary: f.group_role.is_primary(),
+            fix_id: fix.map(|x| x.id.clone()).unwrap_or_default(),
+            fix_rules: fix.map(|x| x.rules.clone()).unwrap_or_default(),
             stage1: self.stage1_view(f),
             stage2: self.stage2_view(f),
             markers: self.markers_of(f, has_stale_edit),

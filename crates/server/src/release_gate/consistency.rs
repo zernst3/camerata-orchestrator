@@ -537,6 +537,35 @@ fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
     )
 }
 
+/// `json/all-findings.json` by `(severity, kind)` for the rows of `kinds`, one row for each place:
+/// the first row at a (repo, file, line) heads it, as it does on the All problems sheet, so the
+/// sheet is held to the places and not to the rows behind them.
+fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
+    let mut tally = Tally::new();
+    let Some(rows) = entries
+        .get("json/all-findings.json")
+        .and_then(|bytes| rows_of(bytes).ok())
+    else {
+        return tally;
+    };
+    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for row in &rows {
+        let kind = cell_text(row, "kind");
+        if !kinds.contains(&kind.as_str()) {
+            continue;
+        }
+        let place = (
+            cell_text(row, "repo"),
+            cell_text(row, "path"),
+            cell_text(row, "line"),
+        );
+        if seen.insert(place) {
+            *tally.entry((cell_text(row, "severity"), kind)).or_insert(0) += 1;
+        }
+    }
+    tally
+}
+
 /// `csv/all-findings.csv` by `(severity, kind)`, located by header name.
 fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
     let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
@@ -724,11 +753,9 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
         return problems;
     };
     let sheet_kinds = crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS;
-    let json_for_sheet: Tally = json
-        .iter()
-        .filter(|((_, kind), _)| sheet_kinds.contains(&kind.as_str()))
-        .map(|(k, n)| (k.clone(), *n))
-        .collect();
+    // All problems lists one row for each place (the row that heads the rows at that place), so the
+    // reference is the JSON rows of those kinds collapsed to their places the same way.
+    let json_for_sheet: Tally = places_tally(entries, &sheet_kinds);
     match workbook_rows_tally(xlsx) {
         Ok(tally) => problems.extend(tally_differences(
             &xlsx_name,
@@ -771,10 +798,7 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     }
     match workbook_start_summary(xlsx) {
         Ok((sheet_counts, severities)) => {
-            let want_problems: usize = sheet_kinds
-                .iter()
-                .map(|k| json_kinds.get(*k).copied().unwrap_or(0))
-                .sum();
+            let want_problems: usize = json_for_sheet.values().sum();
             let want_conventions = ["convention_observed", "no_convention"]
                 .iter()
                 .map(|k| json_kinds.get(*k).copied().unwrap_or(0))
@@ -1472,6 +1496,270 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
                     ));
                 }
             }
+        }
+    }
+    problems
+}
+
+// ---- one fix, one row (item #1) -------------------------------------------------------------
+
+const FIX_PARITY: &str = "one fix per row";
+
+/// A Fix is one change, so the package must hold it once everywhere. Over the archive:
+///
+/// * every row of `findings.json` that says something is wrong has a Fix id, and every Fix id
+///   names a Fix of its `fixes` list;
+/// * every member of every Fix is a rule group of the package's own tree;
+/// * the tickets and the Fix plan sheet list the same Fixes, each once, and each is a Fix of the
+///   `fixes` list: one ticket for each plan row, one plan row for each Fix with a place to fix.
+pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
+    let mut problems = Vec::new();
+    let Some(findings) = entries
+        .get("findings.json")
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+    else {
+        return problems;
+    };
+    let fixes = findings.get("fixes").and_then(Value::as_array);
+    // A package written before Fixes existed has none to check.
+    let Some(fixes) = fixes else {
+        return problems;
+    };
+    let fix_ids: BTreeSet<String> = fixes
+        .iter()
+        .filter_map(|f| f.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let groups: BTreeSet<String> = findings
+        .get("tree")
+        .and_then(|t| t.get("nodes"))
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for fix in fixes {
+        let id = fix.get("id").and_then(Value::as_str).unwrap_or("");
+        let members = fix
+            .get("members")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if members.is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &format!("fixes, Fix {id}"),
+                "a Fix has no rule group",
+            ));
+        }
+        for member in members.iter().filter_map(Value::as_str) {
+            if !groups.is_empty() && !groups.contains(member) {
+                problems.push(problem(
+                    "findings.json",
+                    &format!("fixes, Fix {id}"),
+                    format!("the Fix names the rule group {member}, which is not in the tree"),
+                ));
+            }
+        }
+    }
+    let rows = findings
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    // A report with no review tree has no Fixes and says so elsewhere; its rows are not held to one.
+    for (i, row) in rows.iter().enumerate().filter(|_| !fixes.is_empty()) {
+        let kind = cell_text(row, "kind");
+        if !crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let fix_id = cell_text(row, "fix_id");
+        if fix_id.is_empty() && !cell_text(row, "group").is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &format!("findings[{i}]"),
+                "a row in a rule group has no Fix id",
+            ));
+        } else if !fix_id.is_empty() && !fix_ids.contains(&fix_id) {
+            problems.push(problem(
+                "findings.json",
+                &format!("findings[{i}]"),
+                format!("the row names the Fix {fix_id}, which is not in the fixes list"),
+            ));
+        }
+    }
+
+    // Tickets and plan rows.
+    let tickets = entries
+        .get(crate::xlsx_export::tickets::TICKETS_CSV)
+        .map(|b| ticket_fix_ids(b));
+    let plan = package_stem(entries).and_then(|stem| {
+        let xlsx = entries.get(&format!("{stem}-findings.xlsx"))?;
+        Some(plan_fix_ids(xlsx))
+    });
+    let (tickets, plan) = match (tickets, plan) {
+        (Some(t), Some(p)) => (t, p),
+        _ => return problems,
+    };
+    let (tickets, plan) = match (tickets, plan) {
+        (Ok(t), Ok(p)) => (t, p),
+        (Err(e), _) => {
+            problems.push(problem(
+                crate::xlsx_export::tickets::TICKETS_CSV,
+                FIX_PARITY,
+                e,
+            ));
+            return problems;
+        }
+        (_, Err(e)) => {
+            problems.push(problem(
+                "(workbook)",
+                &format!("sheet \"{}\"", v::FIX_PLAN),
+                e,
+            ));
+            return problems;
+        }
+    };
+    for (what, ids) in [("a ticket", &tickets), ("a Fix plan row", &plan)] {
+        let unique: BTreeSet<&String> = ids.iter().collect();
+        if unique.len() != ids.len() {
+            problems.push(problem(
+                "(package)",
+                FIX_PARITY,
+                format!("{what} names the same Fix twice"),
+            ));
+        }
+        for id in ids {
+            if !id.is_empty() && !fix_ids.contains(id) {
+                problems.push(problem(
+                    "(package)",
+                    FIX_PARITY,
+                    format!("{what} names the Fix {id}, which is not in findings.json"),
+                ));
+            }
+        }
+    }
+    let t: BTreeSet<&String> = tickets.iter().collect();
+    let p: BTreeSet<&String> = plan.iter().collect();
+    if t != p {
+        problems.push(problem(
+            "(package)",
+            FIX_PARITY,
+            format!(
+                "the tickets list {} Fixes and the {} sheet lists {}; they must be the same Fixes",
+                tickets.len(),
+                v::FIX_PLAN,
+                plan.len()
+            ),
+        ));
+    }
+    problems
+}
+
+/// The Fix id of every ticket of `tickets.csv`.
+fn ticket_fix_ids(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
+    let headers = reader.headers().map_err(|e| e.to_string())?.clone();
+    let col = headers
+        .iter()
+        .position(|h| h == crate::xlsx_export::vocabulary::H_FIX_ID)
+        .ok_or_else(|| "the tickets file has no Fix id column".to_string())?;
+    let mut out = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| e.to_string())?;
+        out.push(record.get(col).unwrap_or("").to_string());
+    }
+    Ok(out)
+}
+
+/// The Fix id of every row of the workbook's Fix plan sheet.
+fn plan_fix_ids(xlsx: &[u8]) -> Result<Vec<String>, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::FIX_PLAN)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::FIX_PLAN))?;
+    let col = header
+        .iter()
+        .position(|h| h == v::H_FIX_ID)
+        .ok_or_else(|| format!("the {} sheet has no {:?} column", v::FIX_PLAN, v::H_FIX_ID))?;
+    Ok(grid
+        .iter()
+        .skip(1)
+        .filter_map(|row| row.get(col))
+        .filter(|id| !id.is_empty())
+        .cloned()
+        .collect())
+}
+
+/// Over the rows in memory: the PDF's escalation list has one entry for each place that holds an
+/// escalated row (an escalation slot) and none twice, and the top three are three distinct Fixes
+/// that are Fixes of `findings.json`.
+pub fn fix_report_problems(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let slots: BTreeSet<(String, String, String)> = findings
+        .findings
+        .iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .filter(|r| cell_text(r, "escalated") == "true")
+        .map(|r| {
+            (
+                cell_text(&r, "repo"),
+                cell_text(&r, "path"),
+                cell_text(&r, "line"),
+            )
+        })
+        .collect();
+    let entries: Vec<(String, String, String)> = report
+        .escalations
+        .items
+        .iter()
+        .map(|i| (i.repo.clone(), i.path.clone(), i.line.to_string()))
+        .collect();
+    let listed: BTreeSet<&(String, String, String)> = entries.iter().collect();
+    if listed.len() != entries.len() {
+        problems.push(problem(
+            "PDF data",
+            "escalations",
+            "the escalation list names one place more than once",
+        ));
+    }
+    if entries.len() != slots.len() {
+        problems.push(problem(
+            "PDF data",
+            "escalations",
+            format!(
+                "the escalation list has {} entries and findings.json has {} escalated places",
+                entries.len(),
+                slots.len()
+            ),
+        ));
+    }
+    let fix_ids: BTreeSet<&str> = findings.fixes.iter().map(|f| f.id.as_str()).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for item in &report.three_things.items {
+        if item.fix_id.is_empty() {
+            continue;
+        }
+        if !seen.insert(item.fix_id.as_str()) {
+            problems.push(problem(
+                "PDF data",
+                "three_things",
+                format!("the top three names the Fix {} twice", item.fix_id),
+            ));
+        }
+        if !fix_ids.contains(item.fix_id.as_str()) {
+            problems.push(problem(
+                "PDF data",
+                "three_things",
+                format!(
+                    "the top three names the Fix {}, which is not a Fix",
+                    item.fix_id
+                ),
+            ));
         }
     }
     problems

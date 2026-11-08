@@ -532,6 +532,12 @@ pub struct ScanLedger {
     /// sites no sub-group named. `None` until the group reviewer has run.
     #[serde(default)]
     escalation: Option<EscalationBlock>,
+    /// The Fix merge (item #1): how many sub-groups went in, how many Fixes came out and which
+    /// sub-groups were folded into which. A block rather than a row stage because it counts
+    /// sub-groups, not rows, so the row arithmetic of the stages stays as it was. `None` for a
+    /// ledger written before Fixes existed.
+    #[serde(default)]
+    fix_merge: Option<crate::review_tree::FixMergeBlock>,
     /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
     /// escalation block. `None` until the group reviewer has run, and for a ledger written
     /// before the record existed.
@@ -1457,6 +1463,16 @@ impl ScanLedger {
             rules_in_play: self.merged_rules().values().filter(|r| r.ran).count(),
         });
         self.escalation = Some(block);
+    }
+
+    /// Record the Fix merge, replacing an earlier one (the tree is built again after an edit).
+    pub fn record_fix_merge(&mut self, block: crate::review_tree::FixMergeBlock) {
+        self.fix_merge = Some(block);
+    }
+
+    /// The Fix merge of the run, once the tree has been built.
+    pub fn fix_merge(&self) -> Option<&crate::review_tree::FixMergeBlock> {
+        self.fix_merge.as_ref()
     }
 
     /// The sites and groups of the run, once the group reviewer has run.
