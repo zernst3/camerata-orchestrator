@@ -145,8 +145,8 @@ fn ticket_csv_has_one_row_per_subgroup_and_excludes_false_positives() {
             "Labels",
             "Estimate",
             "Group id",
-            "Site count",
-            "Sites"
+            crate::xlsx_export::vocabulary::H_PLACE_COUNT,
+            crate::xlsx_export::vocabulary::H_PLACES,
         ]
     );
     let rows: Vec<csv::StringRecord> = reader.records().map(|r| r.unwrap()).collect();

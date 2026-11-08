@@ -2,8 +2,8 @@
 //! into Jira, Linear or GitHub Issues.
 //!
 //! Generic columns, one row per sub-group with something left to fix. A false positive or an
-//! ignored site is on no ticket. The sites a ticket names are listed inline up to
-//! [`INLINE_SITES`], then the cell points at the Sites sheet filter that lists the rest.
+//! ignored place is on no ticket. The places a ticket names are listed inline up to
+//! [`INLINE_SITES`], then the cell points at the All problems sheet filter that lists the rest.
 
 use super::subgroups::{in_plan_order, subgroup_facts, SubgroupFacts};
 use super::vocabulary as v;
@@ -12,10 +12,13 @@ use crate::report_export::ReviewedReport;
 /// The archive path of the ticket file.
 pub const TICKETS_CSV: &str = "csv/tickets.csv";
 
-/// The most sites a ticket's Sites cell lists before it points at the Sites sheet.
+/// The most places a ticket's Places cell lists before it points at the All problems sheet.
 pub const INLINE_SITES: usize = 50;
 
-/// The ticket file's columns, in order.
+/// The ticket file's columns, in order. Every column that names a concept takes its word from
+/// the vocabulary, so a ticket says "places" where the workbook does. "Group id" stays for now:
+/// a ticket is one per group until the plan is per Fix (item #1), when this column becomes the
+/// vocabulary's "Fix id" ([`v::H_FIX_ID`]).
 pub const TICKET_HEADERS: [&str; 8] = [
     "Title",
     "Description",
@@ -23,8 +26,8 @@ pub const TICKET_HEADERS: [&str; 8] = [
     "Labels",
     "Estimate",
     "Group id",
-    "Site count",
-    "Sites",
+    v::H_PLACE_COUNT,
+    v::H_PLACES,
 ];
 
 fn priority_of(severity: &str) -> &'static str {

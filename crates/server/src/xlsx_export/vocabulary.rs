@@ -214,6 +214,8 @@ pub const H_EFFORT: &str = "Effort";
 pub const H_ESTIMATED_HOURS: &str = "Estimated hours";
 pub const H_CONFIDENCE: &str = "Confidence";
 pub const H_PLACES: &str = "Places";
+/// The ticket file's count of the places a ticket lists (`csv/tickets.csv`).
+pub const H_PLACE_COUNT: &str = "Place count";
 pub const H_AREA: &str = "Area";
 pub const H_AREAS: &str = "Areas";
 pub const H_RULE: &str = "Rule";

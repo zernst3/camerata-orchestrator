@@ -40,14 +40,26 @@ fn client_readmes() -> [String; 2] {
     ]
 }
 
-/// What the README may say that the concept map would otherwise flag: the ticket file's own
-/// column names, which are machine headers a ticket importer maps by name.
-fn without_ticket_headers(text: &str) -> String {
-    let mut out = text.to_string();
+/// The ticket file names its columns in the vocabulary's words: a place is a place there too.
+#[test]
+fn the_ticket_columns_use_the_vocabulary_terms() {
+    assert_eq!(
+        TICKET_HEADERS,
+        [
+            "Title",
+            "Description",
+            "Priority",
+            "Labels",
+            "Estimate",
+            // Per group until the plan is per Fix; then this becomes the Fix id.
+            "Group id",
+            v::H_PLACE_COUNT,
+            v::H_PLACES,
+        ]
+    );
     for header in TICKET_HEADERS {
-        out = out.replace(header, " ");
+        assert_eq!(v::banned_synonym_in(header), None, "{header:?}");
     }
-    out
 }
 
 #[test]
@@ -126,7 +138,7 @@ fn the_client_readme_names_only_sheets_that_exist() {
 #[test]
 fn the_client_readme_uses_no_retired_synonym_and_no_banned_character() {
     for readme in client_readmes() {
-        let text = without_ticket_headers(&readme);
+        let text = readme.clone();
         assert_eq!(
             v::banned_synonym_in(&text),
             None,
