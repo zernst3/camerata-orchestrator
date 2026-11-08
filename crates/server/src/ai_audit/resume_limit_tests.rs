@@ -445,3 +445,188 @@ fn the_stage_that_continues_a_run_carries_the_replayed_share() {
         next.limit_spend_usd()
     );
 }
+
+// ── a Message Batches run ───────────────────────────────────────────────────────────────────
+
+mod batches {
+    use super::*;
+    use crate::ai_audit::stage_batch::{
+        run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings,
+    };
+    use crate::ai_audit::BatchApi;
+    use crate::checkpoint::StageCheckpoint;
+    use crate::llm::{BatchItem, BatchRequestCounts, BatchResultRow, BatchStatus, CacheTtl};
+
+    /// A batch API whose every row costs $5 and which counts what is submitted.
+    struct FiveDollarBatches {
+        submits: AtomicUsize,
+        last_ids: std::sync::Mutex<Vec<String>>,
+        realtime: Counting,
+    }
+
+    #[async_trait::async_trait]
+    impl BatchApi for FiveDollarBatches {
+        fn has_api_key(&self) -> bool {
+            true
+        }
+        fn realtime(&self) -> &dyn LlmPort {
+            &self.realtime
+        }
+        async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+            None
+        }
+        async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+            self.submits.fetch_add(1, Ordering::SeqCst);
+            *self.last_ids.lock().unwrap() = items.into_iter().map(|i| i.custom_id).collect();
+            Ok("msgbatch_r5".to_string())
+        }
+        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+            Ok(BatchStatus {
+                processing_status: "ended".to_string(),
+                request_counts: BatchRequestCounts::default(),
+            })
+        }
+        async fn fetch(&self, _id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+            let ids = self.last_ids.lock().unwrap().clone();
+            Ok(ids
+                .into_iter()
+                .map(|custom_id| BatchResultRow {
+                    custom_id,
+                    response: Some(LlmResponse {
+                        text: "answer".to_string(),
+                        model: "claude-sonnet-5-5".to_string(),
+                        backend: "api".to_string(),
+                        cost_usd: Some(5.0),
+                        input_tokens: Some(100),
+                        output_tokens: Some(10),
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        or_cache_discount: None,
+                        truncated: false,
+                        reported_model: None,
+                    }),
+                    error: None,
+                    billed: None,
+                })
+                .collect())
+        }
+    }
+
+    struct Items {
+        ids: Vec<String>,
+        got: std::collections::BTreeMap<String, String>,
+    }
+
+    impl StageItems for Items {
+        type Id = String;
+        fn items(&self) -> Vec<(String, LlmRequest)> {
+            self.ids
+                .iter()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        LlmRequest::new(format!("ITEM={id};"))
+                            .with_model("claude-sonnet-5-5")
+                            .with_max_tokens(1024),
+                    )
+                })
+                .collect()
+        }
+        fn absorb(&mut self, id: &String, resp: LlmResponse) -> Result<(), ItemReject> {
+            self.got.insert(id.clone(), resp.text);
+            Ok(())
+        }
+        fn retry(&self, _id: &String, _reject: &ItemReject) -> Option<LlmRequest> {
+            None
+        }
+    }
+
+    fn items() -> Items {
+        Items {
+            ids: (0..3).map(|i| format!("item-{i}")).collect(),
+            got: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial(process_env)]
+    async fn a_batch_run_resumed_with_the_limit_below_its_stored_batch_cost_submits_nothing_and_replays_everything(
+    ) {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(FiveDollarBatches {
+            submits: AtomicUsize::new(0),
+            last_ids: std::sync::Mutex::new(Vec::new()),
+            realtime: Counting::new(),
+        });
+        let dir = store.checkpoint_dir();
+        seeded(async {
+            let api = crate::run_store::journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let cp = StageCheckpoint::new(&dir, "calibration_acme_widgets");
+            let mut first = items();
+            let ctx = StageCtx {
+                repo: REPO,
+                model: "claude-sonnet-5-5",
+                realtime: api.realtime(),
+                batch: Some(&api),
+                meter: None,
+                job: None,
+                checkpoint: Some(&cp),
+                settings: StageSettings::default(),
+            };
+            let out = run_stage(Stage::Calibration, &mut first, StageMode::Batch, &ctx).await;
+            assert_eq!(out.absorbed.len(), 3, "the first attempt reads the batch");
+            assert_eq!(fake.submits.load(Ordering::SeqCst), 1);
+        })
+        .await;
+        let id = store.run_id();
+        drop(store);
+
+        let store = RunStore::open(&id).unwrap();
+        assert!(
+            store.stored_usd() >= 15.0 - 1e-6,
+            "the three stored batch rows ($5 each) are in the stored spend: {}",
+            store.stored_usd()
+        );
+        seeded(async {
+            let api = crate::run_store::journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let cp = StageCheckpoint::new(&dir, "calibration_acme_widgets");
+            let meter = capped(Some(1.0), store.stored_usd());
+            let mut second = items();
+            let ctx = StageCtx {
+                repo: REPO,
+                model: "claude-sonnet-5-5",
+                realtime: api.realtime(),
+                batch: Some(&api),
+                meter: Some(&meter),
+                job: None,
+                checkpoint: Some(&cp),
+                settings: StageSettings::default(),
+            };
+            let out = run_stage(Stage::Calibration, &mut second, StageMode::Batch, &ctx).await;
+            assert_eq!(out.resumed.len(), 3, "every stored item is replayed");
+            assert!(out.failed.is_empty(), "{:?}", out.failed);
+            assert_eq!(second.got.len(), 3);
+            assert_eq!(
+                fake.submits.load(Ordering::SeqCst),
+                1,
+                "nothing new is submitted"
+            );
+            let record = meter.cost_cap_record().expect("a limit was set");
+            assert!(
+                record.not_run_stages.is_empty() && !record.stopped_the_run(),
+                "{record:?}"
+            );
+            // The invariant behind the limit: what was replayed never exceeds what was stored, so
+            // the limit still reads the whole stored spend and not less.
+            assert!(
+                (meter.limit_spend_usd() - store.stored_usd()).abs() < 1e-6,
+                "limit {} vs stored {}",
+                meter.limit_spend_usd(),
+                store.stored_usd()
+            );
+        })
+        .await;
+    }
+}

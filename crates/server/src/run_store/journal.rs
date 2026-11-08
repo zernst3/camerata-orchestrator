@@ -1116,7 +1116,7 @@ pub(crate) fn count_calls(store: &RunStore) {
     let _ = store.persist();
 }
 
-/// What the stored calls of the run in `dir` cost in all. Every stored call counts, a reply later
+/// What the stored calls and the stored batch rows of the run in `dir` cost in all. Every stored call counts, a reply later
 /// set aside included: the money was paid either way. A spend limit on a resume counts this whole
 /// figure up front ([`crate::cost_cap::RunControls::stored_spend_usd`]).
 pub(crate) fn stored_spend(dir: &Path) -> f64 {
@@ -1128,6 +1128,24 @@ pub(crate) fn stored_spend(dir: &Path) -> f64 {
         {
             for entry in file.entries.values() {
                 all += entry.cost_usd;
+            }
+        }
+    }
+    // The fetched rows of the batches the run submitted live under `batches/`, not `calls/`. A
+    // stage's checkpoint replays them onto the meter as resumed usage, so the stored figure has to
+    // hold them too, or the limit would take off more than it ever added.
+    if let Ok(entries) = std::fs::read_dir(dir.join("batches")) {
+        for batch in entries
+            .filter_map(Result::ok)
+            .filter_map(|e| read_json::<BatchFile>(&e.path()))
+        {
+            for row in batch.rows.iter().flatten() {
+                for paid in [row.response.as_ref(), row.billed.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    all += paid.cost_usd.unwrap_or(0.0);
+                }
             }
         }
     }
