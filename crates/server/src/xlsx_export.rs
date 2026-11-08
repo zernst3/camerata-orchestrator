@@ -258,9 +258,15 @@ pub struct FindingRow {
     /// On every row of every export.
     #[serde(flatten)]
     facts: crate::report_export::RowFacts,
+    /// Why the row was escalated, in the closed reason vocabulary, on an INTERNAL package's data
+    /// files only (`findings.json`, `json/` and `csv/`). Empty, and so absent from the file, for a
+    /// row that was not escalated and for every row of a client package: no client file carries
+    /// the key. No rank, outlier mark, disagreement or model text is ever serialized.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    escalation_reason: String,
     /// The group reviewer's triage of the row, for the INTERNAL workbook's columns only. It is
-    /// never serialized: no JSON or CSV file of any package carries an escalation reason, rank,
-    /// outlier reason, disagreement or model text, and a client workbook has no such column.
+    /// never serialized: the one thing of it a data file carries is [`Self::escalation_reason`],
+    /// and a client workbook has no such column.
     #[serde(skip)]
     internal_triage: Option<crate::report_export::InternalTriage>,
 }
@@ -652,6 +658,11 @@ fn partition_rows_for(
                 &credentials.also_flagged_in(f),
             ),
             facts: facts_index.facts(f),
+            escalation_reason: if internal {
+                crate::report_export::internal_triage(f).escalation_reason
+            } else {
+                String::new()
+            },
             internal_triage: internal.then(|| crate::report_export::internal_triage(f)),
         });
     }

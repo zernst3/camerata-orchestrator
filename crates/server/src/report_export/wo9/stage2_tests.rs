@@ -104,12 +104,26 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
             "the internal workbook lacks {want}"
         );
     }
-    // The data files are the same in both packages: the triage is the internal WORKBOOK's.
+    // The operator's data files carry the escalation reason of each row (nothing else of the
+    // triage): the reason the row was escalated, in the closed vocabulary, and no model text.
     let findings = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
+    let doc: serde_json::Value = serde_json::from_str(&findings).expect("findings.json parses");
+    let reasons: Vec<&str> = doc["findings"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|r| r["escalation_reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["rule_misfit"],
+        "the triaged row names its reason and an untriaged row has none"
+    );
     for key in [
-        "escalation_reason",
         "outlier_why",
         "stage2_disagreement",
+        "escalation_why",
+        "stage2_rank",
         WHYS[0],
     ] {
         assert!(
@@ -117,6 +131,11 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
             "an internal findings.json carries {key}"
         );
     }
+    // The same reason is in the json/ and csv/ datasets, so the parity checks stay equal.
+    let all_json = String::from_utf8_lossy(&entries["json/all-findings.json"]).into_owned();
+    assert!(all_json.contains("\"escalation_reason\": \"rule_misfit\""));
+    let all_csv = String::from_utf8_lossy(&entries["csv/all-findings.csv"]).into_owned();
+    assert!(all_csv.contains("escalation_reason"));
     // The PDF is the same document for both: it never carries the triage.
     for secret in WHYS {
         assert!(!data.contains(secret), "the PDF data carries {secret}");
