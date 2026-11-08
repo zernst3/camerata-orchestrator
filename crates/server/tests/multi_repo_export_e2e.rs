@@ -802,10 +802,13 @@ fn start_here_does_not_count_pattern_rows_in_the_scorecard() {
         .iter()
         .map(|c| c.parse::<usize>().unwrap())
         .sum();
-    let problems = grid(&xlsx, "All problems").len() - 1;
-    assert!(
-        scorecard_problems >= problems,
-        "the scorecard counts the problems, not the pattern rows"
+    // The scorecard counts every row that is not ruled out, whatever its kind (the PDF scorecard
+    // counts the same way; moving both to problems only is the PDF work order's, W2). Pattern
+    // rows are in no count, so the total is exactly the rows of all-findings.json.
+    let rows = dataset(&report, "json/all-findings.json").len();
+    assert_eq!(
+        scorecard_problems, rows,
+        "the scorecard counts the rows of all-findings.json, not the pattern rows"
     );
 }
 
