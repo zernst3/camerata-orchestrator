@@ -684,3 +684,50 @@ fn each_escalated_place_prints_its_own_fix() {
         "Enable row security on b.rs. Then add a policy."
     );
 }
+
+/// F4: before a review the section says it is for review; "Reviewed in person" only when reviewed.
+#[test]
+fn the_most_serious_problems_say_for_review_until_they_are_reviewed() {
+    let mut f = finding("SEC-A-1", "src/a.rs", 1, "critical");
+    f.review.escalation_state = EscalationState::Escalated;
+    let report = report_with(vec![f.clone()], vec!["SEC-A-1"]).seal();
+    let raw = build_report_json(&apply_overlay(&report, &[], &[], &[]), None, &options());
+    assert!(raw
+        .escalations
+        .intro
+        .starts_with("For review in person, worst first."));
+    assert!(!raw.escalations.intro.contains("Reviewed in person"));
+
+    let key = report.findings[0].site_key.clone();
+    let decision = camerata_api_types::decisions::Decision {
+        id: "dec-000001".to_string(),
+        key,
+        state: camerata_api_types::decisions::DecisionState::Confirmed,
+        reason: String::new(),
+        scope: camerata_api_types::decisions::Scope::Site,
+        applies_to: Vec::new(),
+        except: Vec::new(),
+        inherited_from: None,
+        decided_by: "reviewer".to_string(),
+        decided_at: "2026-11-04T09:00:00Z".to_string(),
+        run_id: "insp-1".to_string(),
+        engine_version: "0.0.0-test".to_string(),
+        needed_me: None,
+        sample_verdict: None,
+        confirmed_by_client: None,
+        revoked_at: None,
+    };
+    let reviewed = build_report_json(
+        &apply_overlay(&report, &[decision], &[], &[]),
+        None,
+        &options(),
+    );
+    assert!(
+        reviewed
+            .escalations
+            .intro
+            .starts_with("Reviewed in person, worst first."),
+        "{}",
+        reviewed.escalations.intro
+    );
+}

@@ -2039,6 +2039,9 @@ pub fn build_report_json(
         .map(|(f, _, _, _)| f.distinct_site_count())
         .sum();
     let escalation_cap = PDF_MAX_SERIOUS_PROBLEMS;
+    let any_open_entry = escalated_items
+        .iter()
+        .any(|e| e.decision.starts_with(crate::xlsx_export::vocabulary::OPEN));
     let escalation_more_line = if escalated_items.len() > escalation_cap {
         crate::xlsx_export::vocabulary::more_in_sheet(
             escalated_items.len() - escalation_cap,
@@ -2059,8 +2062,13 @@ pub fn build_report_json(
             cap: escalation_cap,
             more_line: escalation_more_line,
             intro: format!(
-                "Reviewed in person, worst first. Each entry is one place, whatever the number of \
+                "{} in person, worst first. Each entry is one place, whatever the number of \
                  rules it breaks. Every place is on the {} sheet.",
+                if review_state.is_draft() || any_open_entry {
+                    "For review"
+                } else {
+                    "Reviewed"
+                },
                 crate::xlsx_export::vocabulary::ALL_PROBLEMS
             ),
         },
