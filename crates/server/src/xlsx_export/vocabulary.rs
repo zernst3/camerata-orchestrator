@@ -419,8 +419,13 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Severity",
-        "How bad the problem is if it is left alone: Critical, High, Medium or Low.",
+        "How bad the problem is if it is left alone: Critical, High, Medium or Low. Info marks an observation that is not a defect, such as a convention noted.",
         "Every table of problems; the scorecard on Start here",
+    ),
+    e(
+        "Info",
+        "A severity for an observation that is not a defect, such as a convention noted. It counts in the Low column of the scorecard.",
+        "The Severity column; the scorecard on Start here",
     ),
     e(
         "Effort",
@@ -434,7 +439,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Confidence",
-        "How sure the review is that the problem is real: High, or Low when the review was unsure. A Low problem waits on Needs a decision.",
+        "How sure the review is that the problem is real: High, Low when the review was unsure, or Disputed when the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
         "All problems; Needs a decision",
     ),
     e(
@@ -1102,7 +1107,7 @@ pub const CONCEPTS: &[Concept] = &[
     k(
         "a reviewer must rule before the client acts",
         "Needs a decision",
-        &["held for review", "informational", "needs review"],
+        &["held for review", "needs review"],
     ),
     k(
         "looked at and not a problem",
@@ -1138,10 +1143,19 @@ pub const CONCEPTS: &[Concept] = &[
         &[],
     ),
     k("how bad the problem is", "Severity", &[]),
+    k(
+        "the severity of an observation that is not a defect",
+        "Info",
+        &["informational"],
+    ),
     k("the size of the change", "Effort", &[]),
     k("how sure the review is", "Confidence", &[]),
     k("a habit the code follows consistently", "Convention", &[]),
-    k("a place that departs from a convention", "Departure", &[]),
+    k(
+        "a place that departs from a convention",
+        "Departure",
+        &["deviation", "deviations"],
+    ),
 ];
 
 /// The retired word found in `text`, with the term that replaced it. A word counts only as a
@@ -1320,6 +1334,14 @@ mod tests {
         assert_eq!(banned_synonym_in("Sites sheet"), Some(("sites", "Place")));
         assert_eq!(banned_synonym_in("Rule ID"), Some(("Rule ID", "Rule id")));
         assert_eq!(banned_synonym_in("Backlog"), Some(("backlog", "Later")));
+        assert_eq!(
+            banned_synonym_in("Informational"),
+            Some(("informational", "Info"))
+        );
+        assert_eq!(
+            banned_synonym_in("a Deviation"),
+            Some(("deviation", "Departure"))
+        );
         assert_eq!(banned_synonym_in("a website"), None);
         assert_eq!(banned_synonym_in("see findings.json"), None);
     }
