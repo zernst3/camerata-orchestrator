@@ -844,6 +844,8 @@ pub fn build_report_json(
     // sort key rather than pushed straight into `matrix` in iteration order. Ordering within a
     // bucket is now a real signal (a security-floor medium must rank ahead of an architecture/
     // advisory medium of the same severity), so it can no longer be left to insertion order.
+    // The Fix each row's sub-group is in, for the top three: three DISTINCT Fixes, not three rows.
+    let fix_index = crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings);
     #[allow(clippy::type_complexity)]
     let mut bucketed: HashMap<
         &'static str,
@@ -948,6 +950,7 @@ pub fn build_report_json(
             chosen_option_for_rule,
         );
         reference.why_waiting = why_waiting.map(str::to_string);
+        reference.fix_id = fix_index.fix_id_of(f);
         bucketed
             .entry(bucket)
             .or_default()
@@ -1615,35 +1618,31 @@ pub fn build_report_json(
             f.confidence_rank,
         )
     });
+    // The Fixes, the escalated places and the patterns of the reviewed report, worked out once. The
+    // top three below reads the Fix facts, so an effort is counted once for a Fix however many
+    // rules it closes.
+    let (escalated_items, sub_group_patterns, fix_facts) =
+        crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
     // below (the ONE place these findings are now named) — the exec-summary's own
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
     // `default_narrative`'s doc comment).
     //
-    // C6-B2 design point 3: walk `do_now_sorted` in rank order, but SKIP a row that shares a
-    // non-empty root-cause credential token (`FindingRefJson::root_cause_keys`) with a row
-    // already selected — the defense-in-depth distinctness check for the case the merge pass
-    // (`ai_audit::group_semantic` / `backfill_credential_identity`) conservatively left
-    // several sites of ONE leaked credential as separate rows. A skipped row is simply not
-    // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
-    // normally everywhere else the report lists do-now findings.
+    // Item #1: the three are three DISTINCT FIXES. Walk `do_now_sorted` in rank order and skip a
+    // row whose Fix is already chosen, so one committed secret that six rules flag is one entry
+    // however the rules rank. A report with no review tree has no Fix ids; its rows fall back to
+    // the older test, one rule at a time (W24: three tables missing RLS are one thing).
     //
-    // W24 (2026-10-20): the credential-token check above is gated on `!root_cause_keys
-    // .is_empty()`, so a row carrying NO token skipped it entirely and was always selected.
-    // Three rows of one rule — three tables missing RLS, three endpoints missing one guard —
-    // could therefore fill all three slots, which the graders observed as "top-3 listing one
-    // root cause three times".
-    //
-    // The fallback is the RULE ID. For THIS box that is the right granularity even though
-    // the rows are all genuine: the box asks the client to do three things this week, and
-    // three instances of one rule are one thing ("enable RLS on these tables"). Spending
-    // every slot on it hides the other two problems, which is the opposite of what the box
-    // is for. Everywhere else the report still lists all of them — `do_now_sorted` and
-    // `matrix.do_now` are untouched, exactly as the credential check already promised.
+    // C6-B2 design point 3 still applies on top: a row that names a credential another chosen row
+    // already names (`FindingRefJson::root_cause_keys`) is skipped, so two Fixes that are sites of
+    // one leaked credential do not take two slots. A skipped row is simply not chosen for THIS
+    // box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships normally
+    // everywhere else the report lists do-now findings.
     let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
     let mut selected_root_causes: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
     let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut selected_fixes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
@@ -1652,10 +1651,19 @@ pub fn build_report_json(
             && f.root_cause_keys
                 .iter()
                 .any(|k| selected_root_causes.contains(k.as_str()));
-        if shares_selected_root_cause || selected_rule_ids.contains(f.rule_id.as_str()) {
+        let repeats = if f.fix_id.is_empty() {
+            selected_rule_ids.contains(f.rule_id.as_str())
+        } else {
+            selected_fixes.contains(f.fix_id.as_str())
+        };
+        if shares_selected_root_cause || repeats {
             continue;
         }
-        selected_rule_ids.insert(f.rule_id.as_str());
+        if f.fix_id.is_empty() {
+            selected_rule_ids.insert(f.rule_id.as_str());
+        } else {
+            selected_fixes.insert(f.fix_id.as_str());
+        }
         top3_do_now.push(f);
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
@@ -1757,11 +1765,26 @@ pub fn build_report_json(
     // ── Item 7: "If you only do three things this week" ───────────────────────
     // The same top (up to 3) do-now findings, plus a rough hour estimate per item and a total —
     // the sentence that turns remediation anxiety into a purchase order.
-    let three_things_items: Vec<ThreeThingsItemJson> = top3_do_now
+    let top3_efforts: Vec<Option<String>> = top3_do_now
         .iter()
         .map(|f| {
-            let (_, hours_label) = effort_hours_bounds(f.effort.as_deref());
+            fix_facts
+                .get(&f.fix_id)
+                .map(|x| x.effort.clone())
+                .filter(|e| !e.is_empty())
+                .or_else(|| f.effort.clone())
+        })
+        .collect();
+    let three_things_items: Vec<ThreeThingsItemJson> = top3_do_now
+        .iter()
+        .zip(&top3_efforts)
+        .map(|(f, effort)| {
+            let (_, hours_label) = effort_hours_bounds(effort.as_deref());
+            let fix = fix_facts.get(&f.fix_id);
             ThreeThingsItemJson {
+                fix_id: f.fix_id.clone(),
+                rules: fix.map(|x| x.rules.clone()).unwrap_or_default(),
+                places: fix.map_or(1, |x| x.places.max(1)),
                 headline: f.headline.clone(),
                 repo: f.repo.clone(),
                 path: f.path.clone(),
@@ -1773,7 +1796,7 @@ pub fn build_report_json(
             }
         })
         .collect();
-    let total_hours_label = total_hours_label(&top3_do_now);
+    let total_hours_label = classification::total_hours_label_of(&top3_efforts);
     let three_things = ThreeThingsJson {
         items: three_things_items,
         total_hours_label,
@@ -1925,8 +1948,6 @@ pub fn build_report_json(
     // WO9 (design 3B item 1): the escalations and one pattern for each sub-group, worked out from
     // the reviewed report. The sentence is derived from the tree being exported, never copied from
     // what stage 2 recorded.
-    let (escalated_items, sub_group_patterns) =
-        crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     // (The reviewed report's ledger block is already derived from its tree by `apply_overlay`.)
     let escalation_sentence = report
         .ledger
@@ -2323,6 +2344,7 @@ mod coverage_gaps_tests;
 mod wo9 {
     mod decisions_file_tests;
     mod edit_ids_tests;
+    mod fix_tests;
     mod pdf_tests;
     mod plan_tests;
     mod readme_tests;

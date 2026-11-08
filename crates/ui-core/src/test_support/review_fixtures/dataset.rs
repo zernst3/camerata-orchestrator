@@ -629,6 +629,8 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         snippet,
         group_path: vec![cat_node(rule.category), rule.node.clone(), sub.node.clone()],
         group_primary: false,
+        fix_id: String::new(),
+        fix_rules: Vec::new(),
         stage1,
         stage2,
         markers: Vec::new(),
@@ -672,6 +674,8 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
             THROWN_SUB.to_string(),
         ],
         group_primary: false,
+        fix_id: String::new(),
+        fix_rules: Vec::new(),
         stage1: Stage1View {
             severity: "low".to_string(),
             ..Stage1View::default()

@@ -1,11 +1,12 @@
-//! `csv/tickets.csv`: one ticket per sub-group (design 3B item 4, D16), a file a client can import
-//! into Jira, Linear or GitHub Issues.
+//! `csv/tickets.csv`: one ticket per Fix (design 3B item 4, D16, item #1), a file a client can
+//! import into Jira, Linear or GitHub Issues. A Fix is one change, so one committed secret flagged
+//! by six rules is one ticket that lists every rule and its citation.
 //!
-//! Generic columns, one row per sub-group with something left to fix. A false positive or an
+//! Generic columns, one row per Fix with something left to fix. A false positive or an
 //! ignored place is on no ticket. The places a ticket names are listed inline up to
 //! [`INLINE_SITES`], then the cell points at the All problems sheet filter that lists the rest.
 
-use super::subgroups::{in_plan_order, subgroup_facts, SubgroupFacts};
+use super::subgroups::{plan_facts, FixFacts};
 use super::vocabulary as v;
 use crate::report_export::ReviewedReport;
 
@@ -16,17 +17,15 @@ pub const TICKETS_CSV: &str = "csv/tickets.csv";
 pub const INLINE_SITES: usize = 50;
 
 /// The ticket file's columns, in order. Every column that names a concept takes its word from
-/// the vocabulary, so a ticket says "Places" for the count, as the workbook does, and "Place list"
-/// for the places it names. "Group id" stays for now:
-/// a ticket is one per group until the plan is per Fix (item #1), when this column becomes the
-/// vocabulary's "Fix id" ([`v::H_FIX_ID`]).
+/// the vocabulary, so a ticket says "Places" for the count, as the workbook does, "Place list"
+/// for the places it names and "Fix id" for the Fix a ticket is.
 pub const TICKET_HEADERS: [&str; 8] = [
     "Title",
     "Description",
     "Priority",
     "Labels",
     "Estimate",
-    "Group id",
+    v::H_FIX_ID,
     v::H_PLACES,
     v::H_PLACE_LIST,
 ];
@@ -41,13 +40,13 @@ fn priority_of(severity: &str) -> &'static str {
 }
 
 /// `low` effort as the band the report states for a finding of that effort.
-fn estimate_of(effort: &str, sites: usize) -> String {
+fn estimate_of(effort: &str, places: usize) -> String {
     if effort.is_empty() {
         return "not estimated this run".to_string();
     }
     let (_, band) = crate::report_export::effort_hours_bounds(Some(effort));
-    if sites > 1 {
-        format!("{band} per site")
+    if places > 1 {
+        format!("{band} {}", v::PER_PLACE)
     } else {
         band
     }
@@ -70,7 +69,7 @@ fn label_part(text: &str) -> String {
     out
 }
 
-fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
+fn ticket_row(g: &FixFacts) -> [String; 8] {
     let title_tail = if g.cause.is_empty() {
         g.label.clone()
     } else {
@@ -84,6 +83,19 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
     if !g.cause.is_empty() {
         description.push(format!("Why these places belong together: {}", g.cause));
     }
+    // Every rule the ticket closes, with its citation: nothing a Fix satisfies is left out.
+    let closes: Vec<String> = g
+        .rules
+        .iter()
+        .map(|r| {
+            let mut line = format!("- {} ({})", r.line(g.open_site_total), r.rule_id);
+            if !r.citation.is_empty() {
+                line.push_str(&format!(", {}", r.citation));
+            }
+            line
+        })
+        .collect();
+    description.push(format!("{}\n{}", v::TICKET_CLOSES, closes.join("\n")));
     if !g.fix.is_empty() {
         description.push(format!("Fix: {}", g.fix));
     }
@@ -93,19 +105,23 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
     description.push(format!(
         "{} {}, listed as rows below and on the {} sheet (filter {} = {}).",
         g.open_site_total,
-        if g.open_site_total == 1 {
-            "place"
-        } else {
-            "places"
-        },
+        v::places_word(g.open_site_total),
         v::ALL_PROBLEMS,
         v::H_FIX_ID,
         g.id
     ));
-    let mut labels = vec!["camerata".to_string(), label_part(&g.rule_id)];
-    let category = label_part(&g.category);
-    if !category.is_empty() {
-        labels.push(category);
+    let mut labels = vec!["camerata".to_string()];
+    for rule in &g.rules {
+        let part = label_part(&rule.rule_id);
+        if !part.is_empty() && !labels.contains(&part) {
+            labels.push(part);
+        }
+    }
+    for area in g.category.split(", ") {
+        let category = label_part(area);
+        if !category.is_empty() && !labels.contains(&category) {
+            labels.push(category);
+        }
     }
     let shown: Vec<String> = g
         .open
@@ -134,7 +150,7 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
         description.join("\n\n"),
         priority_of(&g.severity).to_string(),
         labels.join(","),
-        estimate_of(&g.effort, g.open.len()),
+        estimate_of(&g.effort, g.open_site_total),
         g.id.clone(),
         g.open_site_total.to_string(),
         sites,
@@ -148,7 +164,8 @@ pub fn tickets_csv(
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<Vec<u8>> {
     let (rows, deps) = super::partition_rows_for(reviewed, corpus, chosen_options, false);
-    let groups = in_plan_order(subgroup_facts(reviewed, &rows, &deps, corpus));
+    // The tickets are the plan: the same Fixes, in the same order.
+    let groups = plan_facts(reviewed, &rows, &deps, corpus);
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
     writer.write_record(TICKET_HEADERS)?;
     for g in &groups {

@@ -785,6 +785,7 @@ pub(crate) fn finding_ref(
     chosen_option: Option<&str>,
 ) -> FindingRefJson {
     FindingRefJson {
+        fix_id: String::new(),
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
         path: f.path.clone(),
@@ -1151,18 +1152,18 @@ pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, 
     }
 }
 
-/// Sum the rough hour ranges across item 7's (up to 3) do-now findings. Only sums items with a
+/// Sum the rough hour ranges across item 7's (up to 3) do-now items, one effort for each Fix. Only sums items with a
 /// calibrated effort; when one or more items have none, the total says so explicitly rather
 /// than folding a guessed number into the sum.
-pub(crate) fn total_hours_label(items: &[&FindingRefJson]) -> String {
-    if items.is_empty() {
+pub(crate) fn total_hours_label_of(efforts: &[Option<String>]) -> String {
+    if efforts.is_empty() {
         return "No do-now items this run.".to_string();
     }
     let mut lo_sum = 0u32;
     let mut hi_sum = 0u32;
     let mut uncounted = 0usize;
-    for f in items {
-        match effort_hours_bounds(f.effort.as_deref()).0 {
+    for effort in efforts {
+        match effort_hours_bounds(effort.as_deref()).0 {
             Some((lo, hi)) => {
                 lo_sum += lo;
                 hi_sum += hi;
@@ -1170,7 +1171,7 @@ pub(crate) fn total_hours_label(items: &[&FindingRefJson]) -> String {
             None => uncounted += 1,
         }
     }
-    let counted = items.len() - uncounted;
+    let counted = efforts.len() - uncounted;
     if counted == 0 {
         return "None of these items has a calibrated effort estimate yet; ask the reviewer for \
                 a rough scoping pass before pricing remediation."

@@ -42,8 +42,12 @@ pub struct RowFacts {
     /// `personally_reviewed`, `reviewed_as_pattern:<node_id>` or `engine_verified`; empty only
     /// for a row held for a ruling, which a client package refuses.
     pub review_level: String,
-    /// The sub-group's node id. The Sites sheet filter is `Group = <id>`.
+    /// The sub-group's node id.
     pub group: String,
+    /// The Fix the sub-group is in (`review_tree::merge_fixes`): the same on every row of the
+    /// Fix, whatever rule it is under. The All problems filter is `Fix id = <id>`. Empty for a
+    /// row in no sub-group.
+    pub fix_id: String,
     /// The sub-group's label.
     pub sub_group: String,
     /// Why the sub-group's sites belong together.
@@ -106,6 +110,7 @@ pub struct RowFactsIndex<'a> {
     /// Each node's label and cause as client output may carry them, checked once.
     texts: HashMap<&'a str, (String, String)>,
     ids: HashMap<&'a str, String>,
+    fixes: crate::review_tree::FixIndex,
 }
 
 impl<'a> RowFactsIndex<'a> {
@@ -138,10 +143,16 @@ impl<'a> RowFactsIndex<'a> {
             reviewed,
             texts,
             ids,
+            fixes: crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings),
         }
     }
 
     /// The facts of `f`.
+    /// The Fixes the rows' sub-groups are in.
+    pub fn fixes(&self) -> &crate::review_tree::FixIndex {
+        &self.fixes
+    }
+
     pub fn facts(&self, f: &Finding) -> RowFacts {
         let group = f.group_path.get(2).cloned().unwrap_or_default();
         let (sub_group, sub_group_cause) =
@@ -163,6 +174,7 @@ impl<'a> RowFactsIndex<'a> {
                 .unwrap_or_default(),
             sub_group,
             sub_group_cause,
+            fix_id: self.fixes.fix_id_of(f),
             group,
             escalated: f.review.escalation_state == EscalationState::Escalated,
             merged_into,

@@ -599,6 +599,16 @@
         #text(font: mono, size: 8pt, fill: ink_faint)[
           #item.repo / #breakable(item.path), #place_label(item.line) (#item.rule_id)
         ]
+        // Item #1: one entry is one fix. Every rule the fix closes is named, and its places are
+        // counted, so the box never lists one change several times.
+        #if item.rules.len() > 1 [
+          #linebreak()
+          #text(size: 8.5pt, fill: ink_soft)[Closes #item.rules.len() rules: #item.rules.join(", ")]
+        ]
+        #if item.places > 1 [
+          #linebreak()
+          #text(size: 8.5pt, fill: ink_soft)[#item.places places]
+        ]
         #linebreak()
         #text(size: 9pt)[Rough estimate: #item.hours_label]
         // FIX 7 (2026-09-13 review): one factual sentence of what the exposure MEANS, when
@@ -780,7 +790,10 @@
       table.header(th[Severity], th[Finding], th[Location], th[Decision]),
       ..d.escalations.items.map(item => (
         [#severity_chip(lower(item.severity))],
-        [#item.headline],
+        [#item.headline#if item.rules.len() > 1 [
+          #linebreak()
+          #text(size: 8.5pt, fill: ink_soft)[#item.rules.join(", ")]
+        ]],
         [#breakable(place_of(item.path, item.line))],
         [#item.decision],
       )).flatten()
@@ -805,6 +818,10 @@
     #block(breakable: false, below: 12pt)[
       #text(weight: 600, fill: ink)[#p.rule_title] #text(size: 8.5pt, fill: ink_faint)[#p.rule_id]
       #h(6pt) #severity_chip(lower(p.severity))
+      #if p.rules.len() > 1 [
+        #v(2pt)
+        #text(size: 8.5pt, fill: ink_faint)[Closes #p.rules.len() rules: #p.rules.join(", ")]
+      ]
       #if p.cause != "" [
         #v(2pt)
         #text(size: 9.5pt)[#p.cause]

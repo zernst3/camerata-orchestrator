@@ -51,8 +51,7 @@ fn the_ticket_columns_use_the_vocabulary_terms() {
             "Priority",
             "Labels",
             "Estimate",
-            // Per group until the plan is per Fix; then this becomes the Fix id.
-            "Group id",
+            v::H_FIX_ID,
             v::H_PLACES,
             v::H_PLACE_LIST,
         ]

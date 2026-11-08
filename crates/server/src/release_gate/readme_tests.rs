@@ -92,7 +92,7 @@ fn a_client_readme_says_what_each_file_is_and_how_to_import_the_tickets() {
         "Jira",
         "Linear",
         "GitHub Issues",
-        "Group id",
+        "Fix id",
     ] {
         assert!(readme.contains(expected), "missing {expected:?}:\n{readme}");
     }

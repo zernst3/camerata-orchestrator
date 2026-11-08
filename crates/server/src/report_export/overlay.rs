@@ -327,6 +327,10 @@ pub fn apply_overlay(
         if !outcome.splits.is_empty() {
             if let Some(tree) = r.tree.as_mut() {
                 apply_splits(tree, &mut r.findings, &outcome.splits);
+                // A split moves rows between sub-groups, so the Fixes are worked out again from
+                // the tree as it now stands.
+                let block = tree.refresh_fixes(&r.findings);
+                r.ledger.record_fix_merge(block);
             }
         }
         // The reviewer's node summaries replace the model's, after the tree is in its final

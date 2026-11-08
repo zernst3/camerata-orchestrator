@@ -160,6 +160,10 @@ pub struct FindingRow {
     /// "also_matches" field (this struct serializes verbatim), so the raw-id leak closed in the
     /// PDF's "Also violates" line had a second, independent instance right here.
     also_matches: String,
+    /// The rule ids behind [`Self::also_matches`]: rules that flagged the same place and were
+    /// kept as demotions of this row. A Fix lists them as rules of its own.
+    #[serde(skip)]
+    also_match_ids: Vec<String>,
     status: String,
     snippet: String,
     detail: String,
@@ -605,6 +609,7 @@ fn partition_rows_for(
             citation_urls,
             also_matches: crate::report_export::also_matches_titles(&f.also_matches, corpus)
                 .join(", "),
+            also_match_ids: f.also_matches.clone(),
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
@@ -1801,8 +1806,8 @@ pub fn build_workbook(
     let tree_nodes = crate::report_export::tree_view::tree_view(reviewed, opts.internal);
     let decision_rows = crate::report_export::decisions_file::decision_rows(reviewed);
     // One row per fix with something to do, in plan order (design 3B item 2).
-    let plan_rows = subgroups::in_plan_order(subgroups::subgroup_facts(
-        reviewed, &rows, &dep_rows, corpus,
+    let plan_rows = subgroups::in_plan_order(subgroups::fix_facts(
+        reviewed, &rows, &dep_rows, corpus, false,
     ));
     let sorted_deps = sheets::sorted_deps(&dep_rows);
     let coverage_rows = build_coverage_rows(report, &rows, corpus);
@@ -1881,12 +1886,20 @@ pub fn build_workbook(
     ));
     // Every source row, parents in the order of All problems first. A report with more rows than
     // one sheet holds continues on "All source rows (2)" rather than dropping any.
-    let in_problems: HashSet<*const FindingRow> = lay
-        .problems
-        .iter()
-        .map(|r| *r as *const FindingRow)
-        .collect();
-    let mut parents: Vec<&FindingRow> = lay.problems.clone();
+    // Each place's rows sit together: the row that stands for the place, then the rows behind it.
+    let mut in_problems: HashSet<*const FindingRow> = HashSet::new();
+    let mut parents: Vec<&FindingRow> = Vec::with_capacity(rows.len());
+    for rep in &lay.problems {
+        for member in lay
+            .place_members
+            .get(&rep.facts.site_id)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            if in_problems.insert(*member as *const FindingRow) {
+                parents.push(member);
+            }
+        }
+    }
     parents.extend(
         rows.iter()
             .filter(|r| !in_problems.contains(&(*r as *const FindingRow))),
@@ -2056,6 +2069,9 @@ pub struct FindingsExport {
     /// counts from the rows (design 3B). A client package carries only what the client reads; an
     /// internal one adds the architect's triage of each node.
     pub tree: TreeJson,
+    /// The Fixes: the rule groups whose places are one change, with every place and rule of each
+    /// (item #1). Every row's `fix_id` names one of these.
+    pub fixes: Vec<crate::review_tree::FixNode>,
 }
 
 /// The tree in `findings.json`.
@@ -2088,6 +2104,18 @@ pub fn build_findings_export(
         patterns_across_services: report_json.patterns_across_services.clone(),
         tree: TreeJson {
             nodes: crate::report_export::tree_view::tree_view(reviewed, report_json.internal),
+        },
+        fixes: {
+            let report = reviewed.report();
+            let mut fixes =
+                crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings)
+                    .fixes()
+                    .to_vec();
+            // The places are the client's own paths, so they pass the same sanitising as the rows.
+            for place in fixes.iter_mut().flat_map(|f| f.places.iter_mut()) {
+                place.path = crate::report_export::strip_zero_width(&place.path).into_owned();
+            }
+            fixes
         },
     }
 }

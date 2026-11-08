@@ -30,9 +30,10 @@ fn level_count(node: &TreeNodeView, wire: &str) -> usize {
 /// What kind of group a node is, in the vocabulary's words.
 fn level_word(level: &str) -> &'static str {
     match level {
-        "category" => "Area",
-        "rule" => "Rule",
-        _ => "Fix",
+        "category" => v::LEVEL_AREA,
+        "rule" => v::LEVEL_RULE,
+        "subgroup" => v::LEVEL_RULE_GROUP,
+        _ => v::LEVEL_FIX,
     }
 }
 
@@ -60,6 +61,7 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
         Col::plain(v::H_ENGINE_VERIFIED, 12.0),
         Col::technical(v::H_GROUP_ID, 34.0),
         Col::technical(v::H_PARENT_ID, 34.0),
+        Col::technical(v::H_FIX_ID, 20.0),
     ];
     if internal {
         for h in [
@@ -103,7 +105,8 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
                 Cell::Num(level_count(n, "engine_verified") as f64),
             )
             .put(v::H_GROUP_ID, Cell::text(&n.id))
-            .put(v::H_PARENT_ID, Cell::text(&n.parent));
+            .put(v::H_PARENT_ID, Cell::text(&n.parent))
+            .put(v::H_FIX_ID, Cell::text(&n.fix_id));
         if let Some(t) = &n.internal {
             c.put("Summary source", Cell::text(&t.summary_source))
                 .put(v::H_ESCALATED, Cell::Num(t.escalated as f64))

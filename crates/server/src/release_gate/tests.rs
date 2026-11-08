@@ -419,7 +419,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_fifteen_checks() {
+fn release_passes_a_clean_package_and_reports_sixteen_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -439,6 +439,7 @@ fn release_passes_a_clean_package_and_reports_fifteen_checks() {
             "manifest",
             "provenance",
             "unsynced reviewer changes",
+            "one fix per row",
             "client text style"
         ]
     );
@@ -456,7 +457,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
              reviewer correction on flagged findings, confidentiality marking, manifest, \
-             provenance, unsynced reviewer changes, client text style (all passed)"
+             provenance, unsynced reviewer changes, one fix per row, client text style (all \
+             passed)"
         ),
         "{readme}"
     );
@@ -836,10 +838,10 @@ fn audit_zip_over_a_released_zip_is_clean() {
         report.problems().collect::<Vec<_>>()
     );
     // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own decisions.json, so a standalone
-    // audit of a zip runs it too.
+    // audit of a zip runs it too. Item #1 adds the one-fix-per-row check: 11.
     assert_eq!(
         report.checks.len(),
-        10,
+        11,
         "row parity needs the in-memory rows"
     );
 }
@@ -1249,7 +1251,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
              finding content, reviewer decision on unverified evidence, decision records behind \
              merged rows, reviewer decision on restored findings, reviewer correction on \
              flagged findings, confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes, client text style"
+             reviewer changes, one fix per row, client text style"
         )
     );
 }

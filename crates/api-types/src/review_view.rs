@@ -293,6 +293,14 @@ pub struct SiteRow {
     pub group_path: Vec<String>,
     /// The sub-group's primary row (the one that orders the sub-group).
     pub group_primary: bool,
+    /// The Fix the sub-group is in: the rule groups whose places are one change. Deciding the Fix
+    /// (node id `fix:<id>`) writes a record for every site of all of them. Empty when the report's
+    /// tree has no Fixes.
+    #[serde(default)]
+    pub fix_id: String,
+    /// Every rule id of the Fix, so a reviewer sees what a decision on it covers.
+    #[serde(default)]
+    pub fix_rules: Vec<String>,
     pub stage1: Stage1View,
     pub stage2: Option<Stage2View>,
     /// Every marker the row has, in [`Marker::PRECEDENCE`] order.

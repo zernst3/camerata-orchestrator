@@ -41,6 +41,16 @@ fn reviewed_for_plan() -> (
     (apply_overlay(&sealed, &records, &[], &[]), sealed)
 }
 
+/// The Fix a rule group is in.
+fn fix_id_of(sealed: &crate::onboard::SealedReport, subgroup: &str) -> String {
+    sealed
+        .tree
+        .as_ref()
+        .and_then(|t| t.fix_of(subgroup))
+        .map(|f| f.id.clone())
+        .unwrap_or_else(|| panic!("no Fix for {subgroup}"))
+}
+
 fn cell<'a>(grid: &[Vec<String>], row: &'a [String], header: &str) -> &'a str {
     let col = grid[0]
         .iter()
@@ -82,14 +92,16 @@ fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_an
     // the layering group (one site a false positive) and the dependency advisory.
     let rows: Vec<&Vec<String>> = grid.iter().skip(1).collect();
     assert_eq!(rows.len(), 3, "{rows:?}");
-    let sql_group = sealed.findings[0].group_path[2].clone();
-    let layering_group = sealed
-        .findings
-        .iter()
-        .find(|f| f.path == "src/d.rs")
-        .unwrap()
-        .group_path[2]
-        .clone();
+    let sql_group = fix_id_of(&sealed, &sealed.findings[0].group_path[2]);
+    let layering_group = fix_id_of(
+        &sealed,
+        &sealed
+            .findings
+            .iter()
+            .find(|f| f.path == "src/d.rs")
+            .unwrap()
+            .group_path[2],
+    );
     let row_of = |group: &str| -> &[String] {
         rows.iter()
             .find(|r| cell(&grid, r, "Fix id") == group)
@@ -144,7 +156,7 @@ fn ticket_csv_has_one_row_per_subgroup_and_excludes_false_positives() {
             "Priority",
             "Labels",
             "Estimate",
-            "Group id",
+            crate::xlsx_export::vocabulary::H_FIX_ID,
             crate::xlsx_export::vocabulary::H_PLACES,
             crate::xlsx_export::vocabulary::H_PLACE_LIST,
         ]
@@ -155,7 +167,7 @@ fn ticket_csv_has_one_row_per_subgroup_and_excludes_false_positives() {
         3,
         "one ticket per sub-group with something to fix"
     );
-    let sql_group = sealed.findings[0].group_path[2].clone();
+    let sql_group = fix_id_of(&sealed, &sealed.findings[0].group_path[2]);
     let sql = rows
         .iter()
         .find(|r| &r[5] == sql_group.as_str())
@@ -210,7 +222,7 @@ fn a_ticket_lists_fifty_places_and_points_at_the_all_problems_sheet_for_the_rest
         .map(|i| sql_row(&format!("src/handlers/h{i:02}.rs"), 10 + i))
         .collect();
     let sealed = report.seal();
-    let group = sealed.findings[0].group_path[2].clone();
+    let group = fix_id_of(&sealed, &sealed.findings[0].group_path[2]);
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let entries = released_entries(&reviewed, &client_options());
     let mut reader = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice());
@@ -249,7 +261,7 @@ fn sealed_with_a_row_standing_for_three_sites() -> crate::onboard::SealedReport 
 #[test]
 fn plan_ticket_and_pdf_print_the_same_site_count_sites_not_rows() {
     let sealed = sealed_with_a_row_standing_for_three_sites();
-    let group = sealed.findings[0].group_path[2].clone();
+    let group = fix_id_of(&sealed, &sealed.findings[0].group_path[2]);
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let options = client_options();
     let entries = released_entries(&reviewed, &options);

@@ -12,15 +12,20 @@ pub const FULL_PDF_SITE_LIMIT: usize = 30_000;
 /// group reviewer wrote about the site (its reason, rank or words) is in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct EscalatedSiteJson {
-    /// The sub-group the site sits in.
+    /// The sub-group the place sits in.
     pub group: String,
+    /// The Fix the place is in.
+    pub fix_id: String,
     pub headline: String,
     pub severity: String,
     pub repo: String,
     pub path: String,
     pub line: usize,
     pub rule_id: String,
-    /// The decision on the site, as its row states it ("Confirmed by the reviewer ...", "Open ...").
+    /// Every rule at the place, by title, the worst first. One entry is one place (one escalation
+    /// slot), whatever the number of rules at it.
+    pub rules: Vec<String>,
+    /// The decision on the place, as its rows state it ("Confirmed by the reviewer ...", "Open ...").
     pub decision: String,
     pub review_level: String,
 }
@@ -37,10 +42,12 @@ pub struct EscalationsJson {
 /// One sub-group as the PDF describes it: what its sites share, the fix once and a worked example.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PatternJson {
-    /// The sub-group's node id; the Sites sheet filter is `Group = <id>`.
+    /// The Fix id; the All problems filter is `Fix id = <id>`.
     pub group: String,
     pub rule_id: String,
     pub rule_title: String,
+    /// Every rule the Fix satisfies, by title, the worst first.
+    pub rules: Vec<String>,
     pub label: String,
     pub cause: String,
     pub summary: String,
