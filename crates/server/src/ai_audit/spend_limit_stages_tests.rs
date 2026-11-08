@@ -366,3 +366,117 @@ async fn a_judge_stopped_by_the_limit_is_recorded_not_run() {
         record.not_run_stages
     );
 }
+
+// ── a resume's stored spend counts toward the limit ─────────────────────────────────────────
+
+fn resumed_meter(limit: f64, stored: f64) -> UsageMeter {
+    UsageMeter::with_controls(RunControls {
+        max_cost_usd: Some(limit),
+        stored_spend_usd: stored,
+        ..RunControls::default()
+    })
+}
+
+#[tokio::test]
+async fn a_resumes_stored_spend_counts_toward_the_limit_before_any_call() {
+    // The run's stored replies cost $12 against a $5 limit: this attempt has paid nothing, and
+    // nothing new may start.
+    let meter = resumed_meter(LIMIT, STORED);
+    assert!(meter.cap_reached(), "stored spend alone reaches the limit");
+    assert!(meter.admit().await.is_err(), "no pass is admitted");
+    assert!(meter.stage_blocked(REPO, STAGE_CALIBRATION));
+    let record = meter.cost_cap_record().expect("a limit was set");
+    assert!(
+        (record.spent_usd - STORED).abs() < 1e-9,
+        "the record reads the whole run's spend: {}",
+        record.spent_usd
+    );
+    assert_eq!(
+        meter.spent_usd(),
+        0.0,
+        "the usage figures stay what this attempt paid"
+    );
+}
+
+#[tokio::test]
+async fn stored_spend_and_new_spend_add_up_against_the_limit() {
+    // $3 stored, $5 limit: the first pass is admitted; once $2 more is paid the limit is reached.
+    let meter = resumed_meter(LIMIT, 3.0);
+    assert!(!meter.cap_reached());
+    let permit = meter.admit().await.expect("the first pass is admitted");
+    drop(permit);
+    meter.record_stage(
+        Stage::ScanPass,
+        &LlmResponse {
+            text: String::new(),
+            model: "m".into(),
+            backend: "api".into(),
+            cost_usd: Some(2.0),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        },
+    );
+    assert!(meter.cap_reached(), "$3 stored + $2 new reaches $5");
+    assert!(meter.admit().await.is_err());
+}
+
+#[test]
+fn the_stage_that_continues_a_run_keeps_the_stored_spend() {
+    let controls = RunControls {
+        max_cost_usd: Some(LIMIT),
+        stored_spend_usd: 4.0,
+        ..RunControls::default()
+    };
+    let prior = ActualUsage {
+        cost_usd: 0.5,
+        calls: 3,
+        cost_complete: true,
+        ..ActualUsage::default()
+    };
+    let meter = UsageMeter::continuing(controls, &prior);
+    assert!(
+        (meter.cost_cap_record().unwrap().spent_usd - 4.5).abs() < 1e-9,
+        "prior usage plus the stored spend, counted once each"
+    );
+}
+
+#[test]
+fn the_cap_record_reads_the_whole_run_even_when_the_last_stage_refused_nothing() {
+    // The group reviewer's meter continues the scan's. Its replies were all stored, so it
+    // refused nothing and sent nothing, but the run's spend ($43.51) is past the limit ($25):
+    // the record the final report prints must say so and not the scan's $19.61.
+    let controls = RunControls {
+        max_cost_usd: Some(25.0),
+        ..RunControls::default()
+    };
+    let prior = ActualUsage {
+        cost_usd: 43.51,
+        calls: 297,
+        cost_complete: true,
+        ..ActualUsage::default()
+    };
+    let meter = UsageMeter::continuing(controls, &prior);
+    let mut report = crate::onboard::ScanReport::gated(&[REPO.to_string()]);
+    report
+        .ledger
+        .record_cost_cap(crate::cost_cap::CostCapRecord {
+            cap_usd: 25.0,
+            spent_usd: 19.61,
+            ..crate::cost_cap::CostCapRecord::default()
+        });
+    group_review::fold_spend_into_report(&mut report, &meter);
+    let record = report.ledger.cost_cap().expect("the record is kept");
+    assert!(
+        (record.spent_usd - 43.51).abs() < 1e-9,
+        "the record reads the stage's total: {}",
+        record.spent_usd
+    );
+    assert!(
+        !record.stopped_the_run(),
+        "nothing was refused, so the run is complete"
+    );
+}

@@ -132,6 +132,7 @@ async fn scan(
 
 fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
     RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: cap,

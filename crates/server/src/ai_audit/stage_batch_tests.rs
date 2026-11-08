@@ -1692,6 +1692,7 @@ async fn save_unsettled_batch(cp: &StageCheckpoint, all: &[&str], gone_id: &str)
 
 fn cap_meter() -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: Default::default(),
         max_cost_usd: Some(1000.0),
@@ -2033,6 +2034,7 @@ async fn a_window_of_large_requests_is_refused_at_admission_though_the_old_const
     stage.padding = 300_000;
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: Default::default(),
         max_cost_usd: Some(1.0),
@@ -2082,6 +2084,7 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
     let mut stage = Scripted::numbered(10);
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: Default::default(),
         max_cost_usd: Some(1.0),

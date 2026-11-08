@@ -2082,3 +2082,41 @@ async fn a_fresh_transcript_holding_an_object_is_stored_unusable() {
     })
     .await;
 }
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_estimate_separates_the_stored_spend_the_meter_will_not_see_again() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Scripted::new();
+        {
+            let j = JournalLlm::new(&model, store.clone());
+            // A calibration call: its stage keeps a checkpoint and puts its stored usage on the
+            // meter itself, so the limit must not add it a second time.
+            j.complete(ask("calibrate this").with_system(crate::ai_audit::verify_system_prompt()))
+                .await
+                .unwrap();
+            // Another model call (the clone judge, a deep lens): the journal answers it at no
+            // cost, so the limit has to add its stored cost.
+            j.complete(ask("judge this")).await.unwrap();
+        }
+        let id = store.run_id();
+        drop(store);
+        let e = estimate_resume(&id).unwrap();
+        assert!((e.stored_usd - 0.10).abs() < 1e-9, "{e:?}");
+        assert!(
+            (e.stored_unmetered_usd - 0.05).abs() < 1e-9,
+            "only the journal-only call: {e:?}"
+        );
+        assert!(
+            e.render().contains("stored calls cost $0.10"),
+            "the text a resume shows says what is already spent: {}",
+            e.render()
+        );
+        let reopened = RunStore::open(&id).unwrap();
+        assert!((reopened.stored_unmetered_usd() - 0.05).abs() < 1e-9);
+    })
+    .await;
+}

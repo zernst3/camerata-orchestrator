@@ -146,11 +146,19 @@ impl UsageMeter {
         self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
     }
 
-    /// True once actual spend has reached the cap. Always false with no cap.
+    /// What the spend limit is checked against: this attempt's spend plus, on a resumed run, what
+    /// the stored replies cost that this meter does not see again
+    /// ([`crate::cost_cap::RunControls::stored_spend_usd`]). The limit counts the whole run. The
+    /// usage figures and the telemetry stay what this attempt paid ([`Self::spent_usd`]).
+    pub fn limit_spend_usd(&self) -> f64 {
+        self.spent_usd() + self.controls.stored_spend_usd.max(0.0)
+    }
+
+    /// True once the run's spend has reached the cap. Always false with no cap.
     pub fn cap_reached(&self) -> bool {
         self.controls
             .max_cost_usd
-            .is_some_and(|cap| self.spent_usd() >= cap)
+            .is_some_and(|cap| self.limit_spend_usd() >= cap)
     }
 
     /// True when one MORE call from a pass that already holds its permit would go past the
@@ -171,7 +179,7 @@ impl UsageMeter {
             return true;
         }
         let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
-        self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+        self.limit_spend_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
     }
 
     /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
@@ -233,7 +241,7 @@ impl UsageMeter {
             // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
             // a pass whose request alone reaches the limit closes admission at once, whether or
             // not any call has reported a cost yet.
-            if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
+            if self.limit_spend_usd() + budget.in_flight as f64 * reserve >= cap {
                 return Admission::CapReached;
             }
             // Until one call has reported a cost the run has not seen what a call really costs
@@ -375,7 +383,7 @@ impl UsageMeter {
     /// spend, floored at zero) is counted against each submission.
     pub fn batch_refusal_reason(&self, projected_usd: Option<f64>) -> Option<String> {
         let cap = self.controls.max_cost_usd?;
-        let spent = self.spent_usd();
+        let spent = self.limit_spend_usd();
         let remaining_estimate = self
             .controls
             .estimate_hint_usd
@@ -417,7 +425,7 @@ impl UsageMeter {
         let budget = self.budget();
         Some(crate::cost_cap::CostCapRecord {
             cap_usd,
-            spent_usd: self.spent_usd(),
+            spent_usd: self.limit_spend_usd(),
             // Only what the spend limit stopped: an outage stop has its own record.
             not_run_passes: budget
                 .not_run_passes

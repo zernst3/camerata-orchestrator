@@ -1073,11 +1073,49 @@ pub(crate) fn count_calls(store: &RunStore) {
     let _ = store.persist();
 }
 
+/// Whether a resume's usage meter sees the stored calls of a `kind` again. The stages that keep a
+/// checkpoint (calibration, alternatives, detail, fix, group review) put an absorbed item's stored
+/// usage on the meter themselves; the journal answers every other call at no cost
+/// ([`StoredResponse::replayed`]), so its stored cost is on no meter unless a spend limit adds it.
+fn meter_replays_usage(kind: PartKind) -> bool {
+    matches!(
+        kind,
+        PartKind::Calibration
+            | PartKind::Alternatives
+            | PartKind::Detail
+            | PartKind::Fix
+            | PartKind::GroupReview
+    )
+}
+
+/// What the stored calls of the run in `dir` cost in all, and the part of it a resume's meter does
+/// not see again (see [`meter_replays_usage`]). Every stored call counts, a reply later set aside
+/// included: the money was paid either way.
+pub(crate) fn stored_spend(dir: &Path) -> (f64, f64) {
+    let mut all = 0.0f64;
+    let mut unmetered = 0.0f64;
+    if let Ok(entries) = std::fs::read_dir(dir.join("calls")) {
+        for file in entries
+            .filter_map(Result::ok)
+            .filter_map(|e| read_json::<CallFile>(&e.path()))
+        {
+            for entry in file.entries.values() {
+                all += entry.cost_usd;
+                if !meter_replays_usage(file.kind) {
+                    unmetered += entry.cost_usd;
+                }
+            }
+        }
+    }
+    (all, unmetered)
+}
+
 /// What a resume of `record` would cost, from the stored files of `dir`.
 pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstimate {
     let mut stored = 0usize;
     let mut again = 0usize;
     let mut spent = 0.0f64;
+    let (stored_usd, stored_unmetered_usd) = stored_spend(dir);
     if let Ok(entries) = std::fs::read_dir(dir.join("calls")) {
         for file in entries
             .filter_map(Result::ok)
@@ -1146,6 +1184,8 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
         calls_stored: stored,
         calls_to_send_again: again,
         usd,
+        stored_usd,
+        stored_unmetered_usd,
         basis,
     }
 }
