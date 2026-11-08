@@ -1070,7 +1070,10 @@ fn a_saved_run_without_stage_1_severity_yields_no_mechanical_candidate() {
     let rows = vec![floored_row("old.sql", "high", "yes", None)];
     let (tree, rows) = tree_of_rows(rows);
     let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
-    assert!(ranked.candidates.is_empty(), "no guess from a missing rating");
+    assert!(
+        ranked.candidates.is_empty(),
+        "no guess from a missing rating"
+    );
 }
 
 #[test]
@@ -1106,5 +1109,8 @@ fn a_site_stage_2_nominated_is_not_added_again() {
         .push(esc(&f, EscalationReason::OutlierInGroup, 1));
     let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
     assert_eq!(ranked.candidates.len(), 1);
-    assert_eq!(ranked.candidates[0].reason, EscalationReason::OutlierInGroup);
+    assert_eq!(
+        ranked.candidates[0].reason,
+        EscalationReason::OutlierInGroup
+    );
 }

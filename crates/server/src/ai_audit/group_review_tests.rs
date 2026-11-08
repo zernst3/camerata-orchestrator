@@ -518,7 +518,11 @@ async fn the_escalation_block_counts_slots_not_rows() {
     };
     review_groups(&mut report, &llm, &config, None).await;
     let block = report.ledger.escalation().expect("block");
-    assert_eq!(tree(&report).candidates.len(), 4, "four rows are candidates");
+    assert_eq!(
+        tree(&report).candidates.len(),
+        4,
+        "four rows are candidates"
+    );
     assert_eq!(block.candidates, 2, "two candidate sites");
     assert_eq!(block.escalated, 1);
     assert_eq!(block.candidates.saturating_sub(block.escalated), 1);
