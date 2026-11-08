@@ -756,6 +756,9 @@ mod readme_tests;
 mod machine_files_tests;
 
 #[cfg(test)]
+mod pdf_unreadable_tests;
+
+#[cfg(test)]
 mod merged_site_tests;
 
 #[cfg(test)]

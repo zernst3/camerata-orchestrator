@@ -351,25 +351,59 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     problems
 }
 
-/// The text of a compiled PDF, page by page, or `None` when it cannot be read (a stand-in in a
-/// test, a file that is not a PDF). The extractor can panic on a malformed file, which is
-/// caught: an unreadable PDF is held to the check through its data instead
-/// ([`json_bytes_problems`] over `data.json`, which is all the template reads).
-pub fn pdf_pages(bytes: &[u8]) -> Option<Vec<String>> {
-    if !bytes.starts_with(b"%PDF") {
-        return None;
-    }
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pdf_extract::extract_text_from_mem_by_pages(bytes).ok()
-    }))
-    .ok()
-    .flatten()
+/// What reading a PDF member's text gave.
+pub enum PdfText {
+    /// The text of each page.
+    Pages(Vec<String>),
+    /// Not a document this check can judge: it does not start `%PDF` (the dataset-set check owns
+    /// that), or it is a stand-in (the assembly zips one before the PDF is compiled, and tests
+    /// zip others).
+    NotJudged,
+    /// A real-looking PDF whose text could not be read, and why.
+    Unreadable(String),
 }
 
-/// A compiled PDF's text, located by page.
+/// A PDF this size or with a trailer is a real document: a Camerata report's cover alone is
+/// kilobytes, and Typst always writes `%%EOF`. Anything shorter without a trailer is a stand-in.
+const REAL_PDF_MIN_BYTES: usize = 1024;
+
+fn looks_like_a_real_pdf(bytes: &[u8]) -> bool {
+    bytes.len() >= REAL_PDF_MIN_BYTES || bytes.windows(5).any(|w| w == b"%%EOF")
+}
+
+/// The text of a compiled PDF, page by page. The extractor can panic on a malformed file, which
+/// is caught and reported like any other failure to read: a PDF the check cannot open is not a
+/// PDF the check has passed.
+pub fn pdf_text(bytes: &[u8]) -> PdfText {
+    if !bytes.starts_with(b"%PDF") || !looks_like_a_real_pdf(bytes) {
+        return PdfText::NotJudged;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem_by_pages(bytes)
+    })) {
+        Ok(Ok(pages)) => PdfText::Pages(pages),
+        Ok(Err(e)) => PdfText::Unreadable(e.to_string()),
+        Err(_) => PdfText::Unreadable("the reader stopped on it".to_string()),
+    }
+}
+
+/// A compiled PDF's text, located by page. A real PDF whose text cannot be read is itself a
+/// problem: the export fails closed.
 pub fn pdf_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
-    let Some(pages) = pdf_pages(bytes) else {
-        return Vec::new();
+    let pages = match pdf_text(bytes) {
+        PdfText::Pages(pages) => pages,
+        PdfText::NotJudged => return Vec::new(),
+        PdfText::Unreadable(why) => {
+            return vec![Problem::new(
+                file,
+                "PDF text",
+                format!(
+                    "the PDF's text could not be read, so it could not be checked for dashes and \
+                     for a whole file printed as line 0 ({why})"
+                ),
+                None,
+            )]
+        }
     };
     let mut hits = Vec::new();
     for (i, page) in pages.iter().enumerate() {
