@@ -389,7 +389,9 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
     for (i, fx) in fixes.iter().enumerate() {
         let mut per_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
         for p in fx.places.iter().filter(|p| p.line > 0) {
-            *per_file.entry((p.repo.as_str(), p.path.as_str())).or_default() += 1;
+            *per_file
+                .entry((p.repo.as_str(), p.path.as_str()))
+                .or_default() += 1;
         }
         for (file, n) in per_file {
             lines_in.entry(file).or_default().push((i, n));

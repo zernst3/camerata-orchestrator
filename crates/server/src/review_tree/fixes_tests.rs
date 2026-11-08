@@ -356,10 +356,7 @@ fn an_incomparable_pair_folds_into_the_eligible_whole_file_container() {
     ];
     assert_eq!(
         members(&fixes_of(&rows)),
-        vec![
-            names(&["sub:B/1", "sub:C/1"]),
-            names(&["sub:FILE/1"])
-        ]
+        vec![names(&["sub:B/1", "sub:C/1"]), names(&["sub:FILE/1"])]
     );
 }
 
