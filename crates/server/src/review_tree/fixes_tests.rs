@@ -304,3 +304,30 @@ fn a_decision_can_be_made_at_a_fix_and_covers_the_members_of_every_sub_group_in_
     expected.sort();
     assert_eq!(tree.batch_members(&id), expected);
 }
+
+#[test]
+fn thousands_of_rule_groups_merge_without_visiting_every_pair() {
+    // 3,000 rule groups over 600 files, each holding three lines of two files: the merge asks each
+    // group only about the groups that hold its first place, so this finishes at once. Every group
+    // lands in exactly one Fix and the result does not depend on the order of the rows.
+    let mut rows: Vec<Finding> = Vec::new();
+    for g in 0..3_000usize {
+        let sub = format!("sub:R{g}/0");
+        for k in 0..3usize {
+            let file = (g * 7 + k * 13) % 600;
+            rows.push(row(
+                &sub,
+                &format!("R{g}"),
+                "medium",
+                &format!("src/f{file}.ts"),
+                10 + k,
+            ));
+        }
+    }
+    let first = fixes_of(&rows);
+    let in_fixes: usize = first.iter().map(|f| f.members.len()).sum();
+    assert_eq!(in_fixes, 3_000);
+    let mut reversed = rows.clone();
+    reversed.reverse();
+    assert_eq!(first, fixes_of(&reversed));
+}

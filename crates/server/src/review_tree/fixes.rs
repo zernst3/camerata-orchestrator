@@ -133,26 +133,19 @@ struct Candidate {
     worst: u8,
     mergeable: bool,
     rules: BTreeSet<String>,
+    /// The (repo, file) of every whole-file place, worked out once.
+    whole_files: BTreeSet<(String, String)>,
 }
 
 impl Candidate {
-    fn whole_files(&self) -> BTreeSet<(&str, &str)> {
-        self.places
-            .iter()
-            .filter(|p| p.line == 0)
-            .map(|p| (p.repo.as_str(), p.path.as_str()))
-            .collect()
-    }
-
     /// Whether `self` contains every place of `other`, a whole-file place counting for the lines
     /// of its file when `self` is at least as severe as `other`'s worst row.
     fn covers(&self, other: &Self) -> bool {
-        let files = self.whole_files();
         other.places.iter().all(|p| {
             self.places.contains(p)
                 || (p.line > 0
                     && self.worst <= other.worst
-                    && files.contains(&(p.repo.as_str(), p.path.as_str())))
+                    && self.whole_files.contains(&(p.repo.clone(), p.path.clone())))
         })
     }
 }
@@ -216,6 +209,11 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
             rows.iter().map(|f| place_of(f)).collect::<BTreeSet<_>>(),
         );
         candidates.push(Candidate {
+            whole_files: places
+                .iter()
+                .filter(|p| p.line == 0)
+                .map(|p| (p.repo.clone(), p.path.clone()))
+                .collect(),
             id: id.to_string(),
             worst: problems
                 .iter()
@@ -258,20 +256,48 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
                 .unwrap_or(3),
             mergeable: first.mergeable,
             rules: BTreeSet::new(),
+            whole_files: first.whole_files.clone(),
         }
     };
     let reps: Vec<Candidate> = (0..classes.len()).map(stand_in).collect();
 
-    // Each class folds into the smallest class that contains it, when there is exactly one.
+    // Each class folds into the smallest class that contains it, when there is exactly one. A
+    // container must hold the class's first place or the whole file of it, so only those are asked.
+    let mut holding: HashMap<&FixPlace, Vec<usize>> = HashMap::new();
+    let mut whole_of: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    for (i, rep) in reps.iter().enumerate().filter(|(_, r)| r.mergeable) {
+        for p in &rep.places {
+            holding.entry(p).or_default().push(i);
+        }
+        for (repo, path) in &rep.whole_files {
+            whole_of
+                .entry((repo.as_str(), path.as_str()))
+                .or_default()
+                .push(i);
+        }
+    }
     let mut parent: Vec<Option<usize>> = vec![None; classes.len()];
     for s in 0..classes.len() {
         if !reps[s].mergeable {
             continue;
         }
-        let containers: Vec<usize> = (0..classes.len())
-            .filter(|&t| {
-                t != s && reps[t].mergeable && reps[t].covers(&reps[s]) && !reps[s].covers(&reps[t])
-            })
+        let Some(first) = reps[s].places.iter().next() else {
+            continue;
+        };
+        let mut asked: BTreeSet<usize> =
+            holding.get(first).into_iter().flatten().copied().collect();
+        if first.line > 0 {
+            asked.extend(
+                whole_of
+                    .get(&(first.repo.as_str(), first.path.as_str()))
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+        }
+        let containers: Vec<usize> = asked
+            .into_iter()
+            .filter(|&t| t != s && reps[t].covers(&reps[s]) && !reps[s].covers(&reps[t]))
             .collect();
         let minimal: Vec<usize> = containers
             .iter()
