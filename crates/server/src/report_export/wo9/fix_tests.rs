@@ -554,3 +554,84 @@ fn the_top_three_never_names_one_place_twice_even_when_two_fixes_share_it() {
     assert_eq!(fixes.len(), items.len(), "one Fix twice: {items:?}");
     assert_eq!(items.len(), 2, "{items:?}");
 }
+
+#[test]
+fn a_secret_file_its_line_and_the_rules_around_it_take_one_entry_of_the_top_three() {
+    // The supabase shape: the file (whole file), line 6 flagged by a group that also holds the
+    // example file's line 6, and line 6 flagged by a group of its own; then two unrelated criticals.
+    let mut report = crate::release_gate::test_scan_report();
+    let at = |rule: &str, area: &str, severity: &str, path: &str, line: usize| {
+        let mut f = secret_row(rule, area, severity, line);
+        f.path = path.to_string();
+        f
+    };
+    report.findings = vec![
+        at(FILE_RULE, "Universal", "critical", ".env.production", 0),
+        at(
+            RULES_AT_LINE[0],
+            "Universal",
+            "critical",
+            ".env.production",
+            6,
+        ),
+        at(RULES_AT_LINE[0], "Universal", "low", ".env.example", 6),
+        at(
+            RULES_AT_LINE[1],
+            "Javascript",
+            "critical",
+            ".env.production",
+            6,
+        ),
+        at(RULES_AT_LINE[1], "Javascript", "low", ".env.example", 6),
+        at(
+            RULES_AT_LINE[2],
+            "Supabase Secrets",
+            "critical",
+            ".env.production",
+            6,
+        ),
+        at(
+            RULES_AT_LINE[3],
+            "Secret Exposure",
+            "critical",
+            ".env.production",
+            6,
+        ),
+        at(
+            "SEC-NO-UNAUTH-CHARGE-1",
+            "Authorization",
+            "critical",
+            "supabase/functions/charge/index.ts",
+            14,
+        ),
+        at(
+            "SEC-VERIFY-JWT-1",
+            "Authorization",
+            "critical",
+            "supabase/config.toml",
+            30,
+        ),
+    ];
+    let reviewed = reviewed_of(&report.seal(), &[]);
+    let json = build_report_json(&reviewed, None, &options());
+    let items = &json.three_things.items;
+    let places: Vec<(String, usize)> = items.iter().map(|i| (i.path.clone(), i.line)).collect();
+    assert_eq!(items.len(), 3, "{places:?}");
+    assert_eq!(
+        places
+            .iter()
+            .filter(|(p, _)| p == ".env.production")
+            .count(),
+        1,
+        "the committed file is one entry: {places:?}"
+    );
+    let secret = items.iter().find(|i| i.path == ".env.production").unwrap();
+    assert!(
+        secret.rules.contains(&FILE_RULE.to_string())
+            && secret.rules.contains(&RULES_AT_LINE[2].to_string()),
+        "the entry closes the file rule and the line rules held with it: {:?}",
+        secret.rules
+    );
+    let fixes: std::collections::BTreeSet<&str> = items.iter().map(|i| i.fix_id.as_str()).collect();
+    assert_eq!(fixes.len(), 3);
+}

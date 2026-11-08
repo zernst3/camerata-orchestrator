@@ -1643,14 +1643,20 @@ pub fn build_report_json(
         std::collections::HashSet::new();
     let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut selected_fixes: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    // Two Fixes can share a place (a true partial overlap); the box still names a place once.
+    // A chosen Fix blocks every place it holds, and a chosen whole-file place blocks the lines of
+    // its file, so the box always takes the next distinct change (two Fixes can share a place, and
+    // a file and its lines are one secret).
     let mut selected_places: std::collections::HashSet<(&str, &str, usize)> =
+        std::collections::HashSet::new();
+    let mut selected_files: std::collections::HashSet<(&str, &str)> =
         std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
         }
-        if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line)) {
+        if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line))
+            || (f.line > 0 && selected_files.contains(&(f.repo.as_str(), f.path.as_str())))
+        {
             continue;
         }
         let shares_selected_root_cause = !f.root_cause_keys.is_empty()
@@ -1672,6 +1678,21 @@ pub fn build_report_json(
         }
         top3_do_now.push(f);
         selected_places.insert((f.repo.as_str(), f.path.as_str(), f.line));
+        for p in fix_index
+            .fixes()
+            .iter()
+            .find(|x| x.id == f.fix_id)
+            .into_iter()
+            .flat_map(|x| &x.places)
+        {
+            selected_places.insert((p.repo.as_str(), p.path.as_str(), p.line));
+            if p.line == 0 {
+                selected_files.insert((p.repo.as_str(), p.path.as_str()));
+            }
+        }
+        if f.line == 0 {
+            selected_files.insert((f.repo.as_str(), f.path.as_str()));
+        }
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
     let dependency_advisories = dependency_snapshot.rows.len();
