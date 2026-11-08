@@ -992,6 +992,11 @@ pub struct PdfWordsJson {
     /// "and N more skipped files, listed in full on the Not checked sheet and in findings.json":
     /// the part after "N".
     pub skipped_files_more: String,
+    /// How many "not run" notes the PDF prints in each place before it points at the Not checked
+    /// sheet.
+    pub failed_passes_cap: usize,
+    /// "and N more, listed on the Not checked sheet": the part after "N".
+    pub failed_passes_more: String,
     /// The sentence that opens "Where the details are".
     pub details_intro: String,
     pub patterns_across_services: String,
@@ -1023,6 +1028,8 @@ impl PdfWordsJson {
                 v::START_HERE
             ),
             patterns_across_services: v::PATTERNS_ACROSS_SERVICES.to_string(),
+            failed_passes_cap: PDF_MAX_FAILED_PASS_NOTES,
+            failed_passes_more: format!("more, listed on the {} sheet", v::NOT_CHECKED),
             skipped_files_cap: PDF_MAX_SKIPPED_FILES,
             skipped_files_more: format!(
                 "more skipped files, listed in full on the {} sheet and in findings.json",

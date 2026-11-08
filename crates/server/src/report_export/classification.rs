@@ -992,7 +992,7 @@ pub(crate) fn default_narrative(
     accepted: usize,
 ) -> String {
     if candidates_reviewed == 0 {
-        return "The scan surfaced no candidate findings to review in this run.".to_string();
+        return "The scan surfaced no problems to review in this run.".to_string();
     }
     let dep_clause = if dependency_advisories == 0 {
         String::new()
@@ -1008,39 +1008,36 @@ pub(crate) fn default_narrative(
     };
     match review_state {
         ReviewState::Raw => format!(
-            "This is a draft export: no finding in this run has had a human triage pass. The \
-             engine analyzed {} and produced {}. {curated_total} {} curated for action \
-             ({do_now} do now, {do_next} do next, {plan} planned, {accepted} already carried \
+            "This is a draft export: no problem in this run has had a human review. The \
+             engine analyzed {} and produced {}. {curated_total} {} for action \
+             ({do_now} First, {do_next} Next, {plan} Later, {accepted} already carried \
              as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             held for a human reviewer's judgment call, and {excluded_fp} {} auto-excluded as \
-             likely false positives.{dep_clause}",
+             a human reviewer's decision, and {excluded_fp} {} ruled out \
+             automatically.{dep_clause}",
             noun(files_scanned, "file", "files"),
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
+            noun(candidates_reviewed, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
+            if held_for_review == 1 {
+                "needs"
+            } else {
+                "need"
+            },
             if excluded_fp == 1 { "was" } else { "were" },
         ),
-        ReviewState::Reviewed => format!(
-            "{} were reviewed by a human reviewer; {} {} dispositioned as false positives and \
-             excluded entirely from this report. Of the remaining {}, {curated_total} {} \
-             curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
-             {accepted} accepted as risk) and {held_for_review} {} held for further review.\
-             {dep_clause}",
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
+        ReviewState::Reviewed => {
+            format!(
+            "{} were reviewed by a human reviewer; {} {} ruled out and left out of this report \
+             entirely. Of the remaining {}, {curated_total} {} for action ({do_now} First, \
+             {do_next} Next, {plan} Later, {accepted} accepted as risk) and {held_for_review} \
+             {} a further decision.{dep_clause}",
+            noun(candidates_reviewed, "problem", "problems"),
             excluded_fp,
             if excluded_fp == 1 { "was" } else { "were" },
-            noun(curated_total + held_for_review, "finding", "findings"),
+            noun(curated_total + held_for_review, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
-        ),
+            if held_for_review == 1 { "needs" } else { "need" },
+        )
+        }
     }
 }
 

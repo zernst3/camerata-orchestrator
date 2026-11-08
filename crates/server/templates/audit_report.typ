@@ -463,8 +463,11 @@
 #if d.executive_summary.failed_passes.len() > 0 [
   #block(above: 8pt, below: 4pt, stroke: 0.75pt + vivid, inset: 10pt, radius: 8pt, width: 100%)[
     #text(weight: 600, size: 9pt, fill: ink)[Not run this inspection]
-    #for note in d.executive_summary.failed_passes [
+    #for note in d.executive_summary.failed_passes.slice(0, calc.min(d.executive_summary.failed_passes.len(), W.failed_passes_cap)) [
       - #note
+    ]
+    #if d.executive_summary.failed_passes.len() > W.failed_passes_cap [
+      #text(size: 9pt, fill: ink_soft)[and #str(d.executive_summary.failed_passes.len() - W.failed_passes_cap) #W.failed_passes_more]
     ]
   ]
 ]
@@ -481,7 +484,7 @@
   #panel[
     #for item in d.three_things.items [
       #block(above: 4pt, below: 10pt)[
-        #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
+        #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
         #linebreak()
         #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
         #if item.closes_line != "" [
@@ -520,7 +523,7 @@
     // The severity columns get a FIXED width because `heat_cell`'s box is itself fixed-width.
     // The status column is wide enough for its longest chip, so no word breaks mid-word, and the
     // area name wraps when it has no natural break.
-    columns: (1fr, 1.7cm, 1.7cm, 1.7cm, 1.7cm, 3.7cm, 3.3cm),
+    columns: (1fr, 1.6cm, 1.6cm, 1.6cm, 1.6cm, 4.1cm, 3.2cm),
     stroke: table_stroke,
     inset: (x: 4pt, y: 5pt),
     align: horizon,
@@ -605,7 +608,7 @@
   #v(4pt)
   #for item in d.escalations.items.slice(0, calc.min(d.escalations.items.len(), d.escalations.cap)) [
     #block(breakable: false, above: 6pt, below: 8pt)[
-      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#item.headline]
+      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
       #linebreak()
       #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
       #linebreak()
@@ -776,9 +779,9 @@ Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_n
 // auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
 // each show EVERY number in the partition, so `candidates_reviewed` always reconciles on the page.
 #if d.review_state == "reviewed" [
-  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
+  *#str(d.methodology.candidates_reviewed) #plural(d.methodology.candidates_reviewed, "problem", "problems") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) ruled out and left out of this report; #str(d.methodology.held_for_review) #plural(d.methodology.held_for_review, "needs", "need") a further decision.*
 ] else [
-  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") produced by the engine; #str(d.methodology.held_for_review) held for a human reviewer's judgment call; #str(d.methodology.excluded_false_positive) auto-excluded as likely false positives. This export has not yet had a human triage pass.*
+  *#str(d.methodology.candidates_reviewed) #plural(d.methodology.candidates_reviewed, "problem", "problems") produced by the engine; #str(d.methodology.held_for_review) #plural(d.methodology.held_for_review, "needs", "need") a human reviewer's decision; #str(d.methodology.excluded_false_positive) ruled out automatically. This export has not yet had a human review.*
 ]
 
 #d.methodology.severity_scale_note
@@ -794,8 +797,11 @@ Not performed in this engagement:
 #if d.methodology.failed_passes.len() > 0 [
   #v(0.2cm)
   Not run this inspection:
-  #for note in d.methodology.failed_passes [
+  #for note in d.methodology.failed_passes.slice(0, calc.min(d.methodology.failed_passes.len(), W.failed_passes_cap)) [
     - #note
+  ]
+  #if d.methodology.failed_passes.len() > W.failed_passes_cap [
+    #text(size: 9pt, fill: ink_soft)[and #str(d.methodology.failed_passes.len() - W.failed_passes_cap) #W.failed_passes_more]
   ]
 ]
 

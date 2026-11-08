@@ -57,6 +57,8 @@ pub const PDF_MAX_OTHER_FIXES: usize = 60;
 pub const PDF_MAX_HEALTHY_RULES: usize = 25;
 /// The most skipped files the PDF names; the Not checked sheet holds the rest.
 pub const PDF_MAX_SKIPPED_FILES: usize = 10;
+/// The most "not run" notes the PDF prints in the summary and in the methodology.
+pub const PDF_MAX_FAILED_PASS_NOTES: usize = 5;
 /// The most dependency advisories the PDF names; the Dependencies sheet holds the rest.
 pub const PDF_MAX_DEPENDENCIES: usize = 5;
 /// The most rules the PDF names in the cross-service comparison.
@@ -841,13 +843,13 @@ pub(crate) fn next_steps_note_for(
     };
     let not_yet_established = || {
         format!(
-            "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
-             decision; 0 excluded so far.",
-            noun(candidates_reviewed, "candidate", "candidates"),
+            "Fix rate not yet established: {held_for_review} of {} need a reviewer's \
+             decision; 0 ruled out so far.",
+            noun(candidates_reviewed, "problem", "problems"),
         )
     };
     let fix_rate_sentence = if candidates_reviewed == 0 {
-        "This run produced no candidate findings, so there is no fix rate to report.".to_string()
+        "This run produced no problems, so there is no fix rate to report.".to_string()
     } else if matches!(review_state, ReviewState::Raw) {
         not_yet_established()
     } else {
@@ -857,14 +859,14 @@ pub(crate) fn next_steps_note_for(
         } else {
             let pct = (curated_total as f64 / denominator as f64) * 100.0;
             let excluding_clause = if excluded_false_positive > 0 {
-                ", excluding the rest as likely false positives"
+                ", ruling out the rest"
             } else {
                 ""
             };
             format!(
                 "This run kept {curated_total} of {} as real, actionable items (a {pct:.0}% \
                  fix rate){excluding_clause}.",
-                noun(denominator, "candidate finding", "candidate findings"),
+                noun(denominator, "problem", "problems"),
             )
         }
     };

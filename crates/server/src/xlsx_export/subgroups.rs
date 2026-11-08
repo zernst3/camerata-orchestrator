@@ -1045,8 +1045,16 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
             if !rules.contains(&r.rule_id) {
                 rules.push(r.rule_id.clone());
             }
-            if !decisions.contains(&r.disposition_label) {
-                decisions.push(r.disposition_label.clone());
+            // The place's decision, without the fix order a row recommends (that is the Fix's):
+            // "Open", "Confirmed by the reviewer", "Needs a decision".
+            let state = r
+                .disposition_label
+                .split(" (")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !decisions.contains(&state) {
+                decisions.push(state);
             }
         }
         out.push(crate::report_export::EscalatedSiteJson {
@@ -1133,8 +1141,12 @@ pub(crate) fn pdf_sections(
             )
         })
         .collect();
+    // A Fix that holds only conventions, or only rules that could not be completed, is no fix: it
+    // is not on the Fix plan sheet and has no line in the PDF.
+    let with_problems = super::sheets::fixes_with_problems(&rows, &deps);
     let patterns = facts
         .into_iter()
+        .filter(|g| with_problems.contains(&g.id))
         .map(|g| crate::report_export::PatternJson {
             pointer: format!(
                 "{} {}, see the All problems sheet, filter Fix id = {}",

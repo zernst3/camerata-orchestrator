@@ -285,7 +285,7 @@ fn methodology_next_steps_reports_no_fix_rate_for_a_zero_candidate_run() {
     assert!(
         json.methodology
             .next_steps
-            .contains("no candidate findings, so there is no fix rate to report"),
+            .contains("no problems, so there is no fix rate to report"),
         "a clean run must honestly say there is no fix rate, never fabricate one or divide \
              by zero: {}",
         json.methodology.next_steps
@@ -324,7 +324,7 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
     );
     // 3 of 4 kept -> 75% fix rate.
     assert!(
-        notes.contains("kept 3 of 4 candidate findings"),
+        notes.contains("kept 3 of 4 problems"),
         "the paragraph must state the real kept/total counts: {notes}"
     );
     assert!(
@@ -342,8 +342,8 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
 fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
     let note = next_steps_note(ReviewState::Reviewed, 1, 1, 0, 0);
     assert!(
-        note.contains("kept 1 of 1 candidate finding as"),
-        "a single candidate must use the singular noun, not 'findings': {note}"
+        note.contains("kept 1 of 1 problem as"),
+        "a single problem must use the singular noun, not 'problems': {note}"
     );
 }
 
@@ -367,11 +367,11 @@ fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage(
         "a draft export must say the fix rate is not yet established: {note}"
     );
     assert!(
-        note.contains("23 of 23 candidates are held for a reviewer's decision"),
+        note.contains("23 of 23 problems need a reviewer's decision"),
         "the held count must be named plainly: {note}"
     );
     assert!(
-        note.contains("0 excluded so far"),
+        note.contains("0 ruled out so far"),
         "a draft export has excluded nothing yet, and must say so: {note}"
     );
 }
@@ -386,7 +386,7 @@ fn next_steps_note_reviewed_with_exclusions_shows_percentage_and_exclusion_claus
         "the fix rate must be curated/(curated+excluded) = 17/20 = 85%: {note}"
     );
     assert!(
-        note.contains("excluding the rest as likely false positives"),
+        note.contains("ruling out the rest"),
         "excluded > 0 must surface the exclusion clause: {note}"
     );
 }
@@ -401,7 +401,7 @@ fn next_steps_note_reviewed_with_no_exclusions_omits_the_exclusion_clause() {
         "zero excluded still yields a (100%) fix rate over curated candidates: {note}"
     );
     assert!(
-        !note.contains("excluding the rest"),
+        !note.contains("ruling out the rest"),
         "excluded == 0 must never print the exclusion clause: {note}"
     );
 }
@@ -1115,9 +1115,9 @@ fn raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narra
 
     // Every one of those numbers is actually visible in the prose, not just the JSON.
     let n = &json.executive_summary.narrative;
-    assert!(n.contains("2 candidate findings"), "{n}");
+    assert!(n.contains("2 problems"), "{n}");
     assert!(n.contains('1'), "{n}"); // curated_total / held_for_review both literally "1"
-    assert!(n.contains("0 were auto-excluded"), "{n}");
+    assert!(n.contains("0 were ruled out automatically"), "{n}");
 
     // Never claims a human reviewed or dispositioned anything.
     assert!(!n.contains("reviewed by a human reviewer"), "{n}");
@@ -1190,12 +1190,12 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
 
     let n = &json.executive_summary.narrative;
     assert!(
-        n.contains("3 candidate findings were reviewed by a human reviewer"),
+        n.contains("3 problems were reviewed by a human reviewer"),
         "{n}"
     );
-    assert!(n.contains("1 was dispositioned as false positives"), "{n}");
+    assert!(n.contains("1 was ruled out"), "{n}");
     assert!(n.contains("1 accepted as risk"), "{n}");
-    assert!(n.contains("held for further review"), "{n}");
+    assert!(n.contains("a further decision"), "{n}");
     assert!(
         json.methodology
             .ai_tier_note
@@ -1218,7 +1218,7 @@ fn zero_candidates_raw_scan_keeps_the_empty_state_sentence() {
     assert_eq!(json.review_state, ReviewState::Raw);
     assert_eq!(
         json.executive_summary.narrative,
-        "The scan surfaced no candidate findings to review in this run."
+        "The scan surfaced no problems to review in this run."
     );
 }
 
@@ -1305,11 +1305,11 @@ fn shipped_template_methodology_line_is_gated_on_review_state() {
         "the methodology reconciling line must branch on review_state"
     );
     assert!(
-        template.contains("has not yet had a human triage pass"),
+        template.contains("has not yet had a human review"),
         "the raw branch must say so explicitly"
     );
     assert!(
-        template.contains("held for a human reviewer's judgment call"),
+        template.contains("a human reviewer's decision"),
         "the raw branch must surface held_for_review, not just candidates/excluded"
     );
 }

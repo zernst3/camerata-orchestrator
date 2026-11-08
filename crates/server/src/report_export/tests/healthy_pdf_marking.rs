@@ -366,7 +366,7 @@ fn executive_summary_default_narrative_when_no_override() {
     assert!(!json.executive_summary.is_override);
     assert_eq!(
         json.executive_summary.narrative,
-        "The scan surfaced no candidate findings to review in this run."
+        "The scan surfaced no problems to review in this run."
     );
 }
 
@@ -381,9 +381,7 @@ fn executive_summary_default_narrative_pluralizes_correctly() {
         &empty_opts(),
     );
     assert!(
-        json.executive_summary
-            .narrative
-            .contains("1 candidate finding."),
+        json.executive_summary.narrative.contains("1 problem."),
         "expected singular 'finding', got: {:?}",
         json.executive_summary.narrative
     );
