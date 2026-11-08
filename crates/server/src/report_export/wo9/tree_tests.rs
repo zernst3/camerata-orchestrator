@@ -184,9 +184,13 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
             .iter()
             .position(|h| h == "Review flags")
             .expect("the internal Tree sheet has a Review flags column");
+        let id_col = grid[0]
+            .iter()
+            .position(|h| h == "Group id")
+            .expect("the Group id column");
         let row = grid
             .iter()
-            .find(|r| r.iter().any(|c| c == "sub:SEC-NO-RAW-SQL-CONCAT-1/0"))
+            .find(|r| r[id_col] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
             .unwrap();
         assert!(
             row[flags_col].contains("methodology_leak"),
