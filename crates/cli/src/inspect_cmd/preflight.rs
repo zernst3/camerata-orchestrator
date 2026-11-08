@@ -679,10 +679,10 @@ mod tests {
     }
 
     /// The cli figure follows the files the scan reads (the sites stage 1 calibrates follow them),
-    /// where two repositories of one code size used to be quoted the same; the API figure is
-    /// unchanged by them (no saved API run records its sites).
+    /// where two repositories of one code size used to be quoted the same; so does the API figure
+    /// (the site count is the scan's, not the transport's).
     #[test]
-    fn the_cli_estimate_follows_the_files_and_the_api_estimate_does_not() {
+    fn both_backends_estimates_follow_the_files() {
         let few = [with_files(20, 26_544, 152)];
         let many = [with_files(60, 26_544, 152)];
         let cli = |repos| {
@@ -692,6 +692,6 @@ mod tests {
         };
         assert!(cli(&few) < cli(&many), "{} vs {}", cli(&few), cli(&many));
         let api = |repos| build(&inputs(repos, None)).estimate_usd.unwrap();
-        assert!((api(&few) - api(&many)).abs() < 1e-9);
+        assert!(api(&few) < api(&many), "{} vs {}", api(&few), api(&many));
     }
 }

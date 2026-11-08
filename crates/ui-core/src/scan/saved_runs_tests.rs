@@ -281,6 +281,10 @@ fn no_stage_of_the_estimate_is_far_from_what_the_stage_cost() {
             // A stage of a few cents is one call more or less (the clone judge made one call in
             // one run and two in three others, at $0.04 and $0.07 to $0.10), not a rate to hold
             // to a factor of two; its dollars are in the total, which has the 1.0 to 1.5 band.
+            if actual == 0.0 {
+                // The stage did not run (faktura made no clone judge call).
+                continue;
+            }
             if actual < SMALLEST_STAGE_CHECKED_USD {
                 continue;
             }
@@ -546,16 +550,15 @@ fn both_backends_are_quoted_the_same_sites_for_known_files() {
     );
 }
 
-/// The API backend keeps the sizing it had: no saved API run records its sites, so the files are
-/// not used for it and its figures do not move with this fit. The two recorded API runs of the
-/// supabase portal fixture (Haiku 5.5 $0.414, Sonnet 5.5 $1.543) are matched within a quarter, as
-/// they were, whether or not the estimate is given the fixture's 36 files.
+/// The two recorded API runs of the supabase portal fixture (Haiku 5.5 $0.414, Sonnet 5.5
+/// $1.543) are still matched within a quarter when the estimate is given the fixture's 36 files,
+/// which now size the API figure's sites as they do the cli's.
 #[test]
-fn the_api_estimate_does_not_move_with_the_files_and_still_matches_both_recorded_api_runs() {
-    let repo = |files| RunRepoInput {
+fn the_api_estimate_for_the_fixture_matches_both_recorded_api_runs_with_its_files() {
+    let repo = RunRepoInput {
         repo: "supabase-portal-fixture".to_string(),
         code_chars: 26_544,
-        files,
+        files: 36,
         selected: 152,
         multi_option_selected: 34,
         routing_groups: 4,
@@ -566,25 +569,8 @@ fn the_api_estimate_does_not_move_with_the_files_and_still_matches_both_recorded
         terse_output: true,
     };
     let judge = priced("claude-haiku-4-5-20251001", 1.0, 5.0);
-    let usd = |model, files| {
-        let models = RunModels {
-            scan: model,
-            calibration: model,
-            group_review: Some(model),
-            fix: Some(priced("claude-haiku-5-5", 0.10, 0.50)),
-            clone_judge: Some(judge),
-        };
-        estimate_run_cost_bounds(&repo(files), "parallel", &models, flags)
-            .expected
-            .1
-    };
-    let sonnet = priced("claude-sonnet-5-5", 2.0, 10.0);
-    let haiku = priced("claude-haiku-5-5", 0.10, 0.50);
-    for model in [sonnet, haiku] {
-        assert_eq!(usd(model, 36), usd(model, 0), "{}", model.id);
-    }
     // The recorded runs had no stage 2: price the stages they had.
-    let without_stage_2 = |model: PricedModel<'_>| {
+    let usd = |model: PricedModel<'_>| {
         let models = RunModels {
             scan: model,
             calibration: model,
@@ -592,11 +578,12 @@ fn the_api_estimate_does_not_move_with_the_files_and_still_matches_both_recorded
             fix: Some(priced("claude-haiku-5-5", 0.10, 0.50)),
             clone_judge: Some(judge),
         };
-        estimate_run_cost_bounds(&repo(36), "parallel", &models, flags)
+        estimate_run_cost_bounds(&repo, "parallel", &models, flags)
             .expected
             .1
     };
-    let (sonnet_usd, haiku_usd) = (without_stage_2(sonnet), without_stage_2(haiku));
+    let sonnet_usd = usd(priced("claude-sonnet-5-5", 2.0, 10.0));
+    let haiku_usd = usd(priced("claude-haiku-5-5", 0.10, 0.50));
     assert!(
         (sonnet_usd - 1.543).abs() <= 1.543 * 0.25,
         "Sonnet 5.5: estimated ${sonnet_usd:.3} against $1.543 spent"

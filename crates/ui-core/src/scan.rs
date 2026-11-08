@@ -1081,22 +1081,27 @@ pub struct RunFlags {
 /// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
 /// calls it prices.
 /// The sites the ceiling beside the estimate is quoted on: the files times the highest rate seen.
-pub fn estimated_ceiling_sites(repo: &RunRepoInput, mode: &str, backend: ProjectBackend) -> usize {
-    run_findings(&RUN_FIT, repo, mode, backend).1 as usize
+pub fn estimated_ceiling_sites(repo: &RunRepoInput, mode: &str, _backend: ProjectBackend) -> usize {
+    run_findings(&ceiling_fit(), repo, mode).1 as usize
 }
 
-pub fn estimated_sites(repo: &RunRepoInput, mode: &str, backend: ProjectBackend) -> usize {
-    run_findings(&RUN_FIT, repo, mode, backend).1 as usize
+/// [`RUN_FIT`] with the sites quoted on the highest rate seen, for the ceiling.
+fn ceiling_fit() -> RunFit {
+    RunFit {
+        sites_per_file: RUN_FIT.sites_per_file_high,
+        ..RUN_FIT
+    }
+}
+
+/// The sites do not depend on the backend (they are what the scan reports, not how the calls are
+/// sent); the argument stays so a caller names the run it is quoting.
+pub fn estimated_sites(repo: &RunRepoInput, mode: &str, _backend: ProjectBackend) -> usize {
+    run_findings(&RUN_FIT, repo, mode).1 as usize
 }
 
 /// The scan's output volume in tokens (before the model's scale) and the findings it implies, for
 /// the run estimate: the arithmetic the scan and calibration terms are sized from.
-fn run_findings(
-    fit: &RunFit,
-    repo: &RunRepoInput,
-    mode: &str,
-    backend: ProjectBackend,
-) -> (f64, f64) {
+fn run_findings(fit: &RunFit, repo: &RunRepoInput, mode: &str) -> (f64, f64) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
@@ -1105,10 +1110,9 @@ fn run_findings(
     // The files the scan reads, when the caller knows them: the sites stage 1 calibrates follow
     // them (2.2 to 3.1 a file in four runs), where the code size and the rule batches the older
     // sizing used gave the same figure to a 36-file repository that calibrated 80 sites and a
-    // 39-file one that calibrated 119. Fitted to cli runs only: no saved run of the API backend
-    // records its sites, so that backend keeps the older sizing (its figures are unchanged) until
-    // one does; the ledger now records the files beside the sites for either backend.
-    if backend == ProjectBackend::Cli && repo.files > 0 && repo.selected > 0 {
+    // 39-file one that calibrated 119. The same on both backends: the site count is what the scan
+    // reports, not how its calls are sent (only the per-site token costs differ by backend).
+    if repo.files > 0 && repo.selected > 0 {
         let sites = (fit.sites_per_file * repo.files as f64).ceil();
         return (sites * REGEN_SCAN_TOKENS_PER_FINDING, sites);
     }
@@ -1138,10 +1142,24 @@ pub fn estimate_run_cost_bounds(
     models: &RunModels<'_>,
     flags: RunFlags,
 ) -> AuditCostBounds {
-    let expected =
-        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_expected, true);
-    let (_, ceiling_usd, _) =
-        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_estimate, false);
+    let expected = estimate_run_with_regeneration(
+        &RUN_FIT,
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_expected,
+        true,
+    );
+    let (_, ceiling_usd, _) = estimate_run_with_regeneration(
+        &ceiling_fit(),
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_estimate,
+        false,
+    );
     AuditCostBounds {
         expected,
         ceiling_usd,
@@ -1211,6 +1229,7 @@ pub fn cockpit_run_estimate(
 /// The arithmetic of [`estimate_run_cost_bounds`], with the regeneration stage priced by
 /// `regen_of` (the expected figure or the ceiling).
 fn estimate_run_with_regeneration(
+    fit: &RunFit,
     repo: &RunRepoInput,
     mode: &str,
     models: &RunModels<'_>,
@@ -1219,7 +1238,7 @@ fn estimate_run_with_regeneration(
     scale_regen_output: bool,
 ) -> (u64, f64, usize) {
     let (tokens, stages, passes) = estimate_run_stages_with_regeneration(
-        &RUN_FIT,
+        fit,
         repo,
         mode,
         models,
@@ -1369,7 +1388,7 @@ fn estimate_run_stages_with_regeneration<'a>(
     let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64 * scan_scale;
 
     // The findings the scan reports, from its output volume (text, before the model's scale).
-    let (findings_out, findings) = run_findings(fit, repo, mode, flags.backend);
+    let (findings_out, findings) = run_findings(fit, repo, mode);
 
     // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
     // and the site's own text; see [`calibration_estimate`]. ──
