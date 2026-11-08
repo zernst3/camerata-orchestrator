@@ -561,3 +561,51 @@ fn your_conventions_is_counts_and_short_lines() {
     );
     assert_eq!(c.more_line, "");
 }
+
+/// F1: the PDF states one number of problems. Two rows at one place (a critical at low effort and
+/// a high at medium effort) and one other place are two problems: the cover, the severity by
+/// effort matrix, the scorecard and the executive summary all say 2, and the gate fails when the
+/// matrix says 3.
+#[test]
+fn the_cover_the_matrix_the_scorecard_and_the_summary_count_the_same_places() {
+    let mut a = finding("SEC-A-1", "src/a.rs", 1, "critical");
+    a.effort = Some("low".to_string());
+    let mut b = finding("SEC-B-1", "src/a.rs", 1, "high");
+    b.effort = Some("medium".to_string());
+    let c = finding("SEC-C-1", "src/c.rs", 3, "medium");
+    let report = report_with(vec![a, b, c], vec!["SEC-A-1", "SEC-B-1", "SEC-C-1"]).seal();
+    let reviewed = apply_overlay(&report, &[], &[], &[]);
+    let json = build_report_json(&reviewed, None, &options());
+    let s = &json.cover.stats;
+    assert_eq!(s.critical + s.high + s.medium + s.low, 2, "cover");
+    let grid: usize = json
+        .priority_grid
+        .rows
+        .iter()
+        .flat_map(|r| &r.cells)
+        .map(|c| c.findings.len())
+        .sum();
+    assert_eq!(grid, 2, "matrix");
+    let card: usize = json
+        .scorecard
+        .rows
+        .iter()
+        .map(|r| r.critical + r.high + r.medium + r.low)
+        .sum();
+    assert_eq!(card, 2, "scorecard");
+    assert!(
+        json.executive_summary
+            .narrative
+            .contains("produced 2 problems"),
+        "{}",
+        json.executive_summary.narrative
+    );
+    // The dataset checks keep their rows: the matrix still holds all three.
+    let rows: usize = json.matrix.do_now.len()
+        + json.matrix.do_next.len()
+        + json.matrix.plan.len()
+        + json.matrix.accepted.len()
+        + json.matrix.informational.len()
+        + json.matrix.held.len();
+    assert_eq!(rows, 3);
+}

@@ -1772,19 +1772,37 @@ pub fn build_report_json(
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
-            default_narrative(
-                review_state,
-                report.files_scanned,
-                candidates_reviewed,
-                excluded_fp,
-                curated_total,
-                held_for_review_total,
-                dependency_advisories,
-                do_now,
-                do_next,
-                plan,
-                accepted,
-            ),
+            {
+                // The narrative counts problems, one for each place, as the cover and the grid do.
+                let heads = problem_heads(&matrix);
+                let in_bucket = |b: &[&str]| {
+                    heads
+                        .iter()
+                        .filter(|f| b.contains(&f.bucket.as_str()))
+                        .count()
+                };
+                let (p_do_now, p_do_next, p_plan, p_accepted) = (
+                    in_bucket(&["do_now"]),
+                    in_bucket(&["do_next"]),
+                    in_bucket(&["plan"]),
+                    in_bucket(&["accepted"]),
+                );
+                let p_held = in_bucket(&["held", "informational"]);
+                let p_curated = p_do_now + p_do_next + p_plan + p_accepted;
+                default_narrative(
+                    review_state,
+                    report.files_scanned,
+                    p_curated + p_held + excluded_fp,
+                    excluded_fp,
+                    p_curated,
+                    p_held,
+                    dependency_advisories,
+                    p_do_now,
+                    p_do_next,
+                    p_plan,
+                    p_accepted,
+                )
+            },
             false,
         ),
     };

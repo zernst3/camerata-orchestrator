@@ -2139,3 +2139,27 @@ fn production_part_cuts_only_at_an_inline_test_module() {
     let inline = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
     assert_eq!(production_part(inline), "fn a() {}");
 }
+
+/// The severity by effort matrix counts the places the cover counts: a matrix that says one more
+/// problem than the cover is refused.
+#[test]
+fn the_gate_catches_a_matrix_that_counts_a_problem_the_cover_does_not() {
+    let mut package = mixed_package();
+    let cell = package
+        .report_json
+        .priority_grid
+        .rows
+        .iter_mut()
+        .flat_map(|r| r.cells.iter_mut())
+        .find(|c| !c.findings.is_empty())
+        .expect("a filled cell");
+    let again = cell.findings[0].clone();
+    cell.findings.push(again);
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file == "PDF data" && p.message.contains("severity by effort matrix")),
+        "{failure}"
+    );
+}

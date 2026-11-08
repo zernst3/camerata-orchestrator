@@ -438,6 +438,39 @@ pub(crate) fn grid_effort_key(effort: Option<&str>) -> &'static str {
     }
 }
 
+/// The rows that head the places of the matrix: one for each (repo, file, line) of a problem (a
+/// kind the All problems sheet lists), the worst severity at the place, the first on a tie. The
+/// grid, the executive summary's counts, the cover and the scorecard all count these, so the PDF
+/// states one number of problems.
+pub(crate) fn problem_heads(matrix: &MatrixJson) -> Vec<&FindingRefJson> {
+    let mut order: Vec<(&str, &str, usize)> = Vec::new();
+    let mut best: std::collections::HashMap<(&str, &str, usize), &FindingRefJson> =
+        std::collections::HashMap::new();
+    for f in matrix
+        .do_now
+        .iter()
+        .chain(&matrix.do_next)
+        .chain(&matrix.plan)
+        .chain(&matrix.accepted)
+        .chain(&matrix.informational)
+        .chain(&matrix.held)
+        .filter(|f| crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&f.kind.tag()))
+    {
+        let key = (f.repo.as_str(), f.path.as_str(), f.line);
+        match best.get(&key) {
+            None => {
+                order.push(key);
+                best.insert(key, f);
+            }
+            Some(kept) if severity_rank(&f.severity) < severity_rank(&kept.severity) => {
+                best.insert(key, f);
+            }
+            Some(_) => {}
+        }
+    }
+    order.into_iter().filter_map(|k| best.remove(&k)).collect()
+}
+
 /// FIX 6 — project the `do_now`/`do_next`/`plan` findings (Accepted and Informational are OUT
 /// OF SCOPE, see [`PriorityGridJson`]'s doc comment) into the real 2-D grid. Rows/columns are
 /// fixed orderings but only emitted when at least one finding uses them, so a small scan's
@@ -446,11 +479,13 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
     const SEVERITY_ORDER: [&str; 4] = ["critical", "high", "medium", "low"];
     const EFFORT_ORDER: [&str; 4] = ["low", "medium", "high", "unscoped"];
 
-    let action_findings: Vec<&FindingRefJson> = matrix
-        .do_now
+    // A problem is a place: each place counts once, at the severity, effort and bucket of the row
+    // that heads it (the cover, the scorecard and the narrative count the same way).
+    let heads = problem_heads(matrix);
+    let action_findings: Vec<&FindingRefJson> = heads
         .iter()
-        .chain(matrix.do_next.iter())
-        .chain(matrix.plan.iter())
+        .copied()
+        .filter(|f| matches!(f.bucket.as_str(), "do_now" | "do_next" | "plan"))
         .collect();
 
     let present_severities: Vec<&str> = SEVERITY_ORDER
@@ -503,10 +538,10 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
     PriorityGridJson {
         columns: present_efforts.into_iter().map(String::from).collect(),
         rows,
-        accepted_count: matrix.accepted.len(),
-        informational_count: matrix.informational.len(),
+        accepted_count: heads.iter().filter(|f| f.bucket == "accepted").count(),
+        informational_count: heads.iter().filter(|f| f.bucket == "informational").count(),
         footnote: format!(
-            "Each cell counts the problems in it. Every problem is on the {} sheet, with its severity, effort and place.",
+            "Each cell counts the problems in it, one for each place. Every problem is on the {} sheet, with its severity, effort and place.",
             crate::xlsx_export::vocabulary::ALL_PROBLEMS
         ),
     }

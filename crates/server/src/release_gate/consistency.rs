@@ -955,6 +955,38 @@ pub fn pdf_count_reconciliation_problems(
             ));
         }
     }
+    // The grid counts the places the cover counts, minus those whose bucket the grid leaves out
+    // (accepted, informational, held): its total by severity equals the cover's less those.
+    let heads = crate::report_export::problem_heads(&report.matrix);
+    for (severity, printed) in [
+        ("critical", stats.critical),
+        ("high", stats.high),
+        ("medium", stats.medium),
+        ("low", stats.low),
+    ] {
+        let left_out = heads
+            .iter()
+            .filter(|f| severity_bucket(&f.severity) == severity)
+            .filter(|f| !matches!(f.bucket.as_str(), "do_now" | "do_next" | "plan"))
+            .count();
+        let grid: usize = report
+            .priority_grid
+            .rows
+            .iter()
+            .filter(|r| severity_bucket(&r.severity) == severity)
+            .flat_map(|r| &r.cells)
+            .map(|c| c.findings.len())
+            .sum();
+        if grid + left_out != printed {
+            problems.push(problem(
+                "PDF data",
+                &format!("priority_grid.{severity}"),
+                format!(
+                    "the severity by effort matrix counts {grid} problems here ({left_out} more are left out of it) and the cover counts {printed}"
+                ),
+            ));
+        }
+    }
     problems
 }
 
