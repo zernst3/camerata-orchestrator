@@ -425,6 +425,10 @@ pub struct PriorityGridJson {
     pub informational_count: usize,
     /// Places whose head row needs a decision: counted on the cover, not in the grid.
     pub held_count: usize,
+    /// "Not in this grid: 2 critical, 2 high and 5 low places that need a decision first, and 6
+    /// low places that are information only. The cover counts all of them." Empty when nothing is
+    /// left out.
+    pub left_out: String,
     /// The line under the grid: each cell counts, the rows are on the All problems sheet.
     pub footnote: String,
 }
@@ -473,6 +477,45 @@ pub(crate) fn problem_heads(matrix: &MatrixJson) -> Vec<&FindingRefJson> {
         }
     }
     order.into_iter().filter_map(|k| best.remove(&k)).collect()
+}
+
+/// The grid's note on the places it leaves out, by severity, so the grid closes to the cover.
+fn left_out_line(heads: &[&FindingRefJson]) -> String {
+    let part = |bucket: &str| -> String {
+        let items: Vec<String> = ["critical", "high", "medium", "low"]
+            .iter()
+            .filter_map(|sev| {
+                let n = heads
+                    .iter()
+                    .filter(|f| {
+                        f.bucket == bucket
+                            && (if *sev == "low" {
+                                !matches!(f.severity.as_str(), "critical" | "high" | "medium")
+                            } else {
+                                f.severity == *sev
+                            })
+                    })
+                    .count();
+                (n > 0).then(|| format!("{n} {sev}"))
+            })
+            .collect();
+        match items.split_last() {
+            None => String::new(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        }
+    };
+    let (held, info) = (part("held"), part("informational"));
+    let mut out = match (held.is_empty(), info.is_empty()) {
+        (true, true) => return String::new(),
+        (false, true) => format!("Not in this grid: {held} places that need a decision first."),
+        (true, false) => format!("Not in this grid: {info} places that are information only."),
+        (false, false) => format!(
+            "Not in this grid: {held} places that need a decision first, and {info} places that are information only."
+        ),
+    };
+    out.push_str(" The cover counts all of them.");
+    out
 }
 
 /// FIX 6 — project the `do_now`/`do_next`/`plan` findings (Accepted and Informational are OUT
@@ -545,6 +588,7 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
         accepted_count: heads.iter().filter(|f| f.bucket == "accepted").count(),
         informational_count: heads.iter().filter(|f| f.bucket == "informational").count(),
         held_count: heads.iter().filter(|f| f.bucket == "held").count(),
+        left_out: left_out_line(&heads),
         footnote: format!(
             "Each cell counts the problems in it, one for each place. Every problem is on the {} sheet, with its severity, effort and place.",
             crate::xlsx_export::vocabulary::ALL_PROBLEMS

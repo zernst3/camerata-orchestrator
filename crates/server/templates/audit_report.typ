@@ -584,17 +584,14 @@
   #text(size: 8.5pt, fill: ink_faint)[#d.priority_grid.footnote]
 ]
 
-#if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 or d.priority_grid.held_count > 0 [
+#if d.priority_grid.accepted_count > 0 or d.priority_grid.left_out != "" [
   #v(0.3cm)
   #text(size: 8.5pt, fill: ink_faint)[
     #if d.priority_grid.accepted_count > 0 [
       #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "problem is", "problems are") accepted risk and out of scope for this grid.
     ]
-    #if d.priority_grid.held_count > 0 [
-      #str(d.priority_grid.held_count) #plural(d.priority_grid.held_count, "problem needs", "problems need") a decision first and #plural(d.priority_grid.held_count, "is", "are") counted on the cover, not in this grid.
-    ]
-    #if d.priority_grid.informational_count > 0 [
-      #str(d.priority_grid.informational_count) further #plural(d.priority_grid.informational_count, "item is", "items are") information only and out of scope for this grid.
+    #if d.priority_grid.left_out != "" [
+      #d.priority_grid.left_out
     ]
   ]
 ]

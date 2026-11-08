@@ -990,6 +990,7 @@ pub(crate) fn default_narrative(
     do_next: usize,
     plan: usize,
     accepted: usize,
+    informational: usize,
 ) -> String {
     if candidates_reviewed == 0 {
         return "The scan surfaced no problems to review in this run.".to_string();
@@ -1012,8 +1013,8 @@ pub(crate) fn default_narrative(
              engine analyzed {} and produced {}. {curated_total} {} for action \
              ({do_now} First, {do_next} Next, {plan} Later, {accepted} already carried \
              as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             a human reviewer's decision, and {excluded_fp} {} ruled out \
-             automatically.{dep_clause}",
+             a human reviewer's decision, {informational} {} information only, and \
+             {excluded_fp} {} ruled out automatically.{dep_clause}",
             noun(files_scanned, "file", "files"),
             noun(candidates_reviewed, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
@@ -1022,20 +1023,22 @@ pub(crate) fn default_narrative(
             } else {
                 "need"
             },
+            if informational == 1 { "is" } else { "are" },
             if excluded_fp == 1 { "was" } else { "were" },
         ),
         ReviewState::Reviewed => {
             format!(
             "{} were reviewed by a human reviewer; {} {} ruled out and left out of this report \
              entirely. Of the remaining {}, {curated_total} {} for action ({do_now} First, \
-             {do_next} Next, {plan} Later, {accepted} accepted as risk) and {held_for_review} \
-             {} a further decision.{dep_clause}",
+             {do_next} Next, {plan} Later, {accepted} accepted as risk), {held_for_review} \
+             {} a further decision and {informational} {} information only.{dep_clause}",
             noun(candidates_reviewed, "problem", "problems"),
             excluded_fp,
             if excluded_fp == 1 { "was" } else { "were" },
-            noun(curated_total + held_for_review, "problem", "problems"),
+            noun(curated_total + held_for_review + informational, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
             if held_for_review == 1 { "needs" } else { "need" },
+            if informational == 1 { "is" } else { "are" },
         )
         }
     }

@@ -778,3 +778,38 @@ fn every_sheet_the_pdf_names_is_a_workbook_tab() {
         );
     }
 }
+
+/// F6: the grid says which places it leaves out, by severity, so a client can close the gap to the
+/// cover.
+#[test]
+fn the_matrix_footnote_names_the_places_it_leaves_out_by_severity() {
+    let mut a = finding("SEC-A-1", "src/a.rs", 1, "critical");
+    a.needs_review = true;
+    let mut b = finding("SEC-B-1", "src/b.rs", 1, "medium");
+    b.needs_review = true;
+    let mut c = finding("SEC-C-1", "src/c.rs", 1, "medium");
+    c.needs_review = true;
+    let ok = finding("SEC-D-1", "src/d.rs", 1, "high");
+    let report = report_with(vec![a, b, c, ok], vec![]).seal();
+    let json = build_report_json(&apply_overlay(&report, &[], &[], &[]), None, &options());
+    assert_eq!(
+        json.priority_grid.left_out,
+        "Not in this grid: 1 critical and 2 medium places that need a decision first. The cover counts all of them."
+    );
+}
+
+/// F7: the summary counts places that need a decision and places that are information only
+/// separately, as the matrix footnote does.
+#[test]
+fn the_summary_counts_decision_and_information_only_places_apart() {
+    let mut held = finding("SEC-A-1", "src/a.rs", 1, "high");
+    held.needs_review = true;
+    let info = finding("SEC-B-1", "src/b.rs", 1, "info");
+    let report = report_with(vec![held, info], vec![]).seal();
+    let json = build_report_json(&apply_overlay(&report, &[], &[], &[]), None, &options());
+    let n = &json.executive_summary.narrative;
+    assert!(
+        n.contains("1 needs a human reviewer's decision, 1 is information only"),
+        "{n}"
+    );
+}

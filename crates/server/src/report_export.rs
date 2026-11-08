@@ -1791,12 +1791,13 @@ pub fn build_report_json(
                     in_bucket(&["plan"]),
                     in_bucket(&["accepted"]),
                 );
-                let p_held = in_bucket(&["held", "informational"]);
+                let p_held = in_bucket(&["held"]);
+                let p_info = in_bucket(&["informational"]);
                 let p_curated = p_do_now + p_do_next + p_plan + p_accepted;
                 default_narrative(
                     review_state,
                     report.files_scanned,
-                    p_curated + p_held + excluded_fp,
+                    p_curated + p_held + p_info + excluded_fp,
                     excluded_fp,
                     p_curated,
                     p_held,
@@ -1805,6 +1806,7 @@ pub fn build_report_json(
                     p_do_next,
                     p_plan,
                     p_accepted,
+                    p_info,
                 )
             },
             false,
@@ -2084,7 +2086,7 @@ pub fn build_report_json(
         three_things,
         scorecard: ScorecardJson {
             rows: scorecard_rows,
-            footnote: "A place with rules from several areas is counted in each; the Total counts each place once.".to_string(),
+            footnote: "A place with rules from several areas is counted in each; the cover counts each place once.".to_string(),
         },
         matrix,
         priority_grid,
