@@ -182,8 +182,9 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             if ceiling_is_above(dollars, ceiling) {
                 writeln!(
                     out,
-                    "  at most ${ceiling:.2} if the detail step needs every repeat round on every \
-                     finding (the usual run pays for its first round only)"
+                    "  at most ${ceiling:.2} if the scan reports sites at the highest rate seen and the \
+                     detail step needs every repeat round on every finding (the usual run pays \
+                     for its first round only)"
                 )
                 .ok();
             }
@@ -362,7 +363,11 @@ mod tests {
     fn repo(chars: usize, rules: usize) -> RepoScanFacts {
         RepoScanFacts {
             repo: "acme/api".into(),
-            files: vec![("a.rs".into(), "x".repeat(chars))],
+            // About as many files as real code of this size has (the saved runs average 740
+            // characters a file); the estimate's sites follow the file count.
+            files: (0..(chars / 740).max(1))
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / (chars / 740).max(1))))
+                .collect(),
             code_chars: chars,
             semantic: (0..rules)
                 .map(|i| (format!("R-{i}"), "do it".to_string()))
@@ -426,9 +431,10 @@ mod tests {
             "the gate's figure is the expected cost"
         );
 
-        // With the stage off the two figures are one and nothing says "at most".
+        // With the stage off the ceiling is still above the figure: it is quoted on the highest
+        // site rate seen as well as on the repeat rounds, so the "at most" line stays.
         let p = build(&inputs(&repos, None));
-        assert!(!p.text.contains("at most $"), "{}", p.text);
+        assert!(p.text.contains("at most $"), "{}", p.text);
     }
 
     #[test]
