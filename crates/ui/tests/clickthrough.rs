@@ -692,10 +692,10 @@ fn workbook_text(zip_bytes: &[u8]) -> String {
     text
 }
 
-/// The rows of the workbook's Sites sheet in the export zip, each as its cells by column
+/// The rows of the workbook sheet `sheet_name` in the export zip, each as its cells by column
 /// (A is index 0): the sheet is found by its name in `xl/workbook.xml`, and a shared-string cell
 /// is read through `xl/sharedStrings.xml`, so a test can say which column a value landed in.
-fn sites_sheet_rows(zip_bytes: &[u8]) -> Vec<Vec<String>> {
+fn workbook_sheet_rows(zip_bytes: &[u8], sheet_name: &str) -> Vec<Vec<String>> {
     use std::io::Read;
     let mut outer = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("a zip");
     let name = zip_names(&outer)
@@ -726,8 +726,8 @@ fn sites_sheet_rows(zip_bytes: &[u8]) -> Vec<Vec<String>> {
         .collect();
     let at = names
         .iter()
-        .position(|n| *n == "Sites")
-        .unwrap_or_else(|| panic!("no Sites sheet in {names:?}"));
+        .position(|n| *n == sheet_name)
+        .unwrap_or_else(|| panic!("no {sheet_name} sheet in {names:?}"));
     let sheet = part(&format!("xl/worksheets/sheet{}.xml", at + 1));
     let unescape = |s: &str| {
         s.replace("&lt;", "<")
@@ -1501,24 +1501,38 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         row["severity"], "high",
         "the edit made on card 1 ships: {row}"
     );
-    // The workbook's Sites sheet carries it too: the row for that path and line, its Severity
-    // column (G) reading High (spec section 14 step 12).
-    let sites = sites_sheet_rows(&zip_bytes);
-    let on_sites: Vec<&Vec<String>> = sites
+    // The workbook's complete record carries it too: every row for that path and line, its
+    // Severity column reading High (spec section 14 step 12). The sheet lists every source row,
+    // so this checks the edit reached each of them; columns are found by their header names.
+    let sheet = "All source rows";
+    let rows = workbook_sheet_rows(&zip_bytes, sheet);
+    let header_at = rows
+        .iter()
+        .position(|r| r.iter().any(|c| c == "Severity") && r.iter().any(|c| c == "File"))
+        .unwrap_or_else(|| panic!("no header row on the {sheet} sheet: {rows:?}"));
+    let col = |name: &str| {
+        rows[header_at]
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("no {name} column on the {sheet} sheet"))
+    };
+    let (file_col, line_col, severity_col) = (col("File"), col("Line"), col("Severity"));
+    let on_sheet: Vec<&Vec<String>> = rows[header_at + 1..]
         .iter()
         .filter(|r| {
-            r.get(3).map(String::as_str) == Some(path) && r.get(4).map(String::as_str) == Some(line)
+            r.get(file_col).map(String::as_str) == Some(path)
+                && r.get(line_col).map(String::as_str) == Some(line)
         })
         .collect();
     assert!(
-        !on_sites.is_empty(),
-        "{first} is not on the Sites sheet: {sites:?}"
+        !on_sheet.is_empty(),
+        "{first} is not on the {sheet} sheet: {rows:?}"
     );
     assert!(
-        on_sites
+        on_sheet
             .iter()
-            .all(|r| r.get(6).map(String::as_str) == Some("High")),
-        "the Sites sheet's row for {first} does not carry the edited severity: {on_sites:?}"
+            .all(|r| r.get(severity_col).map(String::as_str) == Some("High")),
+        "the {sheet} sheet's rows for {first} do not carry the edited severity: {on_sheet:?}"
     );
     stack.assert_no_model_calls();
 }
