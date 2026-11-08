@@ -678,3 +678,47 @@ fn an_ai_row_in_a_fix_is_named_by_its_own_rule_never_by_the_rule_that_grounds_it
         "{text}"
     );
 }
+
+fn top_three_places(rows: Vec<(&str, &str, &str, usize)>) -> Vec<(String, usize)> {
+    let mut report = crate::release_gate::test_scan_report();
+    report.findings = rows
+        .into_iter()
+        .map(|(rule, severity, path, line)| {
+            let mut f = secret_row(rule, "Universal", severity, line);
+            f.path = path.to_string();
+            f
+        })
+        .collect();
+    let reviewed = reviewed_of(&report.seal(), &[]);
+    build_report_json(&reviewed, None, &options())
+        .three_things
+        .items
+        .iter()
+        .map(|i| (i.path.clone(), i.line))
+        .collect()
+}
+
+#[test]
+fn a_chosen_whole_file_blocks_the_lines_of_its_file_and_a_chosen_line_blocks_the_whole_file() {
+    // The file alone, then a Fix holding line 6 of that file and another file: the file is chosen
+    // first (its line sorts first), so line 6 of it is skipped and the next Fix's other place is
+    // taken. Only the file guard does this: the chosen Fix holds `a.ts:0` and nothing else.
+    let places = top_three_places(vec![
+        ("SEC-FILE-1", "critical", "a.ts", 0),
+        ("SEC-LINES-1", "critical", "a.ts", 6),
+        ("SEC-LINES-1", "critical", "b.ts", 1),
+    ]);
+    assert_eq!(
+        places,
+        vec![("a.ts".to_string(), 0), ("b.ts".to_string(), 1)]
+    );
+
+    // The other way round: a critical Fix holding a.ts:6 is chosen first, and a less severe
+    // whole-file Fix of the same file, coming later, is skipped.
+    let places = top_three_places(vec![
+        ("SEC-FILE-1", "high", "a.ts", 0),
+        ("SEC-LINES-1", "critical", "a.ts", 6),
+        ("SEC-LINES-1", "critical", "b.ts", 1),
+    ]);
+    assert_eq!(places, vec![("a.ts".to_string(), 6)]);
+}

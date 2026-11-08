@@ -1650,12 +1650,16 @@ pub fn build_report_json(
         std::collections::HashSet::new();
     let mut selected_files: std::collections::HashSet<(&str, &str)> =
         std::collections::HashSet::new();
+    // The files of chosen line places: a whole-file row of such a file is skipped too.
+    let mut selected_line_files: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
         }
         if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line))
             || (f.line > 0 && selected_files.contains(&(f.repo.as_str(), f.path.as_str())))
+            || (f.line == 0 && selected_line_files.contains(&(f.repo.as_str(), f.path.as_str())))
         {
             continue;
         }
@@ -1688,10 +1692,14 @@ pub fn build_report_json(
             selected_places.insert((p.repo.as_str(), p.path.as_str(), p.line));
             if p.line == 0 {
                 selected_files.insert((p.repo.as_str(), p.path.as_str()));
+            } else {
+                selected_line_files.insert((p.repo.as_str(), p.path.as_str()));
             }
         }
         if f.line == 0 {
             selected_files.insert((f.repo.as_str(), f.path.as_str()));
+        } else {
+            selected_line_files.insert((f.repo.as_str(), f.path.as_str()));
         }
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
