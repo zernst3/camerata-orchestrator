@@ -249,14 +249,20 @@ async fn with_no_flag_the_group_reviewer_runs_on_fable_and_the_environment_is_ig
     // was escalated, in the closed reason vocabulary.
     let text = String::from_utf8(findings_json).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut seen = 0;
     for row in doc["findings"].as_array().unwrap() {
         if let Some(reason) = row["escalation_reason"].as_str() {
+            seen += 1;
             assert!(
                 camerata_api_types::review::EscalationReason::parse(reason).is_some(),
                 "{reason} is not in the reason vocabulary"
             );
         }
     }
+    assert!(
+        seen >= 1,
+        "the operator export names at least one escalation reason"
+    );
     for internal in [
         "escalation_why",
         "subgroup_cause",
