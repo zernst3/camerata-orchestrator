@@ -327,6 +327,8 @@ pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
 pub struct RunFit {
     /// Sites stage 1 calibrates per file the scan reads.
     pub sites_per_file: f64,
+    /// The most sites per file any run showed, which the ceiling beside the estimate is quoted on.
+    pub sites_per_file_high: f64,
     /// Input tokens the fix stage writes per site on the CLI backend (the CLI's own prompt of each
     /// call is priced beside it).
     pub fix_cli_input_tokens_per_site: f64,
@@ -350,6 +352,10 @@ pub struct RunFit {
 pub const RUN_FIT: RunFit = RunFit {
     // 2.22, 3.05, 2.93 and 2.61 sites a file: the median is 2.77.
     sites_per_file: 2.78,
+    // 300 sites over 87 files (hearth, run of 2026-11-05, engine 74d3ef07, whose calibration stage
+    // finished before the run was stopped): the largest rate seen in any run. That engine
+    // calibrated about 12 percent more sites than today's, so it is a high side, not an expectation.
+    sites_per_file_high: 3.45,
     // The fix stage wrote 929, 955, 1,006 and 931 tokens to the cache per site beyond the CLI's own
     // prompt of each call (the old 1,200 was 20 percent over the largest).
     fix_cli_input_tokens_per_site: 1_010.0,
@@ -1074,6 +1080,11 @@ pub struct RunFlags {
 
 /// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
 /// calls it prices.
+/// The sites the ceiling beside the estimate is quoted on: the files times the highest rate seen.
+pub fn estimated_ceiling_sites(repo: &RunRepoInput, mode: &str, backend: ProjectBackend) -> usize {
+    run_findings(&RUN_FIT, repo, mode, backend).1 as usize
+}
+
 pub fn estimated_sites(repo: &RunRepoInput, mode: &str, backend: ProjectBackend) -> usize {
     run_findings(&RUN_FIT, repo, mode, backend).1 as usize
 }

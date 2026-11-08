@@ -352,6 +352,7 @@ fn fit_from(runs: &[&SavedRun]) -> RunFit {
         runs.iter().map(|r| of(r)).fold(f64::MIN, f64::max)
     };
     RunFit {
+        sites_per_file_high: RUN_FIT.sites_per_file_high,
         sites_per_file: median(
             runs.iter()
                 .map(|r| r.stage1_sites as f64 / r.files as f64)
@@ -483,6 +484,66 @@ fn the_estimate_follows_the_files_of_the_repository() {
     );
     // No file count: the sites are sized from the code, as they were.
     assert!(estimated_sites(&repo(0), "parallel", ProjectBackend::Cli) > 100);
+}
+
+/// The ceiling beside the estimate covers the spread of the site rate: at least 1.2 times the
+/// expected figure on every saved run, and quoted on the highest rate seen (hearth's 3.45 a file).
+#[test]
+fn the_ceiling_covers_the_site_rate_spread() {
+    for run in ALL_RUNS {
+        let repo = RunRepoInput {
+            repo: "saved".to_string(),
+            code_chars: run.code_chars,
+            files: run.files,
+            selected: run.selected,
+            multi_option_selected: run.multi_option,
+            routing_groups: run.routing_groups,
+        };
+        let models = RunModels {
+            scan: priced("claude-sonnet-5-5", 2.0, 10.0),
+            calibration: priced("claude-opus-5-5", 4.0, 20.0),
+            group_review: Some(priced("claude-fable-5-1", 10.0, 50.0)),
+            fix: Some(priced("claude-haiku-5-5", 0.10, 0.50)),
+            clone_judge: Some(priced("claude-haiku-5-5", 0.10, 0.50)),
+        };
+        let flags = RunFlags {
+            deep: false,
+            backend: ProjectBackend::Cli,
+            terse_output: true,
+        };
+        let b = estimate_run_cost_bounds(&repo, "parallel", &models, flags);
+        assert!(
+            b.ceiling_usd >= b.expected.1 * 1.2,
+            "{}: ceiling ${:.2} against expected ${:.2}",
+            run.name,
+            b.ceiling_usd,
+            b.expected.1
+        );
+        for backend in [ProjectBackend::Cli, ProjectBackend::Api] {
+            assert_eq!(
+                estimated_ceiling_sites(&repo, "parallel", backend),
+                (3.45 * run.files as f64).ceil() as usize
+            );
+        }
+    }
+}
+
+/// The site count is a property of the scan, not of the transport: both backends are quoted the
+/// same sites for a repository whose files are known.
+#[test]
+fn both_backends_are_quoted_the_same_sites_for_known_files() {
+    let repo = RunRepoInput {
+        repo: "x".to_string(),
+        code_chars: 26_544,
+        files: 36,
+        selected: 152,
+        multi_option_selected: 34,
+        routing_groups: 4,
+    };
+    assert_eq!(
+        estimated_sites(&repo, "parallel", ProjectBackend::Api),
+        estimated_sites(&repo, "parallel", ProjectBackend::Cli)
+    );
 }
 
 /// The API backend keeps the sizing it had: no saved API run records its sites, so the files are
