@@ -215,6 +215,9 @@ struct RawEscalation {
     stage2_severity: Option<String>,
     why: String,
     site: (String, String, usize),
+    /// The engine added this candidate (no stage 2 nomination): it sorts after every reasoned
+    /// candidate of its severity.
+    mechanical: bool,
 }
 
 impl RawEscalation {
@@ -267,6 +270,8 @@ struct RankedSite {
     node_id: String,
     /// The site's first key, for a stable order.
     key: String,
+    /// Every row at the site was added by the engine, not nominated by the group reviewer.
+    mechanical: bool,
 }
 
 impl RankedSite {
@@ -295,6 +300,7 @@ impl RankedSite {
             stage2_rank,
             node_id: members[0].node_id.clone(),
             key: members[0].key.clone(),
+            mechanical: members.iter().all(|m| m.mechanical),
             members,
         }
     }
@@ -306,7 +312,11 @@ impl RankedSite {
 ///    reason it was given. An escalation naming a site that is not in `rows` is ignored.
 /// 2. The engine adds a candidate, reason `evidence_unverified`, for every row whose quoted
 ///    evidence was not found (D5: the release gate refuses that row without a decision anyway),
-///    and lifts a `needs_more_code` escalation of such a row to it.
+///    and lifts a `needs_more_code` escalation of such a row to it. It also adds one,
+///    reason `conflicting_verdicts`, for a row whose shown severity (critical or high) is a
+///    rule minimum above what stage 1 rated, when stage 1 called it real and no row at its site
+///    was nominated (R-5). Such a candidate sorts after every reasoned candidate of its
+///    severity, and is never past the budget.
 /// 3. Rows at one site (the same repo, path and line) share one slot whatever their rules (R-1):
 ///    the site takes its highest severity and its best reason, and every row keeps its own reason.
 /// 4. The sites are sorted by severity (critical first), then by reason rank (R-2: a low row with
@@ -343,6 +353,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                         stage2_severity: stage2_severity_of(row),
                         why: e.why.clone(),
                         site: site_of(row),
+                        mechanical: false,
                     },
                 );
             }
@@ -375,10 +386,55 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                               release gate needs a decision on this site."
                             .to_string(),
                         site: site_of(f),
+                        mechanical: false,
                     },
                 );
             }
         }
+    }
+    // A rule's declared minimum severity can outrank both the per-site reviewer and the group
+    // reviewer (R-5): the shown severity is critical or high, above what stage 1 rated, stage 1
+    // called the site real, and no row at the site was nominated. Nobody asked the architect, so
+    // the engine does, once per site, behind every reasoned candidate of the same severity. A run
+    // saved before stage 1's rating was kept has no rating to compare, and yields none.
+    let nominated_sites: std::collections::HashSet<(String, String, usize)> =
+        raw.values().map(|r| r.site.clone()).collect();
+    for f in rows {
+        if raw.contains_key(&f.site_key) || nominated_sites.contains(&site_of(f)) {
+            continue;
+        }
+        let Some(stage1) = crate::ai_audit::stage1_of(f) else {
+            continue;
+        };
+        let Some(rated) = stage1.severity.as_deref() else {
+            continue;
+        };
+        let shown = f.severity.to_ascii_lowercase();
+        if stage1.real != crate::ai_audit::Real::Yes
+            || !matches!(shown.as_str(), "critical" | "high")
+            || crate::ai_audit::severity_rank(&shown) <= crate::ai_audit::severity_rank(rated)
+        {
+            continue;
+        }
+        raw.insert(
+            f.site_key.clone(),
+            RawEscalation {
+                node_id: f.group_path.get(1).cloned().unwrap_or_default(),
+                key: f.site_key.clone(),
+                reason: EscalationReason::ConflictingVerdicts,
+                convention: crate::ai_audit::is_convention_rule_row(f),
+                stage2_rank: 0,
+                severity: f.severity.clone(),
+                stage2_severity: stage2_severity_of(f),
+                why: format!(
+                    "The rule's minimum severity ({}) is above what the per-site reviewer rated \
+                     ({rated}), and no reviewer escalated the site. The architect decides.",
+                    f.severity
+                ),
+                site: site_of(f),
+                mechanical: true,
+            },
+        );
     }
 
     // One slot per site.
@@ -413,7 +469,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
     let mut by_reason: BTreeMap<_, BTreeMap<String, Vec<RankedSite>>> = BTreeMap::new();
     for site in sites {
         by_reason
-            .entry((sev(&site.severity), site.reason_rank))
+            .entry((sev(&site.severity), site.mechanical, site.reason_rank))
             .or_default()
             .entry(site.node_id.clone())
             .or_default()
