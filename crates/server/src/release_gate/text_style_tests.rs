@@ -435,6 +435,29 @@ fn a_verbatim_code_column_is_not_held_to_the_text_style_in_the_workbook() {
     assert!(!text_style::xlsx_problems("w.xlsx", &book(false)).is_empty());
 }
 
+#[test]
+fn only_a_tables_header_row_opens_a_verbatim_code_column_in_the_workbook() {
+    let code = code_with_a_dash();
+    // A term cell that reads "Code seen" far down a sheet (the Glossary defines that word) is not
+    // a column header: the cells below it are our prose.
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.write_string(0, 0, "Term").expect("header");
+    ws.write_string(1, 0, "Fix").expect("term");
+    ws.write_string(20, 0, "Code seen").expect("term");
+    ws.write_string(21, 0, code.as_str()).expect("cell");
+    let glossary_like = wb.save_to_buffer().expect("workbook");
+    assert!(!text_style::xlsx_problems("w.xlsx", &glossary_like).is_empty());
+    // A header on the third row (All source rows opens with two lines of its own) still counts.
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.write_string(0, 0, "Raw record").expect("note");
+    ws.write_string(2, 0, "Code seen").expect("header");
+    ws.write_string(3, 0, code.as_str()).expect("cell");
+    let source_rows = wb.save_to_buffer().expect("workbook");
+    assert!(text_style::xlsx_problems("w.xlsx", &source_rows).is_empty());
+}
+
 /// Plant `text` on a surface, in a field that is prose (a dataset's `snippet` is the client's code
 /// and is not held to the text style, so the datasets get a `detail` here).
 fn plant_prose(pkg: &mut ProductPackage, surface: Surface, text: &str) {

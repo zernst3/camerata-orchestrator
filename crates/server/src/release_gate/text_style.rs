@@ -310,9 +310,12 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     match xlsx_cells(bytes) {
         Ok(cells) => {
             // The client's own code sits in the column under a "Snippet" or "Code seen" header.
+            // A header sits in a table's first rows (All source rows opens with two lines of its
+            // own); the same words far down a sheet are a term the Glossary defines, not a header.
+            const HEADER_ROWS: usize = 3;
             let header_cells: Vec<_> = cells
                 .iter()
-                .filter(|c| is_verbatim_code(&c.text))
+                .filter(|c| c.row < HEADER_ROWS && is_verbatim_code(&c.text))
                 .map(|c| (c.sheet.clone(), c.col, c.row))
                 .collect();
             for cell in cells {
