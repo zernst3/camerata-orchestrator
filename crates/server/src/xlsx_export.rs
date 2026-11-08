@@ -1814,7 +1814,7 @@ pub fn build_workbook(
     };
 
     // Where each problem sits on each sheet, so a link on one sheet can name a row of another.
-    let mut lay = sheets::Layout::new(&rows, &plan_rows, opts.internal, multi_repo);
+    let mut lay = sheets::Layout::new(&rows, &plan_rows, &sorted_deps, opts.internal, multi_repo);
     for (i, c) in convention_rows.iter().enumerate() {
         lay.placement
             .entry(c.place_id.clone())

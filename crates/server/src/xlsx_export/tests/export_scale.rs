@@ -193,7 +193,7 @@ fn more_places_than_one_sheet_holds_continue_on_a_second_sheet() {
     let parents: Vec<&FindingRow> = rows.iter().collect();
     let places = build_site_rows(&parents, &[]);
     assert_eq!(places.len(), 7);
-    let lay = sheets::Layout::new(&rows, &[], false, false);
+    let lay = sheets::Layout::new(&rows, &[], &[], false, false);
     let names = vec![
         "All source rows".to_string(),
         "All source rows (2)".to_string(),

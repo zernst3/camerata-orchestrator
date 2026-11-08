@@ -1069,11 +1069,6 @@ fn check_coverage(xlsx: &[u8], rows: &[Value]) {
     let projection: Projection = vec![
         c("Area", |r| text(r, "category")),
         c("Rule", |r| text(r, "title")),
-        c("Result", |r| match r["findings_count"].as_u64().unwrap() {
-            0 => "Clean".to_string(),
-            1 => "Found 1 place".to_string(),
-            n => format!("Found {n} places"),
-        }),
         c("How we checked", |r| {
             match r["citation_kind"].as_str().unwrap() {
                 "grounded" => "Deterministic",
@@ -1093,6 +1088,29 @@ fn check_coverage(xlsx: &[u8], rows: &[Value]) {
         .filter(|r| r["Result"] != "Alternative chosen")
         .collect();
     assert_sheet_matches("Rules checked", &checked, &refs, &projection);
+    // The Result: clean is clean; a count reads "Found n places", except that a rule whose rows
+    // are all conventions or all unfinished says so instead of calling them places with problems.
+    for r in rows {
+        let line = checked
+            .iter()
+            .find(|s| s["Rule id"] == text(r, "rule_id"))
+            .expect("the rule has its row");
+        let n = r["findings_count"].as_u64().unwrap();
+        let result = &line["Result"];
+        let found = match n {
+            1 => "Found 1 place".to_string(),
+            n => format!("Found {n} places"),
+        };
+        match n {
+            0 => assert_eq!(result, "Clean"),
+            _ => assert!(
+                *result == found
+                    || result == "Convention noted, no problem"
+                    || result == "Could not be completed",
+                "{result:?}"
+            ),
+        }
+    }
 }
 
 fn check_rules_applied(xlsx: &[u8], rows: &[Value]) {

@@ -56,7 +56,10 @@ pub(super) fn representative_rows(rows: &[FindingRow]) -> Vec<&FindingRow> {
 pub(super) struct Layout<'a> {
     pub internal: bool,
     pub multi_repo: bool,
-    pub plan: &'a [SubgroupFacts],
+    /// The fixes in plan order: the groups that have problems or dependency advisories to go to.
+    /// A group that holds only conventions, or only rules that could not be completed, is not a
+    /// fix and is not here.
+    pub plan: Vec<&'a SubgroupFacts>,
     /// The problems in the order All problems prints them.
     pub problems: Vec<&'a FindingRow>,
     /// Place id to the sheet and zero-based row that stands for it.
@@ -67,22 +70,63 @@ pub(super) struct Layout<'a> {
     pub first_problem_of_fix: HashMap<String, u32>,
     /// Rule id to the first row of its problems on All problems.
     pub first_problem_of_rule: HashMap<String, u32>,
+    /// Fix id to the first row of its advisories on Dependencies.
+    pub first_dep_of_fix: HashMap<String, u32>,
+    /// Rule id to the Place id of its first convention row, for rules that only hold conventions.
+    pub convention_place_of_rule: HashMap<String, String>,
+    /// Rules that hold rows which could not be completed.
+    pub not_checked_rules: std::collections::HashSet<String>,
 }
 
 impl<'a> Layout<'a> {
     pub(super) fn new(
         rows: &'a [FindingRow],
-        plan: &'a [SubgroupFacts],
+        all_groups: &'a [SubgroupFacts],
+        sorted_deps: &[DepRow],
         internal: bool,
         multi_repo: bool,
     ) -> Self {
+        let mut problems = representative_rows(rows);
+        // A group is a fix only when something on All problems or Dependencies belongs to it.
+        let mut with_problems: std::collections::HashSet<&str> = problems
+            .iter()
+            .map(|r| r.facts.group.as_str())
+            .filter(|g| !g.is_empty())
+            .collect();
+        let mut first_dep_of_fix = HashMap::new();
+        for (i, d) in sorted_deps.iter().enumerate() {
+            if !d.facts.group.is_empty() {
+                with_problems.insert(d.facts.group.as_str());
+                first_dep_of_fix
+                    .entry(d.facts.group.clone())
+                    .or_insert(i as u32 + 1);
+            }
+        }
+        let plan: Vec<&SubgroupFacts> = all_groups
+            .iter()
+            .filter(|g| with_problems.contains(g.id.as_str()))
+            .collect();
         let fix_at: HashMap<String, (u32, usize)> = plan
             .iter()
             .enumerate()
             .map(|(i, g)| (g.id.clone(), (i as u32 + 1, i)))
             .collect();
-        let mut problems = representative_rows(rows);
-        problems.sort_by_key(|r| fix_order_key(r, &fix_at, plan));
+        problems.sort_by_key(|r| fix_order_key(r, &fix_at, &plan));
+        let mut convention_place_of_rule = HashMap::new();
+        let mut not_checked_rules = std::collections::HashSet::new();
+        for r in rows.iter().filter(|r| !r.is_fp) {
+            match kind_sheet(r) {
+                KindSheet::Conventions => {
+                    convention_place_of_rule
+                        .entry(r.rule_id.clone())
+                        .or_insert_with(|| r.facts.site_id.clone());
+                }
+                KindSheet::Coverage => {
+                    not_checked_rules.insert(r.rule_id.clone());
+                }
+                KindSheet::Findings => {}
+            }
+        }
         let mut placement = HashMap::new();
         let mut first_problem_of_fix = HashMap::new();
         let mut first_problem_of_rule = HashMap::new();
@@ -109,6 +153,9 @@ impl<'a> Layout<'a> {
             fix_at,
             first_problem_of_fix,
             first_problem_of_rule,
+            first_dep_of_fix,
+            convention_place_of_rule,
+            not_checked_rules,
         }
     }
 }
@@ -118,7 +165,7 @@ impl<'a> Layout<'a> {
 fn fix_order_key(
     row: &FindingRow,
     fix_at: &HashMap<String, (u32, usize)>,
-    plan: &[SubgroupFacts],
+    plan: &[&SubgroupFacts],
 ) -> (Sequence, usize, u8, u8, String, String, usize) {
     let (sequence, position) = match fix_at.get(&row.facts.group) {
         Some((_, i)) => (plan[*i].sequence, *i),
@@ -528,7 +575,22 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
                     }
                 ),
             ),
-            None => Cell::Empty,
+            None => match lay.first_dep_of_fix.get(&g.id) {
+                Some(row) => Cell::link(
+                    v::DEPENDENCIES,
+                    *row,
+                    format!(
+                        "{} {}",
+                        g.open_site_total,
+                        if g.open_site_total == 1 {
+                            "advisory"
+                        } else {
+                            "advisories"
+                        }
+                    ),
+                ),
+                None => Cell::Empty,
+            },
         };
         let what_is_wrong = if g.cause.is_empty() {
             g.summary.clone()
@@ -777,8 +839,14 @@ pub(super) fn rules_checked_table(
     for row in coverage {
         // A result in words, not a bare integer: "0" does not say whether the rule was clean or
         // never ran, and the never-ran rules are named on Not checked.
+        let has_problems = lay.first_problem_of_rule.contains_key(&row.rule_id);
         let mut result = if row.findings_count == 0 {
             "Clean".to_string()
+        } else if !has_problems && lay.convention_place_of_rule.contains_key(&row.rule_id) {
+            // A convention is what the code does, not a place with a problem.
+            "Convention noted, no problem".to_string()
+        } else if !has_problems && lay.not_checked_rules.contains(&row.rule_id) {
+            "Could not be completed".to_string()
         } else {
             format!(
                 "Found {} {}",
@@ -843,6 +911,12 @@ pub(super) fn rules_checked_table(
             Cell::link(v::FIX_PLAN, at, &g.label)
         } else if let Some(at) = lay.first_problem_of_rule.get(&row.rule_id) {
             Cell::link(v::ALL_PROBLEMS, *at, "See the problems")
+        } else if let Some((sheet, at)) = lay
+            .convention_place_of_rule
+            .get(&row.rule_id)
+            .and_then(|place| lay.placement.get(place))
+        {
+            Cell::link(sheet, *at, "See the convention")
         } else {
             Cell::Empty
         };
@@ -1326,6 +1400,9 @@ pub(super) fn scorecard(
     report: &crate::onboard::ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> BTreeMap<String, [usize; 4]> {
+    // KNOWN GAP (follow-up with the PDF work order): this counts every row that is not ruled out,
+    // conventions and the Info row (as Low) included, exactly as the PDF scorecard does, so the
+    // Total can exceed the All problems row count. Both move to problems only together.
     let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
     for row in live_rows {
         let counts = by_area.entry(row.category.clone()).or_insert([0; 4]);

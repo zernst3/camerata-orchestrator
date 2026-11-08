@@ -218,8 +218,12 @@ fn start_here_says_what_each_sheet_is_and_how_many_rows_it_holds() {
         };
         // An empty table carries one line of words in place of a row.
         let listed: usize = row[2].parse().unwrap();
+        let held_rows = held.len().saturating_sub(above);
+        // A count of 0 is true only for an empty table, whose one line is the note.
+        let empty_table =
+            listed == 0 && held_rows == 1 && held[above].iter().skip(1).all(|c| c.is_empty());
         assert!(
-            listed == held.len().saturating_sub(above) || listed == 0,
+            listed == held_rows || empty_table,
             "{:?}: Start here says {listed}, the sheet holds {}",
             info.name,
             held.len().saturating_sub(above)
@@ -346,12 +350,16 @@ fn the_fix_plan_and_all_problems_link_to_each_other_by_fix_id() {
     let mut followed = 0;
     for (i, row) in plan.iter().enumerate().skip(1) {
         let col_letter = col_letter(go);
-        let Some((sheet, target)) = plan_links.get(&format!("{col_letter}{}", i + 1)) else {
-            continue;
-        };
-        assert_eq!(sheet, v::ALL_PROBLEMS);
+        let (sheet, target) = plan_links
+            .get(&format!("{col_letter}{}", i + 1))
+            .unwrap_or_else(|| panic!("the fix in row {} links to no places", i + 1));
+        assert!(
+            sheet == v::ALL_PROBLEMS || sheet == v::DEPENDENCIES,
+            "the link goes to {sheet:?}"
+        );
+        let landed = table(&xlsx, sheet);
         assert_eq!(
-            cell_of(&problems, target - 1, v::H_FIX_ID),
+            cell_of(&landed, target - 1, v::H_FIX_ID),
             row[fix_id_col],
             "the link lands on another fix's place"
         );
@@ -756,4 +764,59 @@ fn the_word_pattern_names_only_how_services_follow_rules() {
             assert!(!has_pattern(h), "header {h:?} on {name:?} uses pattern");
         }
     }
+}
+
+/// A group that holds only conventions is not a fix: the Fix plan lists a group only when it has
+/// problems (or dependency advisories) to go to, every row links to them, and Rules checked does
+/// not call a convention a place with a problem.
+#[test]
+fn the_fix_plan_lists_only_fixes_and_rules_checked_never_calls_a_convention_a_problem() {
+    use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+    let mut report = mixed_sealed().into_inner();
+    let mut convention = sql_row("src/api/list.rs", 7);
+    convention.rule_id = "ARCH-PAGINATION-1".to_string();
+    convention.severity = "info".to_string();
+    convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+        convention_option_id: "cursor".to_string(),
+        convention_label: "Cursor pagination".to_string(),
+    }));
+    report.findings.push(convention);
+    report
+        .provenance
+        .audited_rule_ids
+        .push("ARCH-PAGINATION-1".to_string());
+    let sealed = report.seal();
+    let xlsx = workbook_of(&apply_overlay(&sealed, &[], &[], &[]), false);
+
+    let plan = table(&xlsx, v::FIX_PLAN);
+    let go = column(&plan, v::H_GO_TO_PLACES).unwrap();
+    let rules = column(&plan, v::H_RULES).unwrap();
+    let order = column(&plan, v::H_ORDER).unwrap();
+    let linked: BTreeSet<String> = links(&xlsx, v::FIX_PLAN)
+        .into_iter()
+        .map(|(cell, _, _)| cell)
+        .collect();
+    assert!(plan.len() > 1, "the fixture has fixes");
+    for (i, row) in plan.iter().enumerate().skip(1) {
+        assert!(
+            linked.contains(&format!("{}{}", col_letter(go), i + 1)),
+            "the fix {:?} has no link to its places",
+            row[column(&plan, v::H_FIX).unwrap()]
+        );
+        assert!(
+            !row[rules].contains("ARCH-PAGINATION-1"),
+            "a convention-only group is not a fix: {row:?}"
+        );
+        assert_eq!(row[order], i.to_string(), "Order is 1, 2, 3 without gaps");
+    }
+
+    let checked = table(&xlsx, v::RULES_CHECKED);
+    let at = (1..checked.len())
+        .find(|r| cell_of(&checked, *r, v::H_RULE_ID) == "ARCH-PAGINATION-1")
+        .expect("the convention's rule was checked");
+    let result = cell_of(&checked, at, v::H_RESULT);
+    assert!(
+        !result.starts_with("Found"),
+        "a convention is not a place with a problem: {result:?}"
+    );
 }
