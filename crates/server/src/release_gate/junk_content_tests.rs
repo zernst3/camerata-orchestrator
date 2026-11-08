@@ -332,3 +332,27 @@ fn a_standalone_audit_of_a_zip_reports_junk_but_not_wording() {
     .expect("wording never blocks");
     assert!(audit_zip(&wording.bytes, None).is_clean());
 }
+
+/// An exported detail reads `Title: explanation`. A colon inside an ordinary sentence is not that
+/// join, and a tail that merely starts with a filler word is not an empty explanation.
+#[test]
+fn a_detail_that_merely_contains_a_colon_is_not_junked_for_its_tail() {
+    use crate::junk_finding::{classify_row, JunkReason};
+    let junk = |detail: &str| classify_row("AI-RAW-SQL", "The note", "db.query(sql)", detail).junk;
+    for detail in [
+        "The note: placeholder text is used for the sample config and is replaced at deploy.",
+        "Check this: tbd items stay in the backlog until the next review.",
+        "The handler: x-forwarded-for is trusted without a check.",
+        // A sentence with a colon near its end is not a title and an explanation: the head is
+        // far longer than a headline, so a filler word after the colon is part of the sentence.
+        "Every handler in the billing module reads the tenant id from the request body and never \
+         compares it with the session, which lets one tenant read the rows of another: unknown",
+        "The query is built from the URL. Nothing checks the owner: todo",
+    ] {
+        assert!(junk(detail).is_empty(), "{detail}");
+    }
+    // The shapes the fallback exists for are still found.
+    assert!(junk("Raw SQL:").contains(&JunkReason::EmptyExplanation));
+    assert!(junk("Raw SQL: x").contains(&JunkReason::EmptyExplanation));
+    assert!(junk("Raw SQL: n/a.").contains(&JunkReason::EmptyExplanation));
+}

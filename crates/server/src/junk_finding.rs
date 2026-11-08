@@ -299,14 +299,28 @@ fn explanation_of(detail: &str) -> &str {
     if let Some((_, rest)) = detail.split_once(crate::ai_audit::HEADLINE_SEP) {
         return rest;
     }
-    if let Some((_, rest)) = detail.split_once(": ") {
-        return rest;
-    }
-    if detail.trim_end().ends_with(':') {
-        return "";
+    // The export's join is a title, a colon and the explanation. Only a head that reads as a
+    // title (one short line, no sentence end) is that join; a colon inside a sentence is not.
+    let title_like = |head: &str| {
+        head.chars().count() <= TITLE_LENGTH_CAP
+            && !head.contains(". ")
+            && !head.contains("? ")
+            && !head.contains("! ")
+    };
+    if let Some((head, rest)) = detail.split_once(": ") {
+        if title_like(head) {
+            return rest;
+        }
+    } else if let Some(head) = detail.trim_end().strip_suffix(':') {
+        if title_like(head) {
+            return "";
+        }
     }
     detail
 }
+
+/// The longest head, in characters, that still reads as a title in `Title: explanation`.
+const TITLE_LENGTH_CAP: usize = 100;
 
 /// The parts of a row's text a model wrote: the whole, and each side of the headline separator.
 fn text_parts(text: &str) -> Vec<&str> {
