@@ -655,14 +655,14 @@ async fn a_floored_row_shows_stage1_its_own_severity_and_agreement_is_no_disagre
         .find(|l| l.starts_with("0: "))
         .expect("member line 0");
     assert!(
-        floored.contains("high (rule minimum; per-site reviewer: medium)"),
+        floored.contains("high (floor after review; per-site reviewer: medium)"),
         "{floored}"
     );
     let plain = prompt
         .lines()
         .find(|l| l.starts_with("1: "))
         .expect("member line 1");
-    assert!(!plain.contains("rule minimum"), "{plain}");
+    assert!(!plain.contains("floor after review"), "{plain}");
 }
 
 #[test]
@@ -676,7 +676,7 @@ fn a_run_saved_without_stage1_severity_still_loads_and_prints_the_shown_one() {
     assert_eq!(record.severity, None);
     let line = member_line(&f, 0, false);
     assert!(line.contains("| high |"), "{line}");
-    assert!(!line.contains("rule minimum"), "{line}");
+    assert!(!line.contains("floor after review"), "{line}");
 }
 
 #[tokio::test]

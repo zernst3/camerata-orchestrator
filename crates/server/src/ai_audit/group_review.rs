@@ -857,7 +857,10 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     // rated; say so, so the group reviewer never reads the minimum as that reviewer's call.
     let severity = match stage1.as_ref().and_then(|s| s.severity.as_deref()) {
         Some(rated) if !rated.eq_ignore_ascii_case(&f.severity) => {
-            format!("{} (rule minimum; per-site reviewer: {rated})", f.severity)
+            format!(
+                "{} (floor after review; per-site reviewer: {rated})",
+                f.severity
+            )
         }
         _ => f.severity.clone(),
     };
@@ -1383,7 +1386,7 @@ fn apply_rule(
             let f = &mut findings[m.row];
             // Stage 1's own value, read from the row, whatever the reply quotes.
             let stage1_value = match d.field {
-                // Stage 1's own rating, not the severity a rule minimum raised it to; a run
+                // Stage 1's own rating, not the severity a severity floor raised it to; a run
                 // saved before that was kept falls back to the row's severity.
                 DisagreementField::Severity => stage1_of(f)
                     .and_then(|s| s.severity)
