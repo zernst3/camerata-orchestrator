@@ -349,6 +349,8 @@ fn the_methodology_holds_no_engine_internals() {
         "Calibration model",
         "of a budget of",
         "Escalated ",
+        "Model backend",
+        "Scanned with Camerata",
     ] {
         assert!(!b.flat.contains(internal), "{internal:?} is printed");
     }
@@ -730,4 +732,48 @@ fn the_most_serious_problems_say_for_review_until_they_are_reviewed() {
         "{}",
         reviewed.escalations.intro
     );
+}
+
+/// F5: every "<name> sheet" the PDF names is a tab of the workbook.
+#[test]
+fn every_sheet_the_pdf_names_is_a_workbook_tab() {
+    let rule = super::super::coverage_gaps::ScopeLimitedRuleJson {
+        rule_id: "SEC-A-1".to_string(),
+        files_checked: 3,
+        files_total: 9,
+        changed_files_only: false,
+        scope: "language".to_string(),
+    };
+    let words = crate::report_export::PdfWordsJson::new();
+    let mut strings = vec![
+        super::super::coverage_gaps::scope_limited_sentence(&[rule]).unwrap(),
+        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 1),
+        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 2),
+        words.details_intro.clone(),
+        words.skipped_files_more.clone(),
+        words.failed_passes_more.clone(),
+    ];
+    if let Some(b) = fixture_sized() {
+        strings.push(b.data.clone());
+        strings.push(b.flat.clone());
+    }
+    let tabs: Vec<&str> = v::SHEETS.iter().map(|s| s.name).collect();
+    for text in strings {
+        for (at, _) in text.match_indices(" sheet") {
+            let after = &text[at + 6..];
+            if after.starts_with('s') {
+                continue;
+            }
+            let before = &text[..at];
+            assert!(
+                tabs.iter().any(|t| before.ends_with(t)),
+                "the PDF names a sheet that is not a tab: ...{}",
+                &before[before.len().saturating_sub(30)..]
+            );
+        }
+        assert!(
+            !text.contains("see Coverage"),
+            "a pointer to a Coverage tab"
+        );
+    }
 }

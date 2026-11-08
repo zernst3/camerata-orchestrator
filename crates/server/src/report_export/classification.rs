@@ -1062,9 +1062,10 @@ pub(crate) fn ai_tier_note_for(
     if repos_not_run > 0 && repos_not_run >= total_repos {
         // The tier ran nowhere: say so, and make no claim about a review that did not happen.
         return format!(
-            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+            "The advisory language-model tier did not run for {}; see the {} sheet. Every finding \
              produced in this run came from the deterministic tier.",
-            repos(repos_not_run)
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         );
     }
     let ran = match review_state {
@@ -1088,8 +1089,9 @@ pub(crate) fn ai_tier_note_for(
         ran
     } else {
         format!(
-            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
-            repos(repos_not_run)
+            "{ran} The advisory language-model tier did not run for {}; see the {} sheet.",
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         )
     }
 }

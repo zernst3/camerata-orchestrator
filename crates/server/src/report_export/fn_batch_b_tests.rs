@@ -46,7 +46,7 @@ fn an_ai_error_on_one_of_two_repos_lists_only_that_repo() {
     );
     let note = &json.methodology.ai_tier_note;
     assert!(
-        note.contains("did not run for 1 repo; see Coverage."),
+        note.contains("did not run for 1 repo; see the Not checked sheet."),
         "{note}"
     );
 }
@@ -148,9 +148,7 @@ fn the_scope_sentence_promises_counts_not_file_lists() {
     let gaps = coverage_gaps(&scoped_scan());
     let note = gaps.scope_limited_note.as_deref().unwrap();
     assert!(
-        note.contains(
-            "The counts per rule are on the workbook's Coverage sheet and in findings.json."
-        ),
+        note.contains("The counts per rule are on the Rules checked sheet and in findings.json."),
         "{note}"
     );
     assert!(!note.contains("files each was checked against"), "{note}");

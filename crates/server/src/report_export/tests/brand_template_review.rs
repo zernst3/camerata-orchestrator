@@ -819,8 +819,8 @@ fn shipped_template_cover_table_omits_audit_and_calibration_model() {
     assert!(!cover_section.contains("Audit model"));
     assert!(!cover_section.contains("Calibration model"));
     assert!(
-        template.contains("Scanned with Camerata v"),
-        "the model/version provenance line must still render, just in Methodology"
+        template.contains("Inspection model:"),
+        "the inspection model line must still render, in Methodology (the engine version and the backend are in manifest.json)"
     );
 }
 

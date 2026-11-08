@@ -772,9 +772,10 @@
 
 #d.methodology.citation_note
 
-// The engine build, the rule library hash and the calibration model are in manifest.json, not
+// The engine build, the Camerata version, the model backend, the rule library hash and the
+// calibration model are in manifest.json, not
 // here: a reader of this report has no use for them.
-Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Model backend: #or_na(d.cover.model_backend).
+Inspection model: #or_na(d.cover.audit_model).
 
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
