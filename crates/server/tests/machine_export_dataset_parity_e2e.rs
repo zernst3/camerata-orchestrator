@@ -1050,7 +1050,13 @@ fn check_not_assessed(xlsx: &[u8], rows: &[Value]) {
     assert_sheet_matches("Not checked", &on_sheet, &refs, &projection);
 }
 
-fn check_coverage(xlsx: &[u8], rows: &[Value]) {
+fn check_coverage(
+    xlsx: &[u8],
+    rows: &[Value],
+    all_findings: &[Value],
+    conventions: &[Value],
+    not_assessed: &[Value],
+) {
     assert_uniform_keys("coverage", rows);
     // `citation_kind` is the machine tag behind the worksheet's "How we checked" wording.
     assert_key_accounting(
@@ -1088,28 +1094,32 @@ fn check_coverage(xlsx: &[u8], rows: &[Value]) {
         .filter(|r| r["Result"] != "Alternative chosen")
         .collect();
     assert_sheet_matches("Rules checked", &checked, &refs, &projection);
-    // The Result: clean is clean; a count reads "Found n places", except that a rule whose rows
-    // are all conventions or all unfinished says so instead of calling them places with problems.
+    // The Result, derived from the datasets: clean is clean; a rule with a problem row reads
+    // "Found n places"; a rule with no problem row whose rows are conventions reads "Convention
+    // noted, no problem"; one whose rows are unfinished reads "Could not be completed".
+    let rule_in = |set: &[Value], id: &str| set.iter().any(|r| text(r, "rule_id") == id);
     for r in rows {
+        let id = text(r, "rule_id");
         let line = checked
             .iter()
-            .find(|s| s["Rule id"] == text(r, "rule_id"))
+            .find(|s| s["Rule id"] == id)
             .expect("the rule has its row");
         let n = r["findings_count"].as_u64().unwrap();
-        let result = &line["Result"];
-        let found = match n {
-            1 => "Found 1 place".to_string(),
-            n => format!("Found {n} places"),
+        let has_problem = all_findings
+            .iter()
+            .any(|f| is_findings_sheet_kind(f) && text(f, "rule_id") == id);
+        let expected = if n == 0 {
+            "Clean".to_string()
+        } else if !has_problem && rule_in(conventions, &id) {
+            "Convention noted, no problem".to_string()
+        } else if !has_problem && rule_in(not_assessed, &id) {
+            "Could not be completed".to_string()
+        } else if n == 1 {
+            "Found 1 place".to_string()
+        } else {
+            format!("Found {n} places")
         };
-        match n {
-            0 => assert_eq!(result, "Clean"),
-            _ => assert!(
-                *result == found
-                    || result == "Convention noted, no problem"
-                    || result == "Could not be completed",
-                "{result:?}"
-            ),
-        }
+        assert_eq!(line["Result"], expected, "Result of {id}");
     }
 }
 
@@ -1242,7 +1252,13 @@ fn assert_every_dataset_agrees(
     check_conventions(&a.xlsx, &rows["conventions"]);
     check_dependencies(&a.xlsx, &rows["dependencies"]);
     check_not_assessed(&a.xlsx, &rows["not-assessed"]);
-    check_coverage(&a.xlsx, &rows["coverage"]);
+    check_coverage(
+        &a.xlsx,
+        &rows["coverage"],
+        &rows["all-findings"],
+        &rows["conventions"],
+        &rows["not-assessed"],
+    );
     check_rules_applied(&a.xlsx, &rows["rules-applied"]);
 }
 
