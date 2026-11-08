@@ -283,23 +283,30 @@ impl RankedSite {
                 &b.key,
             ))
         });
-        let severity = members
+        // A site stage 2 nominated is placed by its reasoned members; an engine-added row at
+        // it joins the slot without moving it.
+        let lead: Vec<&RawEscalation> = if members.iter().any(|m| !m.mechanical) {
+            members.iter().filter(|m| !m.mechanical).collect()
+        } else {
+            members.iter().collect()
+        };
+        let severity = lead
             .iter()
-            .map(RawEscalation::ordering_severity)
+            .map(|m| m.ordering_severity())
             .max_by_key(|s| crate::ai_audit::severity_rank(s))
             .unwrap_or_default()
             .to_string();
-        let stage2_rank = members
+        let stage2_rank = lead
             .iter()
             .map(|m| m.stage2_rank)
             .min_by_key(|r| rank_sort_key(*r))
             .unwrap_or(0);
         Self {
             severity,
-            reason_rank: members[0].reason.rank(),
+            reason_rank: lead[0].reason.rank(),
             stage2_rank,
-            node_id: members[0].node_id.clone(),
-            key: members[0].key.clone(),
+            node_id: lead[0].node_id.clone(),
+            key: lead[0].key.clone(),
             mechanical: members.iter().all(|m| m.mechanical),
             members,
         }
@@ -314,9 +321,10 @@ impl RankedSite {
 ///    evidence was not found (D5: the release gate refuses that row without a decision anyway),
 ///    and lifts a `needs_more_code` escalation of such a row to it. It also adds one,
 ///    reason `conflicting_verdicts`, for a row whose shown severity (critical or high) is a
-///    rule minimum above what stage 1 rated, when stage 1 called it real and no row at its site
-///    was nominated (R-5). Such a candidate sorts after every reasoned candidate of its
-///    severity, and is never past the budget.
+///    severity floor (applied after review) above what stage 1 rated, when stage 1 called it real
+///    and the row itself was not nominated (R-5). Such a candidate sorts after every reasoned
+///    candidate of its severity (at a nominated site it joins that slot without moving it), and
+///    is never past the budget.
 /// 3. Rows at one site (the same repo, path and line) share one slot whatever their rules (R-1):
 ///    the site takes its highest severity and its best reason, and every row keeps its own reason.
 /// 4. The sites are sorted by severity (critical first), then by reason rank (R-2: a low row with
@@ -392,23 +400,24 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             }
         }
     }
-    // A rule's declared minimum severity can outrank both the per-site reviewer and the group
-    // reviewer (R-5): the shown severity is critical or high, above what stage 1 rated, stage 1
-    // called the site real, and no row at the site was nominated. Nobody asked the architect, so
-    // the engine does, once per site, behind every reasoned candidate of the same severity. A run
-    // saved before stage 1's rating was kept has no rating to compare, and yields none.
-    let nominated_sites: std::collections::HashSet<(String, String, usize)> =
-        raw.values().map(|r| r.site.clone()).collect();
+    // A severity floor applied after review (a rule's declared minimum or a severity rule of
+    // thumb) can outrank both the per-site reviewer and the group reviewer (R-5): the shown
+    // severity is critical or high, above what stage 1 rated, and stage 1 called the site real.
+    // Nobody asked the architect, so the engine does, once per row, behind every reasoned
+    // candidate of the same severity. At a site stage 2 nominated, the row joins that slot with
+    // its own reason and does not move it. A run saved before stage 1's rating was kept has no
+    // rating to compare, and yields none.
     for f in rows {
-        if raw.contains_key(&f.site_key) || nominated_sites.contains(&site_of(f)) {
+        if raw.contains_key(&f.site_key) {
             continue;
         }
         let Some(stage1) = crate::ai_audit::stage1_of(f) else {
             continue;
         };
-        let Some(rated) = stage1.severity.as_deref() else {
+        let Some(rated) = stage1.severity.as_deref().map(str::to_ascii_lowercase) else {
             continue;
         };
+        let rated = rated.as_str();
         let shown = f.severity.to_ascii_lowercase();
         if stage1.real != crate::ai_audit::Real::Yes
             || !matches!(shown.as_str(), "critical" | "high")
@@ -427,8 +436,9 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 severity: f.severity.clone(),
                 stage2_severity: stage2_severity_of(f),
                 why: format!(
-                    "The rule's minimum severity ({}) is above what the per-site reviewer rated \
-                     ({rated}), and no reviewer escalated the site. The architect decides.",
+                    "The severity ({}) was raised by a severity floor after review, \
+                     above what the per-site reviewer rated ({rated}), and no reviewer \
+                     escalated this row. The architect decides.",
                     f.severity
                 ),
                 site: site_of(f),

@@ -1114,3 +1114,61 @@ fn a_site_stage_2_nominated_is_not_added_again() {
         EscalationReason::OutlierInGroup
     );
 }
+
+#[test]
+fn a_rule_minimum_row_joins_its_nominated_site_without_moving_it() {
+    let build = || {
+        let mut rows = vec![row_at(RULE_A, "x.sql", 8, "medium")];
+        let mut floor = floored_row("x.sql", "high", "yes", Some("medium"));
+        floor.line = 8;
+        rows.push(floor);
+        nominated(&mut rows, "hi", 2, "high");
+        let (mut tree, rows) = tree_of_rows(rows);
+        let f = row_of(&rows, RULE_A, "x.sql").clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, EscalationReason::OutlierInGroup, 1));
+        nominate(&mut tree, &rows, "hi", 2, EscalationReason::NeedsMoreCode);
+        (tree, rows)
+    };
+    let (tree, rows) = build();
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    let floor = candidate_of(&ranked, &rows, "x.sql");
+    assert!(floor.is_some(), "the floor row is a candidate at its site");
+    let floor = floor.unwrap();
+    assert_eq!(floor.reason, EscalationReason::ConflictingVerdicts);
+    let own = ranked
+        .candidates
+        .iter()
+        .find(|c| c.key == row_of(&rows, RULE_A, "x.sql").site_key)
+        .expect("the nominated row");
+    assert_eq!(own.slot, floor.slot, "one slot for the site");
+    assert_eq!(floor.slot, 3, "the site keeps its reasoned place");
+    assert!(!floor.escalated && !own.escalated);
+    assert_eq!(ranked.budget.escalated, 2);
+    assert_eq!(ranked.budget.over_budget, 0);
+    assert_eq!(
+        camerata_api_types::review::count_slots(ranked.candidates.iter()).0,
+        3
+    );
+
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(3));
+    let at_site: Vec<_> = ranked
+        .candidates
+        .iter()
+        .filter(|c| {
+            rows.iter()
+                .any(|f| f.site_key == c.key && f.path == "x.sql")
+        })
+        .collect();
+    assert_eq!(at_site.len(), 2);
+    assert!(at_site.iter().all(|c| c.escalated));
+}
+
+#[test]
+fn an_upper_cased_stage_1_rating_is_read_as_its_lower_case() {
+    let rows = vec![floored_row("a.sql", "high", "yes", Some("HIGH"))];
+    let (tree, rows) = tree_of_rows(rows);
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
+    assert!(ranked.candidates.is_empty(), "HIGH is not below high");
+}
