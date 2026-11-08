@@ -65,10 +65,12 @@ pub(crate) struct SiteFact {
     /// rows of several rules, and a Fix lists every one.
     pub rule_id: String,
     pub rule_title: String,
+    /// Whether the corpus has the rule; one it lacks is named by id beside its plain name.
+    pub rule_known: bool,
     pub citation: String,
     /// Other rules that flagged this place and were collapsed into the row: `(rule id, title,
     /// citation)`. A Fix lists them as rules of its own, so a collapse never hides a rule.
-    pub also_rules: Vec<(String, String, String)>,
+    pub also_rules: Vec<(String, String, String, bool)>,
 }
 
 impl SiteFact {
@@ -296,6 +298,7 @@ fn subgroup_facts_with(
                     waiting: String::new(),
                     rule_id: crate::dep_audit::DEP_AUDIT_RULE_ID.to_string(),
                     rule_title: "Known vulnerable dependency".to_string(),
+                    rule_known: true,
                     citation: String::new(),
                     also_rules: Vec::new(),
                 })
@@ -382,7 +385,8 @@ fn subgroup_facts_with(
                 String::new()
             },
             rule_id: r.rule_id.clone(),
-            rule_title: r.rule_title.clone(),
+            rule_title: own_name(&r.rule_id, corpus).0,
+            rule_known: own_name(&r.rule_id, corpus).1,
             citation: r.citation_label.clone(),
             also_rules: also_rules_of(r, corpus),
         };
@@ -400,7 +404,7 @@ fn subgroup_facts_with(
             cause: cause.text,
             summary: summary.text,
             rule_id: primary.rule_id.clone(),
-            rule_title: rule_title(&primary.rule_id, corpus),
+            rule_title: own_name(&primary.rule_id, corpus).0,
             citation: primary.citation_label.clone(),
             category: primary.category.clone(),
             sequence: sequence_of(&severity, &effort),
@@ -416,8 +420,14 @@ fn subgroup_facts_with(
     out
 }
 
-fn rule_title(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
-    super::rule_title(rule_id, corpus)
+/// A rule's own name and whether the corpus knows it. A rule the corpus lacks (a rule the model
+/// invented) is named by its id written as a plain name, never by the title of the rule that
+/// grounds its citation, so a Fix never says it closes a rule it does not.
+fn own_name(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> (String, bool) {
+    match corpus.and_then(|c| c.get_by_id(rule_id)) {
+        Some(rule) => (rule.title.clone(), true),
+        None => (crate::client_text::plain_rule_name(rule_id), false),
+    }
 }
 
 /// The rules other than the row's own that flagged its place: the sources collapsed into it and
@@ -425,7 +435,7 @@ fn rule_title(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String
 fn also_rules_of(
     row: &FindingRow,
     corpus: Option<&camerata_rules::RuleSet>,
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, String, bool)> {
     let mut ids: Vec<&str> = Vec::new();
     for id in row
         .flagged_by
@@ -440,10 +450,12 @@ fn also_rules_of(
     }
     ids.into_iter()
         .map(|id| {
+            let (title, known) = own_name(id, corpus);
             (
                 id.to_string(),
-                rule_title(id, corpus),
+                title,
                 crate::report_export::resolve_citation(id, None, corpus).label,
+                known,
             )
         })
         .collect()
@@ -454,6 +466,8 @@ fn also_rules_of(
 pub(crate) struct FixRule {
     pub rule_id: String,
     pub title: String,
+    /// Whether the corpus has the rule. One it lacks is written with its id beside its name.
+    pub known: bool,
     /// The standard the rule cites.
     pub citation: String,
     /// The worst severity of the rule's places in the Fix, in title case.
@@ -472,10 +486,15 @@ pub(crate) struct FixRule {
 impl FixRule {
     /// The rule as a line of the Rules column: its title, and where, when it is not everywhere.
     pub fn line(&self, fix_places: usize) -> String {
-        if self.only_at.is_empty() {
+        let name = if self.known {
             self.title.clone()
         } else {
-            vocabulary::rule_at_places(&self.title, &self.only_at, fix_places)
+            format!("{} ({})", self.title, self.rule_id)
+        };
+        if self.only_at.is_empty() {
+            name
+        } else {
+            vocabulary::rule_at_places(&name, &self.only_at, fix_places)
         }
     }
 }
@@ -650,6 +669,7 @@ fn fold_fix(
     // Every rule, once, with the places it covers.
     struct Acc {
         title: String,
+        known: bool,
         citation: String,
         rank: u8,
         order: usize,
@@ -668,9 +688,10 @@ fn fold_fix(
     };
     let mut accs: BTreeMap<String, Acc> = BTreeMap::new();
     let mut extra: BTreeMap<String, Acc> = BTreeMap::new();
-    fn blank(title: &str, citation: &str, order: usize) -> Acc {
+    fn blank(title: &str, known: bool, citation: &str, order: usize) -> Acc {
         Acc {
             title: title.to_string(),
+            known,
             citation: citation.to_string(),
             rank: 9,
             order,
@@ -709,13 +730,13 @@ fn fold_fix(
         for site in basis(m) {
             let acc = accs
                 .entry(site.rule_id.clone())
-                .or_insert_with(|| blank(&site.rule_title, &site.citation, order));
+                .or_insert_with(|| blank(&site.rule_title, site.rule_known, &site.citation, order));
             note(acc, &site, multi_repo, in_open);
             // A rule collapsed into the row is a rule of the Fix at the row's place.
-            for (rule_id, title, citation) in &site.also_rules {
+            for (rule_id, title, citation, known) in &site.also_rules {
                 let other = extra
                     .entry(rule_id.clone())
-                    .or_insert_with(|| blank(title, citation, order + members.len()));
+                    .or_insert_with(|| blank(title, *known, citation, order + members.len()));
                 note(other, &site, multi_repo, in_open);
             }
         }
@@ -755,6 +776,7 @@ fn fold_fix(
                 FixRule {
                     rule_id,
                     title: acc.title,
+                    known: acc.known,
                     citation: acc.citation,
                     severity: severity_title(acc.rank).to_string(),
                     places: acc.places.len(),

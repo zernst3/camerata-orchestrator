@@ -88,7 +88,11 @@ fn ticket_row(g: &FixFacts) -> [String; 8] {
         .rules
         .iter()
         .map(|r| {
-            let mut line = format!("- {} ({})", r.line(g.open_site_total), r.rule_id);
+            // A rule the corpus lacks already carries its id beside its name.
+            let mut line = format!("- {}", r.line(g.open_site_total));
+            if r.known {
+                line.push_str(&format!(" ({})", r.rule_id));
+            }
             if !r.citation.is_empty() {
                 line.push_str(&format!(", {}", r.citation));
             }

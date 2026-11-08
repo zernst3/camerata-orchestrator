@@ -635,3 +635,46 @@ fn a_secret_file_its_line_and_the_rules_around_it_take_one_entry_of_the_top_thre
     let fixes: std::collections::BTreeSet<&str> = items.iter().map(|i| i.fix_id.as_str()).collect();
     assert_eq!(fixes.len(), 3);
 }
+
+#[test]
+fn an_ai_row_in_a_fix_is_named_by_its_own_rule_never_by_the_rule_that_grounds_its_citation() {
+    // A model-written secret rule whose text mentions row level security is grounded on the RLS
+    // rule for its citation. The Fix plan and the ticket must still call it by its own name.
+    const RLS_TITLE: &str = "Every table in an API-exposed schema has Row Level Security enabled";
+    let mut rls = camerata_rules::bare_rule("SUPABASE-RLS-ENABLED-1", "test-fixture");
+    rls.title = RLS_TITLE.to_string();
+    let mut corpus = camerata_rules::RuleSet::default();
+    corpus.push(rls);
+
+    let mut report = crate::release_gate::test_scan_report();
+    let mut ai = secret_row(
+        "AI-SERVICE-ROLE-KEY-EXPOSED-TO-CLIENT",
+        "Secret Exposure",
+        "critical",
+        6,
+    );
+    ai.confidence = Some("high".to_string());
+    ai.detail =
+        "The service-role key bypasses row level security and sits in a client bundle.".to_string();
+    report.findings = vec![ai, secret_row(RULES_AT_LINE[0], "Universal", "critical", 6)];
+    let reviewed = reviewed_of(&report.seal(), &[]);
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, Some(&corpus), &options()).unwrap();
+    let plan = xlsx_sheet_grid(&xlsx, v::FIX_PLAN).unwrap();
+    assert_eq!(plan.len() - 1, 1, "{plan:?}");
+    let rules = &plan[1][col(&plan, v::H_RULES)];
+    assert!(!rules.contains(RLS_TITLE), "{rules}");
+    assert!(
+        rules.contains("AI-SERVICE-ROLE-KEY-EXPOSED-TO-CLIENT"),
+        "the id beside the name: {rules}"
+    );
+
+    let bytes = crate::xlsx_export::tickets::tickets_csv(&reviewed, Some(&corpus), &HashMap::new())
+        .unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(!text.contains(RLS_TITLE), "{text}");
+    assert!(
+        text.contains("(AI-SERVICE-ROLE-KEY-EXPOSED-TO-CLIENT)"),
+        "{text}"
+    );
+}
