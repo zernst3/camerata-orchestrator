@@ -2863,7 +2863,11 @@ pub async fn audit_repos_with_llm_controlled(
                         // SPEND CAP: the judge is a stage like any other; past the cap it does not
                         // start and is recorded as NOT RUN.
                         let clone_blocked = run_ai_review
-                            && meter.stage_blocked(spec, crate::ai_audit::STAGE_CLONE_JUDGE);
+                            && meter.stage_blocked_unless_stored(
+                                spec,
+                                crate::ai_audit::STAGE_CLONE_JUDGE,
+                                meter.is_resume(),
+                            );
                         let unavailable = if clone_blocked {
                             format!(
                                 "{} before the judge ran",
@@ -3550,7 +3554,11 @@ pub async fn audit_repos_with_llm_controlled(
                 // invisible to the actual-vs-estimated readout.
                 if run_ai_review
                     && !repo_findings.is_empty()
-                    && !meter.stage_blocked(spec, crate::ai_audit::STAGE_FIX)
+                    && !meter.stage_blocked_unless_stored(
+                        spec,
+                        crate::ai_audit::STAGE_FIX,
+                        crate::checkpoint::stage_has_stored_work(&format!("fix_{spec}")),
+                    )
                 {
                     let (fixed_findings, fix_failed_passes) =
                         crate::ai_audit::generate_fix_specifics_in(
@@ -3619,7 +3627,13 @@ pub async fn audit_repos_with_llm_controlled(
     let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
-            if meter.stage_blocked(spec, crate::ai_audit::STAGE_DEEP) {
+            // A resume starts the deep tier whatever its spend: a lens the run store holds is
+            // replayed, and each fresh lens is admitted (or refused) on its own.
+            if meter.stage_blocked_unless_stored(
+                spec,
+                crate::ai_audit::STAGE_DEEP,
+                meter.is_resume(),
+            ) {
                 continue;
             }
             let dr = crate::ai_audit::run_deep_tier(

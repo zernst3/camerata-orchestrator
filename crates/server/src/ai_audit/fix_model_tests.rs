@@ -90,6 +90,7 @@ impl LlmPort for Recorder {
             anyhow::bail!("connection reset");
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"fixes":[]}"#.to_string(),
             model: req.model.clone(),
             backend: "stub".to_string(),

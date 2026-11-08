@@ -270,6 +270,7 @@ impl InspectArgs {
             }
         };
         Ok(camerata_server::cost_cap::RunControls {
+            stored_spend_usd: 0.0,
             review: camerata_api_types::project::ReviewSettings {
                 escalation_rate_per_kloc,
                 escalation_floor: self.escalation_floor.unwrap_or(defaults.escalation_floor),
@@ -1006,6 +1007,12 @@ pub async fn run_inspect_pipeline_with(
         )?),
         None => None,
     };
+    // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
+    // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
+    // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
+    if let Some((store, _)) = &resumed {
+        controls.stored_spend_usd = store.stored_usd();
+    }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.
         Some((store, _)) => store.load_prior_manifest(),
@@ -1031,10 +1038,19 @@ pub async fn run_inspect_pipeline_with(
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
     // Skipped when no model call will be made (the compliance gate blocked the AI review).
     let mut preflight_text: Option<String> = None;
-    if let Some((_, estimate_text)) = &resumed {
-        // A resume prices only what remains.
-        (seams.preflight_sink)(estimate_text);
-        preflight_text = Some(estimate_text.clone());
+    if let Some((store, estimate_text)) = &resumed {
+        // A resume prices only what remains, and says beside the limit what the stored replies
+        // already count against it, before any call.
+        let mut text = estimate_text.clone();
+        if let Some(cap) = controls.max_cost_usd {
+            text.push_str(&camerata_server::cost_cap::resume_limit_line(
+                cap,
+                store.stored_usd(),
+            ));
+            text.push('\n');
+        }
+        (seams.preflight_sink)(&text);
+        preflight_text = Some(text);
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
@@ -1928,6 +1944,10 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
             cap.not_run_stages.len()
         )
         .ok();
+    } else if cap.spent_usd >= cap.cap_usd {
+        // The run's spend is at or past the limit and nothing was refused: the stored replies of
+        // a resume, or a last call that crossed the line with nothing left to send.
+        out.push_str(" -- reached; nothing was left to send, so the inspection is complete");
     } else {
         out.push_str(" (not reached)");
     }
@@ -2122,6 +2142,13 @@ mod tests {
             !outcome.cost_capped(),
             "a cap that stopped nothing is not a capped run"
         );
+        // Spend of $5.40 against $5.00 with nothing refused (the last call crossed the line, or a
+        // resume's stored replies did): reached, and nothing was left to send. "(not reached)"
+        // beside a spend over the limit was the old, wrong line.
+        let past = format_outcome_report(&outcome);
+        assert!(!past.contains("(not reached)"), "{past}");
+        assert!(past.contains("nothing was left to send"), "{past}");
+        outcome.cost_cap.as_mut().unwrap().spent_usd = 3.0;
         assert!(format_outcome_report(&outcome).contains("(not reached)"));
     }
 
@@ -2174,6 +2201,37 @@ mod tests {
             ..record
         };
         assert!(render_cost_cap(&reached).contains("-- REACHED."));
+    }
+
+    /// A resume whose stored replies already cost more than the limit (tutorly, 2026-11-06:
+    /// $43.51 stored against $25) sent nothing and finished, so the report said "(not reached)"
+    /// beside a spend over the limit. It says the limit was reached and that nothing was left
+    /// to send, which is not the same as the inspection being cut short.
+    #[test]
+    fn a_limit_passed_with_nothing_refused_is_not_reported_as_not_reached() {
+        use camerata_server::cost_cap::CostCapRecord;
+        let record = CostCapRecord {
+            cap_usd: 25.0,
+            spent_usd: 43.51,
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&record);
+        assert!(text.contains("spend limit: $25.00, spent $43.51"), "{text}");
+        assert!(!text.contains("not reached"), "{text}");
+        assert!(
+            text.contains("reached") && text.contains("nothing was left to send"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("INCOMPLETE"),
+            "nothing was refused, so the inspection is complete: {text}"
+        );
+        // Under the limit the line is unchanged.
+        let under = CostCapRecord {
+            spent_usd: 3.0,
+            ..record
+        };
+        assert!(render_cost_cap(&under).contains("(not reached)"));
     }
 
     // ── validate_args ────────────────────────────────────────────────────────────────
@@ -2609,6 +2667,7 @@ mod tests {
             cost_complete: true,
             cache_read_input_tokens: 50_000,
             cache_creation_input_tokens: 1_000,
+            resumed_cost_usd: 0.0,
         }
     }
 
@@ -2800,6 +2859,7 @@ mod tests {
         meter.record(
             camerata_server::stage_telemetry::Stage::ScanPass,
             &camerata_server::llm::LlmResponse {
+                reported_model: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),

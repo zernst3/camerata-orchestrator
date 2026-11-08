@@ -238,6 +238,7 @@ impl LlmPort for CacheModelLlm {
             m.written.extend(prefixes);
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

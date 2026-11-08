@@ -114,6 +114,7 @@ impl Reviewer {
 
 fn response(text: &str, model: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: "stub".to_string(),
@@ -1689,6 +1690,7 @@ async fn the_spend_limit_counts_what_the_scan_already_spent_and_stops_stage_2() 
         cost_complete: true,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
     });
     let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
     let rules: Vec<(String, String)> = Vec::new();
@@ -1768,6 +1770,7 @@ async fn the_metered_review_folds_its_usage_into_the_reports_usage_and_telemetry
         cost_complete: true,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
     });
     struct Priced(Reviewer);
     #[async_trait::async_trait]

@@ -524,16 +524,26 @@ pub(super) async fn run_prose_part(
         "Repository: {repo}{part_label}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
+    let req = LlmRequest::new(prompt.clone())
+        .with_system(system.to_string())
+        // Whole-repo structured output can be sizable (many controls / many threats).
+        .with_max_tokens(DEEP_LENS_MAX_TOKENS)
+        .with_model(stage_model(audit_model));
     // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
-    // lens result and recorded as the deep tier stopped part way.
-    let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
-        Err(CapReached) => {
-            let mut result = DeepLensResult::empty(lens);
-            result.error =
-                Some("not run: the spend limit set for this run was reached".to_string());
-            return result;
+    // lens result and recorded as the deep tier stopped part way. A lens the run store already
+    // holds a reply for is answered from the store and is not a send, so it is not refused.
+    let _permit = if llm.replays(&req) {
+        None
+    } else {
+        match admit_stage(meter, repo, STAGE_DEEP).await {
+            Err(CapReached) => {
+                let mut result = DeepLensResult::empty(lens);
+                result.error =
+                    Some("not run: the spend limit set for this run was reached".to_string());
+                return result;
+            }
+            Ok(permit) => permit,
         }
-        Ok(permit) => permit,
     };
     let session = if part.1 > 1 {
         format!("deep-{}-{repo}-p{}", lens.id(), part.0)
@@ -552,11 +562,6 @@ pub(super) async fn run_prose_part(
             },
         );
     }
-    let req = LlmRequest::new(prompt)
-        .with_system(system.to_string())
-        // Whole-repo structured output can be sizable (many controls / many threats).
-        .with_max_tokens(DEEP_LENS_MAX_TOKENS)
-        .with_model(stage_model(audit_model));
     // Never send what the model's window cannot take (M1): refused here, disclosed on the lens.
     if let Err(e) = request_budget::ensure_request_fits(&req) {
         let mut result = DeepLensResult::empty(lens);
@@ -775,22 +780,37 @@ pub(super) async fn run_security_passes(
             let digest = chunk_segment(&symbols[ci].text, &parts[ci].digest);
             let repo_map = repo_map.prefix();
             async move {
-                // SPEND CAP: each deep-security pass is admitted like a scan pass.
-                let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
-                    Err(CapReached) => {
-                        return (
-                            ci,
-                            Err(anyhow::anyhow!(
-                                "not run: the spend limit set for this run was reached"
-                            )),
-                        );
-                    }
-                    Ok(permit) => permit,
-                };
                 let prompt = format!(
                     "Repository: {repo} (security pass {}/{n_c})\n\n{repo_map}{digest}\n\n── Perform a DEEP SECURITY AUDIT of the code above. Use the REPO MAP for cross-file context. Return the JSON described in the system prompt. ──",
                     ci + 1,
                 );
+                // The security lens swaps in its own system prompt; everything else mirrors
+                // `audit_pass` (streaming + meter + robust parse).
+                let req = LlmRequest::new(prompt.clone())
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        deep_security_system_prompt_with(terse_output_of(meter)),
+                        nonce,
+                    ))
+                    .with_max_tokens(DEEP_LENS_MAX_TOKENS)
+                    .with_temperature(AUDIT_TEMPERATURE)
+                    .with_model(stage_model(audit_model));
+                // SPEND CAP: each deep-security pass is admitted like a scan pass, unless the run
+                // store already holds its reply (then it is not a send).
+                let _permit = if llm.replays(&req) {
+                    None
+                } else {
+                    match admit_stage(meter, repo, STAGE_DEEP).await {
+                        Err(CapReached) => {
+                            return (
+                                ci,
+                                Err(anyhow::anyhow!(
+                                    "not run: the spend limit set for this run was reached"
+                                )),
+                            );
+                        }
+                        Ok(permit) => permit,
+                    }
+                };
                 let session = format!("deep-security-{repo}-c{ci}");
                 if let Some((store, key)) = feedback {
                     store.register(
@@ -804,16 +824,6 @@ pub(super) async fn run_security_passes(
                         },
                     );
                 }
-                // The security lens swaps in its own system prompt; everything else mirrors
-                // `audit_pass` (streaming + meter + robust parse).
-                let req = LlmRequest::new(prompt)
-                    .with_system(crate::prompt_frame::with_untrusted_clause(
-                        deep_security_system_prompt_with(terse_output_of(meter)),
-                        nonce,
-                    ))
-                    .with_max_tokens(DEEP_LENS_MAX_TOKENS)
-                    .with_temperature(AUDIT_TEMPERATURE)
-                    .with_model(stage_model(audit_model));
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
                     // Never send what the model's window cannot take (M1).
                     request_budget::ensure_request_fits(&req)?;

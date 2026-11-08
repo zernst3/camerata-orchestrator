@@ -2082,13 +2082,17 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
         let has_new = !cap.not_run_passes.is_empty() || !cap.not_run_stages.is_empty();
         if has_new {
             report.failed_passes.extend(cap.failed_passes());
-            match report.ledger.cost_cap().cloned() {
-                Some(mut earlier) => {
-                    earlier.absorb(cap);
-                    report.ledger.record_cost_cap(earlier);
-                }
-                None => report.ledger.record_cost_cap(cap),
+        }
+        // Always folded: this meter counts the whole run (it continues the scan's, and a resumed
+        // stage puts its stored usage on it), so the record's spend must be its total even when
+        // the stage refused nothing, or the final report reads the scan's smaller figure beside a
+        // run that is past its limit.
+        match report.ledger.cost_cap().cloned() {
+            Some(mut earlier) => {
+                earlier.absorb(cap);
+                report.ledger.record_cost_cap(earlier);
             }
+            None => report.ledger.record_cost_cap(cap),
         }
     }
     // An outage that stopped this stage.

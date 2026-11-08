@@ -34,6 +34,7 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.requested.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
+            reported_model: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),

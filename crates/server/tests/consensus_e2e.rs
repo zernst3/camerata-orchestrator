@@ -54,6 +54,7 @@ impl LlmPort for Varying {
                 .to_string()
         };
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

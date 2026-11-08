@@ -14,14 +14,24 @@
 //!   asks [`crate::ai_audit::UsageMeter::admit`]. A pass that was admitted always finishes, its
 //!   truncation retry included. A pass that was refused is recorded as [`NotRunPass`] and
 //!   reported as NOT RUN.
-//! * **Later stages** (alternative recommendation, calibration, fix generation, the clone judge,
-//!   the deep tier) check the cap before they start
+//! * **Later stages** (alternative recommendation, detail regeneration, calibration, the group
+//!   reviewer, fix generation, the clone judge, the deep tier) check the cap before they start
 //!   ([`crate::ai_audit::UsageMeter::stage_blocked`]) and are recorded as [`NotRunStage`]. A
 //!   stage is blocked once spend reaches the cap AND once the cap has already stopped anything,
 //!   so nothing starts after the cap has bitten. Inside calibration, fix generation and the
 //!   deep tier each batch or call is admitted separately
 //!   ([`crate::ai_audit::UsageMeter::admit_for_stage`]); the remainder of a stage that is
-//!   stopped part way is recorded as `partial`, and its findings pass through unchanged.
+//!   stopped part way is recorded as `partial`, and its findings pass through unchanged. Every
+//!   stage that sends a model call admits it that way (the group reviewer and the clone judge
+//!   included); `ai_audit::spend_limit_stages_tests` runs all eight on a meter already past its
+//!   limit and counts the calls.
+//! * **A resume counts the whole run, and refuses only fresh sends.** The limit is checked
+//!   against `fresh spend + stored spend - replayed` ([`RunControls::stored_spend_usd`], the
+//!   meter's resumed counter), the same figure [`resume_limit_line`] prints. A reply the run
+//!   already holds is never refused: the journal's replay ([`camerata_llm::LlmPort::replays`])
+//!   is asked before admission, and a stage with stored work starts and replays it whatever the
+//!   spend. A resume whose stored replies already pass the limit replays them all and sends
+//!   nothing.
 //! * **Message Batches** cannot be cancelled cheaply once submitted, so the cap is checked
 //!   BEFORE a submission, against a projection (see
 //!   [`crate::ai_audit::UsageMeter::refuse_batch_submission`]). A batch that was submitted runs
@@ -79,6 +89,12 @@ pub struct RunControls {
     pub efficiency: EfficiencyConfig,
     /// `--max-cost-usd`. `None` = no cap.
     pub max_cost_usd: Option<f64>,
+    /// On a resumed run: everything the run's stored replies cost. The spend limit counts it
+    /// from the first moment, so a resume is held to the whole run's spend at every stage, and
+    /// the meter takes off the share a checkpoint replays onto it
+    /// ([`crate::ai_audit::UsageMeter::record_resumed`]) so a stored dollar is counted once. It is
+    /// the figure [`resume_limit_line`] prints. Zero for a run that is not resumed.
+    pub stored_spend_usd: f64,
     /// The pre-flight estimate of the whole run, when the caller computed one. Used ONLY to
     /// decide whether a non-cancellable batch may be submitted (a real-time run is capped on
     /// actual spend alone).
@@ -222,6 +238,24 @@ impl RunControls {
             unpriced.join(" and "),
             if unpriced.len() == 1 { "has" } else { "have" }
         ))
+    }
+}
+
+/// The line a resume prints beside the spend limit, before any call: the limit counts the whole
+/// run, the stored replies included.
+pub fn resume_limit_line(cap_usd: f64, stored_usd: f64) -> String {
+    if stored_usd >= cap_usd {
+        format!(
+            "  spend limit: ${cap_usd:.2}. The limit counts the whole run, stored replies \
+             included, and the stored replies already cost ${stored_usd:.2}: no further call will \
+             be sent. Raise the limit by what you are willing to spend on what remains."
+        )
+    } else {
+        format!(
+            "  spend limit: ${cap_usd:.2}. The limit counts the whole run, stored replies \
+             included: ${stored_usd:.2} is already spent, so ${:.2} remain for what is left to do.",
+            cap_usd - stored_usd
+        )
     }
 }
 
@@ -858,5 +892,28 @@ mod tests {
         };
         assert!(!record.stopped_the_run());
         assert!(record.failed_passes().is_empty());
+    }
+
+    #[test]
+    fn a_resume_prints_the_stored_spend_beside_the_limit_before_any_call() {
+        let over = resume_limit_line(25.0, 43.51);
+        assert!(
+            over.contains("$25.00") && over.contains("$43.51"),
+            "both figures: {over}"
+        );
+        assert!(
+            over.contains("counts") && over.contains("stored"),
+            "it says the limit counts the stored spend: {over}"
+        );
+        assert!(
+            over.contains("no further call will be sent"),
+            "past the limit nothing more is sent: {over}"
+        );
+        let under = resume_limit_line(25.0, 10.0);
+        assert!(
+            under.contains("$15.00 remain"),
+            "what is left under the limit: {under}"
+        );
+        assert!(!under.contains("no further call"), "{under}");
     }
 }

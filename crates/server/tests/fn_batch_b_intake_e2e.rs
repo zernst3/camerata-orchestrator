@@ -79,6 +79,7 @@ impl LlmPort for Script {
             }
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: self.reply.clone(),
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -158,6 +159,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls() -> RunControls {
     RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: None,

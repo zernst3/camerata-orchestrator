@@ -12,6 +12,7 @@ use camerata_llm::failure::{FailureClass, LlmCallFailure};
 
 fn response(text: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),

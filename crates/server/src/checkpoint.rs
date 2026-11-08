@@ -441,6 +441,15 @@ pub fn batch_key<'a>(round: &str, site_keys: impl Iterator<Item = &'a str>) -> S
     format!("{round}:{digest}")
 }
 
+/// True when the checkpoint of the stage named `stage` (in the run in scope) holds replies from an
+/// earlier attempt: absorbed items or batches. A stage with stored work starts on a resume
+/// whatever the run's spend, because replaying it costs nothing (see
+/// [`crate::ai_audit::UsageMeter::stage_blocked_unless_stored`]).
+pub fn stage_has_stored_work(stage: &str) -> bool {
+    stage_checkpoint(stage)
+        .is_some_and(|c| !c.absorbed_in_order().is_empty() || !c.batches().is_empty())
+}
+
 /// The checkpoint of the stage named `stage` (a file stem: a stage on two repos uses two names)
 /// in the run in scope, or `None` outside a run.
 pub fn stage_checkpoint(stage: &str) -> Option<StageCheckpoint> {

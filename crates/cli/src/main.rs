@@ -199,11 +199,16 @@ enum Command {
         /// costs (the pre-flight still prints the expected cost and the ceiling). Given, it stops
         /// the run, between passes, once actual spend reaches this many US dollars. A run
         /// that stops early lists every pass and stage it did not run, marks its export incomplete
-        /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
-        /// fix batch and deep-tier call starts; one that has started always finishes, and once
-        /// the limit has stopped anything no later stage starts. So a run can end about one pass
+        /// and exits non-zero (4). The limit is checked before every model call or batch of
+        /// every stage starts: each scan pass, the alternatives call, each detail regeneration
+        /// batch, each calibration batch, each group review call, each fix batch, each deep tier
+        /// call and each clone judge batch. One that has started always finishes, and once the
+        /// limit has stopped anything no later stage starts. So a run can end about one pass
         /// over the limit (a pass can include one retry). In batch mode the limit is checked
-        /// before the batch is submitted.
+        /// before the batch is submitted. The limit counts the whole run: on a resume it
+        /// includes what the stored replies already cost, so set it to the stored spend plus
+        /// what you will allow for the rest (the resume prints the stored spend beside the
+        /// limit before any call).
         #[arg(long = "max-cost-usd", value_name = "USD")]
         max_cost_usd: Option<f64>,
         /// Switch a token-efficiency measure `on` or `off` for this run, e.g.
@@ -972,6 +977,40 @@ mod cli_parse_tests {
         assert!(
             help.contains(&camerata_api_types::project::fix_stage_haiku_display_name()),
             "{help}"
+        );
+    }
+
+    /// The `--max-cost-usd` help names every stage that sends a model call and says that a resume
+    /// counts the stored spend. A stage the help leaves out reads as a stage the limit does not
+    /// cover, which was the question R5 had to answer by reading the code.
+    #[test]
+    fn the_spend_limit_help_names_every_stage_and_the_resume_rule() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let inspect = cmd.find_subcommand("inspect").expect("inspect subcommand");
+        let arg = inspect
+            .get_arguments()
+            .find(|a| a.get_id() == "max_cost_usd")
+            .expect("--max-cost-usd");
+        let help = arg.get_help().expect("help text").to_string();
+        for stage in [
+            "scan pass",
+            "alternatives",
+            "detail regeneration",
+            "calibration",
+            "group review",
+            "fix",
+            "deep",
+            "clone judge",
+        ] {
+            assert!(
+                help.contains(stage),
+                "the help does not name {stage}: {help}"
+            );
+        }
+        assert!(
+            help.contains("resume") && help.contains("stored"),
+            "the help says a resume counts the stored spend: {help}"
         );
     }
 

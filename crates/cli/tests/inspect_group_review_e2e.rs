@@ -58,6 +58,7 @@ impl Scripted {
 impl LlmPort for Scripted {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
             text: self.reply(&req),
             model: req.model.clone(),
             backend: "stub".to_string(),

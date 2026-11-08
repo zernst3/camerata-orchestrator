@@ -2596,7 +2596,7 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
-    let run_controls = req.run_controls_for(&state);
+    let mut run_controls = req.run_controls_for(&state);
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2872,6 +2872,8 @@ pub(crate) async fn start_audit_job(
                     Ok((store, _estimate)) => {
                         // The baseline the run started from, not one an attempt since replaced.
                         prior = store.load_prior_manifest();
+                        // The spend limit counts the whole run: the stored replies' cost joins it.
+                        run_controls.stored_spend_usd = store.stored_usd();
                         Some(store)
                     }
                     Err(e) => {

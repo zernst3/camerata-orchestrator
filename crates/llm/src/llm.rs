@@ -516,6 +516,8 @@ async fn read_cli_stream(
     let mut usage_out = None;
     let mut usage_cache_read = 0u64;
     let mut usage_cache_creation = 0u64;
+    // The model the CLI says answered (see [`LlmResponse::reported_model`]).
+    let mut reported_model: Option<String> = None;
     // An in-band failure reported by the final `result` event, paired with whether it is
     // UNCONDITIONALLY fatal. See the `result` arm and the post-loop check below.
     let mut result_failure: Option<(anyhow::Error, bool)> = None;
@@ -579,6 +581,12 @@ async fn read_cli_stream(
                         ) {
                             progressed = true;
                         }
+                        if ev["type"] == "message_start" {
+                            note_reported_model(
+                                &mut reported_model,
+                                ev["message"]["model"].as_str(),
+                            );
+                        }
                         if ev["type"] == "content_block_delta"
                             && ev["delta"]["type"] == "text_delta"
                         {
@@ -588,7 +596,10 @@ async fn read_cli_stream(
                             }
                         }
                     }
-                    Some("assistant") => progressed = true,
+                    Some("assistant") => {
+                        progressed = true;
+                        note_reported_model(&mut reported_model, v["message"]["model"].as_str());
+                    }
                     Some("result") => {
                         progressed = true;
                         // Apply the SAME in-band failure policy the non-streaming CLI
@@ -620,6 +631,15 @@ async fn read_cli_stream(
                             }
                         }
                         cost = v["total_cost_usd"].as_f64();
+                        // The result keys its usage by the model that ran: the fallback when no
+                        // message event named one.
+                        if reported_model.is_none() {
+                            if let Some(usage) = v["modelUsage"].as_object() {
+                                let mut ids: Vec<&str> = usage.keys().map(String::as_str).collect();
+                                ids.sort_unstable();
+                                note_reported_model(&mut reported_model, Some(&ids.join(", ")));
+                            }
+                        }
                         let (i, o, cr, cc) = usage_tokens(&v["usage"]);
                         usage_in = i.or(usage_in);
                         usage_out = o.or(usage_out);
@@ -688,6 +708,7 @@ async fn read_cli_stream(
         ));
     }
     Ok(LlmResponse {
+        reported_model,
         text: full,
         model: model.to_string(),
         backend: "cli".to_string(),
@@ -699,6 +720,15 @@ async fn read_cli_stream(
         or_cache_discount: None,
         truncated: false,
     })
+}
+
+/// Keep the first model id the CLI names (later events repeat it); blank names are ignored.
+fn note_reported_model(slot: &mut Option<String>, id: Option<&str>) {
+    if slot.is_none() {
+        if let Some(id) = id.map(str::trim).filter(|id| !id.is_empty()) {
+            *slot = Some(id.to_string());
+        }
+    }
 }
 
 /// The minimal completion seam the audit depends on.
@@ -760,6 +790,13 @@ pub trait LlmPort: Send + Sync {
     /// asks again; a reply with an accepted entry in it stays good, so a resume replays what was
     /// accepted instead of paying for it twice. Every other completer ignores it.
     fn note_rejected_reply(&self, _request_key: &str, _reason: &str, _whole: bool) {}
+
+    /// True when this completer will answer `req` from what a saved run already holds, so
+    /// sending it costs nothing new and a spend limit has nothing to refuse. The run store's
+    /// journal answers it from its stored replies; every other completer sends for real.
+    fn replays(&self, _req: &LlmRequest) -> bool {
+        false
+    }
 
     /// Downcast hook for the concrete-only batch path. See the trait doc.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -1088,6 +1125,7 @@ fn messages_response(
         basis,
     );
     LlmResponse {
+        reported_model: None,
         text,
         model: model.to_string(),
         backend: backend.to_string(),
@@ -3218,6 +3256,7 @@ impl OpenRouterCompleter {
             .and_then(|choices| choices.first())
             .is_some_and(|choice| choice["finish_reason"].as_str() == Some("length"));
         Ok(LlmResponse {
+            reported_model: None,
             text: output,
             model: model_returned,
             backend: "openrouter/api".to_string(),
@@ -4132,6 +4171,7 @@ mod tests {
     fn the_ledger_fallback_prices_through_the_same_function() {
         let ledger = crate::usage_ledger::UsageLedger::new();
         let resp = LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -4649,6 +4689,7 @@ malformed line, not json
             BatchResultRow {
                 custom_id: "c0-b0".to_string(),
                 response: Some(LlmResponse {
+                    reported_model: None,
                     text: "text A".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -4672,6 +4713,7 @@ malformed line, not json
             BatchResultRow {
                 custom_id: "c0-b1".to_string(),
                 response: Some(LlmResponse {
+                    reported_model: None,
                     text: "text B".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -5278,6 +5320,72 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"inpu
             elapsed > std::time::Duration::from_millis(600),
             "the test must actually outlast the overall window, took {elapsed:?}"
         );
+    }
+
+    /// The model the CLI says answered is kept beside the one that was asked for. The shapes are
+    /// the events `claude -p --output-format stream-json` prints: `message_start` inside a
+    /// `stream_event`, the `assistant` message, and the `result` event's `modelUsage` map keyed by
+    /// model. A request for the fast model that the CLI ran on another is what a bill at the other
+    /// model's rates looks like; this is how the next run can tell.
+    #[tokio::test]
+    async fn read_cli_stream_records_the_model_the_cli_reports_beside_the_requested_one() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"system","subtype":"init","model":"claude-opus-5-5"}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5","id":"msg_01","role":"assistant","content":[]}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}'
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"x"}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","total_cost_usd":0.07,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-opus-5-5":{"inputTokens":5,"outputTokens":2,"costUSD":0.07}}}'
+"#,
+        );
+        let resp = read_cli_stream(
+            child,
+            "claude-haiku-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect("a healthy scripted call");
+        assert_eq!(resp.model, "claude-haiku-5-5", "the requested id is kept");
+        assert_eq!(
+            resp.reported_model.as_deref(),
+            Some("claude-opus-5-5"),
+            "the id the CLI reported is kept beside it"
+        );
+    }
+
+    /// With no `assistant` or `message_start` event the result's `modelUsage` still names the
+    /// model; with neither, nothing is invented.
+    #[tokio::test]
+    async fn read_cli_stream_falls_back_to_model_usage_and_invents_nothing() {
+        let usage_only = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","modelUsage":{"claude-sonnet-5-5":{"inputTokens":5}}}'
+"#,
+        );
+        let a = read_cli_stream(
+            usage_only,
+            "claude-sonnet-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(a.reported_model.as_deref(), Some("claude-sonnet-5-5"));
+        let silent = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL"}'
+"#,
+        );
+        let b = read_cli_stream(
+            silent,
+            "claude-sonnet-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(b.reported_model, None);
     }
 
     /// HALF 2, at the reader level — a totally silent child must be declared Silent, killed

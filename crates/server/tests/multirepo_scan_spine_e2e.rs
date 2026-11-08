@@ -56,6 +56,7 @@ impl LlmPort for Stub {
             anyhow::bail!("the model refused this repository");
         }
         Ok(LlmResponse {
+            reported_model: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -111,6 +112,7 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls(cap: Option<f64>) -> RunControls {
     RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: cap,

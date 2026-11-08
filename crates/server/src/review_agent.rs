@@ -1231,6 +1231,7 @@ mod tests {
             _req: crate::llm::LlmRequest,
         ) -> anyhow::Result<crate::llm::LlmResponse> {
             Ok(crate::llm::LlmResponse {
+                reported_model: None,
                 text: self.0.clone(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),

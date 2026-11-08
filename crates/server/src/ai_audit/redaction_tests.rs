@@ -226,6 +226,7 @@ impl LlmPort for Stub {
         let text = super::reply_schemas::check::address_by_id(&req.prompt, &self.text);
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),

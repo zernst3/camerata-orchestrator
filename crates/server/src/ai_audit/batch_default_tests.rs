@@ -39,6 +39,7 @@ pub(super) enum Reply {
 
 fn response(text: &str, truncated: bool, cost: f64) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api/batch".to_string(),
@@ -298,6 +299,7 @@ fn eff(batch_default: bool) -> EfficiencyConfig {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: cap,

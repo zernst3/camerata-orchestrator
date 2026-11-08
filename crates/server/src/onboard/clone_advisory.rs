@@ -307,6 +307,7 @@ async fn judge_rule(
     let system = crate::prompt_frame::with_untrusted_clause(system_prompt(rule), nonce);
     let text = rule_text(rule, req.corpus);
     let mut first_failure: Option<String> = None;
+    let mut stopped_by_limit = false;
     for batch in pending.chunks(BATCH_SIZE) {
         let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
         let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
@@ -323,6 +324,35 @@ async fn judge_rule(
             first_failure.get_or_insert_with(|| too_large.to_string());
             append(feedback, session, &format!("batch not sent: {too_large}"));
             continue;
+        }
+        // SPEND LIMIT: every batch is admitted like a scan pass or a calibration batch (the stage
+        // check in the caller only decides whether the judge starts). A batch the limit refuses
+        // is not sent, nor is any later one; its candidates stay undecided (not assessed, not
+        // clean) and the stage is recorded as stopped part way.
+        // A batch the run store already holds a verdict for is answered from the store and
+        // costs nothing, so the limit has nothing to refuse (a resume past its limit replays it).
+        let _permit = match meter {
+            Some(m) if !llm.replays(&request) => match m
+                .admit_for_stage(req.repo, crate::ai_audit::STAGE_CLONE_JUDGE)
+                .await
+            {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    stopped_by_limit = true;
+                    first_failure.get_or_insert_with(|| {
+                        format!(
+                            "{} before this batch was sent",
+                            crate::cost_cap::cause_for(m.cost_unknown())
+                        )
+                    });
+                    append(feedback, session, "batch not sent: the spend limit");
+                    break;
+                }
+            },
+            _ => None,
+        };
+        if let Some(m) = meter {
+            m.note_request(&request);
         }
         // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
         let mut on_delta = |_: &str| {};
@@ -369,7 +399,11 @@ async fn judge_rule(
             pass: FAILED_PASS_NAME.to_string(),
             reason: format!("{}: {reason}", rule.id()),
             files_not_reviewed: 0,
-            class: crate::ai_audit::FailureClass::Content,
+            class: if stopped_by_limit {
+                crate::ai_audit::FailureClass::SpendLimit
+            } else {
+                crate::ai_audit::FailureClass::Content
+            },
             files: Vec::new(),
             attempts: Vec::new(),
             scope_note: false,

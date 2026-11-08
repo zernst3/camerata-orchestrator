@@ -44,6 +44,7 @@ impl LlmPort for Drifting {
             r#"{{"findings":[{{"rule":"SHARED-ACROSS-RUNS-1","severity":"medium","path":"src/db.rs","line":8,"code":"pub fn find_user_query(user_id: &str) -> String {{","title":"shared","detail":"reported by both runs"}},{drift}],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}}"#
         );
         Ok(LlmResponse {
+            reported_model: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

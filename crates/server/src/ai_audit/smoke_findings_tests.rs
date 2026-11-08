@@ -12,6 +12,7 @@ const REPO: &str = "acme/widgets";
 
 fn response(text: &str, truncated: bool) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -242,6 +243,7 @@ async fn a_cut_off_reply_is_not_retried_when_the_switch_is_off() {
         .set("truncation_retry", false)
         .expect("a known measure");
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: None,

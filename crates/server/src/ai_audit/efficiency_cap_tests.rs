@@ -53,6 +53,7 @@ impl LlmPort for StubLlm {
         }
         self.events.lock().unwrap().push(("end", b));
         Ok(LlmResponse {
+            reported_model: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -80,6 +81,7 @@ impl LlmPort for StubLlm {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: cap,
@@ -356,6 +358,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
     meter.record_stage(
         Stage::ScanPass,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -379,6 +382,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
 
 fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
@@ -393,6 +397,7 @@ fn spend(meter: &UsageMeter, dollars: f64) {
     meter.record_stage(
         Stage::ScanPass,
         &LlmResponse {
+            reported_model: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -492,6 +497,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
     // so reaching the network at all would fail this test with a transport error.
     let llm = crate::llm::Llm::for_backend(crate::llm::Backend::Api, Some("sk-test".to_string()));
     let meter = UsageMeter::with_controls(RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(1.0),
@@ -849,6 +855,7 @@ fn response(
     output: Option<u64>,
 ) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),

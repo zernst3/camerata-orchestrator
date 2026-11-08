@@ -363,6 +363,12 @@ mod injection_tests;
 mod efficiency_cap_tests;
 
 #[cfg(test)]
+mod spend_limit_stages_tests;
+
+#[cfg(test)]
+mod resume_limit_tests;
+
+#[cfg(test)]
 mod fix_model_tests;
 
 #[cfg(test)]

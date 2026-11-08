@@ -415,6 +415,7 @@ pub async fn run_repeatability_with(
         }
     }
     let controls = camerata_server::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: Some(per_run),

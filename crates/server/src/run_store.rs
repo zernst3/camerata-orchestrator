@@ -907,6 +907,12 @@ impl RunStore {
         read_json(&self.dir.join("prior_manifest.json"))
     }
 
+    /// What every stored call of this run cost: the figure a spend limit counts up front on a
+    /// resume ([`crate::cost_cap::RunControls::stored_spend_usd`]).
+    pub fn stored_usd(&self) -> f64 {
+        journal::stored_spend(&self.dir)
+    }
+
     pub fn run_id(&self) -> String {
         self.lock_state().record.run_id.clone()
     }
@@ -1445,6 +1451,8 @@ pub struct ResumeEstimate {
     pub calls_to_send_again: usize,
     /// The upper estimate in US dollars of the work that remains.
     pub usd: f64,
+    /// What the stored calls cost when they were made, in US dollars.
+    pub stored_usd: f64,
     /// How the figure was reached, in one sentence.
     pub basis: String,
 }
@@ -1466,6 +1474,10 @@ impl ResumeEstimate {
         out.push_str(&format!(
             "  estimated cost of the remaining work: up to ${:.2} ({})\n",
             self.usd, self.basis
+        ));
+        out.push_str(&format!(
+            "  the stored calls cost ${:.2} when they were made; a spend limit counts it\n",
+            self.stored_usd
         ));
         out
     }
