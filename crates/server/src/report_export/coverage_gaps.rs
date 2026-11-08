@@ -115,13 +115,13 @@ pub struct ScopeLimitedRuleJson {
 }
 
 /// The sentence for `rules` (non-empty), in plain words.
-fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
+pub(super) fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
     let first = rules.first()?;
     let count = rules.len();
     Some(format!(
         "{count} {} checked only against the files in {} scope, not every file in the \
-         repositories (for example {}: {} of {}). The counts per rule are on the workbook's \
-         Coverage sheet and in findings.json.",
+         repositories (for example {}: {} of {}). The counts per rule are on the {} sheet and in \
+         findings.json.",
         if count == 1 { "rule was" } else { "rules were" },
         if count == 1 { "its" } else { "their" },
         first.rule_id,
@@ -131,6 +131,7 @@ fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
         } else {
             format!("{} files", first.files_total)
         },
+        crate::xlsx_export::vocabulary::RULES_CHECKED,
     ))
 }
 

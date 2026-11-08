@@ -285,7 +285,7 @@ fn methodology_next_steps_reports_no_fix_rate_for_a_zero_candidate_run() {
     assert!(
         json.methodology
             .next_steps
-            .contains("no candidate findings, so there is no fix rate to report"),
+            .contains("no problems, so there is no fix rate to report"),
         "a clean run must honestly say there is no fix rate, never fabricate one or divide \
              by zero: {}",
         json.methodology.next_steps
@@ -324,7 +324,7 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
     );
     // 3 of 4 kept -> 75% fix rate.
     assert!(
-        notes.contains("kept 3 of 4 candidate findings"),
+        notes.contains("kept 3 of 4 problems"),
         "the paragraph must state the real kept/total counts: {notes}"
     );
     assert!(
@@ -342,8 +342,8 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
 fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
     let note = next_steps_note(ReviewState::Reviewed, 1, 1, 0, 0);
     assert!(
-        note.contains("kept 1 of 1 candidate finding as"),
-        "a single candidate must use the singular noun, not 'findings': {note}"
+        note.contains("kept 1 of 1 problem as"),
+        "a single problem must use the singular noun, not 'problems': {note}"
     );
 }
 
@@ -367,11 +367,11 @@ fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage(
         "a draft export must say the fix rate is not yet established: {note}"
     );
     assert!(
-        note.contains("23 of 23 candidates are held for a reviewer's decision"),
+        note.contains("23 of 23 problems need a reviewer's decision"),
         "the held count must be named plainly: {note}"
     );
     assert!(
-        note.contains("0 excluded so far"),
+        note.contains("0 ruled out so far"),
         "a draft export has excluded nothing yet, and must say so: {note}"
     );
 }
@@ -386,7 +386,7 @@ fn next_steps_note_reviewed_with_exclusions_shows_percentage_and_exclusion_claus
         "the fix rate must be curated/(curated+excluded) = 17/20 = 85%: {note}"
     );
     assert!(
-        note.contains("excluding the rest as likely false positives"),
+        note.contains("ruling out the rest"),
         "excluded > 0 must surface the exclusion clause: {note}"
     );
 }
@@ -401,7 +401,7 @@ fn next_steps_note_reviewed_with_no_exclusions_omits_the_exclusion_clause() {
         "zero excluded still yields a (100%) fix rate over curated candidates: {note}"
     );
     assert!(
-        !note.contains("excluding the rest"),
+        !note.contains("ruling out the rest"),
         "excluded == 0 must never print the exclusion clause: {note}"
     );
 }
@@ -506,23 +506,15 @@ fn shipped_template_gates_the_failed_pass_disclosure_on_both_sections() {
 /// value — `or_na`'s "N/A" reads as the latter. Pins that the shipped template uses the
 /// field-specific placeholders for both fields in the per-finding chip line, never `or_na`.
 #[test]
-fn shipped_template_never_renders_na_for_effort_or_confidence() {
+fn shipped_template_never_renders_na_for_effort() {
     let template = include_str!("../../../templates/audit_report.typ");
     assert!(
-        template.contains("or_not_estimated(site.effort)"),
+        template.contains("or_not_estimated(item.effort)"),
         "an unestimated effort must render \"not estimated this run\", not \"N/A\""
     );
     assert!(
-        template.contains("or_not_evaluated(site.confidence)"),
-        "an unevaluated confidence must render \"not evaluated this run\", not \"N/A\""
-    );
-    assert!(
-        !template.contains("or_na(site.effort)"),
-        "the per-finding effort chip must never fall back to the generic N/A placeholder"
-    );
-    assert!(
-        !template.contains("or_na(site.confidence)"),
-        "the per-finding confidence chip must never fall back to the generic N/A placeholder"
+        !template.contains("or_na(item.effort)"),
+        "an entry's effort must never fall back to the generic N/A placeholder"
     );
 }
 
@@ -610,64 +602,6 @@ fn a_failed_estimation_pass_is_disclosed_and_unestimated_rows_still_ship() {
 }
 
 // ── Template regressions (2026-09-13 review) ────────────────────────────────
-
-/// FIX 1 rendering bug this pass fixes: `CuratedSiteJson.fix`/`fix_for_this_finding` are
-/// `Option<String>`, which serialize to JSON `null` and parse in Typst as `none` — NOT an
-/// empty string. A `!= ""` guard would let `none` fall into the render branch and print a
-/// bare "Fix:" label with nothing after it. Pins the correct `!= none` guard in the shipped
-/// template so this can't regress silently.
-#[test]
-fn shipped_template_gates_the_fix_block_on_none_not_empty_string() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    assert!(
-        template.contains("if site.fix != none"),
-        "the Fix block must be gated on `!= none` (Option<String> -> JSON null -> Typst \
-             none), not `!= \"\"` — see report_export::CuratedSiteJson::fix's doc comment"
-    );
-    assert!(
-        !template.contains("if site.fix != \"\""),
-        "the old `!= \"\"` gate must not come back"
-    );
-    assert!(
-        template.contains("site.fix_for_this_finding != none"),
-        "the template must gate on `fix_for_this_finding`'s presence, not just `fix`'s"
-    );
-}
-
-/// P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix) must be the
-/// PRIMARY "Fix:" line, with the rule's generic `fix` demoted to a secondary line
-/// UNDER it — never the reverse order this template used before fix-generation existed.
-#[test]
-fn shipped_template_renders_fix_specific_before_the_generic_fix() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    let primary_idx = template
-        .find(r#"if site.fix_for_this_finding != none ["#)
-        .expect("the primary branch must gate on fix_for_this_finding first");
-    let fix_label_idx = template[primary_idx..]
-        .find(r#"[#site.fix_type: ]#fix_body(site.fix_for_this_finding)"#)
-        .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
-    let secondary_idx = template[primary_idx..]
-        .find("General guidance: ")
-        .expect("the rule's generic fix must render as secondary \"General guidance\" text");
-    assert!(
-        fix_label_idx < secondary_idx,
-        "fix_for_this_finding's Fix: line must render BEFORE the generic General guidance \
-             line"
-    );
-}
-
-/// The fallback path (fix-generation never ran or gave up) must still show the rule's
-/// generic remediation as the ONLY Fix line — never silently drop it.
-#[test]
-fn shipped_template_falls_back_to_the_generic_fix_when_no_fix_specific() {
-    let template = include_str!("../../../templates/audit_report.typ");
-    assert!(
-        template.contains("] else if site.fix != none ["),
-        "the fallback branch must still render the generic fix alone when \
-             fix_for_this_finding is none"
-    );
-}
-
 /// FIX 4 regression: the exec summary's own "Top priority items" bullet list (and its
 /// `top_do_now` feed) must not come back — the "Three things this week" box is the one
 /// place page 3 names the top do-now findings.
@@ -722,10 +656,9 @@ fn the_typst_time_budget_is_a_base_plus_a_per_site_allowance_up_to_a_ceiling() {
 }
 
 #[test]
-fn the_site_count_is_every_site_on_a_curated_or_held_card() {
+fn the_site_count_is_the_places_the_report_covers() {
     let data = serde_json::json!({
-        "curated_findings": [{"sites": [{}, {}, {}]}, {"sites": [{}]}],
-        "held_for_review_findings": [{"sites": [{}, {}]}],
+        "site_total": 6,
         "cover": {"project_title": "x"}
     })
     .to_string();
@@ -749,11 +682,7 @@ async fn a_typst_that_outlives_its_budget_fails_naming_the_size_and_ships_no_pdf
     )
     .expect("write the fake typst");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let data = serde_json::json!({
-        "curated_findings": [{"sites": [{}, {}, {}, {}, {}]}],
-        "held_for_review_findings": []
-    })
-    .to_string();
+    let data = serde_json::json!({ "site_total": 5 }).to_string();
     let started = std::time::Instant::now();
     let result = TYPST_PROGRAM
         .scope(
@@ -817,15 +746,20 @@ fn shipped_template_priority_grid_counts_findings_instead_of_listing_them_again(
         "the grid cell must count its findings"
     );
     assert!(
-        template.contains("listed once, in Curated findings"),
-        "the grid must say where the findings are listed"
+        template.contains("d.priority_grid.footnote"),
+        "the grid must say where the problems are listed"
+    );
+    let footnote = build_priority_grid(&MatrixJson::default()).footnote;
+    assert!(
+        footnote.contains(crate::xlsx_export::vocabulary::ALL_PROBLEMS),
+        "{footnote}"
     );
 }
 
 #[tokio::test]
-async fn compile_pdf_prints_each_action_site_exactly_once() {
+async fn compile_pdf_prints_no_place_of_a_report_with_no_escalation_and_counts_them_all() {
     if which_typst().is_none() {
-        eprintln!("skipping compile_pdf_prints_each_action_site_exactly_once: typst not on PATH");
+        eprintln!("skipping: typst not on PATH");
         return;
     }
     let findings: Vec<Finding> = (0..8)
@@ -851,20 +785,15 @@ async fn compile_pdf_prints_each_action_site_exactly_once() {
         .flat_map(|r| r.cells.iter())
         .map(|c| c.findings.len())
         .sum();
-    let on_cards: usize = json.curated_findings.iter().map(|g| g.sites.len()).sum();
     assert_eq!(in_grid, 8, "all eight reach the grid");
-    assert_eq!(on_cards, 8, "all eight have a card");
 
     let pdf = compile_pdf(&json).await.expect("the report must compile");
     let text = pdf_extract::extract_text_from_mem(&pdf).expect("text of the compiled PDF");
-    for i in 0..8 {
-        let path = format!("handler_{i}.rs");
-        assert_eq!(
-            text.matches(&path).count(),
-            1,
-            "{path} must be printed exactly once in the PDF: {text}"
-        );
-    }
+    assert_eq!(
+        text.matches("handler_").count(),
+        0,
+        "the PDF is a summary: no place is listed unless it is escalated or in the top three: {text}"
+    );
 }
 
 /// Branding regression: no hardcoded agency/"Camerata" cover title, no "Brownfield".
@@ -883,13 +812,15 @@ fn shipped_template_has_no_hardcoded_cover_title() {
 fn shipped_template_cover_table_omits_audit_and_calibration_model() {
     let template = include_str!("../../../templates/audit_report.typ");
     let cover_start = template.find("── 1. Cover").expect("cover section marker");
-    let cover_end = template.find("── ToC").expect("ToC section marker");
+    let cover_end = template
+        .find("── 2. Contents")
+        .expect("contents section marker");
     let cover_section = &template[cover_start..cover_end];
     assert!(!cover_section.contains("Audit model"));
     assert!(!cover_section.contains("Calibration model"));
     assert!(
-        template.contains("Scanned with Camerata v"),
-        "the model/version provenance line must still render, just in Methodology"
+        template.contains("Inspection model:"),
+        "the inspection model line must still render, in Methodology (the engine version and the backend are in manifest.json)"
     );
 }
 
@@ -1184,9 +1115,9 @@ fn raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narra
 
     // Every one of those numbers is actually visible in the prose, not just the JSON.
     let n = &json.executive_summary.narrative;
-    assert!(n.contains("2 candidate findings"), "{n}");
+    assert!(n.contains("2 problems"), "{n}");
     assert!(n.contains('1'), "{n}"); // curated_total / held_for_review both literally "1"
-    assert!(n.contains("0 were auto-excluded"), "{n}");
+    assert!(n.contains("0 were ruled out automatically"), "{n}");
 
     // Never claims a human reviewed or dispositioned anything.
     assert!(!n.contains("reviewed by a human reviewer"), "{n}");
@@ -1259,12 +1190,12 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
 
     let n = &json.executive_summary.narrative;
     assert!(
-        n.contains("3 candidate findings were reviewed by a human reviewer"),
+        n.contains("3 problems were reviewed by a human reviewer"),
         "{n}"
     );
-    assert!(n.contains("1 was dispositioned as false positives"), "{n}");
+    assert!(n.contains("1 was ruled out"), "{n}");
     assert!(n.contains("1 accepted as risk"), "{n}");
-    assert!(n.contains("held for further review"), "{n}");
+    assert!(n.contains("a further decision"), "{n}");
     assert!(
         json.methodology
             .ai_tier_note
@@ -1287,7 +1218,7 @@ fn zero_candidates_raw_scan_keeps_the_empty_state_sentence() {
     assert_eq!(json.review_state, ReviewState::Raw);
     assert_eq!(
         json.executive_summary.narrative,
-        "The scan surfaced no candidate findings to review in this run."
+        "The scan surfaced no problems to review in this run."
     );
 }
 
@@ -1374,11 +1305,11 @@ fn shipped_template_methodology_line_is_gated_on_review_state() {
         "the methodology reconciling line must branch on review_state"
     );
     assert!(
-        template.contains("has not yet had a human triage pass"),
+        template.contains("has not yet had a human review"),
         "the raw branch must say so explicitly"
     );
     assert!(
-        template.contains("held for a human reviewer's judgment call"),
+        template.contains("a human reviewer's decision"),
         "the raw branch must surface held_for_review, not just candidates/excluded"
     );
 }
@@ -1600,8 +1531,8 @@ fn no_client_facing_authored_string_contains_the_word_audit() {
         ai_tier_note_for(ReviewState::Reviewed, 0, 1),
         ai_tier_note_for(ReviewState::Raw, 1, 2),
         ai_tier_note_for(ReviewState::Reviewed, 2, 2),
-        default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
-        default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
+        default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0, 0),
+        default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0, 0),
         disposition_label(Disposition::Ignored, "some reason", "accepted", false),
         disposition_label(Disposition::Ignored, "some reason", "accepted", true),
         disposition_label(Disposition::Unresolved, "", "do_now", false),

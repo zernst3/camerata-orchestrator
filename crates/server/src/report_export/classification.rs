@@ -990,9 +990,10 @@ pub(crate) fn default_narrative(
     do_next: usize,
     plan: usize,
     accepted: usize,
+    informational: usize,
 ) -> String {
     if candidates_reviewed == 0 {
-        return "The scan surfaced no candidate findings to review in this run.".to_string();
+        return "The scan surfaced no problems to review in this run.".to_string();
     }
     let dep_clause = if dependency_advisories == 0 {
         String::new()
@@ -1008,39 +1009,38 @@ pub(crate) fn default_narrative(
     };
     match review_state {
         ReviewState::Raw => format!(
-            "This is a draft export: no finding in this run has had a human triage pass. The \
-             engine analyzed {} and produced {}. {curated_total} {} curated for action \
-             ({do_now} do now, {do_next} do next, {plan} planned, {accepted} already carried \
+            "This is a draft export: no problem in this run has had a human review. The \
+             engine analyzed {} and produced {}. {curated_total} {} for action \
+             ({do_now} First, {do_next} Next, {plan} Later, {accepted} already carried \
              as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             held for a human reviewer's judgment call, and {excluded_fp} {} auto-excluded as \
-             likely false positives.{dep_clause}",
+             a human reviewer's decision, {informational} {} information only, and \
+             {excluded_fp} {} ruled out automatically.{dep_clause}",
             noun(files_scanned, "file", "files"),
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
+            noun(candidates_reviewed, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
+            if held_for_review == 1 {
+                "needs"
+            } else {
+                "need"
+            },
+            if informational == 1 { "is" } else { "are" },
             if excluded_fp == 1 { "was" } else { "were" },
         ),
-        ReviewState::Reviewed => format!(
-            "{} were reviewed by a human reviewer; {} {} dispositioned as false positives and \
-             excluded entirely from this report. Of the remaining {}, {curated_total} {} \
-             curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
-             {accepted} accepted as risk) and {held_for_review} {} held for further review.\
-             {dep_clause}",
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
+        ReviewState::Reviewed => {
+            format!(
+            "{} were reviewed by a human reviewer; {} {} ruled out and left out of this report \
+             entirely. Of the remaining {}, {curated_total} {} for action ({do_now} First, \
+             {do_next} Next, {plan} Later, {accepted} accepted as risk), {held_for_review} \
+             {} a further decision and {informational} {} information only.{dep_clause}",
+            noun(candidates_reviewed, "problem", "problems"),
             excluded_fp,
             if excluded_fp == 1 { "was" } else { "were" },
-            noun(curated_total + held_for_review, "finding", "findings"),
+            noun(curated_total + held_for_review + informational, "problem", "problems"),
             if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
-        ),
+            if held_for_review == 1 { "needs" } else { "need" },
+            if informational == 1 { "is" } else { "are" },
+        )
+        }
     }
 }
 
@@ -1065,9 +1065,10 @@ pub(crate) fn ai_tier_note_for(
     if repos_not_run > 0 && repos_not_run >= total_repos {
         // The tier ran nowhere: say so, and make no claim about a review that did not happen.
         return format!(
-            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+            "The advisory language-model tier did not run for {}; see the {} sheet. Every finding \
              produced in this run came from the deterministic tier.",
-            repos(repos_not_run)
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         );
     }
     let ran = match review_state {
@@ -1091,8 +1092,9 @@ pub(crate) fn ai_tier_note_for(
         ran
     } else {
         format!(
-            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
-            repos(repos_not_run)
+            "{ran} The advisory language-model tier did not run for {}; see the {} sheet.",
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         )
     }
 }
@@ -1157,7 +1159,7 @@ pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, 
 /// than folding a guessed number into the sum.
 pub(crate) fn total_hours_label_of(efforts: &[Option<String>]) -> String {
     if efforts.is_empty() {
-        return "No do-now items this run.".to_string();
+        return "No fix is due first this run.".to_string();
     }
     let mut lo_sum = 0u32;
     let mut hi_sum = 0u32;

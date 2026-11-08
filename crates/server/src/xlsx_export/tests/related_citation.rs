@@ -183,10 +183,10 @@ fn the_report_explains_related_standards_in_one_plain_sentence() {
         "no em dashes in buyer-facing text"
     );
 
-    // The PDF template renders both the note and the related heading over the sources.
+    // The PDF template renders the note. (It lists no per-place citation, so no heading over a
+    // list of sources.)
     let template = include_str!("../../../templates/audit_report.typ");
     assert!(template.contains("d.methodology.citation_note"));
-    assert!(template.contains("group.citation.kind == \"related\""));
 }
 
 #[test]

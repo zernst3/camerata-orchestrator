@@ -283,7 +283,7 @@ async fn privileged_no_authz_finding_reaches_curated_findings_high_and_grounded(
     // routes High to `do_now` when `effort == Some("low")`, and a deterministic architectural
     // finding is never calibrated.
     assert_eq!(
-        site.disposition, "Open (recommended: Do next)",
+        site.disposition, "Open (recommended: Next)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
     );
     assert_eq!(

@@ -300,7 +300,7 @@ async fn grammar_injection_finding_reaches_curated_findings_high_and_not_rls_hed
     // never held for review by the P3 citation gate, which only ever applies to AI-tier
     // findings — see `report_export::is_ai_tier`/`is_uncited_ai_finding`).
     assert_eq!(
-        site.disposition, "Open (recommended: Do next)",
+        site.disposition, "Open (recommended: Next)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket; \
          NOT held as needs-review"
     );

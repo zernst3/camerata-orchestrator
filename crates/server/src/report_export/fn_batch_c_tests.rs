@@ -47,7 +47,7 @@ fn the_ai_tier_note_says_when_the_tier_did_not_run_for_some_repos() {
     );
     let note = &json.methodology.ai_tier_note;
     assert!(
-        note.contains("did not run for 1 repo; see Coverage."),
+        note.contains("did not run for 1 repo; see the Not checked sheet."),
         "{note}"
     );
 }
@@ -63,7 +63,7 @@ fn the_ai_tier_note_drops_the_calibrated_claim_when_the_tier_ran_nowhere() {
     );
     let note = &json.methodology.ai_tier_note;
     assert!(
-        note.contains("did not run for 2 repos; see Coverage."),
+        note.contains("did not run for 2 repos; see the Not checked sheet."),
         "{note}"
     );
     assert!(
@@ -84,7 +84,7 @@ fn a_blocked_ai_review_is_disclosed_like_a_failed_one() {
     assert!(json
         .methodology
         .ai_tier_note
-        .contains("did not run for 2 repos; see Coverage."));
+        .contains("did not run for 2 repos; see the Not checked sheet."));
 }
 
 #[test]

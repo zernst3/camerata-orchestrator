@@ -366,7 +366,7 @@ fn executive_summary_default_narrative_when_no_override() {
     assert!(!json.executive_summary.is_override);
     assert_eq!(
         json.executive_summary.narrative,
-        "The scan surfaced no candidate findings to review in this run."
+        "The scan surfaced no problems to review in this run."
     );
 }
 
@@ -381,9 +381,7 @@ fn executive_summary_default_narrative_pluralizes_correctly() {
         &empty_opts(),
     );
     assert!(
-        json.executive_summary
-            .narrative
-            .contains("1 candidate finding."),
+        json.executive_summary.narrative.contains("1 problem."),
         "expected singular 'finding', got: {:?}",
         json.executive_summary.narrative
     );
@@ -558,31 +556,32 @@ async fn compile_pdf_never_embeds_a_zero_width_character_when_wrapping_a_long_pa
 /// filler into a nonsense sentence like "a payload like the affected resource renders as
 /// inert text".
 #[tokio::test]
-async fn compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder() {
+async fn the_fix_text_never_swallows_a_literal_html_example_into_a_generic_placeholder() {
     if which_typst().is_none() {
-        eprintln!(
-            "skipping \
-                 compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder: \
-                 typst not on PATH"
-        );
+        eprintln!("skipping the_fix_text_never_swallows_a_literal_html_example: typst not on PATH");
         return;
     }
-    let (json, pdf) = c4_r3_report_and_pdf().await;
-    assert!(
-        json.curated_findings
-            .iter()
-            .any(|g| g.rule_id == "SEC-NO-UNSAFE-HTML-SINK-1"),
-        "the HTML-sink finding must survive triage into curated findings"
+    let (json, _pdf) = c4_r3_report_and_pdf().await;
+    let group = json
+        .curated_findings
+        .iter()
+        .find(|g| g.rule_id == "SEC-NO-UNSAFE-HTML-SINK-1")
+        .expect("the HTML-sink finding must survive triage into curated findings");
+    // The PDF prints no per-place fix text; the text is carried by the dataset the workbook and
+    // the CSV files are built from, and that is where the example must survive.
+    let site = &group.sites[0];
+    let fix = format!(
+        "{} {}",
+        site.fix.clone().unwrap_or_default(),
+        site.fix_for_this_finding.clone().unwrap_or_default()
     );
-    let text = pdf_extract::extract_text_from_mem(&pdf)
-        .expect("must be able to extract text from the compiled PDF");
     assert!(
-        !text.contains("a payload like the affected resource"),
-        "the literal <img ...> example must not be replaced by the generic filler: {text:?}"
+        !fix.contains("a payload like the affected resource"),
+        "the literal <img ...> example must not be replaced by the generic filler: {fix:?}"
     );
     assert!(
-        text.contains("payload like") && text.contains("renders as inert text"),
-        "the authored remediation sentence must still render: {text:?}"
+        fix.contains("payload like") && fix.contains("renders as inert text"),
+        "the authored remediation sentence must still be in the fix text: {fix:?}"
     );
 }
 
@@ -657,10 +656,10 @@ async fn compile_pdf_survives_multi_byte_characters_in_path_and_snippet() {
         "the path's accented/CJK/emoji characters must survive intact: \
              reconstructed={collapsed:?}"
     );
+    // The snippet is not printed (the PDF holds no code), so it must not be in the text.
     assert!(
-        collapsed.contains(&UNIT.repeat(8)),
-        "the snippet's accented/CJK/emoji characters must survive intact: \
-             reconstructed={collapsed:?}"
+        !collapsed.contains(&UNIT.repeat(8)),
+        "the PDF printed a code snippet: reconstructed={collapsed:?}"
     );
 }
 
@@ -1115,12 +1114,11 @@ async fn compile_pdf_renders_fix_specific_and_generic_fix_together() {
 
 // ── C4-P4 residual defect 5: curated ordering + held-for-review separation ─────────
 
-/// Render test (compiles the real Typst template): "Curated findings" must be ordered by
+/// Data test: the curated groups of the report data must be ordered by
 /// severity desc (never alphabetically by rule id — the fixture deliberately gives the LOW
 /// finding a rule id that sorts alphabetically FIRST, so a passing test can only mean the
 /// severity sort actually fired), and an entirely-informational finding must render under
-/// its own "Held for review" heading, strictly AFTER every curated finding, never under
-/// "Curated findings" itself.
+/// their own list, never among the curated groups. (The PDF prints neither list: it is a summary.)
 #[tokio::test]
 async fn curated_findings_are_severity_ordered_and_informational_rows_are_held_for_review_separately(
 ) {
@@ -1173,53 +1171,8 @@ async fn curated_findings_are_severity_ordered_and_informational_rows_are_held_f
         .iter()
         .all(|g| g.sites.iter().all(|s| s.bucket != "informational")));
 
-    let pdf = compile_pdf(&json)
-        .await
-        .expect("compile_pdf must succeed for the severity-ordering fixture");
-    let text = pdf_extract::extract_text_from_mem(&pdf)
-        .expect("must be able to extract text from the compiled PDF");
-
-    // Both headings also appear once each in the clickable table of contents, and some of
-    // the headline text also appears in the "three things this week" box and the severity
-    // matrix earlier in the document — `rfind` anchors on the real SECTION headings (the
-    // last occurrence of each), and the comparisons below are scoped to the text BETWEEN
-    // (and after) those two anchors, so none of those earlier incidental occurrences can
-    // produce a false pass.
-    let curated_anchor = text
-        .rfind("Curated findings")
-        .expect("the Curated findings section heading must render");
-    let held_anchor = text
-        .rfind("Held for review")
-        .expect("the Held for review section heading must render");
-    assert!(
-        curated_anchor < held_anchor,
-        "the Curated findings section must render before Held for review: {text:?}"
-    );
-
-    let curated_section = &text[curated_anchor..held_anchor];
-    let held_section = &text[held_anchor..];
-
-    let critical_idx = curated_section
-        .find("authentication bypass")
-        .expect("the critical finding's headline must render in Curated findings");
-    let low_idx = curated_section
-        .find("cosmetic logging format")
-        .expect("the low finding's headline must render in Curated findings");
-    assert!(
-        critical_idx < low_idx,
-        "the critical (max-severity) finding must render BEFORE the low finding within \
-             Curated findings, never alphabetically: {curated_section:?}"
-    );
-
-    assert!(
-        held_section.contains("variable naming conventions"),
-        "the informational finding must render in Held for review: {held_section:?}"
-    );
-    assert!(
-        !curated_section.contains("variable naming conventions"),
-        "no informational row may appear inside Curated findings (i.e. before a curated \
-             one): {curated_section:?}"
-    );
+    // The PDF lists no group, so there is no section order to check there: the order of the
+    // data is what the workbook and the CSV files are built from.
 }
 
 // ── C6-B1: a held-bucket row counted but never rendered (fixed above in the
@@ -1311,44 +1264,17 @@ async fn hedged_uncited_critical_in_held_bucket_is_counted_and_renders_in_held_f
         json.curated_findings
     );
 
-    // ── Actually renders ──
+    // ── The PDF still counts it ──
+    // The PDF prints no row, so the held critical is counted on the cover and nowhere else in the
+    // PDF; its row is in the workbook and the release gate holds the groups to the matrix.
     let pdf = compile_pdf(&json)
         .await
         .expect("compile_pdf must succeed for the hedged-uncited-critical fixture");
     let text = pdf_extract::extract_text_from_mem(&pdf)
         .expect("must be able to extract text from the compiled PDF");
-
-    // C6-B1: anchor on the HEADING specifically, not any substring occurrence — a `held`
-    // row's own disposition label literally reads "Held for review (a human reviewer's
-    // judgment call is needed before this can be actioned)" (see `disposition_label`), so a
-    // naive `rfind("Held for review")` matches that IN-BODY label (which sorts after the
-    // row's own content) rather than the section heading, truncating the slice to AFTER the
-    // very content being tested for. The heading alone is followed by a bare newline in the
-    // extracted text (the ToC entry is followed by dot-leader spaces; the in-body label is
-    // followed by " ("), so anchoring on the heading-plus-newline disambiguates all three.
-    let curated_anchor = text
-        .find("Curated findings\n")
-        .expect("heading must render");
-    let held_anchor = text.find("Held for review\n").expect("heading must render");
-    let held_section = &text[held_anchor..];
-    let curated_section = &text[curated_anchor..held_anchor];
-
-    for n in 1..=5 {
-        assert!(
-            text.contains(&format!("zzqy-ordinary-critical-{n}")),
-            "ordinary critical #{n} must render somewhere: {text:?}"
-        );
-    }
     assert!(
-        held_section.contains("zzqy-hedged-uncited-critical"),
-        "the hedged, uncited critical row must render in the Held for review section — \
-             this is the exact bug: counted on the cover/scorecard, absent from every \
-             rendered section: {held_section:?}"
-    );
-    assert!(
-        !curated_section.contains("zzqy-hedged-uncited-critical"),
-        "the hedged, uncited row must never render inside Curated findings: \
-             {curated_section:?}"
+        text.contains("6 critical"),
+        "the cover must count all six criticals: {text:?}"
     );
 }
 
@@ -1433,20 +1359,7 @@ async fn cover_critical_count_equals_the_number_of_critical_blocks_actually_rend
         .expect("compile_pdf must succeed for the six-critical fixture");
     let text = pdf_extract::extract_text_from_mem(&pdf)
         .expect("must be able to extract text from the compiled PDF");
-    for n in 1..=2 {
-        assert!(
-            text.contains(&format!("zzqy-curated-critical-{n}")),
-            "{text:?}"
-        );
-        assert!(
-            text.contains(&format!("zzqy-hedged-critical-{n}")),
-            "{text:?}"
-        );
-        assert!(
-            text.contains(&format!("zzqy-uncited-critical-{n}")),
-            "{text:?}"
-        );
-    }
+    assert!(text.contains("6 critical"), "{text:?}");
 }
 
 /// Every (bucket x severity) combination the report pipeline can actually produce must
@@ -1562,26 +1475,6 @@ async fn every_bucket_severity_combination_emits_a_rendered_block() {
             site.bucket, expected_site_bucket,
             "tag {tag:?} expected site bucket {expected_site_bucket:?}, got {:?}",
             site.bucket
-        );
-    }
-
-    if which_typst().is_none() {
-        eprintln!(
-            "skipping PDF leg of every_bucket_severity_combination_emits_a_rendered_block: \
-                 typst not on PATH"
-        );
-        return;
-    }
-    let pdf = compile_pdf(&json)
-        .await
-        .expect("compile_pdf must succeed for the full bucket x severity combo fixture");
-    let text = pdf_extract::extract_text_from_mem(&pdf)
-        .expect("must be able to extract text from the compiled PDF");
-    for (bucket, sev, tag) in &expectations {
-        assert!(
-            text.contains(tag.as_str()),
-            "({bucket}, {sev}) tagged {tag:?} must render somewhere in the compiled PDF: \
-                 {text:?}"
         );
     }
 }

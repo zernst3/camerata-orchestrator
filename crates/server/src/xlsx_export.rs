@@ -1364,6 +1364,108 @@ fn build_deviation_groups(
 pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently, no exceptions found";
 pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
 
+/// "Your conventions" as the PDF states it: how many conventions the code follows consistently,
+/// where it has settled on none, and where it departs from the ones it follows. Counts and a few
+/// short lines; the rows are on the Your conventions and Departures sheets.
+pub(crate) fn pdf_conventions_of(
+    rows: &[FindingRow],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> crate::report_export::ConventionsSummaryJson {
+    use crate::report_export::PDF_MAX_DEPARTURES;
+    let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+    let conventions: Vec<&FindingRow> = live
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Conventions)
+        .collect();
+    let others: Vec<&FindingRow> = live
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Findings)
+        .collect();
+    let convention_rows = build_convention_rows(&conventions, corpus);
+    let departures = build_deviation_groups(&others, corpus);
+    let followed: Vec<&ConventionRow> = convention_rows.iter().filter(|c| c.rank == 0).collect();
+    let none_adopted = convention_rows.len() - followed.len();
+    let areas = |names: Vec<&str>| -> usize {
+        names
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
+    let word = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let followed_line = if followed.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{} followed consistently, in {}.",
+            word(followed.len(), "convention", "conventions"),
+            word(
+                areas(followed.iter().map(|c| c.category.as_str()).collect()),
+                "area",
+                "areas"
+            )
+        )
+    };
+    let none_adopted_line = if none_adopted == 0 {
+        String::new()
+    } else {
+        format!(
+            "{} where your code has settled on no single habit.",
+            word(none_adopted, "rule", "rules")
+        )
+    };
+    let departing_places: usize = departures.iter().map(|d| d.deviating_sites).sum();
+    let departures_line = if departures.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{} from a convention your code mostly follows, in {} ({}).",
+            word(departures.len(), "departure", "departures"),
+            word(
+                areas(departures.iter().map(|d| d.category.as_str()).collect()),
+                "area",
+                "areas"
+            ),
+            vocabulary::places_count(departing_places)
+        )
+    };
+    let lines: Vec<String> = departures
+        .iter()
+        .take(PDF_MAX_DEPARTURES)
+        .map(|d| {
+            let named = if d.convention_label.is_empty() {
+                d.rule_title.clone()
+            } else {
+                d.convention_label.clone()
+            };
+            let places = match d.assessed_sites {
+                Some(of) => format!("{} of {of} places", d.deviating_sites),
+                None => vocabulary::places_count(d.deviating_sites),
+            };
+            format!("{}: {named} ({places})", d.category)
+        })
+        .collect();
+    let more_line = if departures.len() > PDF_MAX_DEPARTURES {
+        vocabulary::more_in_sheet(
+            departures.len() - PDF_MAX_DEPARTURES,
+            vocabulary::DEPARTURES,
+        )
+    } else {
+        String::new()
+    };
+    crate::report_export::ConventionsSummaryJson {
+        any: !followed_line.is_empty()
+            || !none_adopted_line.is_empty()
+            || !departures_line.is_empty(),
+        followed_line,
+        none_adopted_line,
+        departures_line,
+        departures: lines,
+        more_line,
+    }
+}
+
 /// One row of the `Conventions` sheet — the derived decision set (A5.5). A shipped
 /// deliverable: the audit derives the client's conventions and this is the sheet those
 /// conventions are read off, so it answers "what does our codebase already do well and
@@ -2311,7 +2413,7 @@ mod sheets;
 mod subgroups;
 mod tables;
 pub mod vocabulary;
-pub(crate) use subgroups::{no_tree_note, pdf_sections};
+pub(crate) use subgroups::{no_tree_note, pdf_sections, PdfSections};
 pub mod tickets;
 pub mod triage_log;
 
@@ -4534,17 +4636,13 @@ mod tests {
         assert_ne!(hedged_row.bucket, "do_now");
         assert_ne!(hedged_row.bucket, "do_next");
 
-        // The PDF template reads these SAME precomputed fields — `d.priority_grid` (built from
-        // this exact `matrix` by `build_priority_grid`) and each curated site's own
-        // `disposition` label — never a second, independent severity-to-bucket pass of its own.
+        // The PDF template reads the SAME precomputed grid — `d.priority_grid` (built from this
+        // exact `matrix` by `build_priority_grid`) — never a second, independent
+        // severity-to-bucket pass of its own. (It prints no per-place disposition label.)
         let template = include_str!("../templates/audit_report.typ");
         assert!(
             template.contains("d.priority_grid"),
             "the template must render the grid derived from `matrix`, not recompute buckets"
-        );
-        assert!(
-            template.contains("site.disposition"),
-            "the template must render each curated site's own precomputed disposition label"
         );
     }
 

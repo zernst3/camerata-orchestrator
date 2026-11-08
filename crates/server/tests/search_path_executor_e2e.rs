@@ -278,7 +278,7 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     // M4: an uncalibrated high-severity finding recommends "Do next" (never buried as
     // informational — `is_informational` hard-exempts critical/high regardless of family).
     assert_eq!(
-        site.disposition, "Open (recommended: Do next)",
+        site.disposition, "Open (recommended: Next)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
     );
     assert_eq!(

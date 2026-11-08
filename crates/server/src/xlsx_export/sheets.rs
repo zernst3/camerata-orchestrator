@@ -1667,26 +1667,27 @@ pub(super) fn code_volume_label(report: &crate::onboard::ScanReport) -> Option<S
     Some(base)
 }
 
-/// The scorecard: one row for each area, its problems by severity. The PDF scorecard counts the
-/// same rows the same way.
+/// The rows that head the places of the problem sheets: for each (repo, file, line) of a row that
+/// is not ruled out and is a problem (not a convention and not a rule that could not be
+/// completed), the first row there. The scorecard, the PDF cover and the All problems sheet count
+/// these and no others, so the three agree by construction.
+pub(super) fn problem_heads<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> Vec<&'a FindingRow> {
+    let mut seen: std::collections::HashSet<(&str, &str, usize)> = std::collections::HashSet::new();
+    rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
+        .filter(|r| seen.insert((r.repo.as_str(), r.path.as_str(), r.line)))
+        .collect()
+}
+
+/// The scorecard: one row for each area, its problems by severity. A problem is a place: the
+/// place counts once, at the severity and in the area of the row that heads it, which is the row
+/// All problems prints. The PDF scorecard and cover count the same places the same way, so the
+/// Total of this card is the number of rows on All problems.
 pub(super) fn scorecard(
     live_rows: &[&FindingRow],
     report: &crate::onboard::ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> BTreeMap<String, [usize; 4]> {
-    // KNOWN GAP (follow-up with the PDF work order): this counts every row that is not ruled out,
-    // conventions and the Info row (as Low) included, exactly as the PDF scorecard does, so the
-    // Total can exceed the All problems row count. Both move to problems only together.
-    let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
-    for row in live_rows {
-        let counts = by_area.entry(row.category.clone()).or_insert([0; 4]);
-        match row.severity.as_str() {
-            "critical" => counts[0] += 1,
-            "high" => counts[1] += 1,
-            "medium" => counts[2] += 1,
-            _ => counts[3] += 1,
-        }
-    }
+    let mut by_area = problem_counts(live_rows.iter().copied());
     // An area with rules checked and nothing found still gets its row of zeros, as in the PDF.
     for rid in &report.provenance.audited_rule_ids {
         by_area
@@ -1694,6 +1695,47 @@ pub(super) fn scorecard(
             .or_insert([0; 4]);
     }
     by_area
+}
+
+/// Problems by area and severity (critical, high, medium, low): each place is counted in every
+/// area where a rule fired at it, at the worst severity of that area's rules there. A place with
+/// rules from several areas is in each of them; [`problem_totals`] counts each place once.
+pub(crate) fn problem_counts<'a>(
+    rows: impl Iterator<Item = &'a FindingRow>,
+) -> BTreeMap<String, [usize; 4]> {
+    let slot = |severity: &str| match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    };
+    let mut worst: BTreeMap<(String, String, usize, String), usize> = BTreeMap::new();
+    for r in rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings) {
+        let key = (r.repo.clone(), r.path.clone(), r.line, r.category.clone());
+        let s = slot(&r.severity);
+        let e = worst.entry(key).or_insert(s);
+        *e = (*e).min(s);
+    }
+    let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
+    for ((_, _, _, area), s) in worst {
+        by_area.entry(area).or_insert([0; 4])[s] += 1;
+    }
+    by_area
+}
+
+/// Problems by severity (critical, high, medium, low), each place once, at the severity of the
+/// row that heads it: the cover's counts and the scorecard's Total.
+pub(crate) fn problem_totals<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> [usize; 4] {
+    let mut totals = [0usize; 4];
+    for row in problem_heads(rows) {
+        match row.severity.as_str() {
+            "critical" => totals[0] += 1,
+            "high" => totals[1] += 1,
+            "medium" => totals[2] += 1,
+            _ => totals[3] += 1,
+        }
+    }
+    totals
 }
 
 pub(super) fn write_start_here(
@@ -1784,12 +1826,11 @@ pub(super) fn write_start_here(
     }
     r += 1;
     let by_area = scorecard(facts.live_rows, facts.report, facts.corpus);
-    let mut totals = [0usize; 4];
+    let totals = problem_totals(facts.live_rows.iter().copied());
     for (area, counts) in &by_area {
         ws.write_text(r, 0, area)?;
         for (i, count) in counts.iter().enumerate() {
             ws.write_number(r, (i + 1) as u16, *count as f64)?;
-            totals[i] += *count;
         }
         ws.write_number(r, 5, counts.iter().sum::<usize>() as f64)?;
         r += 1;

@@ -213,7 +213,7 @@ fn narrative_bucket_counts_are_a_one_pass_partition_with_no_subset_restatement()
     assert!(
         json.executive_summary
             .narrative
-            .contains("1 do now, 0 do next, 1 planned, 0 already carried as accepted risk"),
+            .contains("1 First, 0 Next, 1 Later, 0 already carried as accepted risk"),
         "{}",
         json.executive_summary.narrative
     );
@@ -316,7 +316,7 @@ fn three_things_box_is_empty_when_no_do_now_items_exist() {
     assert!(json.three_things.items.is_empty());
     assert_eq!(
         json.three_things.total_hours_label,
-        "No do-now items this run."
+        "No fix is due first this run."
     );
 }
 
@@ -812,8 +812,8 @@ fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean()
 }
 
 #[test]
-fn whats_healthy_caps_at_ten_and_reports_further_clean_count() {
-    let audited_owned: Vec<String> = (0..15).map(|i| format!("SEC-{i}")).collect();
+fn whats_healthy_caps_at_twenty_five_and_reports_further_clean_count() {
+    let audited_owned: Vec<String> = (0..30).map(|i| format!("SEC-{i}")).collect();
     let audited: Vec<&str> = audited_owned.iter().map(String::as_str).collect();
     let report = report_with(vec![], audited);
     let json = build_report_json(
@@ -821,7 +821,8 @@ fn whats_healthy_caps_at_ten_and_reports_further_clean_count() {
         None,
         &empty_opts(),
     );
-    assert_eq!(json.whats_healthy.rules.len(), 10);
+    assert_eq!(json.whats_healthy.rules.len(), PDF_MAX_HEALTHY_RULES);
+    assert_eq!(PDF_MAX_HEALTHY_RULES, 25);
     assert_eq!(json.whats_healthy.further_clean_count, 5);
 }
 
@@ -962,11 +963,11 @@ async fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
         &empty_opts(),
     );
 
-    // Cover critical count == the critical ROWS: the floor rule and the model's rule for the
-    // SQL-injection defect are two rows, each critical, and each counts.
+    // The cover counts problems, one for each place (W2): the floor rule and the model's rule for
+    // the SQL-injection defect are two rows at one place, so they are one critical problem.
     assert_eq!(
-        json.cover.stats.critical, 2,
-        "both critical SQL-injection rows count, since neither is merged away"
+        json.cover.stats.critical, 1,
+        "the two critical SQL-injection rows are one place and count once"
     );
 
     // The CORS security finding must survive as its own curated row, never absorbed under
@@ -1224,8 +1225,9 @@ async fn c5_1_cover_critical_count_equals_rendered_critical_rows_after_merge() {
     );
 
     // Every row is in exactly one matrix bucket, whether or not the citation gate also
-    // curates it, so the rows rendered in the body are the matrix rows.
-    let rendered_critical_rows = json
+    // curates it. The cover counts problems, one for each place (W2), so it equals the number of
+    // distinct places among the critical matrix rows.
+    let critical_places: std::collections::BTreeSet<(&str, &str, usize)> = json
         .matrix
         .do_now
         .iter()
@@ -1235,15 +1237,16 @@ async fn c5_1_cover_critical_count_equals_rendered_critical_rows_after_merge() {
         .chain(&json.matrix.informational)
         .chain(&json.matrix.held)
         .filter(|r| r.severity == "critical")
-        .count();
+        .map(|r| (r.repo.as_str(), r.path.as_str(), r.line))
+        .collect();
     assert_eq!(
-        json.cover.stats.critical, rendered_critical_rows,
-        "the cover's critical count must equal the number of critical rows actually \
-             rendered in the body"
+        json.cover.stats.critical,
+        critical_places.len(),
+        "the cover's critical count must equal the number of places with a critical problem"
     );
     assert_eq!(
-        json.cover.stats.critical, 4,
-        "each of the four critical rows counts once: nothing is merged away"
+        json.cover.stats.critical, 2,
+        "the four critical rows are two places, two rule families at each: two problems"
     );
 }
 

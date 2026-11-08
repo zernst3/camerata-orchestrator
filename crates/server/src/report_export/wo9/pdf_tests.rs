@@ -141,72 +141,45 @@ fn report_of_sites(sites: usize) -> crate::onboard::SealedReport {
 }
 
 #[test]
-fn a_repo_above_30000_sites_renders_only_the_reshaped_pdf() {
-    // At the limit the PDF still prints every site.
-    let at_limit = apply_overlay(&report_of_sites(30_000), &[], &[], &[]);
-    let json = serde_json::to_value(build_report_json(&at_limit, None, &client_options())).unwrap();
-    assert_eq!(json["reduced"], false, "30,000 sites is the full PDF");
-    assert!(!json["curated_findings"].as_array().unwrap().is_empty());
-
-    // One site more and only the reshaped shape is rendered: summary, escalations and patterns.
-    let over = apply_overlay(&report_of_sites(30_001), &[], &[], &[]);
-    let built = build_report_json(&over, None, &client_options());
-    let data = render_data_json(&built).unwrap();
-    let json = serde_json::to_value(&built).unwrap();
-    assert_eq!(json["reduced"], true);
-    assert_eq!(json["site_total"], 30_001);
-    assert!(
-        json["curated_findings"].as_array().unwrap().is_empty(),
-        "no per-site cards"
-    );
-    assert!(json["held_for_review_findings"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    for bucket in [
-        "do_now",
-        "do_next",
-        "plan",
-        "accepted",
-        "informational",
-        "held",
-    ] {
+fn the_pdf_data_is_a_summary_at_every_size() {
+    // The shape is the same at 30,000 places and at 30,001: no switch, no per-place list.
+    for places in [30_000usize, 30_001] {
+        let reviewed = apply_overlay(&report_of_sites(places), &[], &[], &[]);
+        let built = build_report_json(&reviewed, None, &client_options());
+        let data = render_data_json(&built).unwrap();
+        let json: Value = serde_json::from_str(&data).unwrap();
+        assert!(json.get("reduced").is_none(), "{places}: no size switch");
+        assert!(json.get("reduced_matrix").is_none(), "{places}");
+        assert_eq!(json["site_total"], places);
+        // The lists the template does not read are not in the data it parses.
+        for unread in ["curated_findings", "held_for_review_findings", "matrix"] {
+            assert!(
+                json.get(unread).is_none(),
+                "{places}: {unread} is in the data"
+            );
+        }
+        // The report itself still holds them, for the release gate's dataset checks.
+        let in_memory = serde_json::to_value(&built).unwrap();
+        assert!(!in_memory["curated_findings"].as_array().unwrap().is_empty());
+        let patterns = json["sub_group_patterns"].as_array().unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0]["site_count"], places);
         assert!(
-            json["matrix"][bucket].as_array().unwrap().is_empty(),
-            "{bucket} lists no site"
+            patterns[0]["pointer"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!(
+                    "{places} places, see the All problems sheet, filter Fix id = "
+                )),
+            "{}",
+            patterns[0]["pointer"]
         );
-    }
-    // The counts the lists would have given are still there, and the patterns carry the sites.
-    let tally: u64 = json["reduced_matrix"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["count"].as_u64().unwrap())
-        .sum();
-    assert_eq!(tally, 1, "one row, in its bucket");
-    let patterns = json["sub_group_patterns"].as_array().unwrap();
-    assert_eq!(patterns.len(), 1);
-    assert_eq!(patterns[0]["site_count"], 30_001);
-    assert!(
-        patterns[0]["pointer"]
-            .as_str()
-            .unwrap()
-            .starts_with("30001 places, see the All problems sheet, filter Fix id = "),
-        "{}",
-        patterns[0]["pointer"]
-    );
-    // No per-site text reaches the PDF's data: the data is small whatever the site count.
-    assert!(
-        !data.contains("module_00001.rs"),
-        "a site is in the PDF data"
-    );
-    assert!(data.len() < 200_000, "{} bytes", data.len());
-
-    // The reshaped PDF compiles.
-    if camerata_test_env::typst_on_path() {
-        let pdf = futures_lite_block_on(crate::report_export::compile_pdf_from_data(&data))
-            .expect("the reshaped PDF compiles");
-        assert!(pdf.starts_with(b"%PDF-"));
+        // No per-place text reaches the PDF's data: the data is small whatever the place count.
+        assert!(
+            !data.contains("module_00001.rs"),
+            "a place is in the PDF data"
+        );
+        assert!(data.len() < 200_000, "{places}: {} bytes", data.len());
     }
 }
 
@@ -219,7 +192,7 @@ fn futures_lite_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 }
 
 #[test]
-fn a_reduced_package_clears_the_release_gate() {
+fn a_package_of_thirty_thousand_places_clears_the_release_gate() {
     let over = apply_overlay(&report_of_sites(30_001), &[], &[], &[]);
     let entries = released_entries(&over, &client_options());
     assert!(entries.contains_key("findings.json"));
@@ -243,15 +216,24 @@ fn the_compiled_pdf_prints_the_escalations_and_the_patterns() {
     let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF's text extracts");
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     for want in [
-        "Sites reviewed in person",
-        "Escalated 2 of a budget of 20",
-        "What the findings have in common",
-        "filter Fix id = ",
-        "Bind the parameters with the driver.",
+        "The most serious problems",
+        "What to do: Bind the parameters with the driver.",
+        "The other fixes",
     ] {
         assert!(
             flat.contains(want),
             "the PDF does not print {want:?}: {flat}"
+        );
+    }
+    for gone in [
+        "Escalated 2 of a budget of 20",
+        "Sites reviewed in person",
+        "What the findings have in common",
+        "filter Fix id = ",
+    ] {
+        assert!(
+            !flat.contains(gone),
+            "the PDF still prints {gone:?}: {flat}"
         );
     }
     assert!(!flat.contains("SECRET-WHY-ESCALATION"));

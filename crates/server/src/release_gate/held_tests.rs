@@ -367,12 +367,12 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
         "{header}"
     );
     assert!(csv.contains("edit-000001"), "{csv}");
-    // The PDF's data.
+    // The PDF's data holds no row, so it carries no row's edit marks.
     assert!(
-        data_json.contains("\"reviewer_edited\":true"),
+        !data_json.contains("\"reviewer_edited\":true"),
         "the PDF data"
     );
-    assert!(data_json.contains("edit-000002"));
+    assert!(!data_json.contains("edit-000002"));
     // The workbook.
     let cells = xlsx_text(&zip);
     assert!(cells.iter().any(|c| c == "Reviewer edited"), "{cells:?}");

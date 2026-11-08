@@ -1045,11 +1045,32 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
             if !rules.contains(&r.rule_id) {
                 rules.push(r.rule_id.clone());
             }
-            if !decisions.contains(&r.disposition_label) {
-                decisions.push(r.disposition_label.clone());
+            // The place's decision, without the fix order a row recommends (that is the Fix's):
+            // "Open", "Confirmed by the reviewer", "Needs a decision".
+            let state = r
+                .disposition_label
+                .split(" (")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !decisions.contains(&state) {
+                decisions.push(state);
             }
         }
         out.push(crate::report_export::EscalatedSiteJson {
+            place: vocabulary::place_text(&head.repo, &head.path, head.line),
+            rules_line: format!("{}: {}", vocabulary::H_RULES, rules.join(", ")),
+            // The fix written for this place (its head row's own), else the rule's.
+            what_to_do: crate::report_export::first_sentences(
+                head.fix_specific
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .or(head.fix.as_deref())
+                    .unwrap_or_default(),
+                2,
+                400,
+            ),
+            effort: String::new(),
             group: head.facts.group.clone(),
             fix_id: head.facts.fix_id.clone(),
             headline: head.headline.clone(),
@@ -1068,7 +1089,27 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
                 .to_string(),
         });
     }
+    // The worst first, so the PDF's cap keeps the most serious.
+    out.sort_by_key(|e| severity_rank(&e.severity.to_ascii_lowercase()));
     out
+}
+
+/// What the PDF states from the reviewed report beyond its own row lists, worked out once from one
+/// partition of the rows.
+pub(crate) struct PdfSections {
+    /// The escalated places with their decisions, worst first.
+    pub escalated: Vec<crate::report_export::EscalatedSiteJson>,
+    /// One pattern for each Fix.
+    pub patterns: Vec<crate::report_export::PatternJson>,
+    /// The facts of each Fix by id, for the top three.
+    pub fixes: std::collections::HashMap<String, PdfFixFacts>,
+    /// "Your conventions".
+    pub conventions: crate::report_export::ConventionsSummaryJson,
+    /// Problems by area and severity (critical, high, medium, low), one for each place: the
+    /// scorecard and the cover, counted the way the workbook's scorecard counts.
+    pub problem_counts: BTreeMap<String, [usize; 4]>,
+    /// The same by severity alone, each place once: the cover.
+    pub problem_totals: [usize; 4],
 }
 
 /// What the PDF prints from the reviewed report beyond the per-site sections (design 3B item 1):
@@ -1078,15 +1119,29 @@ pub(crate) fn pdf_sections(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &std::collections::HashMap<String, String>,
-) -> (
-    Vec<crate::report_export::EscalatedSiteJson>,
-    Vec<crate::report_export::PatternJson>,
-    std::collections::HashMap<String, PdfFixFacts>,
-) {
+) -> PdfSections {
     let (rows, deps) = super::partition_rows_for(reviewed, corpus, chosen_options, false);
-    let escalated = escalated_places(&rows);
+    let mut escalated = escalated_places(&rows);
     let mut facts = fix_facts(reviewed, &rows, &deps, corpus, true);
     facts.sort_by_key(|g| (g.open.is_empty(), g.sequence));
+    // What each escalated place's Fix asks of the reader, in two sentences, and its effort.
+    for entry in &mut escalated {
+        if let Some(g) = facts.iter().find(|g| g.id == entry.fix_id) {
+            // Last resort: the Fix's own text.
+            if entry.what_to_do.is_empty() {
+                let text = if g.worked_example.is_empty() {
+                    &g.fix
+                } else {
+                    &g.worked_example
+                };
+                entry.what_to_do = crate::report_export::first_sentences(text, 2, 400);
+            }
+            entry.effort = g.effort.clone();
+        }
+    }
+    let conventions = super::pdf_conventions_of(&rows, corpus);
+    let problem_counts = super::sheets::problem_counts(rows.iter());
+    let problem_totals = super::sheets::problem_totals(rows.iter());
     let by_id = facts
         .iter()
         .map(|g| {
@@ -1101,8 +1156,12 @@ pub(crate) fn pdf_sections(
             )
         })
         .collect();
+    // A Fix that holds only conventions, or only rules that could not be completed, is no fix: it
+    // is not on the Fix plan sheet and has no line in the PDF.
+    let with_problems = super::sheets::fixes_with_problems(&rows, &deps);
     let patterns = facts
         .into_iter()
+        .filter(|g| with_problems.contains(&g.id))
         .map(|g| crate::report_export::PatternJson {
             pointer: format!(
                 "{} {}, see the All problems sheet, filter Fix id = {}",
@@ -1111,6 +1170,17 @@ pub(crate) fn pdf_sections(
                 g.id
             ),
             rules: g.rules.iter().map(|r| r.rule_id.clone()).collect(),
+            area: g
+                .category
+                .split(", ")
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            name: if g.label.is_empty() {
+                g.rule_title.clone()
+            } else {
+                g.label.clone()
+            },
             group: g.id,
             rule_id: g.rule_id,
             rule_title: g.rule_title,
@@ -1130,5 +1200,12 @@ pub(crate) fn pdf_sections(
             sequence: g.sequence.label().to_string(),
         })
         .collect();
-    (escalated, patterns, by_id)
+    PdfSections {
+        escalated,
+        patterns,
+        fixes: by_id,
+        conventions,
+        problem_counts,
+        problem_totals,
+    }
 }

@@ -1170,21 +1170,23 @@ fn changing_the_rate_moves_the_budget_sentence_and_the_ledger_block() {
         .text(".triage-tab:nth-child(2)")
         .contains(&escalated.to_string()));
 
-    // The ledger block of the export: the PDF states the escalation outcome, derived from the
-    // line as it stands now (a budget of 20 and none over), and not the old one (a budget of 2).
+    // The export follows the line as it stands now. The PDF is a summary and states no budget (the
+    // sentence is for the operator), but it prints one entry in "The most serious problems" for
+    // each place above the line, derived when the export is made: six now, not the two the old
+    // line (a budget of 2) put above it.
     let zip_bytes = export_zip(&stack);
     let text = pdf_text(&zip_bytes)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let sentence = format!("Escalated {escalated} of a budget of {budget} (none over)");
-    assert!(
-        text.contains(&sentence),
-        "the PDF does not say {sentence:?}"
+    assert_eq!(
+        text.matches("Rules: ").count() as u64,
+        escalated,
+        "the PDF does not name one entry for each of the {escalated} places above the line"
     );
     assert!(
-        !text.contains("of a budget of 2 ("),
-        "the PDF still carries the old line"
+        !text.contains("of a budget of"),
+        "the PDF states the escalation budget, which is an operator line"
     );
 
     // Changing the line changes no decision: the counts are the clean variant's.
