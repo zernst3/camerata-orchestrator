@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::support::*;
-use crate::release_gate::{read_zip_entries, release, xlsx_sheet_grid, ProductPackage};
+use crate::release_gate::{read_zip_entries, release, ProductPackage};
 use crate::report_export::apply_overlay;
 
 type Tally = BTreeMap<String, usize>;
@@ -54,15 +54,15 @@ fn sites_sheet_rows(entries: &BTreeMap<String, Vec<u8>>) -> Vec<Value> {
         .find(|(name, _)| name.ends_with(".xlsx"))
         .map(|(_, bytes)| bytes.clone())
         .expect("a workbook");
-    let grid = xlsx_sheet_grid(&xlsx, "Sites").expect("a Sites sheet");
+    let grid = sheet_table(&xlsx, "All source rows");
     let header = &grid[0];
     let col = |name: &str| {
         header
             .iter()
             .position(|h| h == name)
-            .unwrap_or_else(|| panic!("the Sites sheet has no {name:?} column: {header:?}"))
+            .unwrap_or_else(|| panic!("All source rows has no {name:?} column: {header:?}"))
     };
-    let (site, level, group) = (col("Site"), col("Review level"), col("Group"));
+    let (site, level, group) = (col("Row role"), col("Review level"), col("Fix id"));
     grid.iter()
         .skip(1)
         .filter(|r| r[site] == "Primary")

@@ -25,17 +25,17 @@
 //!
 //! | dataset | worksheet |
 //! |---|---|
-//! | `all-findings` | "All Findings" (defect, deviation and kind-less rows only) |
-//! | `deviations` | "Deviations" |
-//! | `conventions` | "Conventions" |
-//! | `not-assessed` | "Coverage", section "Checks we could not complete this scan" |
+//! | `all-findings` | "All problems" (defect, deviation and kind-less rows only) |
+//! | `deviations` | "Departures" |
+//! | `conventions` | "Your conventions" |
+//! | `not-assessed` | "Not checked", the rows whose kind of gap is "Rule could not be completed" |
 //! | `dependencies` | "Dependencies" |
-//! | `false-positives` | "False Positives" |
-//! | `coverage` | "Coverage", the main per-rule table |
-//! | `rules-applied` | "Coverage", section "Rules applied (alternative selection)" |
+//! | `false-positives` | "Ruled out" |
+//! | `coverage` | "Rules checked", the per-rule columns |
+//! | `rules-applied` | "Rules checked", the Alternative applied and Evidence for it columns |
 //!
 //! `all-findings.json` is deliberately the UNPARTITIONED non-false-positive row set (see
-//! `xlsx_export::FindingsExport`), so it is a superset of the "All Findings" sheet; the rows
+//! `xlsx_export::FindingsExport`), so it is a superset of the "All problems" sheet; the rows
 //! the workbook routes elsewhere by kind are accounted for against `conventions` and
 //! `not-assessed` below, so every JSON row is still matched to exactly one worksheet row.
 //!
@@ -369,25 +369,6 @@ fn read_sheet(xlsx: &[u8], sheet_name: &str) -> Vec<Vec<String>> {
     xlsx_sheet_grid(xlsx, sheet_name).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// The data rows of the table whose header row is exactly `headers`: the rows after it up to
-/// the first fully blank one, each truncated to `headers.len()` columns. `None` when no such
-/// header row exists (so a missing section is distinguishable from an empty one).
-fn table(grid: &[Vec<String>], headers: &[&str]) -> Option<Vec<Vec<String>>> {
-    let width = headers.len();
-    let cell = |row: &Vec<String>, c: usize| row.get(c).cloned().unwrap_or_default();
-    let header_at = grid
-        .iter()
-        .position(|row| (0..width).all(|c| cell(row, c) == headers[c]))?;
-    let mut rows = Vec::new();
-    for row in &grid[header_at + 1..] {
-        if row.iter().all(String::is_empty) {
-            break;
-        }
-        rows.push((0..width).map(|c| cell(row, c)).collect());
-    }
-    Some(rows)
-}
-
 // ── JSON / CSV readers and the shared comparison rules ────────────────────────────────────
 
 fn rows_of(json_bytes: &[u8]) -> Vec<Value> {
@@ -478,100 +459,201 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 38] = [
-    "Severity",
-    "Headline",
-    "Repo",
-    "File",
-    "Line",
-    "Rule ID",
-    "Category",
-    "Action",
-    "Disposition",
-    "Effort",
-    "Est. hours",
-    "Confidence",
-    "Needs review",
-    "In test scope",
-    "Provenance",
-    "Citation",
-    "Citation URLs",
-    "Also matches",
-    "Status",
-    "Snippet",
-    "Detail",
-    "Fix (specific to this finding)",
-    "Recommended Fix",
-    "Kind",
-    "Sites",
-    "Also found at",
-    "Severity adjustments",
-    "Carried from",
-    "Fix type",
-    "Reviewer edited",
-    "Edit ids",
-    "Site id",
-    "Review level",
-    "Group",
-    "Sub-group",
-    "Sub-group cause",
-    "Escalated",
-    "Merged into",
-];
+/// One worksheet column projected from one JSON key (or several): the header it sits under and
+/// the text it must show for a JSON row.
+type Projection = Vec<(&'static str, fn(&Value) -> String)>;
 
-const FINDING_RENDERED: [&str; 36] = [
-    "severity",
-    "headline",
-    "repo",
-    "path",
-    "line",
+/// One projected column: a closure that captures nothing coerces to the function pointer here.
+fn c(header: &'static str, f: fn(&Value) -> String) -> (&'static str, fn(&Value) -> String) {
+    (header, f)
+}
+
+/// The data rows of a table sheet (header on its first row) as header-to-text maps. A row counts
+/// only when `key_header` is filled: that keeps the one-line note an empty table carries from
+/// being read as a row.
+fn sheet_rows(xlsx: &[u8], sheet: &str, key_header: &str) -> Vec<HashMap<String, String>> {
+    let grid = read_sheet(xlsx, sheet);
+    let header = &grid[0];
+    grid[1..]
+        .iter()
+        .map(|row| {
+            header
+                .iter()
+                .enumerate()
+                .map(|(c, h)| (h.clone(), row.get(c).cloned().unwrap_or_default()))
+                .collect::<HashMap<_, _>>()
+        })
+        .filter(|row| row.get(key_header).is_some_and(|k| !k.is_empty()))
+        .collect()
+}
+
+/// The JSON rows against the worksheet rows, column by column, in any order: each side is
+/// projected to the same headers and the two sorted lists must be equal.
+fn assert_sheet_matches(
+    label: &str,
+    sheet_rows: &[HashMap<String, String>],
+    json_rows: &[&Value],
+    projection: &Projection,
+) {
+    assert_eq!(
+        sheet_rows.len(),
+        json_rows.len(),
+        "{label}: worksheet and JSON disagree on the row count"
+    );
+    let mut expected: Vec<Vec<String>> = json_rows
+        .iter()
+        .map(|r| projection.iter().map(|(_, f)| f(r)).collect())
+        .collect();
+    let mut actual: Vec<Vec<String>> = sheet_rows
+        .iter()
+        .map(|row| {
+            projection
+                .iter()
+                .map(|(h, _)| {
+                    row.get(*h)
+                        .unwrap_or_else(|| panic!("{label}: the worksheet has no {h:?} column"))
+                        .clone()
+                })
+                .collect()
+        })
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual,
+        expected,
+        "{label}: worksheet cells differ from JSON (columns {:?})",
+        projection.iter().map(|(h, _)| *h).collect::<Vec<_>>()
+    );
+}
+
+fn yes_or_blank(row: &Value, key: &str) -> String {
+    if row[key].as_bool().unwrap() {
+        "Yes".to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn joined(row: &Value, key: &str, separator: &str) -> String {
+    row[key]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(separator)
+        })
+        .unwrap_or_default()
+}
+
+fn locations_text(row: &Value) -> String {
+    row["also_locations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            let at = format!("{}:{}", l["path"].as_str().unwrap(), l["line"]);
+            if l["consequence"].as_bool().unwrap() {
+                format!("{at} (also affected)")
+            } else {
+                at
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn line_text(row: &Value) -> String {
+    match text(row, "line").as_str() {
+        "0" => "whole file".to_string(),
+        n => n.to_string(),
+    }
+}
+
+fn source_text(row: &Value) -> String {
+    let provenance = text(row, "provenance");
+    match provenance.strip_prefix("Preview: ") {
+        Some(tool) => format!("Tool: {tool}"),
+        None if provenance == "Deterministic" => provenance,
+        None => "Model-reviewed".to_string(),
+    }
+}
+
+/// The columns of All problems that carry one JSON key each. The other keys of a findings row
+/// are accounted for in `FINDING_JSON_ONLY`.
+fn problem_projection() -> Projection {
+    vec![
+        c("Severity", |r| title_case(&text(r, "severity"))),
+        c("Problem", |r| text(r, "headline")),
+        c("Repo", |r| text(r, "repo")),
+        c("File", |r| text(r, "path")),
+        c("Line", line_text),
+        c("Area", |r| text(r, "category")),
+        c("Effort", |r| text(r, "effort")),
+        c("Estimated hours", |r| text(r, "est_hours")),
+        c("Confidence", |r| match text(r, "confidence").as_str() {
+            "needs-review" => "Low".to_string(),
+            other => title_case(other),
+        }),
+        c("Needs a decision", |r| yes_or_blank(r, "needs_review")),
+        c("Source", source_text),
+        c("Standard cited", |r| text(r, "citation_label")),
+        c("Standard links", |r| text(r, "citation_urls")),
+        c("Status", |r| text(r, "status")),
+        c("Code seen", |r| text(r, "snippet")),
+        c("More detail", |r| text(r, "detail")),
+        c("What to do here", |r| {
+            let specific = text(r, "fix_specific");
+            if specific.is_empty() {
+                text(r, "fix")
+            } else {
+                specific
+            }
+        }),
+        c("Kind", |r| text(r, "kind")),
+        c("Places", |r| text(r, "site_count")),
+        c("Also found at", locations_text),
+        c("Why the severity changed", |r| {
+            text(r, "severity_adjustments")
+        }),
+        c("Carried from", |r| text(r, "carried_from")),
+        c("Fix type", |r| text(r, "fix_type")),
+        c("Reviewer edited", |r| yes_or_blank(r, "reviewer_edited")),
+        c("Edit ids", |r| joined(r, "edit_ids", ", ")),
+        c("Place id", |r| text(r, "site_id")),
+        c("Review level", |r| text(r, "review_level")),
+        c("Fix id", |r| text(r, "group")),
+        c("Merged into", |r| text(r, "merged_into")),
+    ]
+}
+
+/// Keys of a findings row the All problems worksheet shows in a derived form, not one-to-one:
+/// `rule_id` and `also_matches` are in the Rules and Rule ids columns, `bucket` is the fix order,
+/// `disposition_label` is the decision so far, `escalated` is internal-only.
+const FINDING_DERIVED_KEYS: [&str; 5] = [
     "rule_id",
-    "category",
+    "also_matches",
     "bucket",
     "disposition_label",
-    "effort",
-    "est_hours",
-    "confidence",
-    "needs_review",
-    "in_test",
-    "provenance",
-    "citation_label",
-    "citation_urls",
-    "also_matches",
-    "status",
-    "snippet",
-    "detail",
-    "fix_specific",
-    "fix",
-    "kind",
-    "severity_adjustments",
-    "carried_from",
-    "fix_type",
-    "reviewer_edited",
-    "edit_ids",
-    "site_id",
-    "review_level",
-    "group",
-    "sub_group",
-    "sub_group_cause",
     "escalated",
-    "merged_into",
 ];
 
-/// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
-/// - `also_locations`: rendered, but flattened into the "Also found at" column;
-/// - `flagged_by`: the sources collapsed into the row; a source that cited another line is
-///   listed in the same "Also found at" column;
-/// - `site_count`: rendered as the "Sites" column;
-/// - `is_fp` / `fp_reason`: the False Positives sheet's identity and its extra "FP Reason"
-///   column; the live sheets have no such column;
-/// - the kind payload (`deviating_sites` ... `reason_detail`): the sheet shows the kind TAG only
-///   in a findings row; the payload is rendered on the Deviations / Conventions / Coverage
-///   tables, which this test checks against their own datasets.
-const FINDING_EXTRA_KEYS: [&str; 13] = [
+/// Keys of a findings row that no All problems column carries: the machine-readable files are
+/// the complete record.
+/// - `in_test`, `sub_group`, `sub_group_cause`: the fix's label and cause are on Fix plan;
+/// - `also_locations`: flattened into Also found at (checked above) and listed in full on All
+///   source rows; `flagged_by`: the collapsed sources, listed on All source rows;
+/// - `is_fp` / `fp_reason`: the Ruled out sheet's identity and reason;
+/// - the kind payload (`deviating_sites` ... `reason_detail`): rendered on Departures, Your
+///   conventions and Not checked, which this test checks against their own datasets.
+const FINDING_JSON_ONLY: [&str; 16] = [
+    "in_test",
+    "sub_group",
+    "sub_group_cause",
     "also_locations",
     "flagged_by",
-    "site_count",
     "is_fp",
     "fp_reason",
     "deviating_sites",
@@ -582,6 +664,7 @@ const FINDING_EXTRA_KEYS: [&str; 13] = [
     "reason",
     "reason_detail",
     "disposition_kind",
+    "citation_kind",
 ];
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
@@ -629,103 +712,6 @@ const FINDING_BASE_KEYS: [&str; 40] = [
     "fp_reason",
 ];
 
-fn bucket_title(bucket: &str) -> &'static str {
-    match bucket {
-        "do_now" => "Do now",
-        "do_next" => "Do next",
-        "plan" => "Plan",
-        "informational" => "Informational",
-        "held" => "Held for review",
-        _ => "Accepted",
-    }
-}
-
-fn locations_text(row: &Value) -> String {
-    row["also_locations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| {
-            let at = format!("{}:{}", l["path"].as_str().unwrap(), l["line"]);
-            if l["consequence"].as_bool().unwrap() {
-                format!("{at} (also affected)")
-            } else {
-                at
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn yes_or_blank(row: &Value, key: &str) -> String {
-    if row[key].as_bool().unwrap() {
-        "Yes".to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// The 28 cells a findings-style worksheet row must show for `row`; a False Positives row adds
-/// the "FP Reason" cell (and shows a blank Action, since a false positive has no matrix cell).
-fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
-    let mut cells = vec![
-        title_case(&text(row, "severity")),
-        text(row, "headline"),
-        text(row, "repo"),
-        text(row, "path"),
-        text(row, "line"),
-        text(row, "rule_id"),
-        text(row, "category"),
-        if false_positive {
-            String::new()
-        } else {
-            bucket_title(row["bucket"].as_str().unwrap()).to_string()
-        },
-        text(row, "disposition_label"),
-        text(row, "effort"),
-        text(row, "est_hours"),
-        text(row, "confidence"),
-        yes_or_blank(row, "needs_review"),
-        yes_or_blank(row, "in_test"),
-        text(row, "provenance"),
-        text(row, "citation_label"),
-        text(row, "citation_urls"),
-        text(row, "also_matches"),
-        text(row, "status"),
-        text(row, "snippet"),
-        text(row, "detail"),
-        text(row, "fix_specific"),
-        text(row, "fix"),
-        text(row, "kind"),
-        text(row, "site_count"),
-        locations_text(row),
-        text(row, "severity_adjustments"),
-        text(row, "carried_from"),
-        text(row, "fix_type"),
-        yes_or_blank(row, "reviewer_edited"),
-        row["edit_ids"]
-            .as_array()
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default(),
-        text(row, "site_id"),
-        text(row, "review_level"),
-        text(row, "group"),
-        text(row, "sub_group"),
-        text(row, "sub_group_cause"),
-        yes_or_blank(row, "escalated"),
-        text(row, "merged_into"),
-    ];
-    if false_positive {
-        cells.push(text(row, "fp_reason"));
-    }
-    cells
-}
-
 fn is_findings_sheet_kind(row: &Value) -> bool {
     matches!(
         row["kind"].as_str().unwrap(),
@@ -745,10 +731,9 @@ fn check_finding_datasets(
         ("all-findings", all_findings),
         ("false-positives", false_positives),
     ] {
-        let rendered: Vec<&str> = FINDING_RENDERED.to_vec();
-        let json_only: Vec<&str> = FINDING_EXTRA_KEYS.to_vec();
-        // `kind_payload_placeholder` and `disposition_kind` are tolerated only if absent; they
-        // are filtered out of the stale check below by being in json_only, not rendered.
+        let rendered: Vec<&str> = PROBLEM_RENDERED_KEYS.to_vec();
+        let mut json_only: Vec<&str> = FINDING_JSON_ONLY.to_vec();
+        json_only.extend(FINDING_DERIVED_KEYS);
         assert_key_accounting(name, rows, &rendered, &json_only);
         let base: BTreeSet<&str> = FINDING_BASE_KEYS.into_iter().collect();
         for (i, row) in rows.iter().enumerate() {
@@ -801,38 +786,85 @@ fn check_finding_datasets(
         "not-assessed.json must have one row per not-assessed row of all-findings.json"
     );
 
-    let header_refs: Vec<&str> = FINDING_HEADERS.to_vec();
-
-    let grid = read_sheet(xlsx, "All Findings");
-    let sheet = table(&grid, &header_refs).expect("All Findings carries its header row");
-    let expected: Vec<Vec<String>> = on_findings_sheet
-        .iter()
-        .map(|r| finding_cells(r, false))
-        .collect();
-    assert_eq!(
-        sheet.len(),
-        expected.len(),
-        "All Findings: worksheet and JSON disagree on the row count"
+    assert_sheet_matches(
+        "All problems",
+        &sheet_rows(xlsx, "All problems", "Place id"),
+        &on_findings_sheet,
+        &problem_projection(),
     );
-    assert_eq!(
-        sheet, expected,
-        "All Findings: worksheet cells differ from JSON"
-    );
+    // The rule columns: the Rules cell opens with the rule's title and lists the other rules;
+    // the Rule ids cell opens with the row's own rule id.
+    for row in sheet_rows(xlsx, "All problems", "Place id") {
+        let json = on_findings_sheet
+            .iter()
+            .find(|r| r["site_id"].as_str() == Some(row["Place id"].as_str()))
+            .expect("the worksheet row's place is in the JSON");
+        assert_eq!(
+            row["Rule ids"].split(", ").next().unwrap(),
+            text(json, "rule_id"),
+            "All problems: Rule ids opens with the row's own rule"
+        );
+        let also = text(json, "also_matches");
+        if !also.is_empty() {
+            assert!(
+                row["Rules"].ends_with(&also),
+                "All problems: Rules lists the other rules {also:?}, got {:?}",
+                row["Rules"]
+            );
+        }
+    }
 
-    let mut fp_headers = header_refs.clone();
-    fp_headers.push("FP Reason");
-    let grid = read_sheet(xlsx, "False Positives");
-    let sheet = table(&grid, &fp_headers).expect("False Positives carries its header row");
-    let expected: Vec<Vec<String>> = false_positives
-        .iter()
-        .map(|r| finding_cells(r, true))
-        .collect();
-    assert_eq!(sheet.len(), expected.len(), "False Positives row count");
-    assert_eq!(
-        sheet, expected,
-        "False Positives: worksheet cells differ from JSON"
+    // Ruled out: the reviewer's false positives, one row each.
+    let ruled_out_projection: Projection = vec![
+        c("Problem", |r| text(r, "headline")),
+        c("File", |r| text(r, "path")),
+        c("Line", line_text),
+        c("Rule id", |r| text(r, "rule_id")),
+        c("Reason", |r| text(r, "fp_reason")),
+        c("Place id", |r| text(r, "site_id")),
+    ];
+    let fp_refs: Vec<&Value> = false_positives.iter().collect();
+    assert_sheet_matches(
+        "Ruled out",
+        &sheet_rows(xlsx, "Ruled out", "Place id"),
+        &fp_refs,
+        &ruled_out_projection,
     );
 }
+
+/// Keys of a findings row that a column of All problems carries one-to-one (the projection
+/// names the columns; this names the keys they come from).
+const PROBLEM_RENDERED_KEYS: [&str; 29] = [
+    "severity",
+    "headline",
+    "repo",
+    "path",
+    "line",
+    "category",
+    "effort",
+    "est_hours",
+    "confidence",
+    "needs_review",
+    "provenance",
+    "citation_label",
+    "citation_urls",
+    "status",
+    "snippet",
+    "detail",
+    "fix_specific",
+    "fix",
+    "kind",
+    "site_count",
+    "severity_adjustments",
+    "carried_from",
+    "fix_type",
+    "reviewer_edited",
+    "edit_ids",
+    "site_id",
+    "review_level",
+    "group",
+    "merged_into",
+];
 
 fn check_deviations(xlsx: &[u8], rows: &[Value]) {
     assert_uniform_keys("deviations", rows);
@@ -853,50 +885,30 @@ fn check_deviations(xlsx: &[u8], rows: &[Value]) {
         ],
         &[],
     );
-    let headers = [
-        "Area",
-        "What was checked",
-        "Convention your codebase follows",
-        "Sites deviating",
-        "Sites assessed",
-        "Highest severity",
-        "Where",
-        "Recommended fix",
-        "Rule ID",
-        "Fix type",
+    let projection: Projection = vec![
+        c("Area", |r| text(r, "category")),
+        c("Rule", |r| text(r, "rule_title")),
+        c("Convention", |r| text(r, "convention_label")),
+        c("Places departing", |r| count_text(r, "deviating_sites")),
+        c("Places checked", |r| {
+            if r["assessed_sites"].is_null() {
+                "not counted".to_string()
+            } else {
+                count_text(r, "assessed_sites")
+            }
+        }),
+        c("Worst severity", |r| text(r, "worst_severity")),
+        c("Where", |r| joined(r, "locations", "\n")),
+        c("What to do", |r| text(r, "recommended_fix")),
+        c("Rule id", |r| text(r, "rule_id")),
+        c("Fix type", |r| text(r, "fix_type")),
     ];
-    let expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            vec![
-                text(r, "category"),
-                text(r, "rule_title"),
-                text(r, "convention_label"),
-                count_text(r, "deviating_sites"),
-                if r["assessed_sites"].is_null() {
-                    "not counted".to_string()
-                } else {
-                    count_text(r, "assessed_sites")
-                },
-                text(r, "worst_severity"),
-                r["locations"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|l| l.as_str().unwrap())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                text(r, "recommended_fix"),
-                text(r, "rule_id"),
-                text(r, "fix_type"),
-            ]
-        })
-        .collect();
-    let sheet = table(&read_sheet(xlsx, "Deviations"), &headers).expect("Deviations header row");
-    assert_eq!(sheet.len(), expected.len(), "Deviations row count");
-    assert_eq!(
-        sheet, expected,
-        "Deviations: worksheet cells differ from JSON"
+    let refs: Vec<&Value> = rows.iter().collect();
+    assert_sheet_matches(
+        "Departures",
+        &sheet_rows(xlsx, "Departures", "Rule id"),
+        &refs,
+        &projection,
     );
 }
 
@@ -919,47 +931,41 @@ fn check_conventions(xlsx: &[u8], rows: &[Value]) {
         ],
         &[],
     );
-    let headers = [
-        "Area",
-        "What was checked",
-        "Status",
-        "Convention your codebase follows",
-        "Patterns in use",
-        "What we observed",
-        "Detail",
-        "Sites",
-        "Also found at",
-        "Rule ID",
+    let projection: Projection = vec![
+        c("Area", |r| text(r, "category")),
+        c("What we checked", |r| text(r, "headline")),
+        // What the code does: the convention followed, else the habits seen, else the row's own
+        // statement.
+        c("What your code does", |r| {
+            let label = text(r, "convention_label");
+            if !label.is_empty() {
+                label
+            } else if !text(r, "patterns_in_use").is_empty() {
+                text(r, "patterns_in_use")
+            } else {
+                text(r, "headline")
+            }
+        }),
+        c("How consistently", |r| text(r, "status")),
+        c("Places looked at", |r| count_text(r, "sites")),
+        c("Rule", |r| text(r, "rule_title")),
+        c("More detail", |r| text(r, "detail")),
+        c("Also found at", |r| text(r, "also_found_at")),
+        c("Rule id", |r| text(r, "rule_id")),
     ];
-    let expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            vec![
-                text(r, "category"),
-                text(r, "rule_title"),
-                text(r, "status"),
-                text(r, "convention_label"),
-                text(r, "patterns_in_use"),
-                text(r, "headline"),
-                text(r, "detail"),
-                count_text(r, "sites"),
-                text(r, "also_found_at"),
-                text(r, "rule_id"),
-            ]
-        })
-        .collect();
-    let sheet = table(&read_sheet(xlsx, "Conventions"), &headers).expect("Conventions header row");
-    assert_eq!(sheet.len(), expected.len(), "Conventions row count");
-    assert_eq!(
-        sheet, expected,
-        "Conventions: worksheet cells differ from JSON"
+    let refs: Vec<&Value> = rows.iter().collect();
+    assert_sheet_matches(
+        "Your conventions",
+        &sheet_rows(xlsx, "Your conventions", "Rule id"),
+        &refs,
+        &projection,
     );
 }
 
 fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
     assert_uniform_keys("dependencies", rows);
-    // `ownership` is the machine tag behind the worksheet's "Recommended action" wording;
-    // the sheet renders the consequence (the action), not the tag.
+    // `ownership` is the machine tag behind the worksheet's "What to do" wording; the sheet
+    // renders the consequence (the action), not the tag.
     assert_key_accounting(
         "dependencies",
         rows,
@@ -977,8 +983,9 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "reviewer_edited",
             "edit_ids",
         ],
-        // The sub-group's label and cause, the escalation and the merge pointer are on the
-        // Sites, Tree and Remediation plan sheets; the Dependencies worksheet has no such column.
+        // The fix's label and cause, the escalation and the merge pointer are on the Fix plan,
+        // How problems were grouped and All source rows sheets; the Dependencies worksheet has no
+        // such column.
         &[
             "ownership",
             "sub_group",
@@ -987,62 +994,36 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "merged_into",
         ],
     );
-    let headers = [
-        "Package",
-        "Advisory",
-        "Severity",
-        "Repo",
-        "Fixed in",
-        "Recommended action",
-        "File",
-        "Site id",
-        "Review level",
-        "Group",
-        "Reviewer edited",
-        "Edit ids",
-    ];
-    let mut expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            let fixed = r["fixed_version"].as_str();
-            let action = match (text(r, "action").as_str(), fixed) {
+    let projection: Projection = vec![
+        c("Package", |r| text(r, "package")),
+        c("Advisory", |r| text(r, "advisory")),
+        c("Severity", |r| title_case(&text(r, "severity"))),
+        c("Repo", |r| text(r, "repo")),
+        c("Fixed in", |r| {
+            r["fixed_version"]
+                .as_str()
+                .unwrap_or("(no patch yet)")
+                .to_string()
+        }),
+        c("What to do", |r| {
+            match (text(r, "action").as_str(), r["fixed_version"].as_str()) {
                 ("", Some(v)) => format!("Upgrade to >= {v}."),
                 (a, _) => a.to_string(),
-            };
-            vec![
-                text(r, "package"),
-                text(r, "advisory"),
-                title_case(&text(r, "severity")),
-                text(r, "repo"),
-                fixed.unwrap_or("(no patch yet)").to_string(),
-                action,
-                text(r, "path"),
-                text(r, "site_id"),
-                text(r, "review_level"),
-                text(r, "group"),
-                yes_or_blank(r, "reviewer_edited"),
-                r["edit_ids"]
-                    .as_array()
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default(),
-            ]
-        })
-        .collect();
-    let mut sheet =
-        table(&read_sheet(xlsx, "Dependencies"), &headers).expect("Dependencies header row");
-    assert_eq!(sheet.len(), expected.len(), "Dependencies row count");
-    // The worksheet re-sorts by severity then package; the JSON keeps partition order. The
-    // set of rows is what must agree.
-    expected.sort();
-    sheet.sort();
-    assert_eq!(
-        sheet, expected,
-        "Dependencies: worksheet cells differ from JSON"
+            }
+        }),
+        c("File", |r| text(r, "path")),
+        c("Place id", |r| text(r, "site_id")),
+        c("Review level", |r| text(r, "review_level")),
+        c("Fix id", |r| text(r, "group")),
+        c("Reviewer edited", |r| yes_or_blank(r, "reviewer_edited")),
+        c("Edit ids", |r| joined(r, "edit_ids", ", ")),
+    ];
+    let refs: Vec<&Value> = rows.iter().collect();
+    assert_sheet_matches(
+        "Dependencies",
+        &sheet_rows(xlsx, "Dependencies", "Place id"),
+        &refs,
+        &projection,
     );
 }
 
@@ -1054,36 +1035,24 @@ fn check_not_assessed(xlsx: &[u8], rows: &[Value]) {
         &["rule_title", "why", "headline", "detail", "rule_id"],
         &[],
     );
-    let headers = [
-        "What was checked",
-        "Why",
-        "What we observed",
-        "Detail",
-        "Rule ID",
+    let projection: Projection = vec![
+        c("Rule", |r| text(r, "rule_title")),
+        c("Why", |r| text(r, "why")),
+        c("What", |r| text(r, "headline")),
+        c("More detail", |r| text(r, "detail")),
+        c("Rule id", |r| text(r, "rule_id")),
     ];
-    let expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            vec![
-                text(r, "rule_title"),
-                text(r, "why"),
-                text(r, "headline"),
-                text(r, "detail"),
-                text(r, "rule_id"),
-            ]
-        })
+    let refs: Vec<&Value> = rows.iter().collect();
+    let on_sheet: Vec<HashMap<String, String>> = sheet_rows(xlsx, "Not checked", "Kind of gap")
+        .into_iter()
+        .filter(|r| r["Kind of gap"] == "Rule could not be completed")
         .collect();
-    let sheet = table(&read_sheet(xlsx, "Coverage"), &headers).unwrap_or_default();
-    assert_eq!(sheet.len(), expected.len(), "not-assessed row count");
-    assert_eq!(
-        sheet, expected,
-        "not-assessed: worksheet cells differ from JSON"
-    );
+    assert_sheet_matches("Not checked", &on_sheet, &refs, &projection);
 }
 
 fn check_coverage(xlsx: &[u8], rows: &[Value]) {
     assert_uniform_keys("coverage", rows);
-    // `citation_kind` is the machine tag behind the worksheet's "How we checked it" wording.
+    // `citation_kind` is the machine tag behind the worksheet's "How we checked" wording.
     assert_key_accounting(
         "coverage",
         rows,
@@ -1097,76 +1066,79 @@ fn check_coverage(xlsx: &[u8], rows: &[Value]) {
         ],
         &[],
     );
-    let headers = [
-        "Area",
-        "What was checked",
-        "Result",
-        "How we checked it",
-        "Standard cited",
-        "Rule ID",
+    let projection: Projection = vec![
+        c("Area", |r| text(r, "category")),
+        c("Rule", |r| text(r, "title")),
+        c("How we checked", |r| {
+            match r["citation_kind"].as_str().unwrap() {
+                "grounded" => "Deterministic",
+                "preview" => "Tool",
+                _ => "Model-reviewed",
+            }
+            .to_string()
+        }),
+        c("Standard cited", |r| text(r, "citation_label")),
+        c("Rule id", |r| text(r, "rule_id")),
     ];
-    let expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            let n = r["findings_count"].as_u64().unwrap();
-            vec![
-                text(r, "category"),
-                text(r, "title"),
-                match n {
-                    0 => "Clean \u{2014} nothing found".to_string(),
-                    1 => "1 site found".to_string(),
-                    n => format!("{n} sites found"),
-                },
-                match r["citation_kind"].as_str().unwrap() {
-                    "grounded" => "Deterministic",
-                    "preview" => "Preview",
-                    _ => "AI-advisory",
-                }
-                .to_string(),
-                text(r, "citation_label"),
-                text(r, "rule_id"),
-            ]
-        })
+    let refs: Vec<&Value> = rows.iter().collect();
+    // A rule that only has a chosen alternative has a row too (see rules-applied); it is not a
+    // checked rule of the coverage dataset.
+    let checked: Vec<HashMap<String, String>> = sheet_rows(xlsx, "Rules checked", "Rule id")
+        .into_iter()
+        .filter(|r| r["Result"] != "Alternative chosen")
         .collect();
-    let sheet = table(&read_sheet(xlsx, "Coverage"), &headers).unwrap_or_default();
-    assert_eq!(sheet.len(), expected.len(), "coverage row count");
-    assert_eq!(
-        sheet, expected,
-        "coverage: worksheet cells differ from JSON"
-    );
+    assert_sheet_matches("Rules checked", &checked, &refs, &projection);
+    // The Result: clean is clean; a count reads "Found n places", except that a rule whose rows
+    // are all conventions or all unfinished says so instead of calling them places with problems.
+    for r in rows {
+        let line = checked
+            .iter()
+            .find(|s| s["Rule id"] == text(r, "rule_id"))
+            .expect("the rule has its row");
+        let n = r["findings_count"].as_u64().unwrap();
+        let result = &line["Result"];
+        let found = match n {
+            1 => "Found 1 place".to_string(),
+            n => format!("Found {n} places"),
+        };
+        match n {
+            0 => assert_eq!(result, "Clean"),
+            _ => assert!(
+                *result == found
+                    || result == "Convention noted, no problem"
+                    || result == "Could not be completed",
+                "{result:?}"
+            ),
+        }
+    }
 }
 
 fn check_rules_applied(xlsx: &[u8], rows: &[Value]) {
     assert_uniform_keys("rules-applied", rows);
+    // `applicable` is the machine flag behind the not-applicable wording of the chosen cell.
     assert_key_accounting(
         "rules-applied",
         rows,
-        &["rule_id", "chosen", "evidence", "applicable"],
-        &[],
+        &["rule_id", "chosen", "evidence"],
+        &["applicable"],
     );
-    let headers = ["Rule ID", "Chosen alternative", "Evidence", "Applicable"];
-    let expected: Vec<Vec<String>> = rows
-        .iter()
-        .map(|r| {
-            vec![
-                text(r, "rule_id"),
-                text(r, "chosen"),
-                text(r, "evidence"),
-                if r["applicable"].as_bool().unwrap() {
-                    "Yes"
-                } else {
-                    "No"
-                }
-                .to_string(),
-            ]
-        })
-        .collect();
-    let sheet = table(&read_sheet(xlsx, "Coverage"), &headers).unwrap_or_default();
-    assert_eq!(sheet.len(), expected.len(), "rules-applied row count");
-    assert_eq!(
-        sheet, expected,
-        "rules-applied: worksheet cells differ from JSON"
-    );
+    let sheet = sheet_rows(xlsx, "Rules checked", "Rule id");
+    for r in rows {
+        let line = sheet
+            .iter()
+            .find(|s| s["Rule id"] == text(r, "rule_id"))
+            .unwrap_or_else(|| panic!("Rules checked has no row for {}", text(r, "rule_id")));
+        assert_eq!(
+            line["Alternative applied"],
+            text(r, "chosen"),
+            "rules-applied: Alternative applied differs from JSON"
+        );
+        assert_eq!(
+            line["Evidence for it"],
+            text(r, "evidence"),
+            "rules-applied: Evidence for it differs from JSON"
+        );
+    }
 }
 
 // ── The gate ──────────────────────────────────────────────────────────────────────────────
@@ -1300,22 +1272,17 @@ fn gate2_an_empty_scan_is_empty_in_every_format() {
         assert!(rows.is_empty(), "{dataset}: {rows:?}");
         assert_csv_matches_json(dataset, &a.csv[dataset], &rows);
     }
-    for (sheet, headers) in [
-        ("All Findings", FINDING_HEADERS.to_vec()),
-        (
-            "Dependencies",
-            vec![
-                "Package",
-                "Advisory",
-                "Severity",
-                "Repo",
-                "Fixed in",
-                "Recommended action",
-            ],
-        ),
+    for (sheet, key) in [
+        ("All problems", "Place id"),
+        ("Dependencies", "Place id"),
+        ("Ruled out", "Place id"),
     ] {
-        let rows = table(&read_sheet(&a.xlsx, sheet), &headers)
-            .unwrap_or_else(|| panic!("{sheet} must keep its header row when empty"));
+        let grid = read_sheet(&a.xlsx, sheet);
+        assert!(
+            !grid.is_empty() && grid[0].iter().any(|h| h == key),
+            "{sheet} must keep its header row when empty"
+        );
+        let rows = sheet_rows(&a.xlsx, sheet, key);
         assert!(rows.is_empty(), "{sheet}: {rows:?}");
     }
 }

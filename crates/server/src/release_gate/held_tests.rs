@@ -545,10 +545,13 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     };
     let label = "Helper builds SQL by hand";
     let new_outputs: Vec<(&str, String)> = vec![
-        ("Remediation plan sheet", sheet("Remediation plan")),
-        ("Tree sheet", sheet("Tree")),
-        ("Decisions sheet", sheet("Decisions")),
-        ("Sites sheet", sheet("Sites")),
+        ("Fix plan sheet", sheet("Fix plan")),
+        (
+            "How problems were grouped sheet",
+            sheet("How problems were grouped"),
+        ),
+        ("Reviewer decisions sheet", sheet("Reviewer decisions")),
+        ("All source rows sheet", sheet("All source rows")),
         (
             "csv/tickets.csv",
             String::from_utf8_lossy(&entries["csv/tickets.csv"]).into_owned(),
@@ -565,16 +568,13 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
         }
     }
     for name in [
-        "Remediation plan sheet",
-        "Tree sheet",
+        "Fix plan sheet",
+        "How problems were grouped sheet",
         "csv/tickets.csv",
         "PDF patterns",
     ] {
         let text = &new_outputs.iter().find(|(n, _)| *n == name).unwrap().1;
-        assert!(
-            text.contains(label),
-            "{name} does not carry the sub-group's name"
-        );
+        assert!(text.contains(label), "{name} does not carry the fix's name");
     }
 }
 

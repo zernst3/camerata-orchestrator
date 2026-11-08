@@ -1,13 +1,12 @@
 //! WO9, amendment A1: a collapse never loses a location. Every collapsed source still appears as
-//! its own row on the Sites sheet, with the surviving row's review level and sub-group.
+//! its own row on the All source rows sheet, with the surviving row's review level and fix.
 
 use super::support::*;
-use crate::release_gate::xlsx_sheet_grid;
 use crate::report_export::apply_overlay;
 use crate::review_tree::FlaggedBy;
 
 #[test]
-fn a_collapsed_source_has_its_own_row_on_the_sites_sheet() {
+fn a_collapsed_source_has_its_own_row_on_the_all_source_rows_sheet() {
     let mut report = mixed_sealed().into_inner();
     report.findings[0].flagged_by = vec![
         FlaggedBy {
@@ -33,15 +32,15 @@ fn a_collapsed_source_has_its_own_row_on_the_sites_sheet() {
         .find(|(n, _)| n.ends_with(".xlsx"))
         .map(|(_, b)| b.clone())
         .unwrap();
-    let grid = xlsx_sheet_grid(&xlsx, "Sites").expect("a Sites sheet");
+    let grid = sheet_table(&xlsx, "All source rows");
     let header = &grid[0];
     let col = |name: &str| header.iter().position(|h| h == name).expect(name);
     let (file, line, site, group, rule) = (
         col("File"),
         col("Line"),
-        col("Site"),
-        col("Group"),
-        col("Rule ID"),
+        col("Row role"),
+        col("Fix id"),
+        col("Rule ids"),
     );
     let at_a: Vec<&Vec<String>> = grid
         .iter()
@@ -66,12 +65,9 @@ fn a_collapsed_source_has_its_own_row_on_the_sites_sheet() {
             .find(|r| r[rule] == want_rule)
             .unwrap_or_else(|| panic!("no row for {want_rule}"));
         assert_eq!(row[line], want_line, "the source keeps its own line");
-        assert_eq!(
-            row[group], primary[group],
-            "it sits in the survivor's sub-group"
-        );
+        assert_eq!(row[group], primary[group], "it sits in the survivor's fix");
     }
-    // The primary row keeps its own count: sources are extra rows of the Sites sheet only.
+    // The primary row keeps its own count: sources are extra rows of the All source rows sheet only.
     let total_rows = grid.len() - 1;
-    assert_eq!(total_rows, 6 + 2, "six sites plus two collapsed sources");
+    assert_eq!(total_rows, 6 + 2, "six places plus two collapsed sources");
 }

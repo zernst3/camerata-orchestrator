@@ -110,7 +110,7 @@ fn two_repos_with_the_same_path_produce_distinct_sites_in_every_site_list() {
     let xlsx = workbook(&report);
 
     // "Also found at" on the findings sheet: the absorbed site names its repo.
-    let all = grid(&xlsx, "All Findings");
+    let all = grid(&xlsx, "All problems");
     let head = &all[0];
     let (repo_col, file_col, also_col) = (
         head.iter().position(|h| h == "Repo").unwrap(),
@@ -133,19 +133,14 @@ fn two_repos_with_the_same_path_produce_distinct_sites_in_every_site_list() {
     );
 
     // The Deviations sheet's "Where" and its service column.
-    let dev = grid(&xlsx, "Deviations");
+    let dev = grid(&xlsx, "Departures");
     assert_eq!(
-        cell(&dev, "Where", "Rule ID", PAGINATION_RULE),
+        cell(&dev, "Where", "Rule id", PAGINATION_RULE),
         "acme/web/src/list.ts:3"
     );
-    assert_eq!(cell(&dev, "Service", "Rule ID", PAGINATION_RULE), WEB);
+    assert_eq!(cell(&dev, "Repo", "Rule id", PAGINATION_RULE), WEB);
     assert_eq!(
-        cell(
-            &dev,
-            "Convention this service follows",
-            "Rule ID",
-            PAGINATION_RULE
-        ),
+        cell(&dev, "Convention", "Rule id", PAGINATION_RULE),
         "cursor pagination"
     );
 
@@ -274,16 +269,16 @@ fn the_section_is_in_no_severity_total_or_finding_count() {
         without.executive_summary.narrative, json.executive_summary.narrative,
         "the narrative never reads the section"
     );
-    // The workbook sheet exists, is a sheet of its own, and the Index totals are the findings'.
+    // The workbook sheet exists and is a sheet of its own.
     let xlsx = workbook(&report);
     let sheet = grid(&xlsx, "Patterns across services");
     let flat: Vec<&str> = sheet.iter().flatten().map(String::as_str).collect();
     assert!(flat.iter().any(|c| c.starts_with("Violated 1")), "{flat:?}");
     assert!(flat.contains(&"Clean"), "{flat:?}");
     assert!(
-        !sheet[3].iter().any(|h| h.eq_ignore_ascii_case("severity")),
+        !sheet[0].iter().any(|h| h.eq_ignore_ascii_case("severity")),
         "the sheet has no severity column: {:?}",
-        sheet[3]
+        sheet[0]
     );
 }
 
@@ -367,23 +362,26 @@ fn a_one_repo_report_reads_exactly_as_it_always_has() {
     assert!(cv.per_repo.is_empty());
 
     let xlsx = workbook(&report);
-    let dev = grid(&xlsx, "Deviations");
-    assert!(dev[0]
-        .iter()
-        .any(|h| h == "Convention your codebase follows"));
+    let dev = grid(&xlsx, "Departures");
+    assert!(dev[0].iter().any(|h| h == "Convention"));
     assert!(!dev[0].iter().any(|h| h == "Service"));
     // A site is a bare path and line.
     assert_eq!(
-        cell(&dev, "Where", "Rule ID", PAGINATION_RULE),
+        cell(&dev, "Where", "Rule id", PAGINATION_RULE),
         "src/list.ts:3"
     );
-    let all = grid(&xlsx, "All Findings");
+    let all = grid(&xlsx, "All problems");
     assert!(
-        cell(&all, "Also found at", "Rule ID", SQL_RULE).contains("src/other.ts:7")
-            && !cell(&all, "Also found at", "Rule ID", SQL_RULE).contains("acme/web/"),
+        cell(&all, "Also found at", "Rule ids", SQL_RULE).contains("src/other.ts:7")
+            && !cell(&all, "Also found at", "Rule ids", SQL_RULE).contains("acme/web/"),
     );
-    let cov = grid(&xlsx, "Coverage");
-    assert!(cov[1][0].contains("against this codebase"), "{:?}", cov[1]);
+    let start = grid(&xlsx, "Start here");
+    let summary = start
+        .iter()
+        .flatten()
+        .find(|c| c.starts_with("We checked "))
+        .expect("Start here carries the coverage summary");
+    assert!(summary.contains("against this codebase"), "{summary:?}");
     let deviations = dataset(&report, "json/deviations.json");
     assert!(deviations[0].get("repo").is_none());
 }
@@ -401,9 +399,14 @@ fn a_multi_repo_report_speaks_of_the_services() {
     assert!(!json.methodology.next_steps.contains("the repository once"));
 
     let xlsx = workbook(&report);
-    let cov = grid(&xlsx, "Coverage");
-    assert!(cov[1][0].contains("against these services"), "{:?}", cov[1]);
-    assert!(!cov[1][0].contains("this codebase"));
+    let start = grid(&xlsx, "Start here");
+    let summary = start
+        .iter()
+        .flatten()
+        .find(|c| c.starts_with("We checked "))
+        .expect("Start here carries the coverage summary");
+    assert!(summary.contains("against these services"), "{summary:?}");
+    assert!(!summary.contains("this codebase"));
 
     // The cover's code volume says how large each repo is.
     let cv = json.cover.code_volume.as_ref().unwrap();
@@ -435,9 +438,8 @@ fn whats_healthy_names_where_a_rule_was_clean_and_where_it_did_not_apply() {
 #[test]
 fn the_coverage_sheet_does_not_call_a_rule_clean_that_only_one_service_checked() {
     let xlsx = workbook(&two_repo_report());
-    let cov = grid(&xlsx, "Coverage");
-    // The table starts on the fourth row, under the one-line summary.
-    let result = cell(&cov[3..], "Result", "Rule ID", HEALTHY_RULE);
+    let cov = grid(&xlsx, "Rules checked");
+    let result = cell(&cov, "Result", "Rule id", HEALTHY_RULE);
     assert!(
         result.starts_with("Clean where it applies"),
         "a rule clean in web and not applicable in api says where it is clean: {result:?}"
@@ -576,11 +578,11 @@ fn the_same_credential_in_two_repos_stays_two_rows_each_noting_the_other() {
 
     // The workbook shows it in "Also found at"; the PDF's data carries it on the site.
     let xlsx = workbook(&report);
-    let all = grid(&xlsx, "All Findings");
+    let all = grid(&xlsx, "All problems");
     let head = &all[0];
     let (repo_col, rule_col, also_col) = (
         head.iter().position(|h| h == "Repo").unwrap(),
-        head.iter().position(|h| h == "Rule ID").unwrap(),
+        head.iter().position(|h| h == "Rule ids").unwrap(),
         head.iter().position(|h| h == "Also found at").unwrap(),
     );
     let web_row = all
@@ -769,26 +771,44 @@ fn a_credential_note_never_cites_a_row_dismissed_as_a_false_positive() {
     );
 }
 
-/// The workbook Index lists every sheet with its number of findings. The patterns sheet holds
-/// observations, not findings, so its row carries no count under that header.
+/// Start here lists every sheet with its number of rows. The differences sheet holds
+/// observations, not problems, so its rows are in no scorecard total.
 #[test]
-fn the_index_does_not_count_pattern_rows_as_findings() {
-    let xlsx = workbook(&two_repo_report());
-    let index = grid(&xlsx, "Index");
-    let toc = index
-        .iter()
-        .position(|row| {
-            row.first().is_some_and(|c| c == "Sheet") && row.get(1).is_some_and(|c| c == "Findings")
-        })
-        .expect("the Index has a table of contents");
-    let row = index[toc + 1..]
+fn start_here_does_not_count_pattern_rows_in_the_scorecard() {
+    let report = two_repo_report();
+    let xlsx = workbook(&report);
+    let start = grid(&xlsx, "Start here");
+    let row = start
         .iter()
         .find(|row| row.first().is_some_and(|c| c == "Patterns across services"))
         .expect("the patterns sheet is listed");
+    let patterns = report_json(&report).patterns_across_services.unwrap();
     assert_eq!(
-        row.get(1).map(String::as_str).unwrap_or(""),
-        "",
-        "pattern rows are not findings: {row:?}"
+        row.get(2).map(String::as_str).unwrap_or(""),
+        patterns.rows.len().to_string(),
+        "the listed row count is the sheet's: {row:?}"
+    );
+    let header_at = start
+        .iter()
+        .position(|r| {
+            r.first().is_some_and(|c| c == "Area") && r.get(5).is_some_and(|c| c == "Total")
+        })
+        .expect("the scorecard");
+    let total = start[header_at + 1..]
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == "Total"))
+        .expect("the scorecard total");
+    let scorecard_problems: usize = total[1..=4]
+        .iter()
+        .map(|c| c.parse::<usize>().unwrap())
+        .sum();
+    // The scorecard counts every row that is not ruled out, whatever its kind (the PDF scorecard
+    // counts the same way; moving both to problems only is the PDF work order's, W2). Pattern
+    // rows are in no count, so the total is exactly the rows of all-findings.json.
+    let rows = dataset(&report, "json/all-findings.json").len();
+    assert_eq!(
+        scorecard_problems, rows,
+        "the scorecard counts the rows of all-findings.json, not the pattern rows"
     );
 }
 

@@ -1,9 +1,9 @@
 //! M8 (Fable engine review): the workbook must export at 30,000 rows. A cell that joins a
 //! variable-length list used to abort the whole export at Excel's 32,767-character limit.
 //!
-//! The rule that binds every test here: the client's developers receive every site. Capping a
-//! cell may never hide a site or a violation. What no longer fits a cell must appear in full on
-//! the Sites sheet, with a visible pointer in the cell.
+//! The rule that binds every test here: the client's developers receive every place. Capping a
+//! cell may never hide a place or a problem. What no longer fits a cell must appear in full on
+//! the All source rows sheet, with a visible pointer in the cell.
 
 use super::*;
 use camerata_api_types::audit::{ConventionObservedKind, DeviationKind, FindingKind};
@@ -47,30 +47,31 @@ fn a_finding_with_5000_sites_exports_and_every_site_is_on_the_sites_sheet() {
     )
     .expect("a finding with 5,000 sites must not abort the export");
 
-    let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
+    let also = cell_by_header(&bytes, "All problems", "Also found at", 1);
     assert!(
         also.chars().count() < EXCEL_CELL_LIMIT,
         "the Also found at cell must sit under Excel's limit, was {} chars",
         also.chars().count()
     );
     assert!(
-        also.contains("more sites, see Sites sheet"),
+        also.contains("more places, see All source rows sheet"),
         "a capped cell must say where the rest went: tail {:?}",
         &also[also.len().saturating_sub(120)..]
     );
 
-    // Header row plus one row per site: the primary and the 4,999 absorbed ones.
+    // A title and a first line, the header row, then one row per place: the primary and the
+    // 4,999 absorbed ones.
     assert_eq!(
-        sheet_row_count(&bytes, "Sites"),
-        1 + 5_000,
-        "the Sites sheet must hold every site, in full"
+        sheet_row_count(&bytes, "All source rows"),
+        3 + 5_000,
+        "the All source rows sheet must hold every place, in full"
     );
-    let strings = sheet_cell_strings(&bytes, "Sites");
+    let strings = sheet_cell_strings(&bytes, "All source rows");
     for i in [0usize, 1, 2_500, 4_998] {
         let path = format!("src/generated/module_{i:05}.rs");
         assert!(
             strings.contains(&path),
-            "site {path} is missing from the Sites sheet"
+            "place {path} is missing from the All source rows sheet"
         );
     }
     assert!(strings.iter().any(|s| s == "src/primary.rs"));
@@ -88,7 +89,7 @@ fn the_pointer_counts_exactly_the_sites_the_cell_dropped() {
         &empty_opts(),
     )
     .unwrap();
-    let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
+    let also = cell_by_header(&bytes, "All problems", "Also found at", 1);
     let (shown, pointer) = also.rsplit_once("\nand ").expect("pointer on its own line");
     let dropped: usize = pointer
         .split_whitespace()
@@ -128,14 +129,17 @@ fn a_deviation_group_and_a_convention_with_thousands_of_sites_do_not_abort() {
         &empty_opts(),
     )
     .expect("large deviation and convention groups must not abort the export");
-    let where_cell = cell_text(&bytes, &sheet_entry_for(&bytes, "Deviations"), "G2");
+    let where_cell = cell_by_header(&bytes, "Departures", "Where", 1);
     assert!(where_cell.chars().count() < EXCEL_CELL_LIMIT);
-    assert!(where_cell.contains("more sites, see Sites sheet"));
-    let also = cell_text(&bytes, &sheet_entry_for(&bytes, "Conventions"), "I2");
+    assert!(where_cell.contains("more places, see All source rows sheet"));
+    let also = cell_by_header(&bytes, "Your conventions", "Also found at", 1);
     assert!(also.chars().count() < EXCEL_CELL_LIMIT);
-    assert!(also.contains("more sites, see Sites sheet"));
-    // 4,000 + 4,001 sites, every one on the Sites sheet.
-    assert_eq!(sheet_row_count(&bytes, "Sites"), 1 + 4_000 + 4_001);
+    assert!(also.contains("more places, see All source rows sheet"));
+    // 4,000 + 4,001 places, every one on the All source rows sheet (and its three lines above).
+    assert_eq!(
+        sheet_row_count(&bytes, "All source rows"),
+        3 + 4_000 + 4_001
+    );
 }
 
 #[test]
@@ -149,12 +153,12 @@ fn a_small_report_keeps_its_cells_exactly_as_before() {
         &empty_opts(),
     )
     .unwrap();
-    let also = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "Z2");
+    let also = cell_by_header(&bytes, "All problems", "Also found at", 1);
     assert_eq!(
         also,
         "src/generated/module_00000.rs:1\nsrc/generated/module_00001.rs:2"
     );
-    assert!(!also.contains("see Sites sheet"));
+    assert!(!also.contains("see All source rows sheet"));
 }
 
 #[test]
@@ -168,7 +172,7 @@ fn any_other_oversized_text_cell_is_cut_with_a_pointer_instead_of_aborting() {
         &empty_opts(),
     )
     .expect("an oversized prose cell must not abort the export");
-    let detail = cell_text(&bytes, &sheet_entry_for(&bytes, "All Findings"), "U2");
+    let detail = cell_by_header(&bytes, "All problems", "More detail", 1);
     assert!(detail.chars().count() < EXCEL_CELL_LIMIT);
     assert!(
         detail.contains("full text is in findings.json"),
@@ -177,7 +181,7 @@ fn any_other_oversized_text_cell_is_cut_with_a_pointer_instead_of_aborting() {
 }
 
 #[test]
-fn more_sites_than_one_sheet_holds_continue_on_a_second_sheet() {
+fn more_places_than_one_sheet_holds_continue_on_a_second_sheet() {
     let mut f = finding_with_sites(7);
     f.also_locations.truncate(6);
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
@@ -186,26 +190,32 @@ fn more_sites_than_one_sheet_holds_continue_on_a_second_sheet() {
         None,
         &HashMap::new(),
     );
-    let sites = build_site_rows(&rows, &[]);
-    assert_eq!(sites.len(), 7);
-    let mut wb = Workbook::new();
+    let parents: Vec<&FindingRow> = rows.iter().collect();
+    let places = build_site_rows(&parents, &[]);
+    assert_eq!(places.len(), 7);
+    let lay = sheets::Layout::new(&rows, &[], &[], false, false);
     let names = vec![
-        "Sites".to_string(),
-        "Sites (2)".to_string(),
-        "Sites (3)".to_string(),
+        "All source rows".to_string(),
+        "All source rows (2)".to_string(),
+        "All source rows (3)".to_string(),
     ];
-    write_sites_sheets(&mut wb, &names, &sites, 3, &Formats::new()).unwrap();
+    let tables = sheets::source_rows_tables(&places, &lay, None, 3, &names);
+    let mut wb = Workbook::new();
+    let fmts = Formats::new();
+    for table in &tables {
+        tables::write_table(&mut wb, &fmts, table).unwrap();
+    }
     let bytes = wb.save_to_buffer().unwrap();
-    // 3 + 3 + 1 data rows, each sheet with its own header row.
-    assert_eq!(sheet_row_count(&bytes, "Sites"), 1 + 3);
-    assert_eq!(sheet_row_count(&bytes, "Sites (2)"), 1 + 3);
-    assert_eq!(sheet_row_count(&bytes, "Sites (3)"), 1 + 1);
+    // 3 + 3 + 1 data rows, each sheet with its own title, first line and header row.
+    assert_eq!(sheet_row_count(&bytes, "All source rows"), 3 + 3);
+    assert_eq!(sheet_row_count(&bytes, "All source rows (2)"), 3 + 3);
+    assert_eq!(sheet_row_count(&bytes, "All source rows (3)"), 3 + 1);
 }
 
 #[test]
-fn an_area_called_sites_cannot_take_the_name_the_pointer_uses() {
+fn an_area_named_like_a_sheet_is_only_a_cell() {
     let mut f = finding_with_sites(3);
-    f.category = Some("Sites".to_string());
+    f.category = Some("All source rows".to_string());
     let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
     let bytes = build_workbook(
         &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
@@ -213,10 +223,16 @@ fn an_area_called_sites_cannot_take_the_name_the_pointer_uses() {
         &empty_opts(),
     )
     .unwrap();
-    let strings = sheet_cell_strings(&bytes, "Sites");
+    let names = crate::release_gate::xlsx_sheet_names(&bytes).unwrap();
+    assert_eq!(
+        names.iter().filter(|n| *n == "All source rows").count(),
+        1,
+        "{names:?}"
+    );
+    let strings = sheet_cell_strings(&bytes, "All source rows");
     assert!(
-        strings.iter().any(|s| s.starts_with("Finding (rule @")),
-        "the sheet called Sites must be the site list, got {strings:?}"
+        strings.iter().any(|s| s.starts_with("Raw record.")),
+        "the sheet called All source rows must be the record of every row, got {strings:?}"
     );
 }
 
@@ -227,7 +243,7 @@ fn the_cap_helper_is_exact_at_the_boundary() {
     assert_eq!(site_list_cell_within(&items, 69), items.join("\n"));
     let capped = site_list_cell_within(&items, 68);
     assert!(capped.chars().count() <= 68);
-    assert!(capped.ends_with("more sites, see Sites sheet"));
+    assert!(capped.ends_with("more places, see All source rows sheet"));
     let shown = capped.lines().count() - 1;
     let left_out: usize = capped
         .lines()
@@ -281,9 +297,9 @@ async fn export_everything(report: &ScanReport, render_pdf: bool) -> (usize, usi
         started.elapsed()
     );
     assert_eq!(
-        sheet_row_count(&xlsx, "Sites"),
-        1 + report.findings.len(),
-        "every row's site must be on the Sites sheet"
+        sheet_row_count(&xlsx, "All source rows"),
+        3 + report.findings.len(),
+        "every row's place must be on the All source rows sheet"
     );
 
     let started = std::time::Instant::now();
@@ -374,6 +390,12 @@ fn no_raw_string_writer_outside_capped_sheet() {
         (
             "xlsx_export/triage_log.rs",
             include_str!("../triage_log.rs"),
+        ),
+        ("xlsx_export/sheets.rs", include_str!("../sheets.rs")),
+        ("xlsx_export/tables.rs", include_str!("../tables.rs")),
+        (
+            "xlsx_export/review_sheets.rs",
+            include_str!("../review_sheets.rs"),
         ),
     ];
     for (file, text) in sources {

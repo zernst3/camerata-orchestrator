@@ -141,6 +141,14 @@ pub fn mixed_sealed() -> SealedReport {
     report.seal()
 }
 
+/// A table sheet's grid with its header row first: the title and first line above the header of
+/// All source rows are removed.
+pub fn sheet_table(xlsx: &[u8], sheet: &str) -> Vec<Vec<String>> {
+    let grid = crate::release_gate::xlsx_sheet_grid(xlsx, sheet).unwrap_or_else(|e| panic!("{e}"));
+    let above = if sheet == "All source rows" { 2 } else { 0 };
+    grid.into_iter().skip(above).collect()
+}
+
 pub fn key_at(sealed: &SealedReport, path: &str) -> String {
     sealed
         .findings

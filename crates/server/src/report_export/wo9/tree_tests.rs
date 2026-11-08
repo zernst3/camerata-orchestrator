@@ -105,10 +105,17 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
     assert!(sub.get("internal").is_none(), "{sub}");
     assert!(sub.get("flags").is_none(), "{sub}");
     // The Tree sheet has the same nodes.
-    let grid = xlsx_sheet_grid(&workbook(&entries), "Tree").expect("a Tree sheet");
+    let grid = xlsx_sheet_grid(&workbook(&entries), "How problems were grouped")
+        .expect("a How problems were grouped sheet");
     assert_eq!(grid.len() - 1, nodes.len(), "one row per node");
     for header in [
-        "Node id", "Level", "Parent", "Label", "Cause", "Summary", "Sites",
+        "Group id",
+        "Within",
+        "Group",
+        "Parent group id",
+        "Cause",
+        "Summary",
+        "Places",
     ] {
         assert!(
             grid[0].iter().any(|h| h == header),
@@ -172,14 +179,18 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
             .unwrap()
             .bytes;
         let entries = read_zip_entries(&zip).unwrap();
-        let grid = xlsx_sheet_grid(&workbook(&entries), "Tree").unwrap();
+        let grid = xlsx_sheet_grid(&workbook(&entries), "How problems were grouped").unwrap();
         let flags_col = grid[0]
             .iter()
             .position(|h| h == "Review flags")
             .expect("the internal Tree sheet has a Review flags column");
+        let id_col = grid[0]
+            .iter()
+            .position(|h| h == "Group id")
+            .expect("the Group id column");
         let row = grid
             .iter()
-            .find(|r| r[0] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
+            .find(|r| r[id_col] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
             .unwrap();
         assert!(
             row[flags_col].contains("methodology_leak"),
@@ -192,7 +203,7 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
 #[test]
 fn a_label_or_cause_with_a_methodology_leak_reaches_no_row_and_no_sheet() {
     // The marker rides on every row of the sub-group (findings.json, csv/, json/, the findings
-    // sheets, the Sites sheet) unless the label and the cause pass the same checks the plan, the
+    // sheets, the All source rows sheet) unless the label and the cause pass the same checks the plan, the
     // tree, the tickets and the PDF apply.
     for (label, cause, what) in [
         (

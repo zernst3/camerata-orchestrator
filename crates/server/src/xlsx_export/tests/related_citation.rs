@@ -115,15 +115,15 @@ async fn keyword_matched_ai_finding_cites_a_related_standard_in_every_artifact()
         &empty_opts(),
     )
     .expect("workbook builds");
-    let citation_cell = cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "P2");
+    let citation_cell = cell_by_header(&xlsx, "All problems", "Standard cited", 1);
     assert!(
         citation_cell.starts_with(RELATED_STANDARD_LABEL_PREFIX),
         "xlsx citation cell must say related standard, got {citation_cell:?}"
     );
     assert_eq!(
-        cell_text(&xlsx, &sheet_entry_for(&xlsx, "All Findings"), "O2"),
-        "AI-advisory",
-        "a keyword-matched AI row's provenance must never read Deterministic"
+        cell_by_header(&xlsx, "All problems", "Source", 1),
+        "Model-reviewed",
+        "a keyword-matched AI row's source must never read Deterministic"
     );
 }
 
@@ -204,12 +204,12 @@ fn the_index_sheet_defines_related_standard() {
     let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
     assert!(
         shared.contains("Related standard"),
-        "the Index sheet's vocabulary must define a related standard"
+        "the Glossary must define a related standard"
     );
 }
 
 #[test]
-fn the_index_sheet_provenance_lines_are_accurate_and_free_of_em_dashes() {
+fn the_glossary_source_definitions_are_accurate_and_free_of_dashes() {
     let report = report_with(
         vec![finding("SEC-CRITICAL-1", "a.rs", 1, "critical")],
         vec![],
@@ -220,31 +220,34 @@ fn the_index_sheet_provenance_lines_are_accurate_and_free_of_em_dashes() {
         &empty_opts(),
     )
     .expect("workbook builds");
-    let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
-    // A related row now carries sources, so "no corpus citation" would be false.
+    let glossary = table_grid(&xlsx, "Glossary");
+    let meaning_of = |term: &str| -> String {
+        glossary
+            .iter()
+            .find(|r| r.first().is_some_and(|c| c == term))
+            .and_then(|r| r.get(1))
+            .cloned()
+            .unwrap_or_else(|| panic!("the Glossary does not define {term:?}"))
+    };
+    // A related row carries sources, so "no corpus citation" would be false.
+    let model = meaning_of("Model-reviewed");
     assert!(
-        !shared.contains("no corpus citation"),
-        "AI-advisory must not be defined as having no citation"
+        !model.contains("no corpus citation"),
+        "Model-reviewed must not be defined as having no citation"
     );
     assert!(
-        shared.contains("model-inferred; may cite a related standard"),
-        "AI-advisory is model-inferred and may cite a related standard"
+        model.contains("may cite a related standard"),
+        "Model-reviewed may cite a related standard: {model}"
     );
-    for line in [
-        "Deterministic: corpus-grounded",
-        "Preview: {tool}: scan-time deterministic tool pass",
-    ] {
-        assert!(shared.contains(line), "missing Index line {line:?}");
-    }
-    // The vocabulary lines are client-facing: no em dash in them.
-    for entry in shared.split("<si>").filter(|s| {
-        s.contains("corpus-grounded")
-            || s.contains("scan-time deterministic tool pass")
-            || s.contains("model-inferred")
-    }) {
-        assert!(
-            !entry.contains('\u{2014}'),
-            "em dash in Index line: {entry}"
-        );
+    assert!(meaning_of("Deterministic").contains("authoritative published standard"));
+    assert!(meaning_of("Tool").contains("outside analysis tool"));
+    // The definitions are client-facing: no em dash in them.
+    for row in &glossary {
+        for cell in row {
+            assert!(
+                !cell.contains('\u{2014}'),
+                "em dash in the Glossary: {cell}"
+            );
+        }
     }
 }

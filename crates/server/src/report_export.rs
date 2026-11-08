@@ -2260,6 +2260,7 @@ mod wo9 {
     mod stage2_tests;
     pub(super) mod support;
     mod tree_tests;
+    mod workbook_tests;
 }
 
 #[cfg(test)]

@@ -191,7 +191,7 @@ fn a_repo_above_30000_sites_renders_only_the_reshaped_pdf() {
         patterns[0]["pointer"]
             .as_str()
             .unwrap()
-            .starts_with("30001 sites, see Sites sheet, filter Group = sub:"),
+            .starts_with("30001 places, see the All problems sheet, filter Fix id = sub:"),
         "{}",
         patterns[0]["pointer"]
     );
@@ -246,7 +246,7 @@ fn the_compiled_pdf_prints_the_escalations_and_the_patterns() {
         "Sites reviewed in person",
         "Escalated 2 of a budget of 20",
         "What the findings have in common",
-        "filter Group = sub:SEC-NO-RAW-SQL-CONCAT-1/0",
+        "filter Fix id = sub:SEC-NO-RAW-SQL-CONCAT-1/0",
         "Bind the parameters with the driver.",
     ] {
         assert!(

@@ -77,21 +77,21 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
         description.push(g.summary.clone());
     }
     if !g.cause.is_empty() {
-        description.push(format!("Why these sites belong together: {}", g.cause));
+        description.push(format!("Why these places belong together: {}", g.cause));
     }
     if !g.fix.is_empty() {
         description.push(format!("Fix: {}", g.fix));
     }
     if !g.worked_example.is_empty() {
-        description.push(format!("Worked example: {}", g.worked_example));
+        description.push(format!("Example from your code: {}", g.worked_example));
     }
     description.push(format!(
-        "{} {}, listed as rows below and on the Sites sheet (filter Group = {}).",
+        "{} {}, listed as rows below and on the All problems sheet (filter Fix id = {}).",
         g.open_site_total,
         if g.open_site_total == 1 {
-            "site"
+            "place"
         } else {
-            "sites"
+            "places"
         },
         g.id
     ));
@@ -115,7 +115,7 @@ fn ticket_row(g: &SubgroupFacts) -> [String; 8] {
     let mut sites = shown.join("\n");
     if g.open.len() > INLINE_SITES {
         sites.push_str(&format!(
-            "\nand {} more rows, see Sites sheet, filter Group = {}",
+            "\nand {} more rows, see the All problems sheet, filter Fix id = {}",
             g.open.len() - INLINE_SITES,
             g.id
         ));

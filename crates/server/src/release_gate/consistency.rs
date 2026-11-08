@@ -566,22 +566,26 @@ fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
     Ok(tally)
 }
 
-/// The workbook's "All Findings" sheet by `(severity, kind)` (its Severity cells are
-/// title-cased for the reader; compared lower-cased).
+/// The workbook's All problems sheet by `(severity, kind)` (its Severity cells are title-cased
+/// for the reader; compared lower-cased).
 fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "All Findings")?;
-    let header = grid.first().ok_or("the All Findings sheet is empty")?;
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::ALL_PROBLEMS))?;
     let col = |name: &str| {
         header
             .iter()
             .position(|h| h == name)
-            .ok_or_else(|| format!("the All Findings sheet has no {name:?} column"))
+            .ok_or_else(|| format!("the {} sheet has no {name:?} column", v::ALL_PROBLEMS))
     };
-    let (sev, kind) = (col("Severity")?, col("Kind")?);
+    let (sev, kind) = (col(v::H_SEVERITY)?, col(v::H_KIND)?);
     let mut tally = Tally::new();
     for row in grid.iter().skip(1) {
         let cell = |c: usize| row.get(c).map(String::as_str).unwrap_or("");
-        if row.iter().all(String::is_empty) {
+        // The note on an empty sheet sits in the first column with no Severity beside it.
+        if cell(sev).is_empty() && cell(kind).is_empty() {
             continue;
         }
         *tally
@@ -591,19 +595,28 @@ fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
     Ok(tally)
 }
 
-/// The Conventions sheet's rows by kind, read from the Status cell (the sheet prints no kind
-/// tag). A Status cell with neither known wording counts under `"unrecognised status"`, so an
-/// edited cell shows up as a disagreement instead of vanishing.
+/// The Your conventions sheet's rows by kind, read from the How consistently cell (the sheet
+/// prints no kind tag in its plain columns). A cell with neither known wording counts under
+/// `"unrecognised status"`, so an edited cell shows up as a disagreement instead of vanishing.
 fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Conventions")?;
-    let header = grid.first().ok_or("the Conventions sheet is empty")?;
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::YOUR_CONVENTIONS)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::YOUR_CONVENTIONS))?;
     let status = header
         .iter()
-        .position(|h| h == "Status")
-        .ok_or("the Conventions sheet has no \"Status\" column")?;
+        .position(|h| h == v::H_HOW_CONSISTENTLY)
+        .ok_or_else(|| {
+            format!(
+                "the {} sheet has no {:?} column",
+                v::YOUR_CONVENTIONS,
+                v::H_HOW_CONSISTENTLY
+            )
+        })?;
     let mut tally = BTreeMap::new();
     for row in grid.iter().skip(1) {
-        // The note on an empty sheet sits in the first column with no Status beside it.
+        // The note on an empty sheet sits in the first column with no status beside it.
         let cell = row.get(status).map(String::as_str).unwrap_or("");
         if cell.is_empty() {
             continue;
@@ -620,70 +633,72 @@ fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, Strin
     Ok(tally)
 }
 
-/// How many rows the Coverage sheet lists under "Checks we could not complete this scan": its
-/// `not_assessed` rows. The section is absent when there are none.
-fn coverage_sheet_not_assessed(xlsx: &[u8]) -> Result<usize, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Coverage")?;
-    let Some(title) = grid.iter().position(|row| {
-        row.first()
-            .is_some_and(|c| c == crate::xlsx_export::NOT_ASSESSED_SECTION_TITLE)
-    }) else {
+/// How many rows the Not checked sheet lists as "Rule could not be completed": its
+/// `not_assessed` rows.
+fn not_checked_sheet_not_assessed(xlsx: &[u8]) -> Result<usize, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::NOT_CHECKED)?;
+    let Some(gap) = grid
+        .first()
+        .and_then(|header| header.iter().position(|h| h == v::H_GAP))
+    else {
         return Ok(0);
     };
-    // The title, then the column headers, then one row per check until the next blank row.
     Ok(grid
         .iter()
-        .skip(title + 2)
-        .take_while(|row| row.iter().any(|c| !c.is_empty()))
+        .skip(1)
+        .filter(|row| {
+            row.get(gap)
+                .is_some_and(|c| c == v::GAP_RULE_COULD_NOT_COMPLETE)
+        })
         .count())
 }
 
-/// The workbook Index's summaries: the "Statement types" count per kind tag, and the
-/// "Findings by category" Total row per severity column.
-type IndexSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
+/// Start here's summaries: the row count it states for each sheet, and the scorecard's Total row
+/// per severity column.
+type StartSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
 
-fn workbook_index_summary(xlsx: &[u8]) -> Result<IndexSummary, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Index")?;
+fn workbook_start_summary(xlsx: &[u8]) -> Result<StartSummary, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::START_HERE)?;
     let number = |row: &Vec<String>, c: usize| -> usize {
         row.get(c)
             .and_then(|t| t.parse::<f64>().ok())
             .map_or(0, |n| n as usize)
     };
-    let mut kinds = BTreeMap::new();
-    for (tag, label) in crate::xlsx_export::STATEMENT_TYPES {
-        // "Unclassified" renders only when non-zero; an absent line is zero.
+    let mut sheet_counts = BTreeMap::new();
+    for sheet in [v::ALL_PROBLEMS, v::YOUR_CONVENTIONS] {
         let count = grid
             .iter()
-            .find(|row| row.first().is_some_and(|c| c == label))
-            .map_or(0, |row| number(row, 1));
-        if count > 0 {
-            kinds.insert(tag.to_string(), count);
-        }
+            .find(|row| row.first().is_some_and(|c| c == sheet))
+            .map_or(0, |row| number(row, 2));
+        sheet_counts.insert(sheet.to_string(), count);
     }
     let header_at = grid
         .iter()
         .position(|row| {
-            row.first().is_some_and(|c| c == "Category") && row.get(5).is_some_and(|c| c == "Total")
+            row.first().is_some_and(|c| c == v::H_AREA) && row.get(5).is_some_and(|c| c == "Total")
         })
-        .ok_or("the Index has no category matrix")?;
+        .ok_or("Start here has no scorecard")?;
     let total_row = grid
         .iter()
         .skip(header_at + 1)
         .find(|row| row.first().is_some_and(|c| c == "Total"))
-        .ok_or("the Index category matrix has no Total row")?;
+        .ok_or("the Start here scorecard has no Total row")?;
     let severities = ["critical", "high", "medium", "low"]
         .into_iter()
         .enumerate()
         .map(|(i, s)| (s, number(total_row, i + 1)))
         .collect();
-    Ok((kinds, severities))
+    Ok((sheet_counts, severities))
 }
 
-/// 22d, over the archive: the CSV, the workbook's "All Findings" rows, the Conventions and
-/// Coverage sheets' rows (by kind) and the workbook Index's summaries agree with
+/// 22d, over the archive: the CSV, the workbook's All problems rows, the Your conventions and
+/// Not checked sheets' rows (by kind) and Start here's summaries agree with
 /// `json/all-findings.json` by severity AND kind, not only in total.
 /// Missing files are the dataset-set check's to report.
 pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
     let json = match json_tally(entries) {
         None => return Vec::new(),
         Some(Err(p)) => return vec![p],
@@ -708,7 +723,7 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     let Some(xlsx) = entries.get(&xlsx_name) else {
         return problems;
     };
-    let sheet_kinds = crate::xlsx_export::ALL_FINDINGS_SHEET_KINDS;
+    let sheet_kinds = crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS;
     let json_for_sheet: Tally = json
         .iter()
         .filter(|((_, kind), _)| sheet_kinds.contains(&kind.as_str()))
@@ -717,32 +732,31 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     match workbook_rows_tally(xlsx) {
         Ok(tally) => problems.extend(tally_differences(
             &xlsx_name,
-            "the All Findings sheet",
+            "the All problems sheet",
             &json_for_sheet,
             &tally,
         )),
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
-    // The Conventions and Coverage sheets hold the other three kinds, grouped by sheet rather
-    // than by severity, so their rows are tallied by kind against the same JSON rows. (The
-    // Index summaries below count from the report, so they cannot see a row dropped from a
-    // sheet.)
+    // Your conventions and Not checked hold the other three kinds, grouped by sheet rather than
+    // by severity, so their rows are tallied by kind against the same JSON rows. (Start here's
+    // summaries below count from the report, so they cannot see a row dropped from a sheet.)
     let json_kinds = by_kind(&json);
     let mut listed_rows: Vec<(&str, String, usize)> = Vec::new();
     match conventions_sheet_tally(xlsx) {
         Ok(listed) => {
             for kind in ["convention_observed", "no_convention"] {
                 let n = listed.get(kind).copied().unwrap_or(0);
-                listed_rows.push(("Conventions", kind.to_string(), n));
+                listed_rows.push((v::YOUR_CONVENTIONS, kind.to_string(), n));
             }
             if let Some(n) = listed.get("unrecognised status") {
-                listed_rows.push(("Conventions", "unrecognised status".to_string(), *n));
+                listed_rows.push((v::YOUR_CONVENTIONS, "unrecognised status".to_string(), *n));
             }
         }
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
-    match coverage_sheet_not_assessed(xlsx) {
-        Ok(n) => listed_rows.push(("Coverage", "not_assessed".to_string(), n)),
+    match not_checked_sheet_not_assessed(xlsx) {
+        Ok(n) => listed_rows.push((v::NOT_CHECKED, "not_assessed".to_string(), n)),
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
     for (sheet, kind, listed) in listed_rows {
@@ -755,23 +769,26 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
             ));
         }
     }
-    match workbook_index_summary(xlsx) {
-        Ok((kinds, severities)) => {
-            let want_kinds = by_kind(&json);
-            for kind in want_kinds
-                .keys()
-                .chain(kinds.keys())
-                .collect::<BTreeSet<_>>()
-            {
-                let (w, g) = (
-                    want_kinds.get(kind).copied().unwrap_or(0),
-                    kinds.get(kind).copied().unwrap_or(0),
-                );
+    match workbook_start_summary(xlsx) {
+        Ok((sheet_counts, severities)) => {
+            let want_problems: usize = sheet_kinds
+                .iter()
+                .map(|k| json_kinds.get(*k).copied().unwrap_or(0))
+                .sum();
+            let want_conventions = ["convention_observed", "no_convention"]
+                .iter()
+                .map(|k| json_kinds.get(*k).copied().unwrap_or(0))
+                .sum::<usize>();
+            for (sheet, w) in [
+                (v::ALL_PROBLEMS, want_problems),
+                (v::YOUR_CONVENTIONS, want_conventions),
+            ] {
+                let g = sheet_counts.get(sheet).copied().unwrap_or(0);
                 if w != g {
                     problems.push(problem(
                         &xlsx_name,
-                        &format!("sheet \"Index\" statement types, kind {kind}"),
-                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                        &format!("sheet \"Start here\" row count, sheet {sheet}"),
+                        format!("Start here counts {g} and json/all-findings.json has {w}"),
                     ));
                 }
             }
@@ -780,8 +797,8 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
                 if w != g {
                     problems.push(problem(
                         &xlsx_name,
-                        &format!("sheet \"Index\" category totals, severity {severity}"),
-                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                        &format!("sheet \"Start here\" scorecard totals, severity {severity}"),
+                        format!("Start here counts {g} and json/all-findings.json has {w}"),
                     ));
                 }
             }
@@ -863,7 +880,7 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
             if let Ok(names) = super::archive::xlsx_sheet_names(xlsx) {
                 let has_sheet = names
                     .iter()
-                    .any(|n| n == crate::xlsx_export::PATTERNS_SHEET);
+                    .any(|n| n == crate::xlsx_export::vocabulary::PATTERNS_ACROSS_SERVICES);
                 if has_sheet != report.patterns_across_services.is_some() {
                     problems.push(problem(
                         &format!("{stem}-findings.xlsx"),

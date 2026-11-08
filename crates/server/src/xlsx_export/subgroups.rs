@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{severity_rank, title_case, DepRow, FindingRow};
+use super::{severity_rank, title_case, vocabulary, DepRow, FindingRow};
 use crate::report_export::prose_checks::client_text;
 use crate::report_export::{Disposition, ReviewedReport};
 use crate::review_tree::{is_thrown_out_id, NodeLevel};
@@ -24,8 +24,8 @@ use crate::review_tree::{is_thrown_out_id, NodeLevel};
 /// review tree (one stored before the tree existed): there are no sub-groups to plan, and
 /// printing nothing would read as "nothing to fix".
 pub(crate) const NO_TREE_NOTE: &str =
-    "This report has no review tree, so there are no sub-groups to plan. Every site is on the \
-     Sites sheet.";
+    "This report has no review tree, so there are no fixes to plan. Every problem is on the \
+     All problems sheet.";
 
 /// [`NO_TREE_NOTE`] when `reviewed` has findings and no tree, empty otherwise.
 pub(crate) fn no_tree_note(reviewed: &ReviewedReport) -> &'static str {
@@ -52,20 +52,28 @@ pub(crate) struct SiteFact {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Sequence {
     /// Critical, high, or medium at low effort.
-    FixFirst,
+    First,
     /// The rest of medium.
     Next,
     /// Low and informational.
-    Backlog,
+    Later,
 }
 
 impl Sequence {
+    /// The fix order word, from the vocabulary.
     pub fn label(self) -> &'static str {
         match self {
-            Self::FixFirst => "Fix first",
-            Self::Next => "Next",
-            Self::Backlog => "Backlog",
+            Self::First => vocabulary::FIX_ORDER_FIRST,
+            Self::Next => vocabulary::FIX_ORDER_NEXT,
+            Self::Later => vocabulary::FIX_ORDER_LATER,
         }
+    }
+
+    /// The fix order of a fix whose worst problem has `severity` and whose usual effort is
+    /// `effort`: critical and high first, medium at low effort first, the rest of medium next,
+    /// everything else later.
+    pub fn of(severity: &str, effort: &str) -> Self {
+        sequence_of(severity, effort)
     }
 }
 
@@ -165,10 +173,10 @@ fn top_folders<'a>(
 
 fn sequence_of(severity: &str, effort: &str) -> Sequence {
     match severity.to_ascii_lowercase().as_str() {
-        "critical" | "high" => Sequence::FixFirst,
-        "medium" if effort == "low" => Sequence::FixFirst,
+        "critical" | "high" => Sequence::First,
+        "medium" if effort == "low" => Sequence::First,
         "medium" => Sequence::Next,
-        _ => Sequence::Backlog,
+        _ => Sequence::Later,
     }
 }
 
@@ -234,7 +242,7 @@ pub(crate) fn subgroup_facts_with(
         let label = if label.flags.is_empty() {
             label.text
         } else {
-            "Sub-group".to_string()
+            vocabulary::H_FIX.to_string()
         };
 
         if !dep_in_group.is_empty() {
@@ -470,9 +478,9 @@ pub(crate) fn pdf_sections(
         .into_iter()
         .map(|g| crate::report_export::PatternJson {
             pointer: format!(
-                "{} {}, see Sites sheet, filter Group = {}",
+                "{} {}, see the All problems sheet, filter Fix id = {}",
                 g.live_sites,
-                if g.live_sites == 1 { "site" } else { "sites" },
+                if g.live_sites == 1 { "place" } else { "places" },
                 g.id
             ),
             group: g.id,
