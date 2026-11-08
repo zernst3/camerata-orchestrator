@@ -423,6 +423,8 @@ pub struct PriorityGridJson {
     pub rows: Vec<GridRowJson>,
     pub accepted_count: usize,
     pub informational_count: usize,
+    /// Places whose head row needs a decision: counted on the cover, not in the grid.
+    pub held_count: usize,
     /// The line under the grid: each cell counts, the rows are on the All problems sheet.
     pub footnote: String,
 }
@@ -542,6 +544,7 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
         rows,
         accepted_count: heads.iter().filter(|f| f.bucket == "accepted").count(),
         informational_count: heads.iter().filter(|f| f.bucket == "informational").count(),
+        held_count: heads.iter().filter(|f| f.bucket == "held").count(),
         footnote: format!(
             "Each cell counts the problems in it, one for each place. Every problem is on the {} sheet, with its severity, effort and place.",
             crate::xlsx_export::vocabulary::ALL_PROBLEMS

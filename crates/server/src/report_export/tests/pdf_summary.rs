@@ -588,6 +588,7 @@ fn the_cover_the_matrix_the_scorecard_and_the_summary_count_the_same_places() {
         .map(|c| c.findings.len())
         .sum();
     assert_eq!(grid, 2, "matrix");
+    assert_eq!(json.priority_grid.held_count, 0);
     let card: usize = json
         .scorecard
         .rows
