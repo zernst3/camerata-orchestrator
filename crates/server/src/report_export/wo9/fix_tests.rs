@@ -419,7 +419,7 @@ fn tickets_equal_plan_rows_equal_fixes_with_open_places() {
     let entries = released_secret_entries();
     // One Fix with an open place: one ticket, one plan row.
     let tickets = String::from_utf8(entries["csv/tickets.csv"].clone()).unwrap();
-    assert_eq!(tickets.lines().count() > 1, true);
+    assert!(tickets.lines().count() > 1);
 
     // A second copy of the ticket names the same Fix twice, and the tickets then disagree with
     // the plan.
