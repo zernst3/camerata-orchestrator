@@ -1180,6 +1180,29 @@ const fn e(
     }
 }
 
+/// The line that opens the generated glossary block in `docs/CLIENT_PACKAGE.md`.
+pub const GLOSSARY_BLOCK_START: &str = "<!-- glossary:start -->";
+/// The line that closes the generated glossary block in `docs/CLIENT_PACKAGE.md`.
+pub const GLOSSARY_BLOCK_END: &str = "<!-- glossary:end -->";
+
+/// The client Glossary as a Markdown table, from the same [`GLOSSARY_ENTRIES`] the workbook's
+/// Glossary sheet prints (the reviewers' extra terms are not in a client file, so they are not
+/// here). `docs/CLIENT_PACKAGE.md` holds this between [`GLOSSARY_BLOCK_START`] and
+/// [`GLOSSARY_BLOCK_END`], and a test holds the file to it.
+pub fn glossary_markdown() -> String {
+    let cell = |s: &str| s.replace('|', "\\|");
+    let mut out = format!("| {H_TERM} | {H_PLAIN_MEANING} | Where it appears |\n|---|---|---|\n");
+    for e in GLOSSARY_ENTRIES {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            cell(e.term),
+            cell(e.meaning),
+            cell(e.where_you_meet_it)
+        ));
+    }
+    out
+}
+
 /// Terms only a reviewer's export defines.
 pub const INTERNAL_GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
@@ -1651,6 +1674,41 @@ mod tests {
                 c.term
             );
         }
+    }
+
+    /// `docs/CLIENT_PACKAGE.md` holds the client Glossary between two marker lines, rendered from
+    /// [`GLOSSARY_ENTRIES`]. `UPDATE_CLIENT_PACKAGE_DOC=1` rewrites the block instead of failing.
+    #[test]
+    fn client_package_doc_glossary_block_matches_the_vocabulary() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/CLIENT_PACKAGE.md");
+        let doc = std::fs::read_to_string(&path).expect("docs/CLIENT_PACKAGE.md must exist");
+        let regenerate = std::env::var_os("UPDATE_CLIENT_PACKAGE_DOC").is_some();
+        let how = "regenerate it with: UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server \
+                   client_package_doc_glossary_block";
+        let (Some(start), Some(end)) =
+            (doc.find(GLOSSARY_BLOCK_START), doc.find(GLOSSARY_BLOCK_END))
+        else {
+            panic!(
+                "docs/CLIENT_PACKAGE.md has no {GLOSSARY_BLOCK_START} ... {GLOSSARY_BLOCK_END} \
+                 block: add the two marker lines, then {how}"
+            );
+        };
+        assert!(start < end, "the glossary markers are out of order");
+        let body_from = start + GLOSSARY_BLOCK_START.len();
+        let expected = format!("\n\n{}\n", glossary_markdown());
+        if doc[body_from..end] == expected {
+            return;
+        }
+        if regenerate {
+            let updated = format!("{}{expected}{}", &doc[..body_from], &doc[end..]);
+            std::fs::write(&path, updated).expect("write docs/CLIENT_PACKAGE.md");
+            return;
+        }
+        panic!(
+            "the glossary block of docs/CLIENT_PACKAGE.md differs from the vocabulary's \
+             Glossary entries; {how}"
+        );
     }
 
     #[test]
