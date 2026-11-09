@@ -78,8 +78,10 @@ pub(crate) enum TreeStatus {
     Ready,
 }
 
-/// A prompt open in the right pane.
+/// A prompt open in the right pane. One prompt is open at a time, so the larger plan variant
+/// costs nothing worth boxing it for.
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TreePrompt {
     /// Reading every page of a node to work out what a batch would write.
     Planning {

@@ -231,12 +231,14 @@ pub fn place_sentence(plan: &BatchPlan) -> String {
         let rules: Vec<&PlanRule> = plan
             .left_out
             .iter()
-            .filter(|(_, why)| match (pick, why) {
-                (0, LeftOutWhy::Held(_)) => true,
-                (1, LeftOutWhy::Unticked) => true,
-                (2, LeftOutWhy::Merged) => true,
-                (3, LeftOutWhy::Already) => true,
-                _ => false,
+            .filter(|(_, why)| {
+                matches!(
+                    (pick, why),
+                    (0, LeftOutWhy::Held(_))
+                        | (1, LeftOutWhy::Unticked)
+                        | (2, LeftOutWhy::Merged)
+                        | (3, LeftOutWhy::Already)
+                )
             })
             .map(|(r, _)| r)
             .collect();
