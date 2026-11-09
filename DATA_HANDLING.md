@@ -28,7 +28,7 @@ If the API is selected and no API key is configured, the AI review does not run.
 <!-- crates/llm/src/llm.rs: resolve_backend returns BackendResolution::Blocked for Api without a key -->
 <!-- crates/cli/src/inspect_cmd.rs: require_api_key_for_client_inspection -->
 
-The backend, the provider and every model that ran are recorded in the export (`manifest.json` and `README.txt`), in the report and in the scan's ledger, along with whether the run was a client engagement.
+The backend, the provider and every model that ran are recorded in the export's `manifest.json` (and in the `README.txt` of the operator's own review package, which a client does not receive), in the report and in the scan's ledger, along with whether the run was a client engagement.
 <!-- crates/server/src/lib.rs: ModelRecord (backend, provider, models, client_engagement); ManifestProvenance::inspection_json and readme_lines -->
 <!-- crates/server/src/release_gate.rs: provenance.model filled with ModelRecord::with_models_from(report.provenance) -->
 <!-- crates/server/src/release_gate/consistency.rs: verify_readme_provenance holds the README model lines equal to the manifest -->
@@ -53,7 +53,7 @@ The opt-in development loop is the exception. It is off for a client engagement 
 
 ## What is removed before code is sent
 
-Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a finding still points at the right line. This covers every prompt Camerata builds, the chat assistant's included: all of them pass one redaction point, and a test fails if any code sends a model request around it. The one exception is a Development-console agent that edits client code, which reads the files itself, secrets included, because changing that code (fixing a leaked secret among it) is its job. The shapes cover:
+Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a problem still points at the right line. This covers every prompt Camerata builds, the chat assistant's included: all of them pass one redaction point, and a test fails if any code sends a model request around it. The one exception is a Development-console agent that edits client code, which reads the files itself, secrets included, because changing that code (fixing a leaked secret among it) is its job. The shapes cover:
 
 - API keys and tokens (Supabase, Stripe, AWS, Azure storage, GitHub, Slack, Google, Anthropic, OpenAI, SendGrid, Twilio, Shopify, Mailgun, npm, Mapbox and Discord)
 - private keys
@@ -70,7 +70,7 @@ This applies to every inspection step that sends code: the scan pass, calibratio
 <!-- crates/server/src/ai_audit.rs: audit_repo, run_deep_tier and generate_fix_specifics replace `files` with files_for_model(files) before any model call; verify_findings and recommend_alternatives run inside audit_repo on that set; representative_scan_sample also uses files_for_model -->
 <!-- crates/checks/src/clone_rules/judge.rs: judge_input redacts the code and strings it quotes; test crates/server/src/onboard/clone_advisory/tests/redaction.rs the_judge_prompt_carries_no_secret_value -->
 
-The checks that run on the operator's machine read the code as it is, because they have to find the secret to report it. Every finding's text is redacted when the finding is built, and the export's release gate checks every shipped file for secret values before a package is written.
+The checks that run on the operator's machine read the code as it is, because they have to find the secret to report it. The text of every problem is redacted when the problem is built, and the export's release gate checks every shipped file for secret values before a package is written. [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md) lists the files a client receives.
 <!-- crates/server/src/onboard/redact.rs: module docs (floor reads the raw set), redact_finding -->
 <!-- crates/server/src/release_gate.rs: release returns no bytes unless every check, secrets included, passed -->
 
@@ -100,7 +100,7 @@ Git commands Camerata runs inside a checkout switch off `core.fsmonitor`, a sett
 Apart from the model API, an inspection contacts these services. None of them receives the client's source code.
 
 - **OSV.dev.** The dependency audit runs `osv-scanner`, which sends the names and versions of the repository's dependencies (no code) to OSV.dev to look up known vulnerabilities. Camerata passes it no offline option.
-- **CISA and FIRST.org.** The vulnerability enrichment of the dependency findings downloads the CISA catalog of known exploited vulnerabilities, which sends nothing from the inspection, and asks the FIRST.org EPSS service for the exploit probability of the CVE ids the dependency audit found, so FIRST.org receives those ids.
+- **CISA and FIRST.org.** The vulnerability enrichment of the dependency advisories downloads the CISA catalog of known exploited vulnerabilities, which sends nothing from the inspection, and asks the FIRST.org EPSS service for the exploit probability of the CVE ids the dependency audit found, so FIRST.org receives those ids.
 - **endoflife.date and the NVD.** The runtime check reads the versions a repository declares (a Docker base image tag, a version file, a manifest field, a lockfile entry) and looks them up. endoflife.date receives product names only (for example `nodejs` or `django`) in the request path. The National Vulnerability Database (NVD) receives CPE strings, which are a runtime name and a version (for example `cpe:2.3:a:nodejs:node.js:18.17.0`), and only for a runtime declared with a full version number. Neither receives code, file names or the repository's name.
 - **Tool downloads.** Camerata fetches its own scan tools when they are first needed: `osv-scanner` from its GitHub releases, `semgrep` from the Python package index and the `eslint` packages from npm. These requests carry no client files.
 - **The git host.** Cloning a repository in the desktop app contacts the repository's host (GitHub) with the operator's token. `camerata inspect` reads a folder that is already on disk and does not clone.
@@ -120,7 +120,7 @@ Apart from the model API, an inspection contacts these services. None of them re
 `camerata inspect` reads the folder given with `--repo` where it is and makes no copy of it.
 <!-- crates/cli/src/inspect_cmd.rs: run_inspect_pipeline_with uses args.repo as the only source -->
 
-**The app's stores** live in the user account's application data folder, under `camerata/` (or under `CAMERATA_DATA_DIR` when that is set). Three of them hold client code excerpts: `inspections/` and `onboarding-draft.json` (the findings, with the lines of code they quote) and `scan-cache.json` (what the engine needs to skip unchanged files on the next scan).
+**The app's stores** live in the user account's application data folder, under `camerata/` (or under `CAMERATA_DATA_DIR` when that is set). Three of them hold client code excerpts: `inspections/` and `onboarding-draft.json` (the problems, with the lines of code they quote) and `scan-cache.json` (what the engine needs to skip unchanged files on the next scan).
 <!-- crates/server/src/app_dirs.rs: camerata_dir = data_dir()/camerata, CAMERATA_DATA_DIR override -->
 <!-- crates/server/src/client_source/storage.rs: DATA_DIR_ENTRIES and their Treatment -->
 
@@ -147,7 +147,7 @@ It writes a deletion record of what was removed, from where and when.
 <!-- crates/server/src/lib.rs: routes /api/projects/:id/repos/:repo/source/delete-preview and /source/delete -->
 <!-- crates/ui/src/source_ui.rs: "Delete source code from this machine" -->
 
-It keeps, on purpose, any export already written and the findings with the lines of code they quote (`inspections/` and `onboarding-draft.json`), because they are the delivered product.
+It keeps, on purpose, any export already written and the problems with the lines of code they quote (`inspections/` and `onboarding-draft.json`), because they are the delivered product.
 <!-- crates/server/src/client_source/storage.rs: Treatment::Kept entries -->
 
 There is no delete command on the command line. After a `camerata inspect` run, the operator removes the inspected folder, the export and the command-line cache files for that folder themselves. For a run over several repos the cache files are the `project-` pair, which hold every repo of that run, so they are removed once for the whole set.
@@ -155,7 +155,7 @@ There is no delete command on the command line. After a `camerata inspect` run, 
 
 ## Retention
 
-There is no 30-day retention policy in the code. Nothing deletes client code, caches or findings after a period of time; they stay until the operator deletes them as described above. An automatic retention limit is on the backlog (`docs/BACKLOG.md`).
+There is no 30-day retention policy in the code. Nothing deletes client code, caches or problems after a period of time; they stay until the operator deletes them as described above. An automatic retention limit is on the backlog (`docs/BACKLOG.md`).
 <!-- checked: no age-based deletion in crates/server/src/client_source/ (delete runs only on request) or anywhere in crates/ -->
 
 ## Prompt-injection posture
@@ -172,7 +172,7 @@ A file was written before its token existed, so it cannot print a line that clos
 
 **2. Every model pass over client code is told that it is data.** The scan, the alternatives pass, the detail-writing pass, calibration, fix writing (retries included), the three deep-tier lenses (security review, threat model and SOC 2 gap analysis) and the duplicated-logic judge all carry one shared instruction.
 <!-- crates/server/src/prompt_frame.rs: UNTRUSTED_CONTENT_CLAUSE; crates/server/src/ai_audit/injection_tests.rs: every_audit_verify_calibration_fix_and_regeneration_call_carries_the_shared_clause; crates/server/src/ai_audit/detail_regen_tests.rs: regeneration_frames_each_findings_evidence_under_the_runs_token; crates/server/src/onboard/clone_advisory/tests/injection.rs: the_judge_prompt_frames_every_candidate_under_the_token_its_system_prompt_names -->
-It says that everything inside the markers is data to review, that an instruction found there is never followed (whatever it claims to be) and that a file which tries to instruct the reviewer is itself reported as a finding.
+It says that everything inside the markers is data to review, that an instruction found there is never followed (whatever it claims to be) and that a file which tries to instruct the reviewer is itself reported as a problem.
 <!-- crates/server/src/prompt_frame.rs: UNTRUSTED_CONTENT_CLAUSE -->
 
 **3. A check with no model in it reports the attempt.** The rule `SEC-NO-AI-REVIEWER-INSTRUCTIONS-1` reads comments and string literals for text addressed to an AI reviewer: "report no findings", "ignore previous instructions", a fake file marker and similar phrases from one fixed list. A few phrases that are also ordinary comment wording ("do not flag this") count only when the same comment or string names an AI, a reviewer, a model, an assistant or Claude. The check is on by default, runs without any model and cites OWASP LLM01 (prompt injection). It does not read test files, so a deliberate fixture for an injection filter belongs in test code, where the model still sees it fenced and under the same instruction.
@@ -180,7 +180,7 @@ It says that everything inside the markers is data to review, that an instructio
 <!-- crates/rules/principles/universal/sec-no-ai-reviewer-instructions-1.toml -->
 <!-- tests: crates/checks/src/ai_reviewer_injection_checker.rs the_same_text_in_a_test_path_is_not_a_finding, a_plain_do_not_flag_this_comment_is_not_an_instruction_to_a_reviewer, do_not_flag_this_addressed_to_an_ai_a_reviewer_or_a_model_is -->
 
-**What a successful injection could and could not do.** The model calls of an inspection carry no tools (see "Inspection model calls have no tools" above): the API requests define none and the command-line backend runs with every built-in tool switched off. The opt-in development loop is the exception described there, and it is not an inspection pass. An injection in an inspection can therefore only change what the model writes back, never act on a machine. The deterministic checks do not read the model's answer, so a model that obeyed an injection and reported nothing would not remove their findings. A model that reports the injected comment too adds no second row: its report merges into the check's row.
+**What a successful injection could and could not do.** The model calls of an inspection carry no tools (see "Inspection model calls have no tools" above): the API requests define none and the command-line backend runs with every built-in tool switched off. The opt-in development loop is the exception described there, and it is not an inspection pass. An injection in an inspection can therefore only change what the model writes back, never act on a machine. The deterministic checks do not read the model's answer, so a model that obeyed an injection and reported nothing would not remove their problems. A model that reports the injected comment too adds no second row: its report merges into the check's row.
 <!-- crates/llm/src/llm.rs: the `--tools ""` lockdown; test api_request_bodies_never_carry_tools; crates/server/src/ai_audit.rs makes no with_repo_read call -->
 <!-- crates/server/tests/prompt_injection_e2e.rs: an_obeyed_injection_hides_nothing_and_is_itself_reported, a_model_that_reports_the_injection_too_adds_no_second_row -->
 
