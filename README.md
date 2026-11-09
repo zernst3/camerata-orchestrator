@@ -124,6 +124,7 @@ The Codebase Inspection and brownfield onboarding are built and run end to end o
 |---|---|
 | [`PLATFORM.md`](PLATFORM.md) | The platform in depth: the inspection, onboarding, the governance gate, the enforcement model and the full crate graph |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | How to use it, screen by screen |
+| [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md) | What a Codebase Inspection delivers: every file in the package, the workbook's sheets, the PDF's sections and the glossary |
 | [`docs/TECHNICAL.md`](docs/TECHNICAL.md) | How it works inside: the gate, the scan pipeline, agent grounding, persistence |
 | [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | The high-level map of the whole system in one sitting |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The all-Rust stack, top to bottom |
