@@ -2560,6 +2560,7 @@ mod wo9 {
     mod edit_ids_tests;
     mod fix_tests;
     mod pdf_tests;
+    mod place_tests;
     mod plan_tests;
     mod readme_tests;
     mod review_level_tests;

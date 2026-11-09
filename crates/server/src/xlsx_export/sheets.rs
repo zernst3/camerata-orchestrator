@@ -42,8 +42,8 @@ use crate::report_export::Disposition;
 /// the rule. Nothing is dropped: the rows behind the representative are on All source rows and
 /// their rules are listed on the place's own row.
 pub(super) struct PlaceRows<'a> {
-    /// The row that heads the place: the first of its rows in the order the engine sorted them
-    /// (worst severity, then the strongest source).
+    /// The row that heads the place: the row that carries the others (the engine's best-ranked
+    /// row there), or the first of its rows in export order when none carries.
     pub rep: &'a FindingRow,
     /// Every row at the place, the representative first.
     pub members: Vec<&'a FindingRow>,
@@ -70,9 +70,24 @@ pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
     order
         .into_iter()
         .filter_map(|key| at.remove(&key))
-        .map(|members| PlaceRows {
-            rep: members[0],
-            members,
+        .map(|mut members| {
+            // The row that heads the place is the one the engine ranks first (D2): the row the
+            // others name in `carried_by`, so All problems, the review and the machine files agree
+            // on who carries what. A place with no carrier keeps its first row.
+            let carrier = members.iter().position(|r| {
+                r.facts.carried_by.is_empty()
+                    && members
+                        .iter()
+                        .any(|o| o.facts.carried_by == r.facts.site_id)
+            });
+            if let Some(at) = carrier {
+                let head = members.remove(at);
+                members.insert(0, head);
+            }
+            PlaceRows {
+                rep: members[0],
+                members,
+            }
         })
         .collect()
 }
@@ -399,8 +414,8 @@ fn why_waiting(row: &FindingRow, internal: bool) -> String {
 /// place, as titles.
 fn rules_cell(row: &FindingRow) -> Cell {
     let mut lines = vec![row.rule_title.clone()];
-    if !row.also_matches.is_empty() {
-        lines.push(row.also_matches.clone());
+    if !row.also_legacy.is_empty() {
+        lines.push(row.also_legacy.clone());
     }
     Cell::wrap(lines.join("\n"))
 }
@@ -665,7 +680,7 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
             titles.push(r.rule_title.clone());
         }
     }
-    let also = distinct(members.iter().map(|r| r.also_matches.clone()));
+    let also = distinct(members.iter().map(|r| r.also_legacy.clone()));
     c.put(
         v::H_RULES,
         Cell::wrap(

@@ -64,7 +64,7 @@ fn sheet_xml(xlsx: &[u8], sheet: &str) -> String {
 }
 
 /// Every internal link on a sheet: (cell, target sheet, target row 1-based).
-fn links(xlsx: &[u8], sheet: &str) -> Vec<(String, String, usize)> {
+pub(super) fn links(xlsx: &[u8], sheet: &str) -> Vec<(String, String, usize)> {
     let xml = sheet_xml(xlsx, sheet);
     let mut out = Vec::new();
     for chunk in xml.split("<hyperlink ").skip(1) {
@@ -88,17 +88,17 @@ fn links(xlsx: &[u8], sheet: &str) -> Vec<(String, String, usize)> {
 }
 
 /// A table's grid with its header row first, whatever sits above it.
-fn table(xlsx: &[u8], sheet: &str) -> Vec<Vec<String>> {
+pub(super) fn table(xlsx: &[u8], sheet: &str) -> Vec<Vec<String>> {
     let grid = xlsx_sheet_grid(xlsx, sheet).unwrap();
     let header_at = if sheet == v::ALL_SOURCE_ROWS { 2 } else { 0 };
     grid.into_iter().skip(header_at).collect()
 }
 
-fn column(grid: &[Vec<String>], header: &str) -> Option<usize> {
+pub(super) fn column(grid: &[Vec<String>], header: &str) -> Option<usize> {
     grid.first()?.iter().position(|h| h == header)
 }
 
-fn cell_of<'a>(grid: &'a [Vec<String>], row: usize, header: &str) -> &'a str {
+pub(super) fn cell_of<'a>(grid: &'a [Vec<String>], row: usize, header: &str) -> &'a str {
     let col = column(grid, header).unwrap_or_else(|| panic!("no {header:?} in {:?}", grid[0]));
     grid[row].get(col).map_or("", String::as_str)
 }
@@ -386,7 +386,7 @@ fn the_fix_plan_and_all_problems_link_to_each_other_by_fix_id() {
     assert!(back > 0, "no problem links to its fix");
 }
 
-fn col_letter(mut col: usize) -> String {
+pub(super) fn col_letter(mut col: usize) -> String {
     let mut out = String::new();
     loop {
         out.insert(0, (b'A' + (col % 26) as u8) as char);
