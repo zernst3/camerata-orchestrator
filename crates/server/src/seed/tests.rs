@@ -197,8 +197,8 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
     assert_eq!(
         shell.counts,
         ReviewCounts {
-            total: 31,
-            unresolved: 15,
+            total: 32,
+            unresolved: 16,
             confirmed: 11,
             ignored: 1,
             false_positive: 2,
@@ -293,7 +293,7 @@ async fn seed_review_loads_a_fixture_run_with_its_overlays() {
     assert_eq!(report["stale"].as_array().unwrap().len(), 0);
     assert_eq!(report["merges"].as_array().unwrap().len(), 1);
     assert_eq!(report["held"].as_array().unwrap().len(), 5);
-    assert_eq!(report["findings"].as_array().unwrap().len(), 31);
+    assert_eq!(report["findings"].as_array().unwrap().len(), 32);
 }
 
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn seed_clean_variant_releases_every_held_row() {
     // ship agree, so the export panel shows its button and the package ships.
     let shell: ReviewShellView = get(&app, &seeded, "the shell", "review").await;
     assert_eq!(shell.counts.held, 0, "{:?}", shell.counts);
-    assert_eq!(shell.counts.total, 31, "the same run as the base variant");
+    assert_eq!(shell.counts.total, 32, "the same run as the base variant");
     let gate: ExportGateView = get(&app, &seeded, "the gate", "review/export-gate").await;
     assert!(view_rows(&gate).is_empty(), "{gate:?}");
     let latest = state.inspections().latest(&seeded.project_id).unwrap();
@@ -321,7 +321,7 @@ async fn seed_clean_variant_releases_every_held_row() {
     // The held rows are released by decisions, not dropped: every site is still on a page, and
     // the Engine Check No on sql-11 has its correction (the lane still draws the card).
     let rows = all_rows(&app, &seeded).await;
-    assert_eq!(rows.len(), 31);
+    assert_eq!(rows.len(), 32);
     let lane: EngineCheckLane = get(&app, &seeded, "the lane", "review/engine-check").await;
     let uncorrected = lane
         .cards
@@ -566,8 +566,8 @@ async fn seed_moved_variant_produces_stale_records() {
         !stale[0]["current_key"].as_str().unwrap().is_empty(),
         "the engine found where the edited site went"
     );
-    // 31 rows of the first run and the new one.
-    assert_eq!(report["findings"].as_array().unwrap().len(), 32);
+    // 32 rows of the first run and the new one.
+    assert_eq!(report["findings"].as_array().unwrap().len(), 33);
 
     // A row whose line moved and whose key did not keeps its decision.
     let (path, line) = place_of("sql-01", Variant::Moved);
@@ -999,5 +999,30 @@ async fn uncorrected_engine_check_no_is_refused_through_every_loader() {
         found,
         loaders.len(),
         "the loaders this test names are the ones in the source"
+    );
+}
+
+#[tokio::test]
+async fn the_seeded_run_has_one_place_where_two_rules_meet() {
+    let (_dir, seeded) = seed(Variant::Base).await;
+    let (state, _app) = reopen(&seeded);
+    let latest = state.inspections().latest(&seeded.project_id).unwrap();
+    let tree = latest.report.tree.as_ref().expect("a tree");
+    assert_eq!(tree.places.len(), 1, "{:?}", tree.places);
+    let place = &tree.places[0];
+    assert_eq!(
+        (place.path.as_str(), place.line),
+        ("src/api/profile.rs", 33)
+    );
+    assert_eq!(place.rules, ["SEC-AUTHZ-4", "SEC-NO-HARDCODED-SECRETS-1"]);
+    let carrier = latest
+        .report
+        .findings
+        .iter()
+        .find(|f| f.site_key == place.carrier)
+        .unwrap();
+    assert_eq!(
+        carrier.rule_id, "SEC-AUTHZ-4",
+        "the more severe row carries"
     );
 }

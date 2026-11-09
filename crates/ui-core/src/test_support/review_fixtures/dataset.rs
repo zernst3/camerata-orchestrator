@@ -928,8 +928,6 @@ pub fn build(p: &Params) -> ReviewDataSet {
     let moved_rows = take(p.moved);
     let dup_rows = take(p.duplicates);
     let added_rows = take(p.added);
-    // Two plain rows of one place: the first carries the second (D2).
-    let place_rows = take(2);
     let mut special = vec![false; rows.len()];
     for group in [
         &cand_rows,
@@ -942,7 +940,6 @@ pub fn build(p: &Params) -> ReviewDataSet {
         &moved_rows,
         &dup_rows,
         &added_rows,
-        &place_rows,
     ] {
         for &i in group {
             special[i] = true;
@@ -1392,7 +1389,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
 
     // The place: the carrier lists the rule it carries and the carried row points back at it.
     // Done last, so the carried rule shows the decision and hold it finally has.
-    if let [carrier, carried] = place_rows[..] {
+    if let Some((carrier, carried)) = plain_pair(&rows, &special) {
         link_place(&mut rows, carrier, carried);
     }
 
@@ -1413,6 +1410,32 @@ pub fn build(p: &Params) -> ReviewDataSet {
         (&node_decisions, &gap_for),
         &verdicts,
     )
+}
+
+/// The last two rows, in the fixed order, that nothing else has touched and that are of two
+/// different rules: the carrier and the row it carries. Choosing them last, from what is left
+/// plain and from the far end, changes no count and no row any other state opens first.
+fn plain_pair(rows: &[SiteRow], special: &[bool]) -> Option<(usize, usize)> {
+    let plain = |i: usize| {
+        let r = &rows[i];
+        !special.get(i).copied().unwrap_or(false)
+            && r.thrown_out_reason.is_none()
+            && r.decision.is_none()
+            && r.held.is_none()
+            && r.edits.is_empty()
+            && r.stage2.as_ref().is_some_and(|s| s.reason.is_none())
+            && r.stage2
+                .as_ref()
+                .is_some_and(|s| s.outlier_reason.is_none())
+            && r.flagged_by.is_empty()
+            && r.merged_into.is_none()
+            && r.review_level.is_none()
+    };
+    let first = (0..rows.len()).rev().find(|&i| plain(i))?;
+    let second = (0..rows.len())
+        .rev()
+        .find(|&i| i != first && plain(i) && rows[i].rule_id != rows[first].rule_id)?;
+    Some((first, second))
 }
 
 /// Make `carrier` the row that carries `carried` at their place (D2).

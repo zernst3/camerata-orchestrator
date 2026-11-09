@@ -231,8 +231,8 @@ fn liveview_serves_only_the_review_lanes() {
         );
     }
     stack.assert_shell_counts(&Strip {
-        unresolved: 15,
-        total: 31,
+        unresolved: 16,
+        total: 32,
         confirmed: 11,
         ignored: 1,
         false_positive: 2,
@@ -446,8 +446,8 @@ fn tree_descend_and_batch_confirm_with_two_outliers_ticked() {
 
 /// The counts the base seed opens with.
 const BASE: Strip = Strip {
-    unresolved: 15,
-    total: 31,
+    unresolved: 16,
+    total: 32,
     confirmed: 11,
     ignored: 1,
     false_positive: 2,
@@ -957,7 +957,7 @@ fn a_rerun_with_a_moved_line_shows_the_stale_chip_and_reapply_clears_it() {
     // The rerun moved two rows and left one decision and one edit behind on their old keys.
     assert_eq!(stale_of(&stack), (1, 1, 2, 1));
     let opening = stack.strip();
-    assert_eq!(opening.total, 32, "the first run's 31 rows and the new one");
+    assert_eq!(opening.total, 33, "the first run's 32 rows and the new one");
 
     // The moved rows are in the tree with their chips.
     let (decided, edited) = (moved_place(&model, "sql-03"), moved_place(&model, "sql-04"));
@@ -1771,5 +1771,199 @@ fn a_copy_without_the_clipboard_bridge_selects_the_text_and_asks_the_webview_to_
         .expect("the spy recorded the call");
     assert_eq!(asked["command"], "copy", "{asked}");
     assert_eq!(asked["selected"], text, "the text was selected: {asked}");
+    stack.assert_no_model_calls();
+}
+
+/// The tree path to the sub-group that holds the row at `path:line`: the category, the rule node
+/// and the sub-group, read from the server's own tree and sites (the seed names no node ids).
+fn node_path_of(
+    stack: &Stack,
+    rule: &str,
+    path: &str,
+    line: u64,
+) -> (String, String, String, usize) {
+    let tree = support::get_json(&format!("{}/review/tree", stack.api));
+    let nodes = tree["nodes"].as_array().expect("nodes");
+    let rule_node = format!("rule:{rule}");
+    let category = nodes
+        .iter()
+        .find(|n| n["id"] == rule_node.as_str())
+        .and_then(|n| n["parent"].as_str())
+        .expect("the rule has a category")
+        .to_string();
+    for sub in nodes.iter().filter(|n| n["parent"] == rule_node.as_str()) {
+        let id = sub["id"].as_str().unwrap();
+        let page = support::get_json(&format!("{}/review/sites?node={id}&limit=500", stack.api));
+        let rows = page["rows"].as_array().unwrap();
+        if rows.iter().any(|r| r["path"] == path && r["line"] == line) {
+            return (category, rule_node, id.to_string(), rows.len());
+        }
+    }
+    panic!("no sub-group of {rule} holds {path}:{line}");
+}
+
+#[test]
+fn a_place_with_two_rules_is_decided_once_a_rule_decided_alone_wins_and_the_gate_accepts_it() {
+    let model = Model::load();
+    let stack = Stack::open(Seed::Clean);
+    let mut expected = model.clean_strip();
+    stack.assert_shell_counts(&expected);
+    let carrier = model.site("auth-05");
+    let carried = model.site("sec-07");
+    let (path, line) = (
+        carrier["path"].as_str().unwrap().to_string(),
+        carrier["line"].as_u64().unwrap(),
+    );
+    assert_eq!(
+        (
+            carried["path"].as_str().unwrap(),
+            carried["line"].as_u64().unwrap()
+        ),
+        (path.as_str(), line)
+    );
+    let place = format!("{path}:{line}");
+    let carrier_rule = carrier["rule_id"].as_str().unwrap();
+    let carried_rule = carried["rule_id"].as_str().unwrap();
+
+    // The carrier's sub-group: the carrier row has the "+1" chip.
+    let (cat, rule_node, sub, rows) = node_path_of(&stack, carrier_rule, &path, line);
+    open_subgroup(&stack, &cat, &rule_node, &sub, rows);
+    stack.wait_for(
+        "the also-match chip on the carrier",
+        &format!(
+            "T.has('.site-row .mark-also', '+1 also match') && T.has('.site-row .col-loc', {})",
+            support::js_str(&place)
+        ),
+    );
+    // Open the carrier: the pane lists the rule it carries.
+    stack.click(".site-row .col-loc", &place);
+    stack.wait_for(
+        "the pane of the carrier",
+        "T.has('.site-detail .site-detail-label', 'Also matches at this place')",
+    );
+    assert_eq!(stack.js("T.count('.site-detail-carried-rule')"), 1);
+    assert!(stack
+        .text(".site-detail-carried-rule")
+        .contains(carried_rule));
+
+    // Decide the place: Confirm needs a reason, and the sentence names both rules.
+    stack.click(".site-detail-actions .pane-dispose", "Confirmed");
+    stack.wait_for("the place prompt", "T.count('.batch-sentence') === 1");
+    let sentence = stack.text(".batch-sentence");
+    assert!(
+        sentence.contains("This writes 2 rule records at this place")
+            && sentence.contains(carrier_rule)
+            && sentence.contains(carried_rule),
+        "{sentence}"
+    );
+    let reason = "one request field is trusted and a fixed seed rides along with it";
+    stack.type_into(".queue-reason-prompt .queue-reason-input", "", reason);
+    stack.click(".queue-reason-prompt .queue-prompt-commit", "");
+    expected.shift(None, "confirmed");
+    expected.shift(None, "confirmed");
+    stack.assert_shell_counts(&expected);
+
+    // The decisions file holds the place's node record and one site record for each rule.
+    let decisions = stack.store("decisions");
+    let records = decisions["decisions"].as_array().unwrap();
+    let node = records
+        .iter()
+        .rev()
+        .find(|d| d["scope"].get("node").is_some())
+        .expect("a node record")
+        .clone();
+    assert!(
+        node["scope"]["node"]
+            .as_str()
+            .unwrap()
+            .starts_with("place:"),
+        "{node}"
+    );
+    assert_eq!(node["applies_to"].as_array().unwrap().len(), 2, "{node}");
+    assert_eq!(node["reason"], reason);
+    let inherited: Vec<&Value> = records
+        .iter()
+        .filter(|d| d["inherited_from"] == node["id"])
+        .collect();
+    assert_eq!(inherited.len(), 2, "one record for each rule");
+
+    // The carried row, under its own sub-group, reads the decision as inherited.
+    let (cat2, rule_node2, sub2, rows2) = node_path_of(&stack, carried_rule, &path, line);
+    open_subgroup(&stack, &cat2, &rule_node2, &sub2, rows2);
+    let carried_place = format!("{}:{}", carried["path"].as_str().unwrap(), carried["line"]);
+    stack.wait_for(
+        "the carried row's inherited decision",
+        &format!(
+            "T.has('.site-row.row-carried', {})",
+            support::js_str(&carried_place)
+        ),
+    );
+    let carried_row = stack.js_string(
+        "(document.querySelector('.site-row.row-carried .col-dec')||{textContent:''}).textContent",
+    );
+    assert!(
+        carried_row.contains("Confirmed") && carried_row.contains("inherited"),
+        "{carried_row}"
+    );
+    assert!(stack
+        .text(".site-row.row-carried .carried-pointer")
+        .contains("carried by"));
+
+    // The gate accepts the package with the carried pair, and the machine file names the carrier.
+    let zip_bytes = export_zip(&stack);
+    {
+        use std::io::Read;
+        let mut outer = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
+        let mut data = String::new();
+        outer
+            .by_name("findings.json")
+            .unwrap()
+            .read_to_string(&mut data)
+            .unwrap();
+        let findings: Value = serde_json::from_str(&data).unwrap();
+        let rows = findings["findings"].as_array().unwrap();
+        let at: Vec<&Value> = rows
+            .iter()
+            .filter(|r| r["path"] == path.as_str() && r["line"] == line)
+            .collect();
+        assert_eq!(at.len(), 2, "both rows stay");
+        assert_eq!(
+            at.iter().filter(|r| r["carried_by"] != "").count(),
+            1,
+            "one row is carried"
+        );
+    }
+
+    // Decide the carried rule alone: it wins for that key, the carrier keeps the place's decision.
+    stack.click(".site-row.row-carried .col-loc", "");
+    stack.wait_for(
+        "the pane of the carried row",
+        "T.has('.site-detail .site-detail-carried-by', 'Carried by')",
+    );
+    stack.click(".site-detail-actions .pane-dispose", "False positive");
+    stack.wait_for("the reason prompt", "T.count('.queue-reason-prompt') === 1");
+    let own = "the seed is a test value, not a credential";
+    stack.type_into(".queue-reason-prompt .queue-reason-input", "", own);
+    stack.click(".queue-reason-prompt .queue-prompt-commit", "");
+    expected.shift(Some("confirmed"), "false_positive");
+    stack.assert_shell_counts(&expected);
+    stack.wait_for(
+        "the carried row reads its own decision",
+        "(document.querySelector('.site-row.row-carried .col-dec')||{textContent:''}).textContent.includes('False positive')",
+    );
+    let after = stack.js_string(
+        "(document.querySelector('.site-row.row-carried .col-dec')||{textContent:''}).textContent",
+    );
+    assert!(!after.contains("inherited"), "{after}");
+    let decisions = stack.store("decisions");
+    let last = decisions["decisions"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["state"], "false_positive", "{last}");
+    assert!(last["inherited_from"].is_null(), "{last}");
+    assert_eq!(last["reason"], own);
     stack.assert_no_model_calls();
 }
