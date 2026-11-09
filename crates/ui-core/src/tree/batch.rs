@@ -46,6 +46,37 @@ pub struct BatchPlan {
     pub already_recorded: Vec<String>,
     /// Outliers the reviewer ticked, so they are in `keys`.
     pub ticked_included: usize,
+    /// A place decision only: the rules it writes, with their severity and kind, carrier first.
+    pub written: Vec<PlanRule>,
+    /// A place decision only: the rules it leaves out, and why.
+    pub left_out: Vec<(PlanRule, LeftOutWhy)>,
+    /// A place decision only: carried rules the reviewer unticked.
+    pub excluded_unticked: Vec<String>,
+    /// A node decision only: rows of the node that another row at their place carries. The
+    /// batch still covers them; the sentence says so.
+    pub carried_elsewhere: usize,
+}
+
+/// One rule of a place decision as the prompt names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRule {
+    pub rule_id: String,
+    pub severity: String,
+    /// The row's kind tag (`defect`, `deviation`, ...).
+    pub kind: &'static str,
+}
+
+/// Why a place decision leaves a rule out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeftOutWhy {
+    /// The release gate holds the row; it needs a ruling by name. Carries the hold in words.
+    Held(String),
+    /// The reviewer unticked it.
+    Unticked,
+    /// The reviewer merged the row into another; a place decision never overwrites a merge.
+    Merged,
+    /// It already holds this decision.
+    Already,
 }
 
 impl BatchPlan {
@@ -56,6 +87,7 @@ impl BatchPlan {
             .iter()
             .chain(&self.excluded_held)
             .chain(&self.excluded_merged)
+            .chain(&self.excluded_unticked)
             .chain(&self.already_recorded)
             .cloned()
             .collect();
@@ -67,6 +99,11 @@ impl BatchPlan {
     /// Nothing would be written.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// The plan is a place decision (`place:<id>`): it names the rules it writes and leaves out.
+    pub fn is_place_plan(&self) -> bool {
+        !self.written.is_empty() || !self.left_out.is_empty()
     }
 }
 
@@ -87,6 +124,10 @@ pub fn batch_plan(
         excluded_merged: Vec::new(),
         already_recorded: Vec::new(),
         ticked_included: 0,
+        written: Vec::new(),
+        left_out: Vec::new(),
+        excluded_unticked: Vec::new(),
+        carried_elsewhere: rows.iter().filter(|r| r.carried_by.is_some()).count(),
     };
     for row in rows {
         if row.held.is_some() {
@@ -122,6 +163,9 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 /// The sentence the prompt shows: `This writes 12 site records. 2 outliers are excluded unless
 /// you tick them. 1 held row is excluded. 1 merged row is excluded.` Clauses with nothing to say are left out.
 pub fn plan_sentence(plan: &BatchPlan) -> String {
+    if plan.is_place_plan() {
+        return super::place::place_sentence(plan);
+    }
     let n = plan.keys.len();
     let mut s = format!(
         "This writes {} site {}.",
@@ -168,6 +212,15 @@ pub fn plan_sentence(plan: &BatchPlan) -> String {
             plural(a, "holds", "hold"),
             plural(a, "is", "are"),
             plural(a, "it is", "they are")
+        ));
+    }
+    let c = plan.carried_elsewhere;
+    if c > 0 {
+        s.push_str(&format!(
+            " {} {} carried by another row at {} place.",
+            thousands(c),
+            plural(c, "row here is", "rows here are"),
+            plural(c, "its", "their")
         ));
     }
     s

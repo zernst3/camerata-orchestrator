@@ -47,7 +47,7 @@ use crate::decisions::{apply_to, AppliedDecisions};
 use crate::onboard::{Finding, ScanReport};
 use crate::report_export::overlay::StaleEditNote;
 use crate::report_export::ReviewedReport;
-use crate::review_tree::{KeyLink, LinkHow, ReviewTree};
+use crate::review_tree::{KeyLink, LinkHow, PlaceNode, ReviewTree};
 
 mod lane;
 mod queue;
@@ -106,6 +106,9 @@ pub struct ReviewComposer<'a> {
     candidate_at: HashMap<String, usize>,
     /// Sites any node lists as an outlier.
     outliers: HashSet<&'a str>,
+    /// Site key to its position in the tree's stored places (a place with two or more problem
+    /// rows): the row that carries and the rows it carries.
+    place_at: HashMap<&'a str, usize>,
     /// Edits by site key.
     edits_by_key: HashMap<&'a str, Vec<&'a Edit>>,
     /// Edits the overlay did not apply, by edit id.
@@ -137,6 +140,13 @@ impl<'a> ReviewComposer<'a> {
                     children.entry(p).or_default().push(i);
                 }
                 outliers.extend(n.outliers.iter().map(|o| o.key.as_str()));
+            }
+        }
+
+        let mut place_at: HashMap<&str, usize> = HashMap::new();
+        if let Some(t) = tree {
+            for (i, p) in t.places.iter().enumerate() {
+                place_at.extend(p.members.iter().map(|m| (m.as_str(), i)));
             }
         }
 
@@ -227,6 +237,7 @@ impl<'a> ReviewComposer<'a> {
             budget,
             candidate_at,
             outliers,
+            place_at,
             edits_by_key,
             stale_edits,
             gate,
@@ -238,6 +249,12 @@ impl<'a> ReviewComposer<'a> {
     /// The row with site key `key`, kept or thrown out.
     fn row(&self, key: &str) -> Option<&'a Finding> {
         self.rows.get(key).copied()
+    }
+
+    /// The place a site is a member of, when it shares its place with another problem row.
+    fn place_of(&self, key: &str) -> Option<&'a PlaceNode> {
+        let tree = self.tree?;
+        self.place_at.get(key).map(|i| &tree.places[*i])
     }
 
     /// The escalation line as it stands under the project's current settings.
@@ -317,7 +334,7 @@ impl<'a> ReviewComposer<'a> {
             budget: self.budget,
             lanes: LaneCounts {
                 tree_undecided: counts.unresolved,
-                escalations: self.candidates.iter().filter(|c| c.escalated).count(),
+                escalations: self.queue_groups().iter().filter(|g| g.escalated).count(),
                 engine_check: sample.drawn(),
                 engine_check_off: self.inputs.settings.sample_size_per_run == 0,
                 flat_rows: counts.total,

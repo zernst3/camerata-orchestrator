@@ -423,9 +423,12 @@ pub fn build_tree(
         candidates,
         group_reviewed,
         fixes: Vec::new(),
+        places: Vec::new(),
     };
     // The Fixes are worked out here, from the rows and the tree alone, so they are stored with it.
     tree.fixes = super::merge_fixes(&tree, findings);
+    // The places come after the Fixes: each lists the Fixes of its rows.
+    tree.places = super::merge_places(&tree, findings);
     tree
 }
 

@@ -5,8 +5,9 @@ use camerata_api_types::decisions::Decision;
 use camerata_api_types::edits::{Edit, EditField};
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
-    BreadcrumbItem, DecisionView, DuplicateView, EditView, EscalationStatus, FlaggedByView, Marker,
-    MergedIntoView, NewSinceDecisionView, SiteRow, Stage1View, Stage2View,
+    BreadcrumbItem, CarriedByView, CarriedRuleView, DecisionView, DuplicateView, EditView,
+    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SiteRow,
+    Stage1View, Stage2View,
 };
 
 use super::ReviewComposer;
@@ -14,6 +15,7 @@ use crate::onboard::Finding;
 use crate::report_export::overlay::{
     current_value, merged_target, PROVENANCE_CAPTURE, REVIEWER_EDITED_CAPTURE, REVIEWER_PROVENANCE,
 };
+use crate::review_tree::PlaceNode;
 
 fn decision_view(d: &Decision) -> DecisionView {
     DecisionView {
@@ -178,6 +180,9 @@ impl<'a> ReviewComposer<'a> {
         if f.possible_duplicate_of.is_some() {
             out.push(Marker::PossibleDuplicate);
         }
+        if self.carried_by_view(key).is_some() {
+            out.push(Marker::Carried);
+        }
         if f.captures.contains_key(REVIEWER_EDITED_CAPTURE) {
             out.push(Marker::Edited);
         }
@@ -208,6 +213,46 @@ impl<'a> ReviewComposer<'a> {
             rule_id: target.map(|t| t.rule_id.clone()).unwrap_or_default(),
             path: target.map(|t| t.path.clone()).unwrap_or_default(),
             line: target.map_or(0, |t| t.line),
+        })
+    }
+
+    /// The rules the row at `key` carries, when it heads a place.
+    fn carried_rule_views(&self, key: &str) -> Vec<CarriedRuleView> {
+        let Some(place) = self.place_of(key).filter(|p| p.carrier == key) else {
+            return Vec::new();
+        };
+        place
+            .carried()
+            .filter_map(|k| self.row(k))
+            .map(|f| {
+                let candidate = self.candidate(&f.site_key);
+                CarriedRuleView {
+                    rule_id: f.rule_id.clone(),
+                    site_key: f.site_key.clone(),
+                    node_id: f.group_path.get(2).cloned().unwrap_or_default(),
+                    severity: f.severity.clone(),
+                    kind: f.kind.clone(),
+                    held: self.hold_of(&f.site_key),
+                    stage1_real: self.stage1_view(f).real,
+                    escalation_reason: candidate.map(|c| c.reason),
+                    escalation_rank: candidate.map(|c| c.global_rank),
+                    decision: self.decision_of(&f.site_key),
+                }
+            })
+            .collect()
+    }
+
+    /// The row that carries the row at `key`, when another row at its place does.
+    fn carried_by_view(&self, key: &str) -> Option<CarriedByView> {
+        let place = self.place_of(key).filter(|p| p.carrier != key)?;
+        let carrier = self.row(&place.carrier)?;
+        Some(CarriedByView {
+            site_key: carrier.site_key.clone(),
+            node_id: carrier.group_path.get(2).cloned().unwrap_or_default(),
+            rule_id: carrier.rule_id.clone(),
+            path: carrier.path.clone(),
+            line: carrier.line,
+            decided: self.decision_of(&carrier.site_key).is_some(),
         })
     }
 
@@ -244,6 +289,12 @@ impl<'a> ReviewComposer<'a> {
             group_primary: f.group_role.is_primary(),
             fix_id: fix.map(|x| x.id.clone()).unwrap_or_default(),
             fix_rules: fix.map(|x| x.rules.clone()).unwrap_or_default(),
+            place_id: self
+                .place_of(key)
+                .map(PlaceNode::node_id)
+                .unwrap_or_default(),
+            carries: self.carried_rule_views(key),
+            carried_by: self.carried_by_view(key),
             stage1: self.stage1_view(f),
             stage2: self.stage2_view(f),
             markers: self.markers_of(f, has_stale_edit),

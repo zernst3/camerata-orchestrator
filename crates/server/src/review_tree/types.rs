@@ -184,6 +184,12 @@ pub struct ReviewTree {
     /// stored before Fixes existed has none; an export works them out from the rows then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixes: Vec<super::FixNode>,
+    /// The places with two or more problem rows ([`super::merge_places`]): the row that heads
+    /// each and the rules it carries. Worked out from the rows and the tree alone, never from a
+    /// decision, and stored with the tree. A tree stored before places existed has none; an
+    /// export works them out from the rows then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<super::PlaceNode>,
 }
 
 impl ReviewTree {
@@ -294,6 +300,16 @@ impl ReviewTree {
                 .flat_map(|fx| fx.members.iter())
                 .flat_map(|sub| self.batch_members(sub))
                 .collect();
+            keys.sort();
+            keys.dedup();
+            return keys;
+        }
+        // A place covers the rows at it.
+        if node_id.starts_with(super::PLACE_PREFIX) {
+            let mut keys: Vec<String> = self
+                .place(node_id)
+                .map(|p| p.members.clone())
+                .unwrap_or_default();
             keys.sort();
             keys.dedup();
             return keys;

@@ -15,16 +15,17 @@ use camerata_api_types::review::{
     REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
-    BreadcrumbItem, CategoryAllocation, CorrectionRef, DecisionView, DuplicateView, EditView,
-    EngineCheckCard, EngineCheckError, EngineCheckLane, EngineCheckSettingsView,
-    EngineCheckVerdict, EscalationSettingsView, EscalationStatus, ExportGateView, FlaggedByView,
-    HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView, MovedFromView, NeededMeSummary,
-    NewSinceDecisionView, NodeCountsView, NodeDecisionGap, NodeDecisionSummary, OutlierView,
-    PlacementView, QueueRow, QueueView, ReviewCounts, ReviewSettingsView, ReviewShellView,
-    SampleStratum, SettingsLimits, SiteRow, SitesPage, Stage1View, Stage2View, StageModelsView,
-    StaleSummary, StratumRate, SummarySource, TreeLevel, TreeNodeKind, TreeNodeView, TreeView,
-    ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX, QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR,
-    SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED, SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
+    BreadcrumbItem, CarriedByView, CarriedRuleView, CategoryAllocation, CorrectionRef,
+    DecisionView, DuplicateView, EditView, EngineCheckCard, EngineCheckError, EngineCheckLane,
+    EngineCheckSettingsView, EngineCheckVerdict, EscalationSettingsView, EscalationStatus,
+    ExportGateView, FlaggedByView, HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView,
+    MovedFromView, NeededMeSummary, NewSinceDecisionView, NodeCountsView, NodeDecisionGap,
+    NodeDecisionSummary, OutlierView, PlacementView, QueueRow, QueueView, ReviewCounts,
+    ReviewSettingsView, ReviewShellView, SampleStratum, SettingsLimits, SiteRow, SitesPage,
+    Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource, TreeLevel,
+    TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
+    QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR, SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED,
+    SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
 use serde::Serialize;
 
@@ -631,6 +632,9 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         group_primary: false,
         fix_id: String::new(),
         fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1,
         stage2,
         markers: Vec::new(),
@@ -676,6 +680,9 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         group_primary: false,
         fix_id: String::new(),
         fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1: Stage1View {
             severity: "low".to_string(),
             ..Stage1View::default()
@@ -720,6 +727,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
             Marker::Stale => stale,
             Marker::Moved => row.moved_from.is_some(),
             Marker::PossibleDuplicate => row.possible_duplicate_of.is_some(),
+            Marker::Carried => row.carried_by.is_some(),
             Marker::Edited => edited,
         })
         .collect()
@@ -1379,6 +1387,12 @@ pub fn build(p: &Params) -> ReviewDataSet {
     // Engine Check verdicts and the corrections behind them.
     let verdicts = apply_engine_mode(p, &mut rows);
 
+    // The place: the carrier lists the rule it carries and the carried row points back at it.
+    // Done last, so the carried rule shows the decision and hold it finally has.
+    if let Some((carrier, carried)) = plain_pair(&rows, &special) {
+        link_place(&mut rows, carrier, carried);
+    }
+
     // Everything else is engine verified, unless held.
     for r in &mut rows {
         if r.review_level.is_none() && r.held.is_none() && r.thrown_out_reason.is_none() {
@@ -1396,6 +1410,69 @@ pub fn build(p: &Params) -> ReviewDataSet {
         (&node_decisions, &gap_for),
         &verdicts,
     )
+}
+
+/// The last two rows, in the fixed order, that nothing else has touched and that are of two
+/// different rules: the carrier and the row it carries. Choosing them last, from what is left
+/// plain and from the far end, changes no count and no row any other state opens first.
+fn plain_pair(rows: &[SiteRow], special: &[bool]) -> Option<(usize, usize)> {
+    let plain = |i: usize| {
+        let r = &rows[i];
+        !special.get(i).copied().unwrap_or(false)
+            && r.thrown_out_reason.is_none()
+            && r.decision.is_none()
+            && r.held.is_none()
+            && r.edits.is_empty()
+            && r.stage2.as_ref().is_some_and(|s| s.reason.is_none())
+            && r.stage2
+                .as_ref()
+                .is_some_and(|s| s.outlier_reason.is_none())
+            && r.flagged_by.is_empty()
+            && r.merged_into.is_none()
+            && r.review_level.is_none()
+    };
+    let first = (0..rows.len()).rev().find(|&i| plain(i))?;
+    let second = (0..rows.len())
+        .rev()
+        .find(|&i| i != first && plain(i) && rows[i].rule_id != rows[first].rule_id)?;
+    Some((first, second))
+}
+
+/// Make `carrier` the row that carries `carried` at their place (D2).
+fn link_place(rows: &mut [SiteRow], carrier: usize, carried: usize) {
+    let place_id = format!(
+        "place:{}",
+        hex_encode(&rows[carrier].site_key)
+            .chars()
+            .rev()
+            .take(12)
+            .collect::<String>()
+    );
+    let other = rows[carried].clone();
+    let head = rows[carrier].clone();
+    let candidate = other.stage2.as_ref().filter(|s| s.reason.is_some());
+    rows[carrier].place_id.clone_from(&place_id);
+    rows[carrier].carries = vec![CarriedRuleView {
+        rule_id: other.rule_id.clone(),
+        site_key: other.site_key.clone(),
+        node_id: other.group_path[2].clone(),
+        severity: other.severity.clone(),
+        kind: other.kind.clone(),
+        held: other.held,
+        stage1_real: other.stage1.real.clone(),
+        escalation_reason: candidate.and_then(|s| s.reason),
+        escalation_rank: candidate.and_then(|s| s.global_rank),
+        decision: other.decision.clone(),
+    }];
+    rows[carried].place_id = place_id;
+    rows[carried].carried_by = Some(CarriedByView {
+        site_key: head.site_key.clone(),
+        node_id: head.group_path[2].clone(),
+        rule_id: head.rule_id.clone(),
+        path: head.path.clone(),
+        line: head.line,
+        decided: false,
+    });
 }
 
 /// The old and new text of a field for a made-up edit.

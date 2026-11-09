@@ -18,6 +18,7 @@
 pub mod batch;
 pub mod export;
 pub mod keys;
+pub mod place;
 pub mod shell;
 pub mod state;
 
@@ -241,7 +242,7 @@ pub fn decision_label(state: &DecisionState) -> &'static str {
     }
 }
 
-fn base_name(path: &str) -> &str {
+pub(crate) fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -351,6 +352,17 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                         |d| format!("dup? {} at {}:{}", d.rule_id, base_name(&d.path), d.line),
                     ),
                     tip: dup.map_or_else(String::new, |d| d.hint.clone()),
+                }
+            }
+            Marker::Carried => {
+                let by = row.carried_by.as_ref();
+                Chip {
+                    class: "mark-carried",
+                    label: by.map_or_else(
+                        || "carried".to_string(),
+                        |b| format!("carried by {} at {}:{}", b.rule_id, base_name(&b.path), b.line),
+                    ),
+                    tip: "Another row at this place carries this rule. It is decided there unless you decide this rule alone.".to_string(),
                 }
             }
             Marker::Edited => Chip {
@@ -499,6 +511,8 @@ pub struct DecisionCell {
     pub tone: DecisionTone,
     /// The decision came from a node and not from the reviewer looking at this site.
     pub inherited: bool,
+    /// A carried row with no decision yet: where it will be decided.
+    pub note: Option<String>,
 }
 
 /// The Decision column: the state label (green when decided, `Unresolved` gray), `inherited`
@@ -514,12 +528,14 @@ pub fn decision_cell(row: &SiteRow) -> DecisionCell {
                 label,
                 tone: DecisionTone::Decided,
                 inherited: d.inherited_from.is_some(),
+                note: None,
             }
         }
         None => DecisionCell {
             label: "Unresolved".to_string(),
             tone: DecisionTone::Unresolved,
             inherited: false,
+            note: place::carried_decision_note(row),
         },
     }
 }

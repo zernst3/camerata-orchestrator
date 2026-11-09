@@ -6990,7 +6990,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    Chips sit beside `.kind-chip` and take its sizing. Each class is one row of the spec's chip
    table; the markers column draws at most two and folds the rest into a "+N". */
 .mark-esc, .mark-cand, .mark-over, .mark-outlier, .mark-new, .mark-stale, .mark-moved,
-.mark-held, .mark-dup, .mark-qc, .mark-edited {
+.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   border-radius: 999px; padding: 1px 8px; white-space: nowrap; border: 1px solid transparent;
 }
@@ -7010,6 +7010,10 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .mark-held { background: transparent; border-color: var(--danger-color); color: var(--danger-color); }
 /* Possible duplicate: a gray outline. */
 .mark-dup { background: transparent; border-color: var(--ink-faint); color: var(--ink-soft); }
+/* Also matches (a row that carries other rules at its place) and carried (a row another row at
+   its place carries): gray outlines, so neither reads as a warning. */
+.mark-also { background: transparent; border-color: var(--accent); color: var(--ink-soft); }
+.mark-carried { background: transparent; border-color: var(--ink-faint); color: var(--ink-faint); }
 /* Engine Check: the default badge (the Engine Check lane only). */
 .mark-qc { background: var(--line); color: var(--ink-soft); }
 /* Reviewer edited: a green outline. */
@@ -7022,6 +7026,15 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .site-row.row-escalated { box-shadow: inset 3px 0 0 var(--accent); }
 .site-row.finding-row-critical.row-escalated { box-shadow: inset 3px 0 0 var(--danger-color), inset 6px 0 0 var(--accent); }
 .site-row.row-held td { border-bottom: 1px dotted var(--danger-color); }
+/* A carried row is a pointer to the row that decides it: dimmed, still readable and clickable. */
+.site-row.row-carried td { opacity: .65; }
+.site-row.row-carried td.col-markers, .site-row.row-carried td.col-dec { opacity: 1; }
+.carried-pointer { color: var(--ink-soft); text-decoration: underline dotted; cursor: pointer; }
+.dec-carried-note { display: block; font-size: 10px; color: var(--ink-faint); }
+.site-detail-carries { margin: 6px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.site-detail-carried-rule { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 3px 0; font-size: 12px; }
+.site-detail-carried-rule .carried-rule-id { font-family: var(--font-mono, monospace); }
+.site-detail-carried-rule .carried-stage1, .site-detail-carried-rule .carried-escalation { color: var(--ink-soft); }
 
 .review-shell { width: 100%; max-width: 1440px; padding: 0 16px; box-sizing: border-box; }
 .review-shell .triage-tab[disabled] { opacity: .55; cursor: default; }

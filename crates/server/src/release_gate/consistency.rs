@@ -503,20 +503,52 @@ fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
     else {
         return tally;
     };
-    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+    // Each place: the row that carries the others heads it (the first row there when none does),
+    // at the worst severity of any row at the place, as the All problems sheet prints it.
+    let mut places: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
     for row in &rows {
-        let kind = cell_text(row, "kind");
-        if !kinds.contains(&kind.as_str()) {
+        if !kinds.contains(&cell_text(row, "kind").as_str()) {
             continue;
         }
-        let place = (
-            cell_text(row, "repo"),
-            cell_text(row, "path"),
-            cell_text(row, "line"),
-        );
-        if seen.insert(place) {
-            *tally.entry((cell_text(row, "severity"), kind)).or_insert(0) += 1;
-        }
+        places
+            .entry((
+                cell_text(row, "repo"),
+                cell_text(row, "path"),
+                cell_text(row, "line"),
+            ))
+            .or_default()
+            .push(row);
+    }
+    let severity_slot = |s: &str| match s {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    };
+    for members in places.values() {
+        let ids: BTreeSet<String> = members
+            .iter()
+            .map(|m| cell_text(m, "carried_by"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let head = members
+            .iter()
+            .find(|m| ids.contains(&cell_text(m, "site_id")))
+            .unwrap_or(&members[0]);
+        // The head first, then the rest in file order: on a tie (`low` and `info` share a rank)
+        // the head's own word stands, as on the sheet.
+        let worst = std::iter::once(head)
+            .chain(members.iter().filter(|m| !std::ptr::eq(*m, head)))
+            .map(|m| cell_text(m, "severity"))
+            .min_by_key(|s| severity_slot(s))
+            .unwrap_or_default();
+        // The place is as actionable as its worst kind: a defect over a departure.
+        let kind = if members.iter().any(|m| cell_text(m, "kind") == "defect") {
+            "defect".to_string()
+        } else {
+            cell_text(head, "kind")
+        };
+        *tally.entry((worst, kind)).or_insert(0) += 1;
     }
     tally
 }
@@ -1638,6 +1670,173 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
                 plan.len()
             ),
         ));
+    }
+    problems
+}
+
+/// The place parity of a package (D2): a row another row at its place carries names that row in
+/// `carried_by`, and the carrier lists the carried rule in `also_matches`.
+///
+/// * every `carried_by` is the `site_id` of a row of `findings.json` at the same repo, file and
+///   line, and that row is not itself carried;
+/// * the carrier lists the carried row's rule (a rule the carrier shares is not listed twice);
+/// * All problems has one row for each place, and the Place id of that row is the carrier's.
+///
+/// A package written before the field existed has no `carried_by` on any row and passes.
+pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
+    let mut problems = Vec::new();
+    let Some(findings) = entries
+        .get("findings.json")
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+    else {
+        return problems;
+    };
+    let rows = findings
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if !rows.iter().any(|r| r.get("carried_by").is_some()) {
+        return problems;
+    }
+    let by_id: std::collections::BTreeMap<String, &Value> = rows
+        .iter()
+        .map(|r| (cell_text(r, "site_id"), r))
+        .filter(|(id, _)| !id.is_empty())
+        .collect();
+    let place_of = |r: &Value| {
+        (
+            cell_text(r, "repo"),
+            cell_text(r, "path"),
+            cell_text(r, "line"),
+        )
+    };
+    // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
+    let ruled_out: BTreeSet<String> = entries
+        .get("json/false-positives.json")
+        .and_then(|b| rows_of(b).ok())
+        .unwrap_or_default()
+        .iter()
+        .chain(rows.iter().filter(|r| cell_text(r, "is_fp") == "true"))
+        .map(|r| cell_text(r, "site_id"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    for (i, row) in rows.iter().enumerate() {
+        let carrier_id = cell_text(row, "carried_by");
+        if carrier_id.is_empty() {
+            continue;
+        }
+        let at = format!("findings[{i}]");
+        if ruled_out.contains(&carrier_id) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, a ruled-out row: a false positive carries nothing"),
+            ));
+            continue;
+        }
+        if ruled_out.contains(&cell_text(row, "site_id")) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                "a false positive is carried by another row",
+            ));
+        }
+        let Some(carrier) = by_id.get(&carrier_id) else {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, which is not a row of findings.json"),
+            ));
+            continue;
+        };
+        if place_of(carrier) != place_of(row) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, a row at another place"),
+            ));
+        }
+        if !cell_text(carrier, "carried_by").is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!(
+                    "the row is carried by {carrier_id}, which is itself carried by another row"
+                ),
+            ));
+        }
+        let rule = cell_text(row, "rule_id");
+        let listed = cell_text(carrier, "also_matches");
+        let names_it = rule == cell_text(carrier, "rule_id")
+            || listed
+                .split(", ")
+                .any(|listed_rule| listed_rule.trim() == rule);
+        if !names_it {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!(
+                    "the row's carrier {carrier_id} does not list the rule {rule} in also_matches"
+                ),
+            ));
+        }
+    }
+
+    // All problems: one row for each place, headed by the carrier.
+    let Some(stem) = package_stem(entries) else {
+        return problems;
+    };
+    let Some(xlsx) = entries.get(&format!("{stem}-findings.xlsx")) else {
+        return problems;
+    };
+    let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS) else {
+        return problems;
+    };
+    let Some(col) = grid
+        .first()
+        .and_then(|h| h.iter().position(|c| c == v::H_PLACE_ID))
+    else {
+        return problems;
+    };
+    let shown: Vec<&str> = grid
+        .iter()
+        .skip(1)
+        .filter_map(|r| r.get(col))
+        .map(String::as_str)
+        .filter(|id| !id.is_empty())
+        .collect();
+    // The rows All problems lists: problem kinds that are not ruled out.
+    let listed: Vec<&Value> = rows
+        .iter()
+        .filter(|r| {
+            crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&cell_text(r, "kind").as_str())
+        })
+        .filter(|r| cell_text(r, "is_fp") != "true")
+        .collect();
+    let places: BTreeSet<(String, String, String)> = listed.iter().map(|r| place_of(r)).collect();
+    if shown.len() != places.len() {
+        problems.push(problem(
+            "(workbook)",
+            &format!("sheet \"{}\"", v::ALL_PROBLEMS),
+            format!(
+                "the sheet has {} rows and findings.json has {} places with a problem",
+                shown.len(),
+                places.len()
+            ),
+        ));
+    }
+    for r in &listed {
+        let carried_by = cell_text(r, "carried_by");
+        let id = cell_text(r, "site_id");
+        if !carried_by.is_empty() && shown.contains(&id.as_str()) {
+            problems.push(problem(
+                "(workbook)",
+                &format!("sheet \"{}\"", v::ALL_PROBLEMS),
+                format!("the sheet heads a place with {id}, a row {carried_by} carries"),
+            ));
+        }
     }
     problems
 }

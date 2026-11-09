@@ -1511,6 +1511,8 @@ impl ScanReport {
         ));
         if let Some(tree) = self.tree.as_ref() {
             self.ledger.record_fix_merge(tree.fix_merge_block());
+            self.ledger
+                .record_place_merge(tree.place_merge_block(&self.findings));
         }
     }
 

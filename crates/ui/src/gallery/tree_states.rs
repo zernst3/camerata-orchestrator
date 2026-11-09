@@ -102,7 +102,25 @@ fn place_cursor(id: &str, body: &TreeBody, state: &mut TreeState, index: &TreeIn
 
 /// The batch prompt the `tree/node-prompt` state has open: the plan over every site of the node
 /// (the fixture's own data), Confirm all, with the reason still blank.
-fn prompt_of(body: &TreeBody) -> Option<TreePrompt> {
+fn prompt_of(id: &str, body: &TreeBody) -> Option<TreePrompt> {
+    // The place decision the carrier's pane has open: Confirm over the place, the reason blank.
+    if id == "tree/place" {
+        let key = body.selected_site.as_ref()?;
+        let ds = dataset_base();
+        let row = ds.row(key)?;
+        let plan = camerata_ui_core::tree::place::place_plan(
+            row,
+            &DecisionState::Confirmed,
+            &BTreeSet::new(),
+        );
+        return Some(TreePrompt::Batch {
+            node: plan.node.clone(),
+            state: TriageState::Confirmed,
+            plan,
+            reason: String::new(),
+            error: None,
+        });
+    }
     let node = body.prompt_node.clone()?;
     let ds = dataset_base();
     let rows: Vec<_> = ds
@@ -153,7 +171,7 @@ pub(super) fn TreePage(props: PageProps) -> Element {
     let (status, index, group_reviewed) = tree_parts(&body.tree);
     let mut state = tree_state_of(&body);
     place_cursor(&props.id, &body, &mut state, &index);
-    let prompt = prompt_of(&body);
+    let prompt = prompt_of(&props.id, &body);
     let undo = undo_of(&props.id, &state);
     let focus = if prompt.is_some() {
         PaneFocus::ReasonPrompt
@@ -200,6 +218,7 @@ states! {
     node_decided => "tree/node-decided",
     not_group_reviewed => "tree/not-group-reviewed",
     narrow => "tree/narrow",
+    place => "tree/place",
 }
 
 #[cfg(test)]

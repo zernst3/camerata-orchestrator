@@ -376,6 +376,10 @@ pub const ROLE_COLLAPSED: &str = "Collapsed source";
 pub const ROLE_ALSO_FOUND: &str = "Also found";
 pub const ROLE_ALSO_AFFECTED: &str = "Also affected";
 pub const ROLE_ALSO_FLAGGED: &str = "Also flagged here";
+/// The term for a rule another row at the same place carries (D2): the review's "+N also match"
+/// chip and "Also matches at this place" heading, and the human label of the findings field
+/// `also_matches`. "Also flagged here" stays the same-rule collapse concept.
+pub const TERM_ALSO_MATCHES: &str = "Also matches";
 
 /// The Not checked sheet's Kind of gap values.
 pub const GAP_RULE_COULD_NOT_COMPLETE: &str = "Rule could not be completed";
@@ -551,6 +555,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Rule",
         "One thing we looked for.",
         "Rules checked; the Rule and Rules columns",
+    ),
+    e(
+        TERM_ALSO_MATCHES,
+        "A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision.",
+        "All problems; the Rules column; the also_matches field of findings.json",
     ),
     e(
         "Rule id",
@@ -1305,6 +1314,11 @@ pub const CONCEPTS: &[Concept] = &[
         &["category", "categories"],
     ),
     k("one thing we looked for", "Rule", &[]),
+    k(
+        "a rule another row at the same place carries",
+        TERM_ALSO_MATCHES,
+        &[],
+    ),
     k("when to do a fix", "Fix order", &["sequence", "bucket"]),
     k("fix order, first", "First", &["fix first", "do now"]),
     k("fix order, second", "Next", &["do next"]),

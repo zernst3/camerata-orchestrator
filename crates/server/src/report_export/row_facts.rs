@@ -56,6 +56,10 @@ pub struct RowFacts {
     pub escalated: bool,
     /// The [`site_id`] of the row this one was merged into, when the reviewer merged it.
     pub merged_into: String,
+    /// The [`site_id`] of the row that carries this one: another row at the same place
+    /// (repo, file and line) that heads it. Empty for a row that is alone at its place and for
+    /// the carrier itself. The carrier lists this row's rule in its `also_matches`.
+    pub carried_by: String,
 }
 
 /// The group reviewer's triage of one row, as text. The internal workbook only.
@@ -111,6 +115,10 @@ pub struct RowFactsIndex<'a> {
     texts: HashMap<&'a str, (String, String)>,
     ids: HashMap<&'a str, String>,
     fixes: crate::review_tree::FixIndex,
+    /// Site key of a carried row to the [`site_id`] of the row that carries it.
+    carried_by: HashMap<String, String>,
+    /// Site key of a carrier to the rule ids of the rows it carries, in the place's order.
+    carries: HashMap<String, Vec<String>>,
 }
 
 impl<'a> RowFactsIndex<'a> {
@@ -139,12 +147,53 @@ impl<'a> RowFactsIndex<'a> {
             .iter()
             .map(|f| (f.site_key.as_str(), site_id(&f.site_key)))
             .collect();
+        // The places: the rows at one (repo, file, line), the best-ranked row carrying the rest.
+        // A false positive is not a problem, so it neither carries nor is carried.
+        let dispositions = reviewed.dispositions();
+        let is_fp = |f: &Finding| {
+            dispositions
+                .get(&super::finding_key(f))
+                .is_some_and(|d| d.state == "FalsePositive")
+        };
+        let no_tree = crate::review_tree::ReviewTree::default();
+        let places = crate::review_tree::merge_places_where(
+            report.tree.as_ref().unwrap_or(&no_tree),
+            &report.findings,
+            &is_fp,
+        );
+        let rule_of: HashMap<&str, &str> = report
+            .findings
+            .iter()
+            .map(|f| (f.site_key.as_str(), f.rule_id.as_str()))
+            .collect();
+        let mut carried_by = HashMap::new();
+        let mut carries = HashMap::new();
+        for place in &places {
+            let carrier_id = site_id(&place.carrier);
+            let own_rule = rule_of.get(place.carrier.as_str()).copied().unwrap_or("");
+            let mut rules: Vec<String> = Vec::new();
+            for key in place.carried() {
+                carried_by.insert(key.to_string(), carrier_id.clone());
+                let rule = rule_of.get(key).copied().unwrap_or("");
+                if !rule.is_empty() && rule != own_rule && !rules.iter().any(|r| r == rule) {
+                    rules.push(rule.to_string());
+                }
+            }
+            carries.insert(place.carrier.clone(), rules);
+        }
         Self {
             reviewed,
             texts,
             ids,
             fixes: crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings),
+            carried_by,
+            carries,
         }
+    }
+
+    /// The rule ids of the rows `f` carries at its place, when it heads one.
+    pub fn carried_rules(&self, f: &Finding) -> &[String] {
+        self.carries.get(&f.site_key).map_or(&[], Vec::as_slice)
     }
 
     /// The facts of `f`.
@@ -178,6 +227,11 @@ impl<'a> RowFactsIndex<'a> {
             group,
             escalated: f.review.escalation_state == EscalationState::Escalated,
             merged_into,
+            carried_by: self
+                .carried_by
+                .get(&f.site_key)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }

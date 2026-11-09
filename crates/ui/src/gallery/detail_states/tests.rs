@@ -26,7 +26,7 @@ fn plain_text(html: &str) -> String {
 
 #[test]
 fn every_detail_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 24, "every detail state is built");
+    assert_eq!(states().len(), 26, "every detail state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");

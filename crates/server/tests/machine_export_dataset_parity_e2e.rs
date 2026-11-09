@@ -650,8 +650,9 @@ const FINDING_DERIVED_KEYS: [&str; 5] = [
 /// - `is_fp` / `fp_reason`: the Ruled out sheet's identity and reason;
 /// - the kind payload (`deviating_sites` ... `reason_detail`): rendered on Departures, Your
 ///   conventions and Not checked, which this test checks against their own datasets.
-const FINDING_JSON_ONLY: [&str; 17] = [
+const FINDING_JSON_ONLY: [&str; 18] = [
     "group",
+    "carried_by",
     "in_test",
     "sub_group",
     "sub_group_cause",
@@ -672,7 +673,7 @@ const FINDING_JSON_ONLY: [&str; 17] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 41] = [
+const FINDING_BASE_KEYS: [&str; 42] = [
     "severity",
     "headline",
     "repo",
@@ -712,6 +713,7 @@ const FINDING_BASE_KEYS: [&str; 41] = [
     "sub_group_cause",
     "escalated",
     "merged_into",
+    "carried_by",
     "is_fp",
     "fp_reason",
 ];
@@ -1096,6 +1098,7 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "sub_group_cause",
             "escalated",
             "merged_into",
+            "carried_by",
         ],
     );
     let projection: Projection = vec![

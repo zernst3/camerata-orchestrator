@@ -595,3 +595,98 @@ fn the_site_pane_shows_its_decision_buttons_and_a_site_prompt() {
     assert!(html.contains("Reason for \u{201c}Ignored\u{201d} on 1 site (required)"));
     assert!(!html.contains('\0'));
 }
+
+#[test]
+fn a_carrier_row_shows_the_also_match_chip_a_carried_row_points_at_its_carrier_and_the_place_prompt_names_every_rule(
+) {
+    use camerata_api_types::review_view::{CarriedByView, CarriedRuleView};
+    let ds = dataset_base();
+    let index = TreeIndex::new(&ds.tree);
+    let sub = ds
+        .tree
+        .nodes
+        .iter()
+        .find(|n| {
+            n.level == camerata_api_types::review_view::TreeLevel::Subgroup
+                && !n.thrown_out
+                && n.counts.sites > 3
+        })
+        .unwrap()
+        .id
+        .clone();
+    let mut state = TreeState::default();
+    for r in state.open_path(&index, &sub) {
+        let page = ds
+            .sites_page(&r.node, r.cursor.as_deref(), r.limit)
+            .unwrap();
+        state.apply_page(&page);
+    }
+    {
+        let rows = &mut state.loaded.get_mut(&sub).unwrap().rows;
+        rows[0].place_id = "place:0123456789ab".to_string();
+        rows[0].carries = vec![CarriedRuleView {
+            rule_id: "SEC-OTHER-1".to_string(),
+            site_key: "carried-key".to_string(),
+            node_id: "sub:SEC-OTHER-1/0".to_string(),
+            severity: "low".to_string(),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            held: Some(HoldReason::EvidenceUnverified),
+            stage1_real: "yes".to_string(),
+            escalation_reason: None,
+            escalation_rank: None,
+            decision: None,
+        }];
+        rows[1].markers = vec![Marker::Carried];
+        rows[1].carried_by = Some(CarriedByView {
+            site_key: rows[0].site_key.clone(),
+            node_id: sub.clone(),
+            rule_id: rows[0].rule_id.clone(),
+            path: "src/deep/carrier.rs".to_string(),
+            line: 42,
+            decided: false,
+        });
+    }
+    let (carrier, carried) = {
+        let rows = &state.loaded[&sub].rows;
+        (rows[0].clone(), rows[1].clone())
+    };
+    state.focus_site(&sub, &carrier.site_key);
+    let plan = camerata_ui_core::tree::place::place_plan(
+        &carrier,
+        &DecisionState::Confirmed,
+        &BTreeSet::new(),
+    );
+    let html = screen(
+        state,
+        Some(TreePrompt::Batch {
+            node: plan.node.clone(),
+            state: TriageState::Confirmed,
+            plan,
+            reason: String::new(),
+            error: None,
+        }),
+        PaneFocus::ReasonPrompt,
+    );
+    assert!(html.contains("+1 also match"), "the carrier's chip");
+    assert!(html.contains("row-carried"), "the carried row is dimmed");
+    assert!(
+        html.contains(&format!(
+            "carried by {} at carrier.rs:42",
+            carried.carried_by.as_ref().unwrap().rule_id
+        )),
+        "the pointer names the carrier"
+    );
+    assert!(
+        html.contains("Reason for \u{201c}Confirmed\u{201d} on this place (required)"),
+        "{html}"
+    );
+    assert!(
+        html.contains("This writes 1 rule record at this place"),
+        "{html}"
+    );
+    assert!(
+        html.contains("SEC-OTHER-1 (low, defect) (evidence unverified)"),
+        "the held rule is named with its reason"
+    );
+    assert!(!html.contains('\0'));
+}

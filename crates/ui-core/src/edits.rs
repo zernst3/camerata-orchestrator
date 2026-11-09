@@ -1252,6 +1252,7 @@ pub fn head_chips(row: &SiteRow) -> Vec<Chip> {
             chip
         })
         .collect();
+    chips.extend(crate::tree::place::also_match_chip(row));
     if row.added_by_reviewer && !chips.iter().any(|c| c.class == "mark-edited") {
         chips.push(Chip {
             class: "mark-edited",

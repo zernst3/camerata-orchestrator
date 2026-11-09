@@ -159,8 +159,16 @@ pub struct FindingRow {
     /// `report_export::also_matches_titles`'s doc comment. This is ALSO the `findings.json`
     /// "also_matches" field (this struct serializes verbatim), so the raw-id leak closed in the
     /// PDF's "Also violates" line had a second, independent instance right here.
+    /// D2: on a row that carries other rows at its place (`facts.carried_by` of those rows names
+    /// it) the ids of the rules it carries are listed here after any rule titles above, so the
+    /// machine file says which rules the place also matches. The workbook shows the titles of
+    /// [`Self::also_legacy`] and lists every rule of a place on All problems.
     also_matches: String,
-    /// The rule ids behind [`Self::also_matches`]: rules that flagged the same place and were
+    /// The rule titles of [`Self::also_matches`] before D2: rules demoted into this row by a
+    /// merge. What the workbook's Rules cell reads. Not exported.
+    #[serde(skip)]
+    also_legacy: String,
+    /// The rule ids behind [`Self::also_legacy`]: rules that flagged the same place and were
     /// kept as demotions of this row. A Fix lists them as rules of its own.
     #[serde(skip)]
     also_match_ids: Vec<String>,
@@ -614,6 +622,11 @@ fn partition_rows_for(
             citation_label: citation.label,
             citation_urls,
             also_matches: crate::report_export::also_matches_titles(&f.also_matches, corpus)
+                .into_iter()
+                .chain(facts_index.carried_rules(f).iter().cloned())
+                .collect::<Vec<_>>()
+                .join(", "),
+            also_legacy: crate::report_export::also_matches_titles(&f.also_matches, corpus)
                 .join(", "),
             also_match_ids: f.also_matches.clone(),
             status: f.status.clone(),
