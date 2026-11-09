@@ -130,6 +130,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Problem | What was found at a place. A problem lists every rule it breaks. | All problems; the Problem column |
 | Area | The part of your system a rule belongs to, such as security or testing. | Area columns; the scorecard on Start here |
 | Rule | One thing we looked for. | Rules checked; the Rule and Rules columns |
+| Also matches | A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision. | All problems; the Rules column; the also_matches field of findings.json |
 | Rule id | The short code that names a rule. Tools read it, and you can quote it when you ask us about a rule. | The technical columns at the right of every table |
 | Fix order | When to do a fix: First, Next or Later. First is every critical and high fix and the quick medium ones. Next is the rest of the medium fixes. Later is the low ones. | Fix plan; All problems; Needs a decision |
 | First | Fix order: do this fix before the others. Every critical and high fix, and the medium fixes that are quick. | Fix plan; All problems |
