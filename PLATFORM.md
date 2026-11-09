@@ -37,8 +37,8 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
  REAL: runs today, reproducible from this repository
     ▸ CODEBASE INSPECTION: a deterministic scan plus an AI pass, calibrated and
       de-duplicated, grouped and ranked by a group reviewer, reviewed by a person,
-      exported as a PDF, a workbook, findings.json, decisions.json, CSV and JSON
-      datasets and import-ready tickets. Runs from
+      exported as a PDF summary, a workbook, findings.json, decisions.json, CSV and JSON
+      datasets and import-ready tickets (docs/CLIENT_PACKAGE.md lists every file). Runs from
       the app or headless with `camerata inspect`. The most hardened part.
     ▸ GOVERNANCE GATE: deny-before-execute blocks a real `claude -p` agent's
       forbidden write before it touches disk. Fail-closed, provider-neutral,
@@ -97,19 +97,19 @@ Point Camerata at one or more existing repositories (in the desktop app, or one 
 
 The honest boundary: this repository shows the engine's behavior on fixture repositories with planted defects and the test suite that pins it. It makes no claim, and holds no published measurement, of how precise or complete the AI pass is on a large real-world codebase; results at that scale stay unproven until they are measured. Every client report is reviewed by a person before it is delivered.
 
-### What a finding IS: five kinds, not a yes/no
+### What a problem is: five kinds, not a yes/no
 
-A finding is not a yes/no. Every exported row carries an explicit `kind`, and the five kinds are different statements about the codebase, not five severities:
+A row is not a yes/no. Every exported row carries an explicit `kind`, and the five kinds are different statements about the codebase, not five severities. The files for tools keep these wire values; the workbook says a **departure** where the value is `deviation`, and a **problem** for what is found at a place:
 
 | Kind | What it says | Ships at |
 |---|---|---|
-| `defect` | An objective fault at a site. | Its calibrated severity, bounded by the rule's authored floor and ceiling. |
-| `deviation` | A consistency violation against the convention this codebase itself predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning." Numerator, denominator and the observed convention are structured fields, never prose to parse. | Capped at `medium` by default, because the cost of inconsistency is forward drift on future features rather than present risk. A rule may author `deviation_ceiling = "high"` where the domain genuinely compounds. |
+| `defect` | An objective fault at a place. | Its calibrated severity, bounded by the rule's authored floor and ceiling. |
+| `deviation` | A departure: a consistency violation against the convention this codebase itself predominantly follows: "2 of 47 assessed endpoints do not use URI versioning." Numerator, denominator and the observed convention are structured fields, never prose to parse. | Capped at `medium` by default, because the cost of inconsistency is forward drift on future features rather than present risk. A rule may author `deviation_ceiling = "high"` where the domain genuinely compounds. |
 | `convention_observed` | The codebase consistently follows a convention and there are zero violations. The inspection derives the decision set; governance later enforces it. | `info`, one row per rule. |
 | `no_convention` | No convention has been adopted; the codebase is inconsistent with no clear majority. | `info`, exactly one row per rule, never N. |
 | `not_assessed` | The rule was armed but could not be evaluated (tool failed, no files matched, the model declined). An honesty row, structurally distinguishable from "assessed and clean". | `info`. |
 
-A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap rather than silently counted as an accusation. The taxonomy is defined once, in `crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and `findings.json`. Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
+A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap rather than silently counted as an accusation. The taxonomy is defined once, in `crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and `findings.json`. What each file holds is in [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md). Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
 
 ### Run an inspection headless
 
@@ -120,7 +120,7 @@ cargo run -p camerata -- count <PATH>       # no model, no network: files and li
                                             # the number the inspection is priced on
 cargo run -p camerata -- inspect --repo <PATH> --client "<CLIENT NAME>" --export <OUT.zip>
                                             # prints an estimate first; the ZIP holds the PDF
-                                            # report, findings.xlsx, findings.json,
+                                            # summary, the workbook, findings.json,
                                             # decisions.json, csv/ and json/ datasets
                                             # (csv/tickets.csv for Jira, Linear or GitHub),
                                             # manifest.json and README.txt.
@@ -139,20 +139,20 @@ cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.js
 
 Without `--internal`, every inspection is a client engagement: it runs only on the Anthropic API with Anthropic models and never executes the repository's own code. `--internal` is for the maintainer's own development.
 
-The workbook is partitioned by finding kind rather than being one flat sheet: **Index**, **All Findings** (defects, deviations and any unclassified row), **Deviations** (one row per rule, at the grain the deviation numbers are actually computed), **Conventions** (what this codebase already does well and consistently), the per-area sheets, **Dependencies**, **False Positives** and **Coverage** (what was checked, what could not be and which rules did not run). The PDF is the summary and deliberately does not carry every row; `findings.json` carries the whole non-false-positive row set, every kind included. Each finding carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
+The workbook holds every row, organised by the question a reader asks: **Start here** and **Glossary**, then **Fix plan** (one row per fix, in the order to do them), **All problems** (every problem once, at its place), **Needs a decision**, **Your conventions**, **Departures** (one row per rule, at the grain the departure numbers are actually computed), **Dependencies**, then **Rules checked**, **Ruled out** and **Not checked**; last come the reviewers' sheets (**All source rows**, **Reviewer decisions** and **How problems were grouped**). The PDF is a summary of about 15 pages and deliberately does not carry every row; `findings.json` carries every problem that was not ruled out, every kind included. Each problem carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
 
 ## What has changed recently
 
 Each item is short here. The detail is in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) §11a and [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a and §14.
 
-- **Several repositories as one project.** `camerata inspect` takes `--repo` more than once (each with a `--repo-name`) and the desktop app takes several repos in a project. It is one scan, one report and one cache. Every finding names its repo, so two services that both have a `src/index.ts` stay apart, and each service's own conventions are read separately. A read-only **Patterns across services** section shows where services follow different conventions for the same rule. It is an observation, never a finding.
+- **Several repositories as one project.** `camerata inspect` takes `--repo` more than once (each with a `--repo-name`) and the desktop app takes several repos in a project. It is one scan, one report and one cache. Every problem names its repo, so two services that both have a `src/index.ts` stay apart, and each service's own conventions are read separately. A read-only **Patterns across services** section shows where services follow different conventions for the same rule. It is an observation, never a problem.
 - **Run to completion.** A client report never contains a part that failed or did not run. A call that fails on network or server trouble (a dropped connection, a timeout, a 429, a 5xx) is retried. A reply that is cut off or malformed is not simply sent again: the part changes the request or fails visibly. Three transport failures in a row (or one login or billing failure) stop the run cleanly, and every part not yet sent is recorded as not run. A client export is written only when every part is complete; otherwise it is refused and the run stays open. A failure report and a failure panel for the operator list each failed part and why. They are never part of the client deliverable.
 - **Saved runs and resume.** Every inspection is saved part by part. After an outage, a failed part or an interruption (a crash, a closed laptop), `camerata inspect --resume <RUN-ID|latest>` or the app's **Run what remains** sends only the model calls that were not stored as good. A resume refuses, in plain words, when the repository, the models, the rules or the Camerata version no longer match the saved run.
 - **The spend limit.** There is no limit on a real run unless the operator sets one (`--max-cost-usd`, or the app's spend limit field). The inspection prints an estimate first. Once a limit is set the run stops between passes when actual spend reaches it and says which parts did not run. The output cap on each model call is only a guard against a runaway reply: it is sized from the work and does not stop a run.
 - **Model choice.** A model comes from the project's settings in the app or from `--model`, `--calibration-model`, `--fix-model` and `--clone-judge-model` on the command line and from nowhere else (no environment variable picks one). The built-in defaults are Claude Sonnet 5.5 for the audit and calibration, Claude Haiku 5.5 for the fix wording and the duplicate-code judge and Claude Opus 5.5 as the strongest tier of the model profiles.
 - **Token-efficiency switches.** Every saving the product applies is on by default and can be switched off for one run with `--efficiency NAME=off`, to find out whether it caused a change. A run prints which were on. The names and what each does are in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) (token efficiency, §6a).
-- **Runtime end-of-life and vulnerability checks.** Beyond the lockfile audit, the runtime a repository declares (a Docker base image, `.nvmrc`, a manifest field) is checked against endoflife.date and the National Vulnerability Database. A release line past its end of life is a high finding. A version that is a range or a moving tag is never guessed: Coverage lists it as not checked.
-- **Accuracy checks on client-facing text.** The model's replies are read as structured data, and a cut-off or malformed reply is never stored as good. The written explanation and the fix for each finding are checked against the evidence: a name the code does not contain is turned down, and the finding keeps its short text or the rule's authored remediation instead.
+- **Runtime end-of-life and vulnerability checks.** Beyond the lockfile audit, the runtime a repository declares (a Docker base image, `.nvmrc`, a manifest field) is checked against endoflife.date and the National Vulnerability Database. A release line past its end of life is a high-severity problem. A version that is a range or a moving tag is never guessed: the Not checked sheet lists it.
+- **Accuracy checks on client-facing text.** The model's replies are read as structured data, and a cut-off or malformed reply is never stored as good. The written explanation and the fix for each problem are checked against the evidence: a name the code does not contain is turned down, and the problem keeps its short text or the rule's authored guidance instead.
 - **Exit codes.** `camerata inspect` exits 0 when the run is complete, 1 when it could not start or a resume was refused, 3 when the release gate refused the export, 4 when the spend limit stopped it, 5 when the AI service could not be reached and 6 when it is incomplete for another reason.
 
 ## Onboarding: from inspection to governance

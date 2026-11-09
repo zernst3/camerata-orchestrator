@@ -414,14 +414,14 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
    | Kind | What it is telling you | Where it lands in the Excel workbook |
    |---|---|---|
-   | **Defect** | An objective fault at this site. Act on it. | All Findings |
-   | **Deviation** | A consistency violation against the convention your own codebase predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning". You get the numerator, the denominator (when it could be counted honestly) and the convention's own name as separate fields, not prose to read. | All Findings (per site) and Deviations (one row per rule) |
-   | **Convention observed** | Your codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Conventions |
-   | **No convention** | No convention has been adopted here; your codebase is inconsistent with no clear majority. Exactly one row per rule, never one per site. | Conventions |
-   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched, or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Coverage, under "checks we could not complete" |
+   | **Defect** | An objective fault at this place. Act on it. | All problems |
+   | **Deviation** (the workbook says a departure) | A consistency violation against the convention the codebase itself predominantly follows: "2 of 47 assessed endpoints do not use URI versioning". The numerator, the denominator (when it could be counted honestly) and the convention's own name come as separate fields, not prose to read. | All problems (per place) and Departures (one row per rule) |
+   | **Convention observed** | The codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Your conventions |
+   | **No convention** | No convention has been adopted here; the codebase is inconsistent with no clear majority. Exactly one row per rule, never one per place. | Your conventions |
+   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Not checked, as a rule that could not be completed |
 
-   A row whose producer never assigned a kind shows as **Unclassified**, and the Index sheet's
-   "Statement types" block shows that count only when it is non-zero. It is never silently rendered
+   A row whose producer never assigned a kind shows as **Unclassified**, and the Start here
+   sheet shows that count only when it is non-zero. It is never silently rendered
    as a defect: an unclassified row is a gap in Camerata, and it has to be visible as one.
 
    A **deviation caps at medium severity by default**, because the cost of inconsistency is paid on
@@ -887,7 +887,7 @@ Those rules now carry a flag (`inspectable = false`) that separates the two role
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
 - They are **not** scanned, so they never appear in a finding, never appear in "what's
-  healthy", and are not counted in the Coverage sheet's "we checked N rules" line. They are
+  healthy", and are not counted in the Start here sheet's "we checked N rules" line. They are
   also not listed under "rules that did not run this scan" - they were never scan rules.
 - So the number of rules you selected and the number the report says were checked will
   legitimately differ, and the second is the honest one. On a TypeScript repo the checked
@@ -1780,8 +1780,10 @@ The SOC-2 lens produces a **gap analysis** — a conversation-starter about what
 ## 11a. The Codebase Inspection deliverable (PDF + Excel + JSON)
 
 This is a different artifact from the deep-report Markdown above. The **product export** is the
-client-facing deliverable: a ZIP holding a PDF, an Excel workbook, `findings.json`, and a
-`README.txt`. Export it from the cockpit's export button after a scan, or produce the identical ZIP
+client-facing deliverable: a ZIP holding a PDF summary, an Excel workbook, `findings.json`,
+`decisions.json`, CSV and JSON copies of the workbook's tables, the ticket file, `manifest.json` and
+a `README.txt`. [`CLIENT_PACKAGE.md`](CLIENT_PACKAGE.md) lists every file, every sheet and every PDF
+section, with the glossary. Export it from the cockpit's export button after a scan, or produce the identical ZIP
 from the command line with no server and no UI at all:
 
 ```
@@ -1869,8 +1871,8 @@ generated and vendored files.
 
 ### The three artifacts have three different jobs
 
-- **The PDF is the summary.** It is written to be read by a person who will not open a spreadsheet.
-  It deliberately does not carry every row, and that is not a gap.
+- **The PDF is the summary.** It is about 15 pages, written to be read by a person who will not open
+  a spreadsheet. It deliberately does not carry every row, and that is not a gap.
 - **The Excel workbook is the detail surface.** Every row that exists lands on exactly one sheet. A
   row missing here IS a problem.
 - **`findings.json` is the data.** It carries the whole set, every kind included, for anything
@@ -1880,30 +1882,38 @@ generated and vendored files.
 
 Every fix in every file carries one of two labels: **Tailored fix** or **Standard fix**. A Tailored fix
 was written for your code and passed Camerata's checks (every name it mentions exists in your
-code, and it agrees with the finding). A Standard fix is the rule's own guidance, filled in with the
-file and names from the finding. A finding gets a Standard fix when no tailored fix passed the checks,
+code, and it agrees with the problem). A Standard fix is the rule's own guidance, filled in with the
+file and names from the problem. A problem gets a Standard fix when no tailored fix passed the checks,
 or when no tailored fix was written for it. Both are real fixes; the label tells you which kind you
 are reading. The label is in the PDF beside the fix, in the workbook's **Fix type** column, and in the
-`fix_type` field of `findings.json` and of the CSV and JSON files. A finding with no fix text has an
-empty label. A finding that ships a Standard fix does not make the inspection incomplete.
+`fix_type` field of `findings.json` and of the CSV and JSON files. A problem with no fix text has an
+empty label. A problem that ships a Standard fix does not make the inspection incomplete.
 
 ### The workbook's sheets
 
-Restructured on 2026-10-11 from a single flat findings sheet into one sheet per kind of statement, so
-a row sits where its own columns mean something:
+The workbook is ordered by the question a reader asks, in four colour groups, and every sheet shows a
+problem once except All source rows. The full list, with the glossary, is in
+[`CLIENT_PACKAGE.md`](CLIENT_PACKAGE.md).
 
 | Sheet | What is on it |
 |---|---|
-| **Index** | The cover, the provenance legend, the category matrix, the disposition summary, and a "Statement types" block counting the five finding kinds and naming the tab each lives on. |
-| **All Findings** | Defects and deviations: something is wrong at a site. An **Unclassified** row lands here too, deliberately, so a gap in Camerata shows up among the accusing rows rather than being filed away in an informational tab. |
-| **Deviations** | One row per RULE, not per site, because the deviation numbers are computed per rule. "2 of 47 sites deviate from URI-versioned endpoints" is three adjacent columns. When the denominator could not be established honestly the cell reads "not counted" - never a fabricated 0. |
-| **Conventions** | Conventions your codebase already follows consistently, plus the rules where no convention has been adopted. Nothing is wrong at a site here. This is the derived decision set. |
-| per-area sheets | One per finding category, as views of the findings set only, so an area tab never mixes "you consistently use cursor pagination" into a list with a critical injection. |
-| **Dependencies** | The dependency audit, plus the dependency scanner's own coverage notes. |
-| **False Positives** | Everything you dispositioned as a false positive, kept rather than deleted. |
-| **Coverage** | What was checked and with what result, which tools could not run, which rules did not run this scan, and the "not assessed" rows in their own "checks we could not complete" section. |
+| **Start here** | The title, a linked list of every sheet with its row count, the scorecard by area and the facts of the inspection. |
+| **Glossary** | What every word and column means. |
+| **Fix plan** | One row per fix, in the order to do them: First, Next or Later. |
+| **All problems** | Every problem once, at the place it was seen, with every rule it breaks and what to do there. An **Unclassified** row lands here too, deliberately, so a gap in Camerata shows up among the accusing rows rather than being filed away in an informational tab. |
+| **Needs a decision** | The problems a reviewer must rule on before the client acts, with why each is waiting. |
+| **Your conventions** | Conventions the codebase already follows consistently, plus the rules where no convention has been adopted. Nothing is wrong at a place here. This is the derived decision set. |
+| **Departures** | One row per RULE, not per place, because the departure numbers are computed per rule. "2 of 47 places depart from URI-versioned endpoints" is adjacent columns (Places departing, Places checked). |
+| **Dependencies** | The dependency audit. |
+| **Rules checked** | Every rule that ran and what it found, clean rules included. |
+| **Patterns across services** | Only for a project of several repos: how each service follows each rule. |
+| **Ruled out** | Everything a reviewer or the engine ruled out, kept rather than deleted, with the reason. |
+| **Not checked** | What was not checked: rules that could not be completed or did not run, files not read, tools that did not run. |
+| **All source rows** | The raw record, where a problem can be listed more than once. |
+| **Reviewer decisions** | Every decision a reviewer recorded. |
+| **How problems were grouped** | How problems were gathered into areas, rules, rule groups and fixes. |
 
-**Known exploited and exploit probability on dependency findings.** Each vulnerable dependency is
+**Known exploited and exploit probability on dependency advisories.** Each vulnerable dependency is
 checked against two public feeds: the CISA Known Exploited Vulnerabilities (KEV) catalog and the
 FIRST.org EPSS exploit-probability scores. Matching is by CVE, including a CVE that a GitHub or
 RustSec advisory lists as an alias. A dependency on the KEV catalog is labelled "Known exploited" and
@@ -1919,11 +1929,11 @@ packages in your lockfiles. A second check looks at the runtime and the major fr
 It reads the versions your repository declares (a Docker base image, a version file such as `.nvmrc`,
 a manifest field, a lockfile entry) and compares them with two public sources: endoflife.date for
 end-of-life dates and the National Vulnerability Database for known vulnerabilities in the runtime
-itself. A release line past its end of life is a high finding, worded like "Node.js 16 has received
+itself. A release line past its end of life is a high-severity problem, worded like "Node.js 16 has received
 no security fixes since 2023-09-11". One that ends within 90 days is a low advisory. A runtime with a
 known vulnerability is rated by its highest CVSS score, and raised to critical when CISA lists the
 vulnerability as known exploited. A version that is a range or a moving tag (`>=18`, `node:latest`)
-is never guessed: the Coverage section lists it as not checked, and a runtime declared without a
+is never guessed: the Not checked sheet lists it, and a runtime declared without a
 patch version is checked for end of life but not for vulnerabilities. In a Dockerfile only the image
 the final stage is built on counts, because an earlier build stage never ships; a final image that is
 itself a build argument (`FROM ${BASE}`) cannot be named, so it is listed as not checked. A framework counts
@@ -1931,12 +1941,11 @@ only when your project file beside the lockfile lists it as a direct, non-dev de
 workspace project, the `package.json` of a listed workspace package counts); one that
 is only pulled in by something else, only used in development or only an optional or peer
 dependency is listed as not checked. If either source cannot be
-reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
+reached, the Not checked sheet says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
 data unavailable in this scan", and the report makes no claim about what was not checked. What a
 repository declares is not proof of what runs in production.
 
-The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
-reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty
+The Rules checked sheet's Result column reads "Clean" or "Found N places" rather than a bare integer. Two coverage honesty
 properties are worth knowing because they were both once wrong: a rule that found something and then
 had its row merged into another rule's row **never** renders as clean, and a whole tool tier failing
 is disclosed in your artifacts rather than only in Camerata's internal log.
