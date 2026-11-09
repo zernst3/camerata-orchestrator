@@ -119,7 +119,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 
 <!-- glossary:start -->
 
-| Term | Plain meaning | Where it appears |
+| Term | Plain meaning | Where you meet it |
 |---|---|---|
 | Fix | One cause and one change that clears a whole set of problems, wherever they appear. | Fix plan; the Fix column on All problems |
 | Rule group | The places of one rule that share one cause. A fix is made of one or more rule groups. | How problems were grouped |

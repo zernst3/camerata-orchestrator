@@ -1191,7 +1191,8 @@ pub const GLOSSARY_BLOCK_END: &str = "<!-- glossary:end -->";
 /// [`GLOSSARY_BLOCK_END`], and a test holds the file to it.
 pub fn glossary_markdown() -> String {
     let cell = |s: &str| s.replace('|', "\\|");
-    let mut out = format!("| {H_TERM} | {H_PLAIN_MEANING} | Where it appears |\n|---|---|---|\n");
+    let mut out =
+        format!("| {H_TERM} | {H_PLAIN_MEANING} | {H_WHERE_YOU_MEET_IT} |\n|---|---|---|\n");
     for e in GLOSSARY_ENTRIES {
         out.push_str(&format!(
             "| {} | {} | {} |\n",
@@ -1678,8 +1679,8 @@ mod tests {
 
     /// Whether the doc block may be rewritten: only for `UPDATE_CLIENT_PACKAGE_DOC=1`, and never
     /// when `CI` is set.
-    fn regeneration_requested(update: Option<&str>, _ci: bool) -> bool {
-        update.is_some()
+    fn regeneration_requested(update: Option<&str>, ci: bool) -> bool {
+        update == Some("1") && !ci
     }
 
     #[test]
