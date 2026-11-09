@@ -1676,6 +1676,21 @@ mod tests {
         }
     }
 
+    /// Whether the doc block may be rewritten: only for `UPDATE_CLIENT_PACKAGE_DOC=1`, and never
+    /// when `CI` is set.
+    fn regeneration_requested(update: Option<&str>, _ci: bool) -> bool {
+        update.is_some()
+    }
+
+    #[test]
+    fn the_doc_block_is_rewritten_only_for_exactly_1_and_never_in_ci() {
+        assert!(regeneration_requested(Some("1"), false));
+        assert!(!regeneration_requested(Some("0"), false));
+        assert!(!regeneration_requested(Some(""), false));
+        assert!(!regeneration_requested(None, false));
+        assert!(!regeneration_requested(Some("1"), true));
+    }
+
     /// `docs/CLIENT_PACKAGE.md` holds the client Glossary between two marker lines, rendered from
     /// [`GLOSSARY_ENTRIES`]. `UPDATE_CLIENT_PACKAGE_DOC=1` rewrites the block instead of failing.
     #[test]
@@ -1683,7 +1698,10 @@ mod tests {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/CLIENT_PACKAGE.md");
         let doc = std::fs::read_to_string(&path).expect("docs/CLIENT_PACKAGE.md must exist");
-        let regenerate = std::env::var_os("UPDATE_CLIENT_PACKAGE_DOC").is_some();
+        let regenerate = regeneration_requested(
+            std::env::var("UPDATE_CLIENT_PACKAGE_DOC").ok().as_deref(),
+            std::env::var_os("CI").is_some(),
+        );
         let how = "regenerate it with: UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server \
                    client_package_doc_glossary_block";
         let (Some(start), Some(end)) =
