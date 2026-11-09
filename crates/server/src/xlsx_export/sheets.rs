@@ -677,6 +677,11 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
     if let Some(worst) = members.iter().min_by_key(|r| severity_rank(&r.severity)) {
         c.put(v::H_SEVERITY, Cell::Severity(worst.severity.clone()));
     }
+    // And as actionable as its worst kind: a defect among its rows makes the place a defect,
+    // whichever row the engine ranks first.
+    if let Some(defect) = members.iter().find(|r| r.kind.tag() == "defect") {
+        c.put(v::H_KIND, Cell::text(defect.kind.tag()));
+    }
     // One line for each rule, by its id: two rules can share a title.
     let mut seen_rules: Vec<&str> = Vec::new();
     let mut titles: Vec<String> = Vec::new();

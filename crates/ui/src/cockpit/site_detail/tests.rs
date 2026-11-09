@@ -170,6 +170,7 @@ fn a_carried_row_says_where_it_is_decided_and_offers_a_way_to_the_carrier() {
         rule_id: "SEC-A".to_string(),
         path: "src/a.rs".to_string(),
         line: 5,
+        decided: false,
     });
     let html = page(row, DetailPanel::default());
     clean(&html);

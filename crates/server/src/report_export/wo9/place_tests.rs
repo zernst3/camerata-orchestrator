@@ -309,3 +309,204 @@ fn a_place_is_as_severe_as_its_worst_rule_even_when_a_less_severe_row_carries_it
         text(carrier, "site_id")
     );
 }
+
+// ── the review's six fixes ────────────────────────────────────────────────────────────────
+
+fn rezip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in entries {
+        writer.start_file(name.clone(), options).expect("start");
+        writer.write_all(bytes).expect("write");
+    }
+    writer.finish().expect("finish").into_inner()
+}
+
+fn site_id_of(entries: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
+    let findings = findings_json(entries);
+    let row = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == path)
+        .unwrap();
+    text(row, "site_id")
+}
+
+#[test]
+fn a_place_reads_as_a_defect_when_a_departure_carries_one() {
+    // The held critical defect ranks below the asserted high departure, so the departure carries
+    // the place; the place is still a defect, at critical, everywhere it is counted.
+    let mut report = crate::release_gate::test_scan_report();
+    let mut defect = row("SEC-RULE-DEFECT-1", "critical", "src/dev.ts", 4);
+    defect.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+    defect.needs_review = true;
+    defect.confidence = Some("needs-review".to_string());
+    let mut departure = row("SEC-RULE-DEPART-1", "high", "src/dev.ts", 4);
+    departure.kind = Some(camerata_api_types::audit::FindingKind::Deviation(
+        camerata_api_types::audit::DeviationKind {
+            deviating_sites: 1,
+            assessed_sites: Some(4),
+            convention_option_id: Some("o".to_string()),
+            convention_label: "The usual way".to_string(),
+        },
+    ));
+    report.findings = vec![defect, departure];
+    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let entries = released_entries(&reviewed, &options());
+    let findings = findings_json(&entries);
+    let rows = findings["findings"].as_array().unwrap();
+    let carrier = rows
+        .iter()
+        .find(|r| text(r, "carried_by").is_empty())
+        .unwrap();
+    assert_eq!(
+        text(carrier, "rule_id"),
+        "SEC-RULE-DEPART-1",
+        "the departure carries"
+    );
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &options()).expect("workbook");
+    let problems = table(&xlsx, v::ALL_PROBLEMS);
+    assert_eq!(problems.len() - 1, 1);
+    assert_eq!(cell_of(&problems, 1, v::H_KIND).to_lowercase(), "defect");
+    assert_eq!(
+        cell_of(&problems, 1, v::H_SEVERITY).to_lowercase(),
+        "critical"
+    );
+}
+
+#[test]
+fn audit_zip_refuses_a_carried_row_whose_carrier_is_at_another_place() {
+    let entries = entries();
+    let other = site_id_of(&entries, "src/other.ts");
+    let tampered = with_findings(&entries, |f| {
+        let i = f["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|r| !text(r, "carried_by").is_empty())
+            .unwrap();
+        f["findings"][i]["carried_by"] = serde_json::json!(other);
+    });
+    let report = crate::release_gate::audit_zip(&rezip(&tampered), None);
+    let fix_parity: Vec<String> = report
+        .checks
+        .iter()
+        .filter(|c| c.check == crate::release_gate::CheckId::FixParity)
+        .flat_map(|c| c.problems.iter().map(|p| p.message.clone()))
+        .collect();
+    assert!(
+        fix_parity
+            .iter()
+            .any(|m| m.contains("a row at another place")),
+        "{fix_parity:?}"
+    );
+}
+
+#[test]
+fn the_gate_refuses_an_all_problems_sheet_with_fewer_rows_than_places() {
+    let entries = entries();
+    let moved = with_findings(&entries, |f| {
+        let i = f["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|r| !text(r, "carried_by").is_empty())
+            .unwrap();
+        f["findings"][i]["line"] = serde_json::json!(13);
+    });
+    let problems = crate::release_gate::place_archive_problems(&moved);
+    assert!(
+        problems_text(&problems).contains("has 2 rows and findings.json has 3 places"),
+        "{}",
+        problems_text(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_an_all_problems_row_headed_by_a_carried_row() {
+    let entries = entries();
+    let swapped = with_findings(&entries, |f| {
+        let rows = f["findings"].as_array_mut().unwrap();
+        let carrier = rows
+            .iter()
+            .position(|r| r["path"] == "src/pay.ts" && text(r, "carried_by").is_empty())
+            .unwrap();
+        let carried = rows
+            .iter()
+            .position(|r| !text(r, "carried_by").is_empty())
+            .unwrap();
+        let (carrier_id, carrier_rule) = (
+            text(&rows[carrier], "site_id"),
+            text(&rows[carrier], "rule_id"),
+        );
+        let carried_id = text(&rows[carried], "site_id");
+        rows[carrier]["carried_by"] = serde_json::json!(carried_id);
+        rows[carried]["carried_by"] = serde_json::json!("");
+        rows[carried]["also_matches"] = serde_json::json!(carrier_rule);
+        let _ = carrier_id;
+    });
+    let problems = crate::release_gate::place_archive_problems(&swapped);
+    assert!(
+        problems_text(&problems).contains("heads a place with"),
+        "{}",
+        problems_text(&problems)
+    );
+}
+
+#[test]
+fn a_false_positive_neither_carries_nor_is_carried() {
+    let sealed = placed_report();
+    let crit = sealed
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "SEC-RULE-CRIT-1")
+        .unwrap()
+        .site_key
+        .clone();
+    let fp = decision(
+        "d-fp",
+        &crit,
+        camerata_api_types::decisions::DecisionState::FalsePositive,
+        "not real",
+    );
+    let reviewed = apply_overlay(&sealed, &[fp], &[], &[]);
+    let entries = released_entries(&reviewed, &options());
+    let findings = findings_json(&entries);
+    let rows = findings["findings"].as_array().unwrap();
+    let ruled_out: serde_json::Value =
+        serde_json::from_slice(&entries["json/false-positives.json"]).expect("false-positives");
+    let fp_row = ruled_out
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| text(r, "rule_id") == "SEC-RULE-CRIT-1")
+        .expect("the ruled-out row is in the false-positives file");
+    assert!(text(fp_row, "carried_by").is_empty() && text(fp_row, "also_matches").is_empty());
+    let head = rows
+        .iter()
+        .find(|r| r["path"] == "src/pay.ts" && !text(r, "also_matches").is_empty())
+        .expect("the high row heads the place");
+    assert_eq!(text(head, "rule_id"), "SEC-RULE-HIGH-1");
+    assert!(text(head, "also_matches").contains("SEC-RULE-LOW-1"));
+    assert!(crate::release_gate::place_archive_problems(&entries).is_empty());
+
+    let fp_id = text(fp_row, "site_id");
+    assert!(!fp_id.is_empty());
+    let bad = with_findings(&entries, |f| {
+        for r in f["findings"].as_array_mut().unwrap() {
+            if text(r, "rule_id") == "SEC-RULE-LOW-1" {
+                r["carried_by"] = serde_json::json!(fp_id);
+            }
+        }
+    });
+    let problems = crate::release_gate::place_archive_problems(&bad);
+    assert!(
+        problems_text(&problems).contains("a false positive carries"),
+        "{}",
+        problems_text(&problems)
+    );
+}

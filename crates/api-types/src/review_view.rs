@@ -296,6 +296,10 @@ pub struct CarriedByView {
     pub rule_id: String,
     pub path: String,
     pub line: usize,
+    /// The carrier already holds a decision (so a carried row with none of its own was left out
+    /// of it on purpose, or came after it).
+    #[serde(default)]
+    pub decided: bool,
 }
 
 /// A row merged into another (spec section 8: "Merged into web/env.ts:3").

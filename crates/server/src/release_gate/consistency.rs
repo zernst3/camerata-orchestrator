@@ -542,7 +542,13 @@ fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
             .map(|m| cell_text(m, "severity"))
             .min_by_key(|s| severity_slot(s))
             .unwrap_or_default();
-        *tally.entry((worst, cell_text(head, "kind"))).or_insert(0) += 1;
+        // The place is as actionable as its worst kind: a defect over a departure.
+        let kind = if members.iter().any(|m| cell_text(m, "kind") == "defect") {
+            "defect".to_string()
+        } else {
+            cell_text(head, "kind")
+        };
+        *tally.entry((worst, kind)).or_insert(0) += 1;
     }
     tally
 }
@@ -1706,12 +1712,37 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
             cell_text(r, "line"),
         )
     };
+    // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
+    let ruled_out: BTreeSet<String> = entries
+        .get("json/false-positives.json")
+        .and_then(|b| rows_of(b).ok())
+        .unwrap_or_default()
+        .iter()
+        .chain(rows.iter().filter(|r| cell_text(r, "is_fp") == "true"))
+        .map(|r| cell_text(r, "site_id"))
+        .filter(|id| !id.is_empty())
+        .collect();
     for (i, row) in rows.iter().enumerate() {
         let carrier_id = cell_text(row, "carried_by");
         if carrier_id.is_empty() {
             continue;
         }
         let at = format!("findings[{i}]");
+        if ruled_out.contains(&carrier_id) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, a ruled-out row: a false positive carries nothing"),
+            ));
+            continue;
+        }
+        if ruled_out.contains(&cell_text(row, "site_id")) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                "a false positive is carried by another row",
+            ));
+        }
         let Some(carrier) = by_id.get(&carrier_id) else {
             problems.push(problem(
                 "findings.json",

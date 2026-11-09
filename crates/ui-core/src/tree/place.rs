@@ -31,7 +31,14 @@ pub fn also_match_chip(row: &SiteRow) -> Option<Chip> {
         tip: row
             .carries
             .iter()
-            .map(|c| format!("{} ({})", c.rule_id, c.severity))
+            .map(|c| {
+                format!(
+                    "{} ({}, {})",
+                    c.rule_id,
+                    c.severity,
+                    kind_tag(c.kind.as_ref())
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     })
@@ -51,9 +58,14 @@ pub fn carried_pointer(row: &SiteRow) -> Option<String> {
 /// The sentence under a carried row's Decision cell when it holds no decision of its own yet.
 pub fn carried_decision_note(row: &SiteRow) -> Option<String> {
     let by = row.carried_by.as_ref()?;
-    row.decision
-        .is_none()
-        .then(|| format!("decided with {} unless alone", by.rule_id))
+    if row.decision.is_some() {
+        return None;
+    }
+    Some(if by.decided {
+        "left out of the place decision".to_string()
+    } else {
+        format!("decided with {} unless alone", by.rule_id)
+    })
 }
 
 /// One carried rule as the carrier's pane lists it, in words.
@@ -336,7 +348,10 @@ mod tests {
         let chip = also_match_chip(&row).expect("a chip");
         assert_eq!(chip.label, "+3 also match");
         assert_eq!(chip.class, "mark-also");
-        assert_eq!(chip.tip, "SEC-1 (high)\nSEC-2 (medium)\nSEC-3 (low)");
+        assert_eq!(
+            chip.tip,
+            "SEC-1 (high, defect)\nSEC-2 (medium, defect)\nSEC-3 (low, defect)"
+        );
         let mut alone = row;
         alone.carries.clear();
         assert!(also_match_chip(&alone).is_none());
@@ -352,6 +367,7 @@ mod tests {
             rule_id: "SEC-0".to_string(),
             path: "src/deep/a.rs".to_string(),
             line: 5,
+            decided: false,
         });
         row.markers = vec![Marker::Carried];
         assert_eq!(
@@ -362,6 +378,13 @@ mod tests {
             carried_decision_note(&row).as_deref(),
             Some("decided with SEC-0 unless alone")
         );
+        // The carrier decided without this row: it was left out, and the note says so.
+        row.carried_by.as_mut().unwrap().decided = true;
+        assert_eq!(
+            carried_decision_note(&row).as_deref(),
+            Some("left out of the place decision")
+        );
+        row.carried_by.as_mut().unwrap().decided = false;
         // Once the place is decided, the Decision column reads the inherited record.
         let mut inherited = decided(DecisionState::Confirmed);
         inherited.inherited_from = Some("dec-1".to_string());
@@ -455,6 +478,7 @@ mod tests {
             rule_id: "SEC-0".to_string(),
             path: "a.rs".to_string(),
             line: 5,
+            decided: false,
         });
         let plan = crate::tree::batch::batch_plan(
             "sub:SEC-X/0",

@@ -1123,3 +1123,35 @@ fn a_carried_rows_own_sub_group_still_lists_it_and_the_node_counts_are_unchanged
     assert_eq!(page.rows.len(), 1);
     assert!(page.rows[0].carried_by.is_some());
 }
+
+#[test]
+fn a_carried_row_knows_when_its_carrier_has_been_decided() {
+    let sealed = placed();
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let page = |decisions: &[Decision]| {
+        let reviewed = placed_overlay(&sealed, decisions);
+        compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page("rule:SEC-B", None, 500).unwrap()
+        })
+    };
+    let b = key_of("SEC-B");
+    let before = page(&[]);
+    let row = before.rows.iter().find(|r| r.site_key == b).unwrap();
+    assert!(!row.carried_by.as_ref().unwrap().decided);
+    let carrier_decision = decision("d-9", &key_of("SEC-A"), DecisionState::Confirmed, RUN);
+    let after = page(&[carrier_decision]);
+    let row = after.rows.iter().find(|r| r.site_key == b).unwrap();
+    assert!(
+        row.decision.is_none(),
+        "the carried row has none of its own"
+    );
+    assert!(row.carried_by.as_ref().unwrap().decided);
+}

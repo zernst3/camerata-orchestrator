@@ -1471,6 +1471,7 @@ fn link_place(rows: &mut [SiteRow], carrier: usize, carried: usize) {
         rule_id: head.rule_id.clone(),
         path: head.path.clone(),
         line: head.line,
+        decided: false,
     });
 }
 

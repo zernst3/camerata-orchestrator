@@ -252,6 +252,7 @@ impl<'a> ReviewComposer<'a> {
             rule_id: carrier.rule_id.clone(),
             path: carrier.path.clone(),
             line: carrier.line,
+            decided: self.decision_of(&carrier.site_key).is_some(),
         })
     }
 

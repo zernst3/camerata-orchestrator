@@ -643,6 +643,7 @@ fn a_carrier_row_shows_the_also_match_chip_a_carried_row_points_at_its_carrier_a
             rule_id: rows[0].rule_id.clone(),
             path: "src/deep/carrier.rs".to_string(),
             line: 42,
+            decided: false,
         });
     }
     let (carrier, carried) = {
