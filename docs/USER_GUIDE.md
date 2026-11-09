@@ -418,7 +418,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    | **Deviation** (the workbook says a departure) | A consistency violation against the convention your own codebase predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning". You get the numerator, the denominator (when it could be counted honestly) and the convention's own name as separate fields, not prose to read. | All problems (per place) and Departures (one row per rule) |
    | **Convention observed** | Your codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Your conventions |
    | **No convention** | No convention has been adopted here; your codebase is inconsistent with no clear majority. Exactly one row per rule, never one per place. | Your conventions |
-   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched, or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Not checked, as a rule that could not be completed |
+   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Not checked, as a rule that could not be completed |
 
    A row whose producer never assigned a kind shows as **Unclassified**, and the Start here
    sheet shows that count only when it is non-zero. It is never silently rendered
