@@ -1832,3 +1832,228 @@ async fn a_corrupt_decision_file_answers_503_keeps_the_file_and_is_never_replace
     // Another project is unaffected.
     assert!(!state.decisions.is_corrupt("some-other-project"));
 }
+
+// ── place decisions (D2, R-6c) ────────────────────────────────────────────────────────────
+
+/// Four rules at one line (a critical carrier, a high, a medium and a low) and a row elsewhere.
+fn place_rows() -> Vec<Finding> {
+    let mut rows = vec![
+        row("SEC-A", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-B", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-C", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-D", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-E", "src/q.rs", 2, "let other = 1;"),
+    ];
+    rows[0].severity = "critical".to_string();
+    rows[1].severity = "high".to_string();
+    rows[2].severity = "medium".to_string();
+    rows[3].severity = "low".to_string();
+    rows
+}
+
+fn place_id_of_tree(tree: &ReviewTree) -> String {
+    assert_eq!(tree.places.len(), 1, "{:?}", tree.places);
+    tree.places[0].node_id()
+}
+
+#[tokio::test]
+async fn a_place_decision_writes_the_node_record_and_one_site_record_per_rule_it_covers() {
+    let (state, app, pid) = app_with_project();
+    let mut rows = place_rows();
+    // SEC-C is held (its quoted evidence is not verified): a batch leaves it for a ruling by name.
+    rows[2].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    let entry = state
+        .inspections
+        .append(entry_of(&pid, rows, "2026-11-02T10:00:00Z"))
+        .unwrap();
+    let tree = entry.report.tree.as_ref().unwrap();
+    let place = place_id_of_tree(tree);
+    let key_of_rule = |rule: &str| {
+        entry
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (carrier, held, unticked, covered_too) = (
+        key_of_rule("SEC-A"),
+        key_of_rule("SEC-C"),
+        key_of_rule("SEC-D"),
+        key_of_rule("SEC-B"),
+    );
+    assert_eq!(tree.places[0].carrier, carrier);
+
+    // A decision without a reason is refused: a place with carried rules is a batch.
+    let uri = format!("/api/projects/{pid}/decisions");
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &place,
+            DecisionState::Confirmed,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let mut req = node_req(&place, DecisionState::Confirmed, "one secret, four rules");
+    req.except = vec![unticked.clone()];
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(req))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(done.inherited_count, 2, "{:?}", done.decision);
+    let mut want = vec![carrier.clone(), covered_too.clone()];
+    want.sort();
+    assert_eq!(done.decision.applies_to, want);
+    assert!(done.decision.except.contains(&held));
+    assert!(done.decision.except.contains(&unticked));
+
+    let all = state.decisions.list(&pid);
+    assert_eq!(all.iter().filter(|d| d.is_node_record()).count(), 1);
+    for key in [&carrier, &covered_too] {
+        let site = all.iter().find(|d| &d.key == key).expect("a site record");
+        assert_eq!(
+            site.inherited_from.as_deref(),
+            Some(done.decision.id.as_str())
+        );
+        assert_eq!(site.reason, "one secret, four rules");
+    }
+    assert!(all.iter().all(|d| d.key != held && d.key != unticked));
+
+    // The release gate's group check finds no gap.
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &pid, &entry);
+    let records = crate::report_export::decisions_file::decision_rows(&reviewed);
+    assert!(
+        crate::release_gate::held::group_decision_gaps(&records).is_empty(),
+        "{records:?}"
+    );
+    // A merge is never a place decision.
+    let mut merge = node_req(
+        &place,
+        DecisionState::MergedInto(carrier.clone()),
+        "same thing",
+    );
+    merge.key = String::new();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(merge))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[test]
+fn a_rule_decided_alone_after_the_place_wins_and_revoking_it_brings_the_place_record_back() {
+    let (rows, tree) = tree_of(place_rows());
+    let place = place_id_of_tree(&tree);
+    let carried = rows.iter().find(|f| f.rule_id == "SEC-B").unwrap();
+    let store = DecisionStore::new();
+    store
+        .record_node(
+            "p",
+            &place,
+            &tree.batch_members(&place),
+            &node_req(&place, DecisionState::Confirmed, "one secret"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let own = store
+        .record_site(
+            "p",
+            &site_req(
+                &carried.site_key,
+                DecisionState::FalsePositive,
+                "this rule is wrong here",
+            ),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    let d = applied
+        .get(&carried.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::FalsePositive);
+    assert_eq!(d.inherited_from, None);
+    // The other rules at the place keep the place's decision.
+    let other = rows.iter().find(|f| f.rule_id == "SEC-A").unwrap();
+    let d = applied
+        .get(&other.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::Confirmed);
+
+    store.revoke("p", &own.id, NOW).unwrap();
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    let d = applied
+        .get(&carried.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::Confirmed);
+    assert!(d.inherited_from.is_some());
+}
+
+#[test]
+fn a_new_rule_at_a_decided_place_is_new_since_the_decision() {
+    let (rows1, tree1) = tree_of(place_rows());
+    let place = place_id_of_tree(&tree1);
+    let store = DecisionStore::new();
+    let (record, _) = store
+        .record_node(
+            "p",
+            &place,
+            &tree1.batch_members(&place),
+            &node_req(&place, DecisionState::Confirmed, "one secret"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    // The rerun finds the same rows and a fifth rule at the same line.
+    let mut again = place_rows();
+    again.push(row("SEC-F", "src/p.rs", 7, "let key = SECRET;"));
+    let (rows2, tree2) = tree_of(again);
+    assert_eq!(
+        place_id_of_tree(&tree2),
+        place,
+        "the place id survives the new rule"
+    );
+    let applied = apply_to(&tree2, &store.active("p"), &[]);
+    for f in rows1.iter().filter(|f| f.path == "src/p.rs") {
+        let s = applied.get(&f.site_key).expect("decided");
+        assert!(s.decision.is_some() && s.new_since_decision.is_none());
+    }
+    let new_key = rows2
+        .iter()
+        .find(|f| f.rule_id == "SEC-F")
+        .unwrap()
+        .site_key
+        .clone();
+    let s = applied.get(&new_key).expect("a standing");
+    assert!(s.is_unresolved());
+    let marker = s.new_since_decision.as_ref().expect("new since decision");
+    assert_eq!(
+        (marker.decision_id.as_str(), marker.node_id.as_str()),
+        (record.id.as_str(), place.as_str())
+    );
+}
