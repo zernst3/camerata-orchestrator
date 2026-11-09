@@ -557,6 +557,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Rules checked; the Rule and Rules columns",
     ),
     e(
+        TERM_ALSO_MATCHES,
+        "A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision.",
+        "All problems; the Rules column; the also_matches field of findings.json",
+    ),
+    e(
         "Rule id",
         "The short code that names a rule. Tools read it, and you can quote it when you ask us about a rule.",
         "The technical columns at the right of every table",
