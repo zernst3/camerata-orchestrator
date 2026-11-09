@@ -270,6 +270,8 @@ pub struct DuplicateView {
 pub struct CarriedRuleView {
     pub rule_id: String,
     pub site_key: String,
+    /// The sub-group the carried row sits in, so a jump to it can open its node.
+    pub node_id: String,
     pub severity: String,
     pub kind: Option<FindingKind>,
     /// Why the release gate holds the carried row, when it does.
@@ -289,6 +291,8 @@ pub struct CarriedRuleView {
 #[serde(deny_unknown_fields)]
 pub struct CarriedByView {
     pub site_key: String,
+    /// The sub-group the carrier sits in, so a jump to it can open its node.
+    pub node_id: String,
     pub rule_id: String,
     pub path: String,
     pub line: usize,

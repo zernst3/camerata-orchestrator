@@ -64,6 +64,7 @@ struct Case {
     ctx: DetailContext,
     panel: DetailPanel,
     ticked: bool,
+    unticked: std::collections::BTreeSet<String>,
 }
 
 #[component]
@@ -75,6 +76,7 @@ fn Harness(props: Case) -> Element {
             position: "7 of 12",
             panel: props.panel.clone(),
             ticked: props.ticked,
+            unticked: props.unticked.clone(),
         }
     }
 }
@@ -87,9 +89,98 @@ fn page(row: SiteRow, panel: DetailPanel) -> String {
             ctx: ctx(),
             panel,
             ticked: false,
+            unticked: std::collections::BTreeSet::new(),
         },
     )
     .replace(GLOBAL_CSS, "")
+}
+
+fn page_unticked(row: SiteRow, unticked: &[&str]) -> String {
+    test_harness::render_props(
+        Harness,
+        Case {
+            row,
+            ctx: ctx(),
+            panel: DetailPanel::default(),
+            ticked: false,
+            unticked: unticked.iter().map(|k| k.to_string()).collect(),
+        },
+    )
+    .replace(GLOBAL_CSS, "")
+}
+
+fn carried_rule(n: usize, severity: &str) -> camerata_api_types::review_view::CarriedRuleView {
+    camerata_api_types::review_view::CarriedRuleView {
+        rule_id: format!("SEC-CARRIED-{n}"),
+        site_key: format!("carried-key-{n}"),
+        node_id: format!("sub:SEC-CARRIED-{n}/0"),
+        severity: severity.to_string(),
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
+        held: None,
+        stage1_real: "yes".to_string(),
+        escalation_reason: None,
+        escalation_rank: None,
+        decision: None,
+    }
+}
+
+// ── The place (D2) ────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_carrier_lists_the_rules_it_carries_each_with_a_tick_and_a_decide_alone_control() {
+    let mut row = plain();
+    row.place_id = "place:abc123abc123".to_string();
+    let mut held = carried_rule(2, "medium");
+    held.held = Some(HoldReason::EvidenceUnverified);
+    row.carries = vec![carried_rule(1, "high"), held, carried_rule(3, "low")];
+    let html = page_unticked(row.clone(), &["carried-key-3"]);
+    clean(&html);
+    assert!(html.contains("Also matches at this place"), "{html}");
+    for id in ["SEC-CARRIED-1", "SEC-CARRIED-2", "SEC-CARRIED-3"] {
+        assert!(html.contains(id), "{id} is listed");
+    }
+    assert_eq!(html.matches("Decide alone").count(), 3);
+    assert!(
+        html.contains("held: evidence unverified"),
+        "the hold is shown"
+    );
+    // The head carries the chip.
+    assert!(html.contains("+3 also match"), "{html}");
+    // Three ticks: the first ticked, the held one locked, the unticked one clear.
+    assert_eq!(html.matches("carried-tick").count(), 3);
+    assert_eq!(
+        html.matches("disabled").count(),
+        1,
+        "only the held tick is locked"
+    );
+    // A lone row draws none of it.
+    let alone = page(plain(), DetailPanel::default());
+    assert!(!alone.contains("Also matches at this place"));
+    assert!(!alone.contains("Carried by"));
+}
+
+#[test]
+fn a_carried_row_says_where_it_is_decided_and_offers_a_way_to_the_carrier() {
+    let mut row = plain();
+    row.place_id = "place:abc123abc123".to_string();
+    row.markers = vec![Marker::Carried];
+    row.carried_by = Some(camerata_api_types::review_view::CarriedByView {
+        site_key: "carrier-key".to_string(),
+        node_id: "sub:SEC-A/0".to_string(),
+        rule_id: "SEC-A".to_string(),
+        path: "src/a.rs".to_string(),
+        line: 5,
+    });
+    let html = page(row, DetailPanel::default());
+    clean(&html);
+    assert!(html.contains("Carried by"), "{html}");
+    assert!(html.contains("SEC-A at src/a.rs:5"), "{html}");
+    assert!(
+        html.contains("decided there unless you decide this rule alone"),
+        "{html}"
+    );
+    assert!(html.contains("Go to carrier"));
+    assert!(!html.contains("Also matches at this place"));
 }
 
 fn mode(mode: DetailMode) -> DetailPanel {
@@ -648,6 +739,7 @@ fn an_outlier_offers_the_batch_tick_and_a_checked_box_when_ticked() {
             ctx: ctx(),
             panel: DetailPanel::default(),
             ticked: true,
+            unticked: std::collections::BTreeSet::new(),
         },
     );
     assert!(html.contains("Include this outlier in the next batch decision"));
@@ -1253,6 +1345,7 @@ fn the_merge_pickers_empty_line_is_the_hosts_own_text() {
             ctx: context.clone(),
             panel: mode(m),
             ticked: false,
+            unticked: std::collections::BTreeSet::new(),
         },
     )
     .replace(GLOBAL_CSS, "");

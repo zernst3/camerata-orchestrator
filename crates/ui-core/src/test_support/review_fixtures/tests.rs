@@ -122,7 +122,7 @@ fn a_different_seed_gives_different_data() {
 fn fixtures_cover_every_state() {
     let unique: BTreeSet<&str> = FIXTURE_IDS.iter().copied().collect();
     assert_eq!(unique.len(), FIXTURE_IDS.len(), "no id is listed twice");
-    assert_eq!(FIXTURE_IDS.len(), 67);
+    assert_eq!(FIXTURE_IDS.len(), 71);
     for id in FIXTURE_IDS {
         assert!(fixture(id).is_some(), "no fixture for {id}");
     }
@@ -556,9 +556,32 @@ fn tree_states_show_what_their_names_promise() {
         .flat_map(|p| &p.rows)
         .flat_map(|r| r.markers.clone())
         .collect();
-    for m in Marker::PRECEDENCE {
+    for m in Marker::PRECEDENCE
+        .into_iter()
+        .filter(|m| *m != Marker::Carried)
+    {
         assert!(shown.contains(&m), "tree/markers does not show {m:?}");
     }
+    // A carried row shows beside its carrier, on its own page.
+    let Body::Tree(place) = body("tree/place") else {
+        panic!()
+    };
+    assert!(
+        place
+            .pages
+            .values()
+            .flat_map(|p| &p.rows)
+            .any(|r| r.markers.contains(&Marker::Carried)),
+        "tree/place shows a carried row"
+    );
+    assert!(
+        place
+            .pages
+            .values()
+            .flat_map(|p| &p.rows)
+            .any(|r| !r.carries.is_empty()),
+        "tree/place shows a carrier"
+    );
     assert!(
         markers.pages.len() >= 2 && markers.open_nodes.len() > markers.pages.len(),
         "ancestors are open too"

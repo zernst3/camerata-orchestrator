@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 67] = [
+pub const FIXTURE_IDS: [&str; 71] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -31,6 +31,7 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "tree/node-decided",
     "tree/not-group-reviewed",
     "tree/narrow",
+    "tree/place",
     "queue/empty",
     "queue/loading",
     "queue/error",
@@ -41,6 +42,7 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "queue/30k",
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
+    "queue/place",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -76,6 +78,8 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "detail/over-budget",
     "detail/viewer-commit",
     "detail/thrown-out",
+    "detail/carrier",
+    "detail/carried",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",
@@ -185,13 +189,20 @@ fn subgroup_ids(ds: &ReviewDataSet) -> Vec<String> {
         .collect()
 }
 
+/// The markers the `tree/markers` page covers: every one but Carried, which a carried row shows
+/// beside its carrier and has its own page (`tree/place`).
+fn cover_markers() -> impl Iterator<Item = Marker> {
+    Marker::PRECEDENCE
+        .into_iter()
+        .filter(|m| *m != Marker::Carried)
+}
+
 /// Where each marker first shows on the first page of `sub`: (marker, row index).
 fn marker_rows(ds: &ReviewDataSet, sub: &str) -> Vec<(Marker, usize)> {
     let Some(page) = ds.sites_page(sub, None, SITES_PAGE_SIZE) else {
         return Vec::new();
     };
-    Marker::PRECEDENCE
-        .into_iter()
+    cover_markers()
         .filter_map(|m| {
             page.rows
                 .iter()
@@ -242,8 +253,7 @@ fn markers_cover(ds: &ReviewDataSet) -> Vec<(String, usize)> {
             .max()
             .unwrap_or(1),
     )];
-    let mut remaining: Vec<Marker> = Marker::PRECEDENCE
-        .into_iter()
+    let mut remaining: Vec<Marker> = cover_markers()
         .filter(|m| !info[&richest].iter().any(|(have, _)| have == m))
         .collect();
     // Rarest first: a marker only one sub-group has is decided before one many have.
@@ -545,6 +555,42 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 shell: shell_of(&ds),
                 body: Body::Tree(tree_body(&ds, &subs)),
             }
+        }
+        "tree/place" => {
+            // The sub-groups of a carrier and of the row it carries, open, the carrier focused:
+            // its chip, the carried row's pointer and the place decision's prompt.
+            let ds = base();
+            let carrier = first_row(&ds, |r| !r.carries.is_empty())?;
+            let carried = first_row(&ds, |r| r.carried_by.is_some())?;
+            let mut subs = vec![carrier.group_path[2].clone()];
+            if !subs.contains(&carried.group_path[2]) {
+                subs.push(carried.group_path[2].clone());
+            }
+            let mut body = tree_body(&ds, &subs);
+            body.selected_site = Some(carrier.site_key);
+            StateFixture {
+                shell: shell_of(&ds),
+                body: Body::Tree(body),
+            }
+        }
+        "queue/place" => {
+            // The first escalated row heads a place that carries a second rule.
+            let ds = base();
+            let carrier = first_row(&ds, |r| !r.carries.is_empty())?;
+            let mut queue = ds.queue(false, 0, 100);
+            if let Some(first) = queue.escalated.first_mut() {
+                first.site.place_id.clone_from(&carrier.place_id);
+                first.site.carries.clone_from(&carrier.carries);
+            }
+            queue_state(&ds, queue)
+        }
+        "detail/carrier" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| !r.carries.is_empty()), None)
+        }
+        "detail/carried" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| r.carried_by.is_some()), None)
         }
         "tree/narrow" => {
             let ds = base();

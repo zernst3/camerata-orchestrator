@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 10, "every queue state is built");
+    assert_eq!(states().len(), 11, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");

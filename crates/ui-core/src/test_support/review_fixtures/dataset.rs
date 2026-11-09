@@ -15,16 +15,17 @@ use camerata_api_types::review::{
     REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
-    BreadcrumbItem, CategoryAllocation, CorrectionRef, DecisionView, DuplicateView, EditView,
-    EngineCheckCard, EngineCheckError, EngineCheckLane, EngineCheckSettingsView,
-    EngineCheckVerdict, EscalationSettingsView, EscalationStatus, ExportGateView, FlaggedByView,
-    HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView, MovedFromView, NeededMeSummary,
-    NewSinceDecisionView, NodeCountsView, NodeDecisionGap, NodeDecisionSummary, OutlierView,
-    PlacementView, QueueRow, QueueView, ReviewCounts, ReviewSettingsView, ReviewShellView,
-    SampleStratum, SettingsLimits, SiteRow, SitesPage, Stage1View, Stage2View, StageModelsView,
-    StaleSummary, StratumRate, SummarySource, TreeLevel, TreeNodeKind, TreeNodeView, TreeView,
-    ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX, QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR,
-    SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED, SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
+    BreadcrumbItem, CarriedByView, CarriedRuleView, CategoryAllocation, CorrectionRef,
+    DecisionView, DuplicateView, EditView, EngineCheckCard, EngineCheckError, EngineCheckLane,
+    EngineCheckSettingsView, EngineCheckVerdict, EscalationSettingsView, EscalationStatus,
+    ExportGateView, FlaggedByView, HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView,
+    MovedFromView, NeededMeSummary, NewSinceDecisionView, NodeCountsView, NodeDecisionGap,
+    NodeDecisionSummary, OutlierView, PlacementView, QueueRow, QueueView, ReviewCounts,
+    ReviewSettingsView, ReviewShellView, SampleStratum, SettingsLimits, SiteRow, SitesPage,
+    Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource, TreeLevel,
+    TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
+    QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR, SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED,
+    SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
 use serde::Serialize;
 
@@ -927,6 +928,8 @@ pub fn build(p: &Params) -> ReviewDataSet {
     let moved_rows = take(p.moved);
     let dup_rows = take(p.duplicates);
     let added_rows = take(p.added);
+    // Two plain rows of one place: the first carries the second (D2).
+    let place_rows = take(2);
     let mut special = vec![false; rows.len()];
     for group in [
         &cand_rows,
@@ -939,6 +942,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
         &moved_rows,
         &dup_rows,
         &added_rows,
+        &place_rows,
     ] {
         for &i in group {
             special[i] = true;
@@ -1386,6 +1390,12 @@ pub fn build(p: &Params) -> ReviewDataSet {
     // Engine Check verdicts and the corrections behind them.
     let verdicts = apply_engine_mode(p, &mut rows);
 
+    // The place: the carrier lists the rule it carries and the carried row points back at it.
+    // Done last, so the carried rule shows the decision and hold it finally has.
+    if let [carrier, carried] = place_rows[..] {
+        link_place(&mut rows, carrier, carried);
+    }
+
     // Everything else is engine verified, unless held.
     for r in &mut rows {
         if r.review_level.is_none() && r.held.is_none() && r.thrown_out_reason.is_none() {
@@ -1403,6 +1413,42 @@ pub fn build(p: &Params) -> ReviewDataSet {
         (&node_decisions, &gap_for),
         &verdicts,
     )
+}
+
+/// Make `carrier` the row that carries `carried` at their place (D2).
+fn link_place(rows: &mut [SiteRow], carrier: usize, carried: usize) {
+    let place_id = format!(
+        "place:{}",
+        hex_encode(&rows[carrier].site_key)
+            .chars()
+            .rev()
+            .take(12)
+            .collect::<String>()
+    );
+    let other = rows[carried].clone();
+    let head = rows[carrier].clone();
+    let candidate = other.stage2.as_ref().filter(|s| s.reason.is_some());
+    rows[carrier].place_id.clone_from(&place_id);
+    rows[carrier].carries = vec![CarriedRuleView {
+        rule_id: other.rule_id.clone(),
+        site_key: other.site_key.clone(),
+        node_id: other.group_path[2].clone(),
+        severity: other.severity.clone(),
+        kind: other.kind.clone(),
+        held: other.held,
+        stage1_real: other.stage1.real.clone(),
+        escalation_reason: candidate.and_then(|s| s.reason),
+        escalation_rank: candidate.and_then(|s| s.global_rank),
+        decision: other.decision.clone(),
+    }];
+    rows[carried].place_id = place_id;
+    rows[carried].carried_by = Some(CarriedByView {
+        site_key: head.site_key.clone(),
+        node_id: head.group_path[2].clone(),
+        rule_id: head.rule_id.clone(),
+        path: head.path.clone(),
+        line: head.line,
+    });
 }
 
 /// The old and new text of a field for a made-up edit.

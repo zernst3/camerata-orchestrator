@@ -162,6 +162,9 @@ pub(crate) fn TreeScreen(
     #[props(default)] on_focus_node: Callback<String>,
     #[props(default)] on_focus_site: Callback<(String, String)>,
     #[props(default)] on_tick: Callback<String>,
+    /// Open another row of the same place: its key, rule id and sub-group.
+    #[props(default)]
+    on_goto: Callback<(String, String, String)>,
     #[props(default)] on_more: Callback<String>,
     #[props(default)] on_retry_node: Callback<String>,
     #[props(default)] on_retry: Callback<()>,
@@ -285,6 +288,7 @@ pub(crate) fn TreeScreen(
                                             ticked: state.ticked.clone(),
                                             on_focus_site,
                                             on_tick,
+                                            on_goto,
                                             on_more,
                                             on_retry: on_retry_node,
                                         }
@@ -318,13 +322,20 @@ pub(crate) fn TreeScreen(
                     {
                         let node_label = index.node(&node).map(|n| n.label.clone()).unwrap_or_default();
                         let ctx = context_for(&index, &state, &node, &row);
-                        let site_prompt = prompt.clone().filter(
-                            |p| matches!(p, TreePrompt::Site { key, .. } if *key == row.site_key),
-                        );
+                        // A site's own reason prompt, or the place decision this row heads.
+                        let site_prompt = prompt.clone().filter(|p| match p {
+                            TreePrompt::Site { key, .. } => *key == row.site_key,
+                            TreePrompt::Batch { node, .. } => {
+                                !row.place_id.is_empty() && *node == row.place_id
+                            }
+                            _ => false,
+                        });
+                        let node_label = if row.place_id.is_empty() { node_label } else { "this place".to_string() };
                         rsx! {
                             SiteDetailView {
                                 position: site_position(&state, &node, &row),
                                 ticked: state.ticked.contains(&row.site_key),
+                                unticked: state.place_unticked.clone(),
                                 panel: detail.clone(),
                                 ctx,
                                 row,
@@ -501,6 +512,7 @@ fn SiteTable(
     ticked: BTreeSet<String>,
     on_focus_site: Callback<(String, String)>,
     on_tick: Callback<String>,
+    on_goto: Callback<(String, String, String)>,
     on_more: Callback<String>,
     on_retry: Callback<String>,
 ) -> Element {
@@ -552,6 +564,7 @@ fn SiteTable(
                                 row,
                                 on_focus_site,
                                 on_tick,
+                                on_goto,
                             }
                         }
                     }
@@ -606,9 +619,13 @@ fn SiteRowView(
     ticked: bool,
     on_focus_site: Callback<(String, String)>,
     on_tick: Callback<String>,
+    on_goto: Callback<(String, String, String)>,
 ) -> Element {
     let token = dom_token(&row.site_key);
     let cell = marker_cell(&row);
+    let also = camerata_ui_core::tree::place::also_match_chip(&row);
+    let pointer = camerata_ui_core::tree::place::carried_pointer(&row);
+    let carrier = row.carried_by.clone();
     let fold = cell.fold_label();
     let fold_tip = cell.fold_tip();
     let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag_of(&row));
@@ -626,6 +643,9 @@ fn SiteRowView(
     }
     if row.held.is_some() {
         class.push_str(" row-held");
+    }
+    if row.carried_by.is_some() {
+        class.push_str(" row-carried");
     }
     if focused {
         class.push_str(" focused");
@@ -661,6 +681,9 @@ fn SiteRowView(
                     if let Some(fold) = fold {
                         span { class: "mark-fold", title: "{fold_tip}", "{fold}" }
                     }
+                    if let Some(chip) = also {
+                        span { class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
+                    }
                 }
             }
             td { class: "col-sev",
@@ -672,7 +695,23 @@ fn SiteRowView(
                 span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
             }
             td { class: "col-loc", title: "{row.repo}", "{file_line(&row)}" }
-            td { class: "col-headline", title: "{row.headline}", "{row.headline}" }
+            td { class: "col-headline", title: "{row.headline}",
+                if let (Some(text), Some(by)) = (pointer, carrier) {
+                    a {
+                        class: "carried-pointer",
+                        href: "#",
+                        title: "Open the row that carries this rule",
+                        onclick: move |e| {
+                            e.prevent_default();
+                            e.stop_propagation();
+                            on_goto.call((by.site_key.clone(), by.rule_id.clone(), by.node_id.clone()));
+                        },
+                        "{text}"
+                    }
+                } else {
+                    "{row.headline}"
+                }
+            }
             td { class: "col-s1", title: "{row.stage1.reason}", "{stage1_cell(&row)}" }
             td { class: "col-s2",
                 title: row.stage2.as_ref().map(|s| s.why.clone()).unwrap_or_default(),
@@ -688,6 +727,9 @@ fn SiteRowView(
                 }
                 if decision.inherited {
                     span { class: "dec-inherited", "inherited" }
+                }
+                if let Some(note) = decision.note.clone() {
+                    span { class: "dec-carried-note", "{note}" }
                 }
             }
         }
@@ -1393,6 +1435,46 @@ pub(crate) fn TreeHost(
         }
     });
 
+    // A decision on a row that carries other rules at its place is a decision on the place
+    // (D2): the plan names every rule it writes and every rule it leaves out, and the reason is
+    // required. Returns false for a row that carries nothing, which decides as before.
+    let open_place = use_callback(move |st: TriageState| -> bool {
+        let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() else {
+            return false;
+        };
+        let Some(row) = state.peek().site(&node, &key).cloned() else {
+            return false;
+        };
+        if row.carries.is_empty() || row.place_id.is_empty() {
+            return false;
+        }
+        let Some(decision) = decision_state_for(st) else {
+            return false;
+        };
+        let plan = camerata_ui_core::tree::place::place_plan(
+            &row,
+            &decision,
+            &state.peek().place_unticked,
+        );
+        prompt.set(Some(TreePrompt::Batch {
+            node: plan.node.clone(),
+            state: st,
+            plan,
+            reason: String::new(),
+            error: None,
+        }));
+        true
+    });
+    let goto = use_callback(move |(key, rule_id, node_id): (String, String, String)| {
+        if let Some(mut d) = door {
+            d.0.set(Some(Door::Site {
+                key,
+                rule_id,
+                node_id,
+            }));
+        }
+    });
+
     let commit = use_callback({
         let api = api.clone();
         move |()| {
@@ -1536,6 +1618,8 @@ pub(crate) fn TreeHost(
                     open_batch.call((id, st));
                 }
             }
+            TreeCommand::Site(PaneCommand::Dispose(st) | PaneCommand::PromptFor(st))
+                if open_place.call(st) => {}
             TreeCommand::Site(PaneCommand::Dispose(st)) => {
                 if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
                     decide_site.call((node, key, st, String::new()));
@@ -1616,6 +1700,7 @@ pub(crate) fn TreeHost(
             on_toggle,
             on_focus_node: move |id: String| state.write().focus_node(&id),
             on_focus_site: move |(node, key): (String, String)| state.write().focus_site(&node, &key),
+            on_goto: goto,
             on_tick: move |key: String| {
                 let found = {
                     let st = state.peek();
@@ -1648,6 +1733,9 @@ pub(crate) fn TreeHost(
             on_detail: move |event: DetailEvent| match event {
                 // The lane's own: a decision, the outlier tick, the viewer and the stack.
                 DetailEvent::Decide(st) => {
+                    if open_place.call(st) {
+                        return;
+                    }
                     if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
                         if refuses.call((node.clone(), key.clone(), st)) {
                             return;
@@ -1664,6 +1752,14 @@ pub(crate) fn TreeHost(
                         state.write().toggle_tick(&row.site_key.clone(), &row);
                     }
                 }
+                DetailEvent::TickCarried(carried_key) => {
+                    if let Some((row, _)) = cursor_site() {
+                        if let Some(rule) = row.carries.iter().find(|c| c.site_key == carried_key) {
+                            state.write().toggle_carried(rule);
+                        }
+                    }
+                }
+                DetailEvent::GoTo(key, rule_id, node_id) => goto.call((key, rule_id, node_id)),
                 DetailEvent::OpenCode => open_code.call(()),
                 DetailEvent::OpenStack => open_stack.call(()),
                 other => {

@@ -229,6 +229,7 @@ impl<'a> ReviewComposer<'a> {
                 CarriedRuleView {
                     rule_id: f.rule_id.clone(),
                     site_key: f.site_key.clone(),
+                    node_id: f.group_path.get(2).cloned().unwrap_or_default(),
                     severity: f.severity.clone(),
                     kind: f.kind.clone(),
                     held: self.hold_of(&f.site_key),
@@ -247,6 +248,7 @@ impl<'a> ReviewComposer<'a> {
         let carrier = self.row(&place.carrier)?;
         Some(CarriedByView {
             site_key: carrier.site_key.clone(),
+            node_id: carrier.group_path.get(2).cloned().unwrap_or_default(),
             rule_id: carrier.rule_id.clone(),
             path: carrier.path.clone(),
             line: carrier.line,

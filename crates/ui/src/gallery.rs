@@ -94,6 +94,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "node-decided",
             "not-group-reviewed",
             "narrow",
+            "place",
         ],
     ),
     (
@@ -110,6 +111,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "30k",
             "detail-form-open",
             "merge-picker-empty-pool",
+            "place",
         ],
     ),
     (
@@ -157,6 +159,8 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "over-budget",
             "viewer-commit",
             "thrown-out",
+            "carrier",
+            "carried",
         ],
     ),
     (
