@@ -116,3 +116,141 @@ A place below the line is not left unchecked. The engine checked it against the 
 The glossary below is generated from the same vocabulary the workbook's Glossary sheet prints, so the two cannot differ. Because the workbook speaks to the client, its definitions address the reader as "you". To change a definition, change the vocabulary and regenerate this block.
 
 To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server client_package_doc_glossary_block`.
+
+<!-- glossary:start -->
+
+| Term | Plain meaning | Where it appears |
+|---|---|---|
+| Fix | One cause and one change that clears a whole set of problems, wherever they appear. | Fix plan; the Fix column on All problems |
+| Rule group | The places of one rule that share one cause. A fix is made of one or more rule groups. | How problems were grouped |
+| Open | A fix or a place with at least one rule no reviewer has ruled on yet. The count says how many rules are decided. | The Decision so far column of Fix plan and All problems |
+| Mixed | Shown as Mixed, see rules: the rules of a fix were decided differently, so the Rules column and the reviewer decisions say which way each went. | The Decision so far column of Fix plan and All problems |
+| Shares places with | The other fixes that list the same place without one containing the other, with how many places they share. | Fix plan |
+| Place | One file and line, or one whole file, where a problem was seen. | File and Line columns; every Places count |
+| Problem | What was found at a place. A problem lists every rule it breaks. | All problems; the Problem column |
+| Area | The part of your system a rule belongs to, such as security or testing. | Area columns; the scorecard on Start here |
+| Rule | One thing we looked for. | Rules checked; the Rule and Rules columns |
+| Rule id | The short code that names a rule. Tools read it, and you can quote it when you ask us about a rule. | The technical columns at the right of every table |
+| Fix order | When to do a fix: First, Next or Later. First is every critical and high fix and the quick medium ones. Next is the rest of the medium fixes. Later is the low ones. | Fix plan; All problems; Needs a decision |
+| First | Fix order: do this fix before the others. Every critical and high fix, and the medium fixes that are quick. | Fix plan; All problems |
+| Next | Fix order: do this fix after the First ones. The rest of the medium fixes. | Fix plan; All problems |
+| Later | Fix order: plan this fix after the Next ones. The low fixes. | Fix plan; All problems |
+| Severity | How bad the problem is if it is left alone: Critical, High, Medium or Low. Info marks an observation that is not a defect, such as a convention noted. | Every table of problems; the scorecard on Start here |
+| Info | A severity for an observation that is not a defect, such as a convention noted. It counts in the Low column of the scorecard. | The Severity column; the scorecard on Start here |
+| Effort | A rough size of the change for one place: low, medium or high. | Fix plan; All problems |
+| Estimated hours | The range of hours the effort stands for, for one place. | All problems |
+| Confidence | How sure the review is that the problem is real: High, Low or Disputed. Low means the review was unsure; Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision. | All problems; Needs a decision |
+| Needs a decision | A reviewer must rule on the problem before you act on it. | The Needs a decision sheet; the column of that name on All problems |
+| Ruled out | Looked at and not a problem. The reason is on the Ruled out sheet. | The Ruled out sheet |
+| Convention | A habit your code already follows consistently. | Your conventions; Departures |
+| Departure | A place where your code departs from a convention it mostly follows. | The Departures sheet |
+| Source | Who found it: Deterministic, Model-reviewed or Tool followed by the tool's name. | All problems; Needs a decision |
+| Deterministic | Found by a check that cites an authoritative published standard and gives the same answer every time. | The Source column; Rules checked |
+| Model-reviewed | Found by a model reading your code. It may cite a related standard. | The Source column; Rules checked |
+| Tool | Found by an outside analysis tool that ran during the inspection. | The Source column; Rules checked |
+| Related standard | A published standard matched to a model-reviewed problem by topic. It is not a rule we checked. | The Standard cited column |
+| Standard cited | The published standard, such as an OWASP or CWE entry, behind the rule. | All problems; Rules checked |
+| Reviewed in person | Yes when a person read the problem in your code. Blank means the engine checked it against your files without a person reading it. | All problems; Dependencies |
+| Engine verified | Checked by the engine against your files, without a person reading it. | How problems were grouped |
+| Example from your code | A fix written for the code at one place in your repo. | Fix plan |
+| Standard fix | The rule's own guidance, not written for your code. | The Fix type column |
+| Tailored fix | A fix written for your code that passed our checks. | The Fix type column |
+| Fix type | Whether the fix text is a Tailored fix or a Standard fix. | All problems; Departures |
+| Kind | What a row is: a defect, a departure, a convention, no convention, a rule that could not be completed or a dependency advisory. Tools read it; people use the sheet it sits on. | The technical columns |
+| Carried from an earlier inspection | A problem carried forward unchanged because only changed files were inspected again. The column holds the earlier commit. | The Carried from column |
+| Carried from | The commit of the earlier inspection a problem was carried forward from. Blank when it was found this time. | The technical columns of All problems |
+| Dependency advisory | A published vulnerability in a package you depend on. | The Dependencies sheet |
+| Status | The state the engine holds a problem in, for example suppressed by an earlier baseline. For tools. | The technical columns of All problems |
+| Place id | A short code that names one place. It is the same in every file of this package. | The technical columns |
+| Fix id | A code that names one fix. It matches a row of the Fix plan. | The technical columns |
+| Rule ids | Every rule id behind a problem: its own rule and any rule that flagged the same place. | The technical columns of All problems |
+| Review level | How closely the problem was reviewed, in the engine's own words. | The technical columns |
+| Merged into | The Place id of the problem a reviewer merged this one into. | The technical columns; Reviewer decisions |
+| Reviewer edited | Yes when a reviewer changed the text of this row. | The technical columns |
+| Edit ids | The ids of the reviewer's edits to this row. | The technical columns |
+| Standard links | The web addresses of the standards cited. | The technical columns of All problems |
+| Group id | A code that names one group of problems: an area, a rule, a rule group or a fix. | The technical columns |
+| Parent group id | The Group id of the group this one sits under. | How problems were grouped |
+| Inherited from | The id of the group decision a decision for one place was written by. | Reviewer decisions |
+| Order | The place of a fix in the plan: 1 is the first to do. | Fix plan |
+| Places | How many places a fix, a problem or a group covers. | Fix plan; All problems; How problems were grouped; the tickets file |
+| Place list | The places a ticket names, one to a line: the file and line of each. Only in the tickets file. | The tickets file |
+| Rules | The rules a fix or a problem breaks, by name. | Fix plan; All problems |
+| Areas | The areas a fix touches. | Fix plan |
+| Folders | The folders that hold most of a fix's places, with how many places each holds. | Fix plan |
+| Reviewed by | How closely the places of a fix were reviewed. | Fix plan |
+| Go to places | A link to the first place of a fix on All problems. | Fix plan |
+| What is wrong | The cause the places of a fix share. | Fix plan |
+| Why it matters | What the problem puts at risk. | Fix plan |
+| What to do | The change that makes the fix. | Fix plan; Departures; Dependencies |
+| What to do here | The change to make at this place. | All problems; Needs a decision |
+| File | The file a problem was seen in. | Every table of problems |
+| Line | The line in the file, or whole file when the problem is the file itself. | Every table of problems |
+| Repo | The repository a place is in. | Every table of problems |
+| Code seen | The lines of your code the problem was seen in. | All problems |
+| Decision so far | What a reviewer has already decided about the problem. | All problems; Needs a decision |
+| Why it is waiting | Why a reviewer must rule on the problem first. | Needs a decision |
+| Also found at | Other places the same problem was found, up to a limit. All of them are on All source rows. | All problems; Your conventions |
+| Why the severity changed | Why the severity is not the one the problem was first rated at. | All problems |
+| What we checked | The thing we looked for, in words. | Your conventions; Patterns across services |
+| What your code does | The convention your code follows, or the habits we saw when it follows none. | Your conventions |
+| How consistently | Whether your code follows the convention everywhere we looked. | Your conventions |
+| Places looked at | How many places we looked at to see the convention. | Your conventions |
+| More detail | The longer explanation behind a row. | All problems; Your conventions; Not checked |
+| Places departing | How many places depart from the convention. | Departures |
+| Places checked | How many places we checked against the convention. | Departures |
+| Worst severity | The highest severity among the departing places. | Departures |
+| Where | The places that depart, up to a limit. All of them are on All source rows. | Departures |
+| Package | The software package an advisory is about. | Dependencies |
+| Advisory | The published description of the vulnerability. | Dependencies |
+| Fixed in | The first version of the package that has the patch. | Dependencies |
+| Result | What a rule found: how many places, or clean. | Rules checked |
+| How we checked | Whether a rule is Deterministic, Model-reviewed or a Tool. | Rules checked |
+| Alternative applied | For a rule with several accepted ways to do a thing, the way we judged your code against. | Rules checked |
+| Evidence for it | The file and line that showed which alternative your code uses. | Rules checked |
+| Go to fix | A link to the fix for the rule's problems, or to the problems when no fix covers them. | Rules checked |
+| Ruled out by | Who ruled the problem out: the Reviewer or the Engine. | Ruled out |
+| Reason | Why, in words. | Ruled out; Reviewer decisions |
+| Kind of gap | What sort of thing was not checked. | Not checked |
+| What | The rule, file or tool that was not checked. | Not checked |
+| Why | Why it was not checked. | Not checked |
+| Row role | Whether a source row is the Primary row of a problem or a row behind it: a collapsed source, or another place the same problem was found. | All source rows |
+| Found how many ways | How many source rows share this Place id. | All source rows |
+| Represented by | A link to the row that stands for this source row on the other sheets. | All source rows |
+| Shown on | The sheet that holds the row standing for this source row. | All source rows |
+| Decision id | A code that names one recorded decision. | Reviewer decisions |
+| Scope | Whether a decision was made on one place or on a group of places. | Reviewer decisions |
+| State | What the decision was: confirmed, ignored, ruled out, merged and so on. | Reviewer decisions |
+| Places covered | How many places a group decision covers. | Reviewer decisions |
+| Reason recorded | Yes when the reviewer wrote a reason down. | Reviewer decisions |
+| Revoked | Yes when the decision was later undone. It stays in the record. | Reviewer decisions |
+| Group | A group of problems: an area, a rule, a rule group or a fix. | How problems were grouped |
+| Within | What kind of group it is: Area, Rule, Rule group or Fix. | How problems were grouped |
+| Under | The group this one sits under. | How problems were grouped |
+| Cause | Why the places of a fix belong together. | How problems were grouped |
+| Summary | A short account of the group. | How problems were grouped |
+| Reviewed with others like it | Places a reviewer ruled on as part of a group of places that share one cause. | How problems were grouped |
+| Term | The word being defined. | Glossary |
+| Plain meaning | What the word means in this package. | Glossary |
+| Where you meet it | The sheets and columns where the word shows up. | Glossary |
+| Sheet | A tab of this workbook. | Start here |
+| What it is | One line on what a sheet holds. | Start here |
+| Rows | How many rows a sheet holds. | Start here |
+| Back to Start here | A link at the top of every sheet that returns you to the Start here page. | Every sheet |
+| Start here | The first page: what this file is, a link to every sheet, the scorecard and the facts of the inspection. | The first tab |
+| Glossary | This sheet: what every word and column means. | The second tab |
+| Fix plan | One row for each fix, in the order to do them. | The What to fix tabs |
+| All problems | Every problem once, with the place it was seen and what to do there. | The What to fix tabs |
+| Your conventions | What your code already does consistently, and where it has no single habit. | The What to fix tabs |
+| Departures | Where your code departs from a convention it mostly follows. | The What to fix tabs |
+| Dependencies | Known vulnerabilities in the packages you depend on. | The What to fix tabs |
+| Rules checked | Every rule we ran and what it found. | The What we checked tabs |
+| Patterns across services | How each service follows each rule, patterns and differences alike: violated in some places, clean, not applicable or not reviewed. It is an observation, so it carries no severity. | The What we checked tabs, for projects of several repos |
+| Pattern | How one service follows one rule: violated in some places, clean, not applicable or not reviewed. A difference between services is a pattern too. | Patterns across services |
+| Not checked | What we could not or did not check: rules that could not finish, rules that did not run, files we did not read. | The What we checked tabs |
+| All source rows | The raw record: every row the engine produced, including the collapsed source rows behind a merged problem. This is the one sheet where a problem can be listed more than once. | The For reviewers tabs |
+| Reviewer decisions | Every decision a reviewer recorded, with the reason where it is shared with you. | The For reviewers tabs |
+| How problems were grouped | How problems were gathered into areas, rules, rule groups and fixes, with the counts at each step. | The For reviewers tabs |
+| Technical (ids for tooling) | The grey columns at the right of every table, closed by default. Open them with the plus sign above the columns. They hold ids and codes for tools; you do not need them to read the sheet. | The right edge of every table |
+
+<!-- glossary:end -->
