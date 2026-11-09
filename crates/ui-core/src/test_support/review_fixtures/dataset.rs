@@ -631,6 +631,9 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         group_primary: false,
         fix_id: String::new(),
         fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1,
         stage2,
         markers: Vec::new(),
@@ -676,6 +679,9 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         group_primary: false,
         fix_id: String::new(),
         fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1: Stage1View {
             severity: "low".to_string(),
             ..Stage1View::default()
@@ -720,6 +726,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
             Marker::Stale => stale,
             Marker::Moved => row.moved_from.is_some(),
             Marker::PossibleDuplicate => row.possible_duplicate_of.is_some(),
+            Marker::Carried => row.carried_by.is_some(),
             Marker::Edited => edited,
         })
         .collect()

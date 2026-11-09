@@ -72,13 +72,16 @@ pub enum Marker {
     Moved,
     /// Another row may describe the same thing.
     PossibleDuplicate,
+    /// Another row at the same place carries this rule: it is decided there unless it is decided
+    /// alone.
+    Carried,
     /// The reviewer changed a field of the row.
     Edited,
 }
 
 impl Marker {
     /// Every marker, in precedence order (spec section 2, "noise rule").
-    pub const PRECEDENCE: [Marker; 10] = [
+    pub const PRECEDENCE: [Marker; 11] = [
         Self::Held,
         Self::Escalated,
         Self::Candidate,
@@ -88,6 +91,7 @@ impl Marker {
         Self::Stale,
         Self::Moved,
         Self::PossibleDuplicate,
+        Self::Carried,
         Self::Edited,
     ];
 }
@@ -259,6 +263,37 @@ pub struct DuplicateView {
     pub line: usize,
 }
 
+/// A rule another row at the same place carries (D2: the "Also matches" list of the carrier). It
+/// keeps its own severity, kind, hold and decision; being carried hides none of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedRuleView {
+    pub rule_id: String,
+    pub site_key: String,
+    pub severity: String,
+    pub kind: Option<FindingKind>,
+    /// Why the release gate holds the carried row, when it does.
+    pub held: Option<HoldReason>,
+    /// Stage 1's answer about the carried row (`yes`, `no`, `unclear`, or blank).
+    pub stage1_real: String,
+    /// Why the carried row is an escalation candidate, when it is one.
+    pub escalation_reason: Option<EscalationReason>,
+    /// Its place among every candidate of the run, when it is one.
+    pub escalation_rank: Option<u32>,
+    /// The decision the carried row stands under now: its own, or the place's inherited one.
+    pub decision: Option<DecisionView>,
+}
+
+/// The row that carries this one (D2): where its decision is made unless it is decided alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedByView {
+    pub site_key: String,
+    pub rule_id: String,
+    pub path: String,
+    pub line: usize,
+}
+
 /// A row merged into another (spec section 8: "Merged into web/env.ts:3").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -301,6 +336,16 @@ pub struct SiteRow {
     /// Every rule id of the Fix, so a reviewer sees what a decision on it covers.
     #[serde(default)]
     pub fix_rules: Vec<String>,
+    /// The place this row heads or is carried at (node id `place:<id>`); empty when the row is
+    /// alone at its place. Deciding the place writes a record for every rule it covers.
+    #[serde(default)]
+    pub place_id: String,
+    /// The rules of the other rows at this place, when this row is the one that carries them.
+    #[serde(default)]
+    pub carries: Vec<CarriedRuleView>,
+    /// The row that carries this one, when another row at the same place does.
+    #[serde(default)]
+    pub carried_by: Option<CarriedByView>,
     pub stage1: Stage1View,
     pub stage2: Option<Stage2View>,
     /// Every marker the row has, in [`Marker::PRECEDENCE`] order.
@@ -919,7 +964,7 @@ mod tests {
         for m in Marker::PRECEDENCE {
             assert!(seen.insert(m), "{m:?} is listed twice");
         }
-        assert_eq!(seen.len(), 10);
+        assert_eq!(seen.len(), 11);
     }
 
     #[test]

@@ -353,6 +353,17 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                     tip: dup.map_or_else(String::new, |d| d.hint.clone()),
                 }
             }
+            Marker::Carried => {
+                let by = row.carried_by.as_ref();
+                Chip {
+                    class: "mark-carried",
+                    label: by.map_or_else(
+                        || "carried".to_string(),
+                        |b| format!("carried by {} at {}:{}", b.rule_id, base_name(&b.path), b.line),
+                    ),
+                    tip: "Another row at this place carries this rule. It is decided there unless you decide this rule alone.".to_string(),
+                }
+            }
             Marker::Edited => Chip {
                 class: "mark-edited",
                 label: "\u{270e} edited".to_string(),

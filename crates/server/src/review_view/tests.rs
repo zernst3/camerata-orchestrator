@@ -915,3 +915,211 @@ fn a_false_positive_after_the_no_confirms_the_throw_out_without_a_named_correcti
         "the later false positive agrees with the engine; the earlier one does not"
     );
 }
+
+// ── D2: one row per place ─────────────────────────────────────────────────────────────────
+
+/// Three rules at `src/a.rs:5` (a critical carrier, a high and a low row) and a row of a fourth
+/// rule at `src/b.rs:9`; every one of the four is an escalation candidate.
+fn placed() -> crate::onboard::SealedReport {
+    let mut rows = vec![
+        row("SEC-A", "src/a.rs", 5, "critical"),
+        row("SEC-B", "src/a.rs", 5, "high"),
+        row("SEC-C", "src/a.rs", 5, "low"),
+        row("SEC-D", "src/b.rs", 9, "medium"),
+    ];
+    // The low row is held: its quoted evidence was not found.
+    rows[2].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    sealed(rows, |report| {
+        let key_of = |rule: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.rule_id == rule)
+                .unwrap()
+                .site_key
+                .clone()
+        };
+        let (a, b, c, d) = (
+            key_of("SEC-A"),
+            key_of("SEC-B"),
+            key_of("SEC-C"),
+            key_of("SEC-D"),
+        );
+        let tree = report.tree.as_mut().unwrap();
+        // The group reviewer named the worst-ranked row of the place first, then its sibling.
+        tree.candidates = vec![
+            candidate(&c, "rule:SEC-C", EscalationReason::RuleMisfit, "low", 1),
+            candidate(
+                &d,
+                "rule:SEC-D",
+                EscalationReason::SecretExposure,
+                "medium",
+                2,
+            ),
+            candidate(
+                &b,
+                "rule:SEC-B",
+                EscalationReason::UnauthenticatedReach,
+                "high",
+                3,
+            ),
+            candidate(
+                &a,
+                "rule:SEC-A",
+                EscalationReason::NeedsMoreCode,
+                "critical",
+                4,
+            ),
+        ];
+    })
+}
+
+/// The reviewed report with the line marked from the default settings, as the loader gives it.
+fn placed_overlay(
+    sealed: &crate::onboard::SealedReport,
+    decisions: &[Decision],
+) -> crate::report_export::ReviewedReport {
+    apply_overlay(
+        &crate::report_export::re_mark_line(sealed, &Stores::default().settings),
+        decisions,
+        &[],
+        &[],
+    )
+}
+
+#[test]
+fn the_queue_lists_one_row_per_escalated_place_headed_by_the_carrier() {
+    let sealed = placed();
+    assert_eq!(sealed.tree.as_ref().unwrap().places.len(), 1);
+    let reviewed = placed_overlay(&sealed, &[]);
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (q, shell) = compose(&reviewed, &Stores::default(), |c| {
+        (c.queue(true, 0, 100), c.shell())
+    });
+    assert_eq!(q.escalated.len(), 2, "four candidates at two places");
+    assert_eq!(shell.lanes.escalations, 2);
+    assert_eq!(q.below_total, 0);
+    // The place's row is the carrier; its candidate is the best-ranked one at the place.
+    let at_a = q
+        .escalated
+        .iter()
+        .find(|r| r.site.path == "src/a.rs")
+        .unwrap();
+    assert_eq!(
+        at_a.site.site_key,
+        key_of("SEC-A"),
+        "the carrier shows the place"
+    );
+    assert_eq!(
+        at_a.candidate.key,
+        key_of("SEC-C"),
+        "the best-ranked candidate"
+    );
+    assert_eq!(at_a.candidate.global_rank, 1);
+    let at_b = q
+        .escalated
+        .iter()
+        .find(|r| r.site.path == "src/b.rs")
+        .unwrap();
+    assert_eq!(at_b.site.site_key, key_of("SEC-D"));
+    assert_eq!(at_b.candidate.key, key_of("SEC-D"));
+}
+
+#[test]
+fn a_carrier_lists_what_it_carries_and_a_carried_row_points_at_its_carrier() {
+    let sealed = placed();
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (a, b, c) = (key_of("SEC-A"), key_of("SEC-B"), key_of("SEC-C"));
+    let own = decision("d-1", &b, DecisionState::FalsePositive, RUN);
+    let reviewed = placed_overlay(&sealed, &[own]);
+    let page = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-A", None, 500).unwrap()
+    });
+    let carrier = page.rows.iter().find(|r| r.site_key == a).unwrap();
+    assert!(
+        carrier.place_id.starts_with("place:"),
+        "{}",
+        carrier.place_id
+    );
+    assert!(carrier.carried_by.is_none());
+    let ids: Vec<&str> = carrier.carries.iter().map(|x| x.rule_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["SEC-B", "SEC-C"],
+        "the carrier first, then rank order"
+    );
+    let (cb, cc) = (&carrier.carries[0], &carrier.carries[1]);
+    assert_eq!(
+        (cb.site_key.as_str(), cb.severity.as_str()),
+        (b.as_str(), "high")
+    );
+    assert_eq!(
+        cb.decision.as_ref().unwrap().state,
+        DecisionState::FalsePositive
+    );
+    assert!(cb.held.is_none());
+    assert_eq!(
+        cb.escalation_reason,
+        Some(EscalationReason::UnauthenticatedReach)
+    );
+    assert_eq!(cb.escalation_rank, Some(3));
+    assert_eq!(
+        (cc.site_key.as_str(), cc.severity.as_str()),
+        (c.as_str(), "low")
+    );
+    assert!(cc.held.is_some(), "a carried rule keeps its own hold");
+    assert!(cc.decision.is_none());
+
+    let carried = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-B", None, 500).unwrap()
+    });
+    let row_b = carried.rows.iter().find(|r| r.site_key == b).unwrap();
+    let by = row_b.carried_by.as_ref().expect("a pointer to the carrier");
+    assert_eq!(
+        (
+            by.site_key.as_str(),
+            by.rule_id.as_str(),
+            by.path.as_str(),
+            by.line
+        ),
+        (a.as_str(), "SEC-A", "src/a.rs", 5)
+    );
+    assert!(row_b.markers.contains(&Marker::Carried));
+    assert!(row_b.carries.is_empty());
+    assert_eq!(row_b.place_id, carrier.place_id);
+}
+
+#[test]
+fn a_carried_rows_own_sub_group_still_lists_it_and_the_node_counts_are_unchanged() {
+    let sealed = placed();
+    let reviewed = placed_overlay(&sealed, &[]);
+    let (view, page) = compose(&reviewed, &Stores::default(), |c| {
+        (c.tree(), c.sites_page("sub:SEC-C/0", None, 500))
+    });
+    let tree = sealed.tree.as_ref().unwrap();
+    let node = view.nodes.iter().find(|n| n.id == "rule:SEC-C").unwrap();
+    assert_eq!(node.counts.sites, 1, "a node's sites stay honest");
+    assert_eq!(tree.counts("rule:SEC-C").sites, 1);
+    let page = page.expect("the carried row's own sub-group");
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.rows[0].carried_by.is_some());
+}

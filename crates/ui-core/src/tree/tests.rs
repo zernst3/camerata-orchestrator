@@ -186,6 +186,7 @@ fn every_marker_has_its_chip_class_from_the_spec_table() {
         (Marker::Stale, "mark-stale"),
         (Marker::Moved, "mark-moved"),
         (Marker::PossibleDuplicate, "mark-dup"),
+        (Marker::Carried, "mark-carried"),
         (Marker::Edited, "mark-edited"),
     ];
     for (marker, class) in expect {
