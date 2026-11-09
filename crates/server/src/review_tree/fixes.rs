@@ -462,12 +462,15 @@ impl ReviewTree {
         self.fixes.iter().find(|f| f.id == bare)
     }
 
-    /// Whether a decision can be made at this id: a tree node or a Fix.
+    /// Whether a decision can be made at this id: a tree node, a Fix or a place.
     pub fn is_decidable(&self, id: &str) -> bool {
-        match id.strip_prefix(FIX_PREFIX) {
-            Some(bare) => self.fixes.iter().any(|f| f.id == bare),
-            None => self.node(id).is_some(),
+        if let Some(bare) = id.strip_prefix(FIX_PREFIX) {
+            return self.fixes.iter().any(|f| f.id == bare);
         }
+        if id.starts_with(super::PLACE_PREFIX) {
+            return self.place(id).is_some();
+        }
+        self.node(id).is_some()
     }
 }
 

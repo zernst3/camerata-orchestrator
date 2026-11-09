@@ -538,6 +538,11 @@ pub struct ScanLedger {
     /// ledger written before Fixes existed.
     #[serde(default)]
     fix_merge: Option<crate::review_tree::FixMergeBlock>,
+    /// The place merge (D2): how many problem rows went in, how many places came out and how many
+    /// rows are carried by another row at their place. A block, like the Fix merge, because the
+    /// carrying removes no row. `None` for a ledger written before places existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    place_merge: Option<crate::review_tree::PlaceMergeBlock>,
     /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
     /// escalation block. `None` until the group reviewer has run, and for a ledger written
     /// before the record existed.
@@ -1484,6 +1489,16 @@ impl ScanLedger {
     /// Record the Fix merge, replacing an earlier one (the tree is built again after an edit).
     pub fn record_fix_merge(&mut self, block: crate::review_tree::FixMergeBlock) {
         self.fix_merge = Some(block);
+    }
+
+    /// Record the place merge, replacing an earlier one (the tree is built again after an edit).
+    pub fn record_place_merge(&mut self, block: crate::review_tree::PlaceMergeBlock) {
+        self.place_merge = Some(block);
+    }
+
+    /// The place merge of the run, once the tree has been built.
+    pub fn place_merge(&self) -> Option<&crate::review_tree::PlaceMergeBlock> {
+        self.place_merge.as_ref()
     }
 
     /// The Fix merge of the run, once the tree has been built.

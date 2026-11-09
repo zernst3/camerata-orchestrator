@@ -331,6 +331,8 @@ pub fn apply_overlay(
                 // the tree as it now stands.
                 let block = tree.refresh_fixes(&r.findings);
                 r.ledger.record_fix_merge(block);
+                let places = tree.refresh_places(&r.findings);
+                r.ledger.record_place_merge(places);
             }
         }
         // The reviewer's node summaries replace the model's, after the tree is in its final

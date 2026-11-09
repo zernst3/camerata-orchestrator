@@ -16,6 +16,7 @@ mod collapse;
 mod fixes;
 mod grouping;
 mod mapping;
+mod places;
 mod types;
 mod unfold;
 
@@ -32,6 +33,10 @@ pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
 pub use mapping::{
     family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
     UNCATEGORISED,
+};
+pub use places::{
+    is_place_row, merge_places, merge_places_where, place_id_of, places_for, PlaceMergeBlock,
+    PlaceNode, PLACE_MERGE_STAGE, PLACE_PREFIX,
 };
 pub use types::{
     DuplicateLink, FlaggedBy, GroupRole, NodeCounts, NodeEscalation, NodeKind, NodeLevel, Outlier,
@@ -572,6 +577,8 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 mod fixes_tests;
 #[cfg(test)]
 mod outlier_tests;
+#[cfg(test)]
+mod places_tests;
 #[cfg(test)]
 mod rank_tests;
 #[cfg(test)]
