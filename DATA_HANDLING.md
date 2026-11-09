@@ -28,7 +28,7 @@ If the API is selected and no API key is configured, the AI review does not run.
 <!-- crates/llm/src/llm.rs: resolve_backend returns BackendResolution::Blocked for Api without a key -->
 <!-- crates/cli/src/inspect_cmd.rs: require_api_key_for_client_inspection -->
 
-The backend, the provider and every model that ran are recorded in the export's `manifest.json` (and in the `README.txt` of the operator's own review package, which a client does not receive), in the report and in the scan's ledger, along with whether the run was a client engagement.
+The backend, the provider and every model that ran are recorded in the export's `manifest.json` (a client package's `README.txt` carries no model lines; the operator's own internal package adds them to its `README.txt`), in the report and in the scan's ledger, along with whether the run was a client engagement.
 <!-- crates/server/src/lib.rs: ModelRecord (backend, provider, models, client_engagement); ManifestProvenance::inspection_json and readme_lines -->
 <!-- crates/server/src/release_gate.rs: provenance.model filled with ModelRecord::with_models_from(report.provenance) -->
 <!-- crates/server/src/release_gate/consistency.rs: verify_readme_provenance holds the README model lines equal to the manifest -->

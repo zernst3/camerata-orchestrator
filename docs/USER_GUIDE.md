@@ -415,9 +415,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    | Kind | What it is telling you | Where it lands in the Excel workbook |
    |---|---|---|
    | **Defect** | An objective fault at this place. Act on it. | All problems |
-   | **Deviation** (the workbook says a departure) | A consistency violation against the convention your own codebase predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning". You get the numerator, the denominator (when it could be counted honestly) and the convention's own name as separate fields, not prose to read. | All problems (per place) and Departures (one row per rule) |
-   | **Convention observed** | Your codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Your conventions |
-   | **No convention** | No convention has been adopted here; your codebase is inconsistent with no clear majority. Exactly one row per rule, never one per place. | Your conventions |
+   | **Deviation** (the workbook says a departure) | A consistency violation against the convention the codebase itself predominantly follows: "2 of 47 assessed endpoints do not use URI versioning". The numerator, the denominator (when it could be counted honestly) and the convention's own name come as separate fields, not prose to read. | All problems (per place) and Departures (one row per rule) |
+   | **Convention observed** | The codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Your conventions |
+   | **No convention** | No convention has been adopted here; the codebase is inconsistent with no clear majority. Exactly one row per rule, never one per place. | Your conventions |
    | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Not checked, as a rule that could not be completed |
 
    A row whose producer never assigned a kind shows as **Unclassified**, and the Start here
@@ -887,7 +887,7 @@ Those rules now carry a flag (`inspectable = false`) that separates the two role
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
 - They are **not** scanned, so they never appear in a finding, never appear in "what's
-  healthy", and are not counted in the Rules checked sheet's "we checked N rules" line. They are
+  healthy", and are not counted in the Start here sheet's "we checked N rules" line. They are
   also not listed under "rules that did not run this scan" - they were never scan rules.
 - So the number of rules you selected and the number the report says were checked will
   legitimately differ, and the second is the honest one. On a TypeScript repo the checked

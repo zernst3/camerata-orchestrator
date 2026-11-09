@@ -20,10 +20,10 @@ The words are the same in every file: a **fix** is one cause and one change that
 |---|---|---|
 | `<stem>.pdf` | The summary report: cover, executive summary, the three things to do first, the scorecard by area, the most serious problems, one line for every other fix, conventions, what is healthy, dependencies, next steps and the method with its limits | Leadership |
 | `<stem>-findings.xlsx` | The workbook: every problem, every fix, every rule checked and everything not checked. Sheets are listed below | Engineers, then the architect |
-| `findings.json` | The same rows as the workbook's All problems sheet, wrapped with provenance, summary counts, coverage, the grouping tree and the fixes. A project of several repos adds a `patterns_across_services` key | Scripts, CI and other tools |
+| `findings.json` | Every row that was not ruled out, of every kind: the rows behind All problems, Your conventions and Not checked together, before All problems shows each problem once. Wrapped with provenance, summary counts, coverage, the grouping tree and the fixes. A project of several repos adds a `patterns_across_services` key | Scripts, CI and other tools |
 | `decisions.json` | Every decision record the report was reviewed with. The workbook's Reviewer decisions sheet is the same list | Tools; the architect |
 | `csv/tickets.csv` | One ticket for each fix that still has places to change, ready to import into Jira, Linear or GitHub Issues | Engineers and project managers |
-| `csv/all-findings.csv` and `json/all-findings.json` | Every problem, once. The same rows as All problems | Tools |
+| `csv/all-findings.csv` and `json/all-findings.json` | The same rows as `findings.json`, as a flat table | Tools |
 | `csv/deviations.csv` and `json/deviations.json` | The same rows as the Departures sheet | Tools |
 | `csv/conventions.csv` and `json/conventions.json` | The same rows as the Your conventions sheet | Tools |
 | `csv/not-assessed.csv` and `json/not-assessed.json` | The rules that could not be completed, which are also listed on the Not checked sheet | Tools |
@@ -34,7 +34,7 @@ The words are the same in every file: a **fix** is one cause and one change that
 | `manifest.json` | The list of the files in the ZIP, each with its purpose, its schema version and a checksum, and the facts of the inspection: the commit of each repo, the engine version, the rule library version and the models used | Anyone checking that the package is whole and unchanged |
 | `README.txt` | What each file is and how to import the tickets | Whoever opens the ZIP first |
 
-`<stem>` is `camerata-inspection-<repo>-<short commit>`, so the file names the repo and the commit it describes.
+`<stem>` is `camerata-inspection-<repo>-<short commit>`, so the file names the repo and the commit it describes. A project of several repos is named `camerata-inspection-<project>-<N>-repos`.
 
 The files for tools keep their own field names (`severity`, `rule_id`, `site_id`, `fix_id` and so on) and their own wire values, so that scripts written against them keep working. Those names are for tools. A person reads the workbook, where every column carries the vocabulary of this page. Each machine file is built from the same rows as the sheet it matches, so they cannot disagree.
 
@@ -99,7 +99,7 @@ A report that no human reviewer has signed off carries a draft banner on every p
 
 ## How the escalation line works
 
-The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. Each one is read in person, and the workbook marks it "Reviewed in person".
+The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. A critical place whose reason is one of the severe kinds (unauthenticated reach, a secret exposed, data loss, cross-tenant access, authorization bypass, injection, unverified evidence) is escalated even past the budget. Each one is read in person, and the workbook marks it "Reviewed in person".
 
 A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The budget itself is the operator's setting and is not printed in a client file.
 
