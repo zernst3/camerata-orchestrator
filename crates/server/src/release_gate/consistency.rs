@@ -503,20 +503,46 @@ fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
     else {
         return tally;
     };
-    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+    // Each place: the row that carries the others heads it (the first row there when none does),
+    // at the worst severity of any row at the place, as the All problems sheet prints it.
+    let mut places: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
     for row in &rows {
-        let kind = cell_text(row, "kind");
-        if !kinds.contains(&kind.as_str()) {
+        if !kinds.contains(&cell_text(row, "kind").as_str()) {
             continue;
         }
-        let place = (
-            cell_text(row, "repo"),
-            cell_text(row, "path"),
-            cell_text(row, "line"),
-        );
-        if seen.insert(place) {
-            *tally.entry((cell_text(row, "severity"), kind)).or_insert(0) += 1;
-        }
+        places
+            .entry((
+                cell_text(row, "repo"),
+                cell_text(row, "path"),
+                cell_text(row, "line"),
+            ))
+            .or_default()
+            .push(row);
+    }
+    let severity_slot = |s: &str| match s {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    };
+    for members in places.values() {
+        let ids: BTreeSet<String> = members
+            .iter()
+            .map(|m| cell_text(m, "carried_by"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let head = members
+            .iter()
+            .find(|m| ids.contains(&cell_text(m, "site_id")))
+            .unwrap_or(&members[0]);
+        // The head first, then the rest in file order: on a tie (`low` and `info` share a rank)
+        // the head's own word stands, as on the sheet.
+        let worst = std::iter::once(head)
+            .chain(members.iter().filter(|m| !std::ptr::eq(*m, head)))
+            .map(|m| cell_text(m, "severity"))
+            .min_by_key(|s| severity_slot(s))
+            .unwrap_or_default();
+        *tally.entry((worst, cell_text(head, "kind"))).or_insert(0) += 1;
     }
     tally
 }

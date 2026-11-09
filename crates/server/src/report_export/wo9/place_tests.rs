@@ -270,3 +270,42 @@ fn a_package_with_carried_rows_clears_every_other_check() {
         .iter()
         .all(|r| text(r, "merged_into").is_empty()));
 }
+
+#[test]
+fn a_place_is_as_severe_as_its_worst_rule_even_when_a_less_severe_row_carries_it() {
+    // The critical row is held for review (needs a decision) and the high row is asserted, so the
+    // asserted row ranks first and carries the place; the sheet, the machine files and the
+    // scorecard still count the place at its worst severity.
+    let mut report = crate::release_gate::test_scan_report();
+    let mut held = row("SEC-RULE-HELD-1", "critical", "src/held.ts", 9);
+    held.needs_review = true;
+    held.confidence = Some("needs-review".to_string());
+    report.findings = vec![held, row("SEC-RULE-SURE-1", "high", "src/held.ts", 9)];
+    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let entries = released_entries(&reviewed, &options());
+    let findings = findings_json(&entries);
+    let rows = findings["findings"].as_array().unwrap();
+    let carrier = rows
+        .iter()
+        .find(|r| text(r, "carried_by").is_empty())
+        .unwrap();
+    assert_eq!(
+        text(carrier, "rule_id"),
+        "SEC-RULE-SURE-1",
+        "the asserted row carries"
+    );
+    assert_eq!(text(carrier, "severity"), "high");
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &options()).expect("workbook");
+    let problems = table(&xlsx, v::ALL_PROBLEMS);
+    assert_eq!(problems.len() - 1, 1, "one place");
+    assert_eq!(
+        cell_of(&problems, 1, v::H_SEVERITY).to_lowercase(),
+        "critical",
+        "{problems:?}"
+    );
+    assert_eq!(
+        cell_of(&problems, 1, v::H_PLACE_ID),
+        text(carrier, "site_id")
+    );
+}

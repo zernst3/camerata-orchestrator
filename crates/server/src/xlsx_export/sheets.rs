@@ -671,6 +671,12 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
     if members.len() < 2 {
         return c;
     }
+    // The place is as severe as its worst rule, whichever row carries it: the carrier is the row
+    // the engine ranks first (a defect over a departure, a security row over a hygiene row), and
+    // that row may not be the most severe one.
+    if let Some(worst) = members.iter().min_by_key(|r| severity_rank(&r.severity)) {
+        c.put(v::H_SEVERITY, Cell::Severity(worst.severity.clone()));
+    }
     // One line for each rule, by its id: two rules can share a title.
     let mut seen_rules: Vec<&str> = Vec::new();
     let mut titles: Vec<String> = Vec::new();
