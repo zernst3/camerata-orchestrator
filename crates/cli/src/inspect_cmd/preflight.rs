@@ -143,6 +143,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                 deep: false,
                 backend: inputs.backend,
                 terse_output: inputs.terse_output,
+                whole_file_calibration: true,
             },
         );
         let rows: Vec<RepoEstimate> = e

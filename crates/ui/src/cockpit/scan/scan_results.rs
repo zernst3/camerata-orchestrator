@@ -1617,6 +1617,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             deep,
                             backend,
                             terse_output: true,
+                            whole_file_calibration: true,
                         };
                         let run_estimate = |inputs: &[camerata_ui_core::scan::RunRepoInput]| {
                             camerata_ui_core::scan::cockpit_run_estimate(
