@@ -127,6 +127,16 @@ fn an_internal_package_carries_the_flag_in_the_workbook_findings_json_and_start_
         };
         assert_eq!(row[col], want, "{row:?}");
     }
+    // The internal Glossary defines the flag and every reason in the words the column uses.
+    let glossary = crate::release_gate::xlsx_sheet_grid(&xlsx, v::GLOSSARY).expect("Glossary");
+    let terms: Vec<&str> = glossary.iter().map(|r| r[0].as_str()).collect();
+    assert!(terms.contains(&v::POSSIBLE_FALSE_POSITIVE), "{terms:?}");
+    for reason in FpReason::ALL {
+        assert!(
+            terms.contains(&reason.label()),
+            "{reason:?} is not in {terms:?}"
+        );
+    }
     // Start here: how many are flagged and how many are decided.
     assert_eq!(
         start_here_line(&xlsx).as_deref(),

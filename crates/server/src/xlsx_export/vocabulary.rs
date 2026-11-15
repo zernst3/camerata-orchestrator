@@ -10,6 +10,8 @@
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
+use camerata_api_types::review::FpReason;
+
 /// Excel refuses a sheet name over this many characters.
 pub const SHEET_NAME_MAX_CHARS: usize = 31;
 
@@ -1265,7 +1267,53 @@ pub const INTERNAL_GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Why a row waits for a reviewer's ruling before a client may receive it. Reviewers only.",
         "The technical columns of an internal export",
     ),
+    e(
+        POSSIBLE_FALSE_POSITIVE,
+        "The engine has its own reasons to doubt this row, listed beside it, so a reviewer can look \
+         at it first. It stays a problem until a reviewer marks it Ruled out: the flag never \
+         hides, drops or lowers anything. Reviewers only.",
+        "The technical columns and Start here of an internal export; the review screens",
+    ),
+    e(
+        FpReason::GroupReviewerDoubt.label(),
+        FpReason::GroupReviewerDoubt.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::CalibrationDoubt.label(),
+        FpReason::CalibrationDoubt.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::TestCodeOnly.label(),
+        FpReason::TestCodeOnly.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::ConventionRuleAtMediumOrHigher.label(),
+        FpReason::ConventionRuleAtMediumOrHigher.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::EvidenceNotFound.label(),
+        FpReason::EvidenceNotFound.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::SeverityFromRuleMinimum.label(),
+        FpReason::SeverityFromRuleMinimum.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
+        FpReason::ModelOnly.label(),
+        FpReason::ModelOnly.sentence(),
+        FP_REASON_WHERE,
+    ),
 ];
+
+/// Where a reader meets a reason of the Possible false positive flag.
+const FP_REASON_WHERE: &str =
+    "The Possible false positive column of an internal export; the review screens";
 
 // ── The vocabulary map: one term for each concept ───────────────────────────────────────
 
@@ -1407,6 +1455,12 @@ pub const CONCEPTS: &[Concept] = &[
     ),
 ];
 
+/// Terms only a reviewer's export uses, each the one name of its own concept, like a term of
+/// [`CONCEPTS`] (which holds the client's terms; every one of those has a client Glossary entry).
+/// "Possible false positive" is the engine doubting a row that stays a problem until a reviewer
+/// rules it out; a removed false alarm is still "Ruled out".
+pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE];
+
 /// The retired word found in `text`, with the term that replaced it. A word counts only as a
 /// whole word (so "website" does not match "site"); machine file names are removed first. A
 /// retired word written with capitals in the table (an id header) is matched as written.
@@ -1420,7 +1474,27 @@ pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     ] {
         cleaned = cleaned.replace(file, " ");
     }
-    let lower = cleaned.to_lowercase();
+    let mut lower = cleaned.to_lowercase();
+    // A term a concept owns is never a retired word of another concept, even when its words hold
+    // one ("Possible false positive" holds "false positive", which Ruled out retired). The owned
+    // term is blanked first, so only the retired word standing alone is matched.
+    let owned = CONCEPTS
+        .iter()
+        .map(|c| (c.term, Some(c)))
+        .chain(INTERNAL_TERMS.iter().map(|t| (*t, None)));
+    for (term, own) in owned {
+        let term = term.to_lowercase();
+        let holds_retired = CONCEPTS.iter().any(|other| {
+            !own.is_some_and(|c| std::ptr::eq(other, c))
+                && other
+                    .retired
+                    .iter()
+                    .any(|r| term.contains(r.to_lowercase().as_str()))
+        });
+        if holds_retired {
+            lower = lower.replace(&term, &" ".repeat(term.len()));
+        }
+    }
     let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
     for concept in CONCEPTS {
         for retired in concept.retired {
@@ -1772,6 +1846,72 @@ mod tests {
             "the glossary block of docs/CLIENT_PACKAGE.md differs from the vocabulary's \
              Glossary entries; {how}"
         );
+    }
+
+    #[test]
+    fn the_possible_false_positive_flag_and_each_reason_are_reviewers_only_glossary_terms() {
+        use camerata_api_types::review::FpReason;
+        let internal = |term: &str| {
+            INTERNAL_GLOSSARY_ENTRIES
+                .iter()
+                .find(|e| e.term == term)
+                .copied()
+        };
+        let flag = internal(POSSIBLE_FALSE_POSITIVE).expect("the flag is defined");
+        assert!(flag.meaning.contains(RULED_OUT), "{:?}", flag.meaning);
+        for reason in FpReason::ALL {
+            let entry = internal(reason.label())
+                .unwrap_or_else(|| panic!("{reason:?} has no Glossary entry"));
+            assert_eq!(entry.meaning, reason.sentence(), "{reason:?}");
+        }
+        // A client file never defines them.
+        for e in GLOSSARY_ENTRIES {
+            assert_ne!(e.term, POSSIBLE_FALSE_POSITIVE);
+            assert!(
+                FpReason::ALL.iter().all(|r| r.label() != e.term),
+                "{}",
+                e.term
+            );
+        }
+    }
+
+    #[test]
+    fn possible_false_positive_is_its_own_term_and_ruled_out_keeps_false_positive() {
+        // The flag is a concept of its own: the engine doubts a row that stays a problem.
+        assert!(INTERNAL_TERMS.contains(&POSSIBLE_FALSE_POSITIVE));
+        assert!(CONCEPTS.iter().all(|c| c.term != POSSIBLE_FALSE_POSITIVE));
+        for text in [
+            "Possible false positive",
+            "Possible false positives first (3)",
+            "2 rows flagged as possible false positives, 1 decided",
+        ] {
+            assert_eq!(banned_synonym_in(text), None, "{text:?}");
+        }
+        // A removed false alarm is still Ruled out, whatever sits beside the flag's name.
+        for text in [
+            "This is a false positive.",
+            "False positives",
+            "A possible false positive the reviewer marked a false positive",
+        ] {
+            assert_eq!(
+                banned_synonym_in(text).map(|(_, term)| term),
+                Some(RULED_OUT),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_start_here_count_reads_in_plain_words() {
+        assert_eq!(
+            possible_false_positive_count_line(1, 0),
+            "1 row flagged as a possible false positive, 0 decided"
+        );
+        assert_eq!(
+            possible_false_positive_count_line(12, 5),
+            "12 rows flagged as possible false positives, 5 decided"
+        );
+        assert_eq!(possible_false_positive_cell(None), "");
     }
 
     #[test]
