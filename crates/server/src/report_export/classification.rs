@@ -284,9 +284,10 @@ pub(crate) fn matrix_bucket(
 /// AI finding now routes to `"held"` instead — the same severity-unbounded "a human must decide"
 /// destination `is_held_for_review` uses (here, the human decision needed is "supply or confirm
 /// a citation" rather than "resolve a calibration hedge", but the destination, visibility, and
-/// real-severity badge are identical). At medium/low/info it still routes to `"informational"`,
-/// exactly as before — nothing changes for the severity band `is_informational`'s cap was
-/// already written for.
+/// real-severity badge are identical). A1: a MEDIUM row routes to `"held"` as well, so
+/// information only means info severity or a convention: a medium login-throttling gap is a real
+/// finding the reader must see called out, not a note. At low/info it still routes to
+/// `"informational"`, exactly as before.
 ///
 /// C5-8 (R7 amended — re-route, never block): a FINAL check, after every other gate has had its
 /// say, for the one case none of them cover — a row that earns an action bucket
@@ -316,7 +317,7 @@ pub(crate) fn effective_bucket(
         return "held";
     }
     if is_uncited_ai_finding(finding, corpus) {
-        return if severity_rank(severity) <= severity_rank("high") {
+        return if severity_rank(severity) <= severity_rank("medium") {
             "held"
         } else {
             "informational"

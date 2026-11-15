@@ -206,7 +206,7 @@ async fn resolve_fix_is_none_when_rule_id_is_unknown_to_the_corpus() {
         errors.is_empty(),
         "corpus must load cleanly, got errors: {errors:?}"
     );
-    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "low");
     assert_eq!(
         resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None),
         None
@@ -1848,7 +1848,7 @@ fn citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory() {
 /// headline, counted in the reconciling totals.
 #[test]
 fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() {
-    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "low");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
@@ -1942,6 +1942,29 @@ fn citation_gate_routes_a_critical_uncited_ai_finding_to_held_not_informational(
     // The severity histogram (cover stats) still honestly reflects it — over-tell, not
     // hidden from the reader entirely, just excluded from the curated action tiers.
     assert_eq!(json.cover.stats.critical, 1);
+}
+
+/// A1 item 3: information only means info severity or a convention. A medium uncited AI row
+/// (a login endpoint with no throttling, say) is a real finding the reader must see called out
+/// as held, so it routes to `held` with its severity untouched, never to the informational
+/// appendix. A low row keeps the informational route.
+#[test]
+fn a1_medium_uncited_ai_row_routes_to_held_never_informational() {
+    let f = finding("AI-AUTH-RATE-LIMIT", "src/routes/auth.js", 33, "medium");
+    let report = report_with(vec![f], vec![]);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert!(
+        json.matrix.informational.is_empty(),
+        "a medium row must never sit in the informational group: {:?}",
+        json.matrix.informational
+    );
+    assert_eq!(json.matrix.held.len(), 1, "{:?}", json.matrix.held);
+    assert_eq!(json.matrix.held[0].severity, "medium");
+    assert_eq!(json.matrix.held[0].rule_id, "AI-AUTH-RATE-LIMIT");
 }
 
 /// C5-7: provenance/citation are ALWAYS the tier/citation of the row's OWN rule id, never
@@ -2273,7 +2296,7 @@ async fn zero_curated_findings_carry_a_model_inferred_or_empty_citation() {
         "CORS reflects the request Origin while Access-Control-Allow-Credentials is true."
             .to_string();
 
-    let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "medium");
+    let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "low");
 
     let report = report_with(
         vec![rls, xss, redirect, token, grammar, cors, unmapped],
