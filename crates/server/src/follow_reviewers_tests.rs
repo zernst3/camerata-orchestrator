@@ -196,3 +196,153 @@ fn reviewer_doubt_reads_only_the_stored_reviewer_answers() {
     f.review.escalation_reason = Some(EscalationReason::LikelyFalseAlarmAtHighSeverity);
     assert_eq!(reviewer_doubt(&f), Some(Doubt::LikelyFalseAlarm));
 }
+
+// ── Cause 4: kind follows the claim, not the rule id ────────────────────────────────────────
+
+/// A row of a multi-option rule with a decided convention, classified a Deviation by rule id
+/// (`ai_audit::assign_deviation_kinds`), rated `stage1` by stage 1, with the group reviewer's
+/// escalation reason `reason`.
+fn deviation_row(rule: &str, stage1: &str, reason: Option<EscalationReason>) -> Finding {
+    let mut f = reviewed_row(rule, stage1, "yes");
+    f.kind = Some(FindingKind::Deviation(
+        camerata_api_types::audit::DeviationKind {
+            deviating_sites: 3,
+            assessed_sites: Some(9),
+            convention_option_id: Some("handler-checks".to_string()),
+            convention_label: "Handlers check access themselves".to_string(),
+        },
+    ));
+    f.review.escalation_reason = reason;
+    f
+}
+
+/// The pipeline as it runs: the bounds (and so the deviation cap) before the group reviewer,
+/// the reviewer's reason written on the row, then the pass that follows the reviewers.
+fn after_group_review(mut rows: Vec<Finding>, set: &camerata_rules::RuleSet) -> Vec<Finding> {
+    let reasons: Vec<Option<EscalationReason>> =
+        rows.iter().map(|f| f.review.escalation_reason).collect();
+    for f in rows.iter_mut() {
+        f.review.escalation_reason = None;
+    }
+    apply_scan_severity_bounds(&mut rows, Some(set));
+    for (f, reason) in rows.iter_mut().zip(reasons) {
+        f.review.escalation_reason = reason;
+    }
+    let before = rows.len();
+    follow_reviewers(&mut rows, Some(set));
+    assert_eq!(rows.len(), before, "nothing is dropped");
+    rows
+}
+
+fn is_defect(f: &Finding) -> bool {
+    matches!(f.kind, Some(FindingKind::Defect))
+}
+
+/// "PATCH updates any record by id without authorizing ownership", reported at medium: an
+/// authorization bypass is a defect, not a consistency deviation.
+#[test]
+fn a_security_reason_deviation_at_medium_becomes_a_defect() {
+    let set = corpus(&[("SYN-ACCESS-CONVENTION-1", None)]);
+    let rows = after_group_review(
+        vec![deviation_row(
+            "SYN-ACCESS-CONVENTION-1",
+            "medium",
+            Some(EscalationReason::AuthorizationBypass),
+        )],
+        &set,
+    );
+    assert!(is_defect(&rows[0]), "{:?}", rows[0].kind);
+    assert_eq!(rows[0].severity, "medium");
+    let why = notes(&rows[0]);
+    assert!(why.contains("authorization bypass"), "{why}");
+    assert!(why.contains("defect"), "{why}");
+}
+
+/// "Full profile row passed to a client component", rated high and capped to medium as a
+/// deviation: as a defect it is uncapped and back at high, everywhere.
+#[test]
+fn a_capped_security_reason_deviation_becomes_an_uncapped_defect() {
+    let set = corpus(&[("SYN-DATA-SHAPE-CONVENTION-1", None)]);
+    let rows = after_group_review(
+        vec![deviation_row(
+            "SYN-DATA-SHAPE-CONVENTION-1",
+            "high",
+            Some(EscalationReason::SecretExposure),
+        )],
+        &set,
+    );
+    assert!(is_defect(&rows[0]), "{:?}", rows[0].kind);
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert_eq!(
+        crate::severity_bounds::bounded_severity(&rows[0], Some(&set)),
+        "high",
+        "the exporters run the same chain and must not cap it"
+    );
+}
+
+/// "Any authenticated user can change roles", rated high and left capped at medium; and a
+/// data-loss reason counts as well.
+#[test]
+fn authorization_and_data_loss_reasons_both_make_a_capped_deviation_a_defect() {
+    let set = corpus(&[("SYN-ROLE-CONVENTION-1", None)]);
+    let rows = after_group_review(
+        vec![
+            deviation_row(
+                "SYN-ROLE-CONVENTION-1",
+                "high",
+                Some(EscalationReason::AuthorizationBypass),
+            ),
+            Finding {
+                line: 30,
+                ..deviation_row(
+                    "SYN-ROLE-CONVENTION-1",
+                    "critical",
+                    Some(EscalationReason::DataLoss),
+                )
+            },
+        ],
+        &set,
+    );
+    assert!(rows.iter().all(is_defect), "{rows:?}");
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert_eq!(rows[1].severity, "critical", "{}", notes(&rows[1]));
+}
+
+/// A plain convention deviation stays a capped deviation: no reason, a reason that is not a
+/// security or data-loss reason, or a security reason at stage 1 low.
+#[test]
+fn a_plain_convention_deviation_stays_a_capped_deviation() {
+    let set = corpus(&[("SYN-LAYERING-CONVENTION-1", None)]);
+    let rows = after_group_review(
+        vec![
+            deviation_row("SYN-LAYERING-CONVENTION-1", "high", None),
+            Finding {
+                line: 31,
+                ..deviation_row(
+                    "SYN-LAYERING-CONVENTION-1",
+                    "high",
+                    Some(EscalationReason::OutlierInGroup),
+                )
+            },
+            Finding {
+                line: 32,
+                ..deviation_row(
+                    "SYN-LAYERING-CONVENTION-1",
+                    "low",
+                    Some(EscalationReason::AuthorizationBypass),
+                )
+            },
+        ],
+        &set,
+    );
+    for f in &rows {
+        assert!(
+            matches!(f.kind, Some(FindingKind::Deviation(_))),
+            "{:?}",
+            f.kind
+        );
+    }
+    assert_eq!(rows[0].severity, "medium", "capped");
+    assert_eq!(rows[1].severity, "medium", "capped");
+    assert_eq!(rows[2].severity, "low");
+}

@@ -321,6 +321,18 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
 pub const DEVIATION_CAP_WHY: &str =
     "a consistency deviation is capped below the severity of a defect";
 
+/// The severity the deviation ceiling lowered a row FROM, read back from the note
+/// [`bounded_severity_explained`] wrote for it (`None` for any other note). The note is built and
+/// read here, in one place, so the two cannot drift. Used when a reviewer's reason shows a row
+/// filed as a deviation is a defect: the cap no longer applies and the row takes back the
+/// severity the cap took off.
+pub fn deviation_cap_lowered_from(note: &str) -> Option<&str> {
+    let rest = note.strip_prefix("severity lowered from ")?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let (_, why) = rest.split_once(": ")?;
+    (why == DEVIATION_CAP_WHY).then_some(from)
+}
+
 /// Apply every severity bound to every finding, in place. `resolve` maps a finding's rule id
 /// to its corpus rule (a plain `RuleSet::get_by_id`, or a lookup that also grounds an external
 /// tool's id); an unresolved id still gets the bounds that need no rule.
@@ -672,6 +684,28 @@ mod tests {
         apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
         assert_eq!(rows[0].inner.inner.severity, "low");
         assert!(!rows[0].held, "no floor was held, so nothing to decide");
+    }
+
+    #[test]
+    fn the_deviation_cap_note_reads_back_the_severity_it_lowered_from() {
+        let set = RuleSet::default();
+        let mut rows = vec![NotedRow {
+            inner: row("critical", BoundKind::Deviation),
+            notes: Vec::new(),
+        }];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.severity, "medium");
+        assert_eq!(rows[0].notes.len(), 1);
+        assert_eq!(
+            deviation_cap_lowered_from(&rows[0].notes[0]),
+            Some("critical")
+        );
+        assert_eq!(
+            deviation_cap_lowered_from(
+                "severity lowered from high to low: the rule caps the severity of what it finds"
+            ),
+            None
+        );
     }
 
     #[test]

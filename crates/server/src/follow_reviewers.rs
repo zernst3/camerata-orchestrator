@@ -68,17 +68,90 @@ pub fn reviewer_doubt(f: &Finding) -> Option<Doubt> {
 /// (`ai_audit::group_review::review_scan_report` calls it last). In place, so it can never change
 /// how many rows there are.
 ///
-/// 1. **A doubted row returns to stage 1's severity** ([`return_doubted_row_to_reviewed_severity`]).
+/// 1. **Kind follows the claim** ([`security_deviation_becomes_defect`]). A deviation the group
+///    reviewer gave a security or data-loss reason is a defect.
+/// 2. **A doubted row returns to stage 1's severity** ([`return_doubted_row_to_reviewed_severity`]).
 ///    The corpus floor ran before the group reviewer read the rows (it has to: the reviewer
 ///    ranks by the shown severity), so a row only the group reviewer doubted was already raised.
-/// 2. **The corpus bounds run again**, so the ceilings have the last word over the severities
+/// 3. **The corpus bounds run again**, so the ceilings have the last word over the severities
 ///    this pass wrote, and a held floor leaves its note and its hold. The bounds are idempotent,
 ///    so a row this pass did not touch is unchanged.
 pub fn follow_reviewers(findings: &mut [Finding], corpus: Option<&camerata_rules::RuleSet>) {
     for f in findings.iter_mut() {
+        security_deviation_becomes_defect(f);
         return_doubted_row_to_reviewed_severity(f, corpus);
     }
     crate::severity_bounds::apply_scan_severity_bounds(findings, corpus);
+}
+
+/// Whether `reason` is one of the closed list's security or data-loss reasons: the security
+/// flaws ([`EscalationReason::is_security_flaw`]: unauthenticated reach, secret exposure,
+/// cross-tenant access, authorization bypass, injection) and data loss.
+pub fn is_security_or_data_loss(reason: EscalationReason) -> bool {
+    reason.is_security_flaw() || reason == EscalationReason::DataLoss
+}
+
+/// Cause 4 of the 2026-11-15 false-alarm diagnosis: kind followed the rule id, not the claim.
+/// Every row of a multi-option rule with a decided convention is filed a
+/// [`FindingKind::Deviation`] (`ai_audit::assign_deviation_kinds`) and capped at the deviation
+/// ceiling, so "PATCH updates any record by id without authorizing ownership" shipped as a
+/// consistency deviation capped at medium.
+///
+/// After the group reviewer: a Deviation whose row carries a security or data-loss escalation
+/// reason ([`is_security_or_data_loss`], read from the closed list the group reviewer writes on
+/// the row, never from its text) and that stage 1 rated medium or higher becomes a
+/// [`FindingKind::Defect`]. It is a defect BEFORE the deviation cap: the cap ran before the group
+/// reviewer, so the severity it took off (read back from the cap's own note) is restored, and
+/// the bounds that run next do not cap a defect. The note says why; the cap's earlier note stays,
+/// so the row's history is whole.
+///
+/// The review tree already turns a convention row's security reason into `rule_misfit` when a
+/// row of a security rule shares its site, so a reason still here is the reviewer's view of this
+/// row alone. Untouched: any other kind, a reason off the list, no reason, and a row stage 1 rated
+/// below medium or never rated.
+fn security_deviation_becomes_defect(f: &mut Finding) {
+    use camerata_api_types::audit::FindingKind;
+    use camerata_rules::severity_bounds::{
+        deviation_cap_lowered_from, normalize_severity, severity_rank,
+    };
+    if !matches!(f.kind, Some(FindingKind::Deviation(_))) {
+        return;
+    }
+    let Some(reason) = f
+        .review
+        .escalation_reason
+        .filter(|r| is_security_or_data_loss(*r))
+    else {
+        return;
+    };
+    let Some(rated) = crate::ai_audit::stage1_of(f).and_then(|s| s.severity) else {
+        return;
+    };
+    // Lower rank is MORE severe here (the rules crate's vocabulary).
+    if severity_rank(&normalize_severity(&rated)) > severity_rank("medium") {
+        return;
+    }
+    f.kind = Some(FindingKind::Defect);
+    let why = format!(
+        "the group reviewer named {} at this site, so the row is a defect rather than a \
+         consistency deviation, and the deviation cap does not apply",
+        reason.phrase()
+    );
+    let shown = normalize_severity(&f.severity);
+    let capped_from = crate::severity_bounds::recorded_adjustments(f)
+        .iter()
+        .rev()
+        .find_map(|n| deviation_cap_lowered_from(n).map(normalize_severity));
+    match capped_from {
+        Some(from) if severity_rank(&from) < severity_rank(&shown) => {
+            crate::ai_audit::record_severity_adjustment(f, &shown, &from, &why);
+            f.severity = from;
+        }
+        _ => crate::severity_bounds::record_adjustment(
+            f,
+            format!("kind changed from deviation to defect: {why}"),
+        ),
+    }
 }
 
 /// R-7 after the group reviewer: a row a reviewer doubted that a floor (the rule's minimum or the
