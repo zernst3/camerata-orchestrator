@@ -870,6 +870,11 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
         reason.split_whitespace().collect::<Vec<_>>().join(" "),
         finding_headline(f),
     );
+    // Stage 1 said the row does not state its rule's central fault: the group reviewer weighs a
+    // rule misfit with it in view.
+    if stage1.as_ref().and_then(|s| s.central_fault) == Some(false) {
+        line.push_str(" | central fault: no");
+    }
     if !flags.is_empty() {
         line.push_str(&format!(" | flags: {}", flags.join(", ")));
     }

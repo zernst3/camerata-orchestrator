@@ -187,8 +187,8 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 }
 
 /// The version of the question the scan asks the model: [`audit_system_prompt`], the pass prompt
-/// layout ([`build_pass_prompt`]) and its task lines, and the rules-block format
-/// ([`build_rules_block`]). It is part of the incremental cache key
+/// layout ([`build_pass_prompt`]) and its task lines, the rules-block format
+/// ([`build_rules_block`]), and the calibration prompt and reply schema. It is part of the incremental cache key
 /// ([`crate::scan_cache::AiScanKey`]): carried findings answered an older question once this
 /// moves, so they are re-scanned instead of reused.
 ///
@@ -214,7 +214,13 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// 5: defects D2 and D4. The detail-regeneration reply is one entry per finding keyed by its id
 /// (the schema requires every id), and the fix prompt says an omitted id is asked about once
 /// more and is never sent for a convention row.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 5;
+///
+/// 6: calibration (stage 1) is part of the question too: a carried finding keeps the severity and
+/// confidence calibration gave it, so its system prompt and reply schema are pinned here as well.
+/// Calibration sees the whole file and a file it names, may lower a severity for a protection it
+/// can see, answers whether the row states the rule's central fault, and rates unauthenticated
+/// access high by default (owner ruling R-8).
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 6;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).

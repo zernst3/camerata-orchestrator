@@ -245,10 +245,21 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
 
     // Calibration.
     let cal = serde_json::json!({
-        "severity": "low", "real": "yes", "effort": "low",
+        "severity": "low", "real": "yes", "effort": "low", "central_fault": "yes",
         "category": "input-validation", "reason": "contained"
     });
     assert_eq!(violation(&stage1_reply_schema(), &cal), None);
+    // The central fault question is required; the protection and the named file are not.
+    let mut without_central = cal.clone();
+    without_central
+        .as_object_mut()
+        .expect("an object")
+        .remove("central_fault");
+    assert!(violation(&stage1_reply_schema(), &without_central).is_some());
+    let mut with_optional = cal.clone();
+    with_optional["protection_at"] = serde_json::json!("src/a.ts:3");
+    with_optional["more_code_file"] = serde_json::json!("src/auth.ts");
+    assert_eq!(violation(&stage1_reply_schema(), &with_optional), None);
     let out = apply_verdicts(
         &serde_json::json!({"verdicts": [{
             "index": 0, "severity": "low", "real": "yes", "effort": "low",
@@ -261,11 +272,12 @@ fn replies_in_each_stages_shape_satisfy_its_schema_and_parse() {
     // A `real` answer outside yes, no and unclear is not a reply the schema allows, and neither
     // is the old confidence field.
     let outside = serde_json::json!({
-        "severity": "low", "real": "maybe", "effort": "low", "reason": "x"
+        "severity": "low", "real": "maybe", "effort": "low", "central_fault": "yes", "reason": "x"
     });
     assert!(violation(&stage1_reply_schema(), &outside).is_some());
     let old = serde_json::json!({
-        "severity": "low", "real": "yes", "confidence": "high", "effort": "low", "reason": "x"
+        "severity": "low", "real": "yes", "confidence": "high", "effort": "low",
+        "central_fault": "yes", "reason": "x"
     });
     assert!(violation(&stage1_reply_schema(), &old).is_some());
 

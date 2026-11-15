@@ -460,8 +460,8 @@ async fn verify_findings_prompt_contains_only_redacted_snippets() {
     // calibration model raw.
     let findings = vec![raw_finding(&p, 3)];
     let stub = Stub::new(r#"{}"#);
-    // The code window is cut from the file as given: a file that bypassed the run's own
-    // redaction must not reach the model raw through the window either.
+    // The code shown is cut from the file as given (this small file is shown whole): a file that
+    // bypassed the run's own redaction must not reach the model raw through it either.
     let files = vec![(".env".to_string(), format!("x\ny\n{}\nz\n", p.text))];
     let _ = verify_findings(
         &stub,
@@ -479,8 +479,8 @@ async fn verify_findings_prompt_contains_only_redacted_snippets() {
         "the calibration prompt was built"
     );
     assert!(
-        sent.contains("The code around the site"),
-        "the window was built from the file"
+        sent.contains("The whole file .env"),
+        "the code shown was built from the file"
     );
     assert!(
         !sent.contains(&p.value),

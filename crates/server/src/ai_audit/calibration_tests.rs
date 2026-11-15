@@ -13,13 +13,13 @@ use repo_map::CHARS_PER_TOKEN_ESTIMATE;
 type Reply = Box<dyn Fn(&LlmRequest) -> anyhow::Result<LlmResponse> + Send + Sync>;
 
 /// Answers every call with `reply(&request)` and records every request.
-struct Scripted {
+pub(super) struct Scripted {
     reply: Reply,
     seen: std::sync::Mutex<Vec<LlmRequest>>,
 }
 
 impl Scripted {
-    fn new(
+    pub(super) fn new(
         reply: impl Fn(&LlmRequest) -> anyhow::Result<LlmResponse> + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -29,17 +29,17 @@ impl Scripted {
     }
 
     /// Answers every call with the same text.
-    fn text(text: &str) -> Self {
+    pub(super) fn text(text: &str) -> Self {
         let text = text.to_string();
         Self::new(move |_| Ok(response(&text)))
     }
 
-    fn requests(&self) -> Vec<LlmRequest> {
+    pub(super) fn requests(&self) -> Vec<LlmRequest> {
         self.seen.lock().expect("lock").clone()
     }
 
     /// The requests that are stage 1 calibration calls (their system prompt is stage 1's).
-    fn calibration_requests(&self) -> Vec<LlmRequest> {
+    pub(super) fn calibration_requests(&self) -> Vec<LlmRequest> {
         self.requests().into_iter().filter(is_stage1).collect()
     }
 }
@@ -50,7 +50,7 @@ fn is_stage1(req: &LlmRequest) -> bool {
         .is_some_and(|s| s.starts_with(&verify_system_prompt()))
 }
 
-fn response(text: &str) -> LlmResponse {
+pub(super) fn response(text: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         text: text.to_string(),
@@ -87,9 +87,9 @@ impl LlmPort for Scripted {
     }
 }
 
-const GOOD: &str = r#"{"severity":"high","real":"yes","effort":"low","category":"authorization","reason":"reachable without a check"}"#;
+pub(super) const GOOD: &str = r#"{"severity":"high","real":"yes","effort":"low","category":"authorization","reason":"reachable without a check"}"#;
 
-fn site(path: &str, line: usize) -> Finding {
+pub(super) fn site(path: &str, line: usize) -> Finding {
     Finding {
         repo: "acme/app".to_string(),
         path: path.to_string(),
@@ -104,7 +104,7 @@ fn site(path: &str, line: usize) -> Finding {
 
 /// A site of a security rule: the verdict mechanics tests raise it to critical, which a
 /// convention rule's row (`site`) is not (see `a_verdict_cannot_raise_a_convention_rule_row_to_critical`).
-fn security_site(path: &str, line: usize) -> Finding {
+pub(super) fn security_site(path: &str, line: usize) -> Finding {
     Finding {
         rule_id: "SEC-X-1".to_string(),
         ..site(path, line)
@@ -112,14 +112,14 @@ fn security_site(path: &str, line: usize) -> Finding {
 }
 
 /// A file of `n` lines, `line 1` .. `line n`.
-fn numbered_file(path: &str, n: usize) -> (String, String) {
+pub(super) fn numbered_file(path: &str, n: usize) -> (String, String) {
     (
         path.to_string(),
         (1..=n).map(|i| format!("line {i}\n")).collect(),
     )
 }
 
-async fn run(
+pub(super) async fn run(
     llm: &Scripted,
     findings: Vec<Finding>,
     files: &[(String, String)],
@@ -191,8 +191,10 @@ async fn stage1_prompt_contains_no_confidence_instruction() {
     // The first-reviewer framing, and the rules of thumb word for word.
     assert!(system.contains("You are the first reviewer of an automated audit."));
     assert!(system.contains("You never remove one."));
+    // Owner ruling R-8: unauthenticated access is high by default (pinned word for word in
+    // `calibration_context_tests`).
     assert!(system.contains(
-        "Unauthenticated access to ANY protected resource or operation, OR a path to full-account"
+        "Unauthenticated access to a protected resource or operation is \"high\" by default."
     ));
     assert!(system.contains(
         "An open or unvalidated redirect (the destination is attacker-controlled or otherwise"
@@ -401,8 +403,17 @@ fn the_code_window_covers_30_lines_each_side_clamped_at_the_file_edges() {
 
 #[tokio::test]
 async fn the_request_for_a_site_carries_its_window_and_nothing_beyond_it() {
+    // A file over the whole-file budget: under it the site is shown its whole file
+    // (`calibration_context_tests`).
     let llm = Scripted::text(GOOD);
-    let files = vec![numbered_file("a.rs", 200)];
+    let pad = "x".repeat(150);
+    let files = vec![(
+        "a.rs".to_string(),
+        (1..=200)
+            .map(|i| format!("{pad} line {i}\n"))
+            .collect::<String>(),
+    )];
+    assert!(files[0].1.len() > WHOLE_FILE_BUDGET_CHARS);
     let _ = run(&llm, vec![site("a.rs", 100)], &files).await;
     let reqs = llm.calibration_requests();
     assert_eq!(reqs.len(), 1);
@@ -871,11 +882,39 @@ async fn prompt_size_per_site_on_the_scripted_fixture() {
         user / 12
     );
     assert_eq!(reqs.len(), 12);
-    // The estimator prices the part of a request that is the site's own (not the cached prefix)
-    // as 560 tokens; the fixture's measured figure, at the engine's 3 characters a token, is it.
-    let site_tokens = (user / 12) as f64 / CHARS_PER_TOKEN_ESTIMATE as f64;
-    let priced = camerata_ui_core::scan::CALIBRATION_SITE_INPUT_TOKENS;
-    assert_eq!(priced, 560.0);
+    // The code shown is the numbered lines; the rest of a site's own text is the rule, the
+    // finding and the framing. The fixture's files are under the whole-file budget, so each site
+    // is shown its whole file of 120 lines.
+    let is_code_line = |l: &str| {
+        l.split_once("| ").is_some_and(|(n, _)| {
+            !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit())
+        })
+    };
+    for r in &reqs {
+        assert_eq!(
+            r.prompt.lines().filter(|l| is_code_line(l)).count(),
+            120,
+            "the whole file is shown"
+        );
+    }
+    let code: usize = reqs
+        .iter()
+        .flat_map(|r| {
+            r.prompt
+                .lines()
+                .filter(|l| is_code_line(l))
+                .map(|l| l.len() + 1)
+        })
+        .sum();
+    // The estimator prices the site's own text without its code (not the cached prefix) as
+    // CALIBRATION_SITE_TEXT_TOKENS, and the code on top of it; the fixture's measured figure, at
+    // the engine's 3 characters a token, is it.
+    let site_tokens = ((user - code) / 12) as f64 / CHARS_PER_TOKEN_ESTIMATE as f64;
+    let priced = camerata_ui_core::scan::CALIBRATION_SITE_TEXT_TOKENS;
+    eprintln!(
+        "STAGE1 SITE TEXT tokens={site_tokens} code_bytes_per_site={}",
+        code / 12
+    );
     assert!(
         (site_tokens - priced).abs() <= 0.05 * priced,
         "a site's own text is {site_tokens} tokens on the fixture against the estimator's {priced}"

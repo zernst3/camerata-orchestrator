@@ -311,6 +311,8 @@ mod batch_mode;
 
 mod calibration;
 #[cfg(test)]
+mod calibration_context_tests;
+#[cfg(test)]
 mod calibration_tests;
 pub mod group_review;
 #[cfg(test)]

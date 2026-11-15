@@ -147,7 +147,7 @@ fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
             crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             digest.as_str()
         ),
-        (5, "a46a9cedc3a8fa97"),
+        (6, "a46a9cedc3a8fa97"),
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
@@ -191,7 +191,7 @@ fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
             hash(crate::ai_audit::detail_regen::detail_regen_system_prompt()).as_str(),
         ),
         (
-            5,
+            6,
             "5bc27c39facb8c9d",
             "fb0d0667d9ea0281",
             "6892c53159a68e5f"
@@ -234,4 +234,37 @@ fn the_applies_to_routing_setting_is_part_of_the_question() {
     .unwrap();
     assert!(!legacy.applies_to_routing);
     assert!(legacy.terse_output);
+}
+
+/// Calibration is part of the question a carried finding answered: it keeps the severity and
+/// confidence calibration gave it. Editing the calibration prompt or its reply schema without
+/// bumping [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] would carry verdicts given to the old
+/// question, so they are pinned the same way: change one, bump the version, update the pin.
+/// Version 6: calibration sees the whole file, credits a shown protection, asks for the central
+/// fault and rates unauthenticated access high by default (R-8).
+#[test]
+fn the_calibration_prompt_is_pinned_to_the_prompt_schema_version() {
+    let hash = |text: String| format!("{:016x}", crate::suppression::fnv1a(&text));
+    let pinned = (
+        crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+        hash(crate::ai_audit::verify_system_prompt()),
+        hash(crate::ai_audit::reply_schemas::stage1_reply_schema().to_string()),
+    );
+    assert_eq!(
+        (pinned.0, pinned.1.as_str(), pinned.2.as_str()),
+        (6, "0465058bc439b4d4", "e9f31f5c4adc7100"),
+        "the calibration prompt or its reply schema changed: bump AUDIT_PROMPT_SCHEMA_VERSION \
+         and update this pin"
+    );
+    // A baseline written under the version before is not reused: its findings are scanned and
+    // calibrated again.
+    let rules = [rule("ARCH-A-1", "do A")];
+    let older = AiScanKey {
+        prompt_schema_version: 5,
+        ..key(MODEL, None, &rules)
+    };
+    let m = manifest_under("fp", &older);
+    assert!(!m.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+    // And a stored run of the older engine is not resumed.
+    assert!(crate::run_store::engine_version().ends_with("+prompt6"));
 }

@@ -1014,6 +1014,7 @@ fn the_batch_fallback_estimate_is_the_run_estimate() {
                 deep: false,
                 backend: crate::llm::ProjectBackend::Api,
                 terse_output: terse,
+                whole_file_calibration: true,
             },
         )
         .expected

@@ -626,6 +626,7 @@ pub(super) fn batch_estimate_usd(
             deep: false,
             backend: crate::llm::ProjectBackend::Api,
             terse_output,
+            whole_file_calibration: true,
         },
     );
     Some(bounds.expected.1)

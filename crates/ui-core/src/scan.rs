@@ -195,13 +195,43 @@ pub const REGEN_SCAN_TOKENS_PER_FINDING: f64 = 300.0;
 
 /// Stage 1 calibration is one structured call per site (the server's
 /// `ai_audit::calibration`). Each call carries the same system prompt and shared prefix (about
-/// 8.7 KB, 2,900 tokens) and the site's own text with its code window (about 1.7 KB, 560
-/// tokens), and writes one verdict. MEASURED on the scripted 12-site fixture of
+/// 8.7 KB, 2,900 tokens) and the site's own text with its code, and writes one verdict.
+/// MEASURED on the scripted 12-site fixture of
 /// `calibration_tests::prompt_size_per_site_on_the_scripted_fixture`; a server test pins the
 /// prefix figure to the real prompt so it cannot drift.
 pub const CALIBRATION_PREFIX_TOKENS: f64 = 2_900.0;
-/// See [`CALIBRATION_PREFIX_TOKENS`]: the part of a stage 1 request that is the site's own.
+/// See [`CALIBRATION_PREFIX_TOKENS`]: the part of a stage 1 request that is the site's own, as
+/// it was under the 61-line window (about 1.7 KB, 560 tokens, MEASURED on the scripted fixture
+/// before stage 1 showed whole files). The runs the estimate is held to were made under it, so
+/// [`CalibrationCode::Window`] prices exactly this.
 pub const CALIBRATION_SITE_INPUT_TOKENS: f64 = 560.0;
+/// The part of a stage 1 request that is the site's own WITHOUT its code: the rule, the finding
+/// and the framing around the code. The code shown is priced on top of it by
+/// [`calibration_code_tokens`]. MEASURED on the scripted fixture, which a server test pins.
+pub const CALIBRATION_SITE_TEXT_TOKENS: f64 = 255.0;
+/// The largest file, in characters, stage 1 shows whole; a larger file is shown as the 61 lines
+/// around the site. 24,000 characters is about 600 lines at 40 a line: a file a person can still
+/// read through in one sitting, the size hand-maintained files are split at (SPIRIT-FILE-SIZE-1),
+/// so almost every hand-maintained file is shown whole and the protections it holds away from the
+/// site (a verified signature, a read-only function, an admin check in another function) are in
+/// view, while generated files and bundles, which are larger, keep the window. It is about 8,000
+/// tokens at the engine's three characters a token, far inside every model's input window, and
+/// it caps the worst site at about six times what a windowed site cost on the API backend. The
+/// server reads this constant, so the engine and the estimate cannot disagree on it.
+pub const CALIBRATION_FILE_BUDGET_CHARS: usize = 24_000;
+/// The mean file size the estimate assumes when it is not told how many files the scan reads (an
+/// ASSUMPTION: about 200 lines of 40 characters). The run estimate knows the file count and uses
+/// the repository's own mean instead ([`calibration_file_chars`]).
+pub const CALIBRATION_ASSUMED_FILE_CHARS: f64 = 8_000.0;
+/// The characters a line of source the estimate assumes (an ASSUMPTION), for the line number
+/// each shown line carries.
+const CALIBRATION_CHARS_PER_LINE: f64 = 40.0;
+/// The line number in front of each shown line (`{number:>5}| `).
+const CALIBRATION_LINE_NUMBER_CHARS: f64 = 7.0;
+/// The share of sites the estimate assumes stage 1 asks a second time with the file it named
+/// (the needs-more-code pass). Such a call carries the site, its own file and the named one. An
+/// ASSUMPTION, set high, until fresh scans measure how many `unclear` verdicts name a file.
+pub const CALIBRATION_SECOND_PASS_SHARE: f64 = 0.15;
 /// The verdict one site's reply holds; the server's cap per site is built from the same figure.
 pub const CALIBRATION_OUTPUT_TOKENS_PER_SITE: f64 = 150.0;
 
@@ -240,10 +270,48 @@ pub struct CalibrationEstimate {
     pub output_tokens: f64,
 }
 
-/// Stage 1 over `sites`: one call each. The prefix is written to the prompt cache once and read
-/// back at the cache price by every later call on the API backend; every CLI call is a fresh
-/// subprocess with no shared cache, so each pays the write.
-pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationEstimate {
+/// The code stage 1 shows each site, for [`calibration_estimate`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CalibrationCode {
+    /// The 61 lines around the site and no second pass: stage 1 before it showed whole files,
+    /// which every saved run the estimate is held to was made under.
+    Window,
+    /// The whole file the site is in, of about this many characters, and the second pass with a
+    /// file the reply names: stage 1 as it runs now.
+    File(f64),
+}
+
+/// The tokens of code stage 1 shows a site whose file is `file_chars` characters: the whole
+/// file, line-numbered, up to [`CALIBRATION_FILE_BUDGET_CHARS`]. Over the budget the engine shows
+/// the 61 lines around the site; the estimate keeps the budget's figure there instead of dropping
+/// to the window, so it never falls as files grow, and errs high for a repository whose mean is
+/// over the budget. At four characters a token, as the rest of the estimator.
+pub fn calibration_code_tokens(file_chars: f64) -> f64 {
+    let shown = file_chars.clamp(0.0, CALIBRATION_FILE_BUDGET_CHARS as f64);
+    shown * (1.0 + CALIBRATION_LINE_NUMBER_CHARS / CALIBRATION_CHARS_PER_LINE) / 4.0
+}
+
+/// The mean size of the file a site sits in, for the run estimate: the repository's code over its
+/// files, or [`CALIBRATION_ASSUMED_FILE_CHARS`] when the file count is not known.
+pub fn calibration_file_chars(repo: &RunRepoInput) -> f64 {
+    if repo.files > 0 {
+        repo.code_chars as f64 / repo.files as f64
+    } else {
+        CALIBRATION_ASSUMED_FILE_CHARS
+    }
+}
+
+/// Stage 1 over `sites`: one call each, showing `code`, plus (for whole files) the second pass for
+/// [`CALIBRATION_SECOND_PASS_SHARE`] of them. The prefix is written to the prompt cache once and
+/// read back at the cache price by every later call on the API backend; every CLI call is a fresh
+/// subprocess, so each pays the write of its own text. The file is priced at the full input
+/// price on every call: the sites of one file are asked at the same time, so a cache entry for
+/// it would rarely be read before the next site of it is sent, and the engine marks none.
+pub fn calibration_estimate(
+    sites: f64,
+    code: CalibrationCode,
+    backend: ProjectBackend,
+) -> CalibrationEstimate {
     const CACHE_WRITE_MULT: f64 = 1.25;
     const CACHE_READ_MULT: f64 = 0.10;
     let calls = sites.max(0.0) as usize;
@@ -254,30 +322,42 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
             output_tokens: 0.0,
         };
     }
+    // What one call carries beyond the prefix, and how many second-pass calls (each with the site,
+    // its own file and the named file, assumed the same size) come on top.
+    let (first_own, second, second_own) = match code {
+        CalibrationCode::Window => (CALIBRATION_SITE_INPUT_TOKENS, 0.0, 0.0),
+        CalibrationCode::File(chars) => {
+            let file = calibration_code_tokens(chars);
+            (
+                CALIBRATION_SITE_TEXT_TOKENS + file,
+                calls as f64 * CALIBRATION_SECOND_PASS_SHARE,
+                CALIBRATION_SITE_TEXT_TOKENS + 2.0 * file,
+            )
+        }
+    };
     // The system prompt and shared prefix are the same bytes on every call, so they are written
     // once and read back by the rest (on the CLI backend too, now that its calls carry no tools:
     // 2,800 of the 3,500 tokens a call read came from the cache). What each call writes is its
-    // own site text; on the CLI backend also its own overhead, at the CLI's write price.
-    let prefix = match backend {
-        ProjectBackend::Cli => {
+    // own site text and code; on the CLI backend also its own overhead, at the CLI's write price.
+    let reads = (calls - 1) as f64 + second;
+    let (prefix, own) = match backend {
+        ProjectBackend::Cli => (
             CALIBRATION_PREFIX_TOKENS * CLI_CACHE_WRITE_MULT
-                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
-        }
-        ProjectBackend::Api => {
+                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * reads,
+            (calls as f64 * (first_own + CLI_CALL_OVERHEAD_TOKENS)
+                + second * (second_own + CLI_CALL_OVERHEAD_TOKENS))
+                * CLI_CACHE_WRITE_MULT,
+        ),
+        ProjectBackend::Api => (
             CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT
-                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
-        }
-    };
-    let per_call_own = match backend {
-        ProjectBackend::Cli => {
-            (CALIBRATION_SITE_INPUT_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT
-        }
-        ProjectBackend::Api => CALIBRATION_SITE_INPUT_TOKENS,
+                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * reads,
+            calls as f64 * first_own + second * second_own,
+        ),
     };
     CalibrationEstimate {
         calls,
-        input_tokens: calls as f64 * per_call_own + prefix,
-        output_tokens: calls as f64 * CALIBRATION_OUTPUT_TOKENS_PER_SITE,
+        input_tokens: own + prefix,
+        output_tokens: (calls as f64 + second) * CALIBRATION_OUTPUT_TOKENS_PER_SITE,
     }
 }
 
@@ -792,7 +872,12 @@ fn estimate_with_regeneration(
     } else {
         0.0
     };
-    let calibration = calibration_estimate(sites, backend);
+    // This estimate is not told how many files the scan reads: it prices the assumed file.
+    let calibration = calibration_estimate(
+        sites,
+        CalibrationCode::File(CALIBRATION_ASSUMED_FILE_CHARS),
+        backend,
+    );
     let cal_in = calibration.input_tokens;
     let cal_out = calibration.output_tokens;
 
@@ -1076,6 +1161,10 @@ pub struct RunFlags {
     pub deep: bool,
     pub backend: ProjectBackend,
     pub terse_output: bool,
+    /// Whether stage 1 shows whole files (with the second pass for a file it names), as it does
+    /// now. `false` prices the 61-line window it showed before, for checking the estimate against
+    /// runs made then.
+    pub whole_file_calibration: bool,
 }
 
 /// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
@@ -1390,11 +1479,16 @@ fn estimate_run_stages_with_regeneration<'a>(
     // The findings the scan reports, from its output volume (text, before the model's scale).
     let (findings_out, findings) = run_findings(fit, repo, mode);
 
-    // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
-    // and the site's own text; see [`calibration_estimate`]. ──
+    // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix,
+    // the site's own text and the file it sits in; see [`calibration_estimate`]. ──
     // Nothing is scanned without rules, so nothing is calibrated.
     let sites = if selected > 0 { findings } else { 0.0 };
-    let calibration = calibration_estimate(sites, flags.backend);
+    let code = if flags.whole_file_calibration {
+        CalibrationCode::File(calibration_file_chars(repo))
+    } else {
+        CalibrationCode::Window
+    };
+    let calibration = calibration_estimate(sites, code, flags.backend);
     let cal_in = calibration.input_tokens;
     let cal_out = calibration.output_tokens * cal_scale;
 
@@ -3449,6 +3543,8 @@ mod tests {
             deep: false,
             backend: ProjectBackend::Api,
             terse_output: true,
+            // The recorded runs these tests are held to ran under the 61-line window.
+            whole_file_calibration: false,
         }
     }
 
@@ -3531,7 +3627,7 @@ mod tests {
 
     #[test]
     fn calibration_is_priced_as_one_call_per_site_with_a_cached_system_prefix() {
-        let api = calibration_estimate(100.0, ProjectBackend::Api);
+        let api = calibration_estimate(100.0, CalibrationCode::Window, ProjectBackend::Api);
         assert_eq!(api.calls, 100, "one call per site");
         assert_eq!(
             api.output_tokens,
@@ -3545,7 +3641,7 @@ mod tests {
         // On the CLI the shared prefix is written once (at the one-hour write price) and read 99
         // times, as on the API; each call also writes its own site text and the CLI's overhead,
         // at the write price.
-        let cli = calibration_estimate(100.0, ProjectBackend::Cli);
+        let cli = calibration_estimate(100.0, CalibrationCode::Window, ProjectBackend::Cli);
         let expected_cli = 100.0
             * ((CALIBRATION_SITE_INPUT_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT)
             + CALIBRATION_PREFIX_TOKENS * CLI_CACHE_WRITE_MULT
@@ -3553,16 +3649,110 @@ mod tests {
         assert!((cli.input_tokens - expected_cli).abs() < 1e-6, "{cli:?}");
         assert!(cli.input_tokens > api.input_tokens);
         // No sites, no calls, no cost.
-        let none = calibration_estimate(0.0, ProjectBackend::Api);
+        let none = calibration_estimate(0.0, CalibrationCode::Window, ProjectBackend::Api);
         assert_eq!(
             (none.calls, none.input_tokens, none.output_tokens),
             (0, 0.0, 0.0)
         );
         // Each further site adds its own text and a cached read of the prefix, not a batch.
-        let one = calibration_estimate(1.0, ProjectBackend::Api);
-        let ten = calibration_estimate(10.0, ProjectBackend::Api);
+        let one = calibration_estimate(1.0, CalibrationCode::Window, ProjectBackend::Api);
+        let ten = calibration_estimate(10.0, CalibrationCode::Window, ProjectBackend::Api);
         let per_site = CALIBRATION_SITE_INPUT_TOKENS + CALIBRATION_PREFIX_TOKENS * 0.10;
         assert!((ten.input_tokens - one.input_tokens - 9.0 * per_site).abs() < 1e-6);
+    }
+
+    /// Stage 1 shows the model the whole file a site is in when it fits the budget, so the
+    /// calibration term grows with the size of the files the sites sit in, and stops growing at
+    /// the budget (a larger file is shown as the window around the site, which this errs above).
+    #[test]
+    fn the_calibration_term_grows_with_the_size_of_the_file_shown() {
+        let at = |chars: f64| {
+            calibration_estimate(100.0, CalibrationCode::File(chars), ProjectBackend::Api)
+        };
+        let small = at(2_000.0);
+        let medium = at(10_000.0);
+        let large = at(20_000.0);
+        assert!(
+            small.input_tokens < medium.input_tokens,
+            "{small:?} {medium:?}"
+        );
+        assert!(
+            medium.input_tokens < large.input_tokens,
+            "{medium:?} {large:?}"
+        );
+        // Above the budget the file is not shown whole: the term stops at the budget's figure.
+        let budget = at(CALIBRATION_FILE_BUDGET_CHARS as f64);
+        let over = at(CALIBRATION_FILE_BUDGET_CHARS as f64 * 3.0);
+        assert!((over.input_tokens - budget.input_tokens).abs() < 1e-6);
+        // Each further thousand characters of file adds, per site, at least those characters at
+        // the estimator's four a token (the line numbers come on top).
+        let per_site_growth = (medium.input_tokens - small.input_tokens) / 100.0;
+        assert!(per_site_growth >= 8_000.0 / 4.0, "{per_site_growth}");
+        // Even a small file shown whole costs more than the window did.
+        let window = calibration_estimate(100.0, CalibrationCode::Window, ProjectBackend::Api);
+        assert!(
+            small.input_tokens > window.input_tokens,
+            "{small:?} {window:?}"
+        );
+        // The same on the CLI backend, where every call writes its own text at the write price.
+        let cli = |chars: f64| {
+            calibration_estimate(100.0, CalibrationCode::File(chars), ProjectBackend::Cli)
+        };
+        assert!(cli(2_000.0).input_tokens < cli(20_000.0).input_tokens);
+        // The run estimate sizes it from the repository: the same code in fewer, larger files
+        // costs more per site to calibrate.
+        let repo = |files: usize| RunRepoInput {
+            repo: "r".into(),
+            code_chars: 400_000,
+            files,
+            selected: 10,
+            multi_option_selected: 0,
+            routing_groups: 1,
+        };
+        assert!(
+            calibration_file_chars(&repo(20)) > calibration_file_chars(&repo(200)),
+            "fewer files over the same code are larger files"
+        );
+        assert_eq!(
+            calibration_file_chars(&repo(0)),
+            CALIBRATION_ASSUMED_FILE_CHARS,
+            "an unknown file count prices the assumed file"
+        );
+        // And a run quoted with whole files costs more than the same run under the window.
+        let models = RunModels {
+            scan: PricedModel {
+                id: "unmeasured-model",
+                price_in: 0.0,
+                price_out: 0.0,
+            },
+            calibration: PricedModel {
+                id: "unmeasured-model",
+                price_in: 1.0,
+                price_out: 1.0,
+            },
+            group_review: None,
+            fix: None,
+            clone_judge: None,
+        };
+        let whole = RunFlags {
+            whole_file_calibration: true,
+            ..flags()
+        };
+        let windowed = RunFlags {
+            whole_file_calibration: false,
+            ..flags()
+        };
+        let usd = |f| {
+            estimate_run_cost_bounds(&repo(100), "parallel", &models, f)
+                .expected
+                .1
+        };
+        assert!(
+            usd(whole) > usd(windowed),
+            "{} {}",
+            usd(whole),
+            usd(windowed)
+        );
     }
 
     /// The run estimate prices the calibration of exactly the findings it assumes, one call each:
@@ -3591,7 +3781,7 @@ mod tests {
         };
         let with = estimate_run_cost_bounds(&fixture(), "parallel", &models(cal), flags());
         let without = estimate_run_cost_bounds(&fixture(), "parallel", &models(free), flags());
-        let est = calibration_estimate(sites as f64, ProjectBackend::Api);
+        let est = calibration_estimate(sites as f64, CalibrationCode::Window, ProjectBackend::Api);
         let dollars = with.expected.1 - without.expected.1;
         assert!(
             (dollars * 1_000_000.0 - (est.input_tokens + est.output_tokens)).abs() < 1.0,
@@ -3927,6 +4117,8 @@ mod tests {
             deep: false,
             backend: ProjectBackend::Cli,
             terse_output: true,
+            // The recorded runs these tests are held to ran under the 61-line window.
+            whole_file_calibration: false,
         }
     }
 

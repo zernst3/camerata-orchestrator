@@ -236,6 +236,8 @@ fn estimate_with(fit: &RunFit, run: &SavedRun) -> RunStageDollars {
             deep: false,
             backend: ProjectBackend::Cli,
             terse_output: true,
+            // The saved runs ran under the 61-line window.
+            whole_file_calibration: false,
         },
     )
 }
@@ -324,6 +326,8 @@ fn the_stages_add_up_to_the_estimate_the_pre_flight_prints() {
             deep: false,
             backend: ProjectBackend::Cli,
             terse_output: true,
+            // The saved runs ran under the 61-line window.
+            whole_file_calibration: false,
         },
     );
     assert!((bounds.expected.1 - by_stage).abs() < 1e-9);
@@ -470,6 +474,8 @@ fn the_estimate_follows_the_files_of_the_repository() {
         deep: false,
         backend: ProjectBackend::Cli,
         terse_output: true,
+        // The saved runs ran under the 61-line window.
+        whole_file_calibration: false,
     };
     let usd = |files| {
         estimate_run_cost_bounds(&repo(files), "parallel", &models, flags)
@@ -514,6 +520,8 @@ fn the_ceiling_covers_the_site_rate_spread() {
             deep: false,
             backend: ProjectBackend::Cli,
             terse_output: true,
+            // The saved runs ran under the 61-line window.
+            whole_file_calibration: false,
         };
         let b = estimate_run_cost_bounds(&repo, "parallel", &models, flags);
         assert!(
@@ -567,6 +575,8 @@ fn the_api_estimate_for_the_fixture_matches_both_recorded_api_runs_with_its_file
         deep: false,
         backend: ProjectBackend::Api,
         terse_output: true,
+        // The saved runs ran under the 61-line window.
+        whole_file_calibration: false,
     };
     let judge = priced("claude-haiku-4-5-20251001", 1.0, 5.0);
     // The recorded runs had no stage 2: price the stages they had.
