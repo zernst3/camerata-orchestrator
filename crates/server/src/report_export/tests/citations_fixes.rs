@@ -206,7 +206,7 @@ async fn resolve_fix_is_none_when_rule_id_is_unknown_to_the_corpus() {
         errors.is_empty(),
         "corpus must load cleanly, got errors: {errors:?}"
     );
-    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "low");
+    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
     assert_eq!(
         resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None),
         None
@@ -1965,6 +1965,46 @@ fn a1_medium_uncited_ai_row_routes_to_held_never_informational() {
     assert_eq!(json.matrix.held.len(), 1, "{:?}", json.matrix.held);
     assert_eq!(json.matrix.held[0].severity, "medium");
     assert_eq!(json.matrix.held[0].rule_id, "AI-AUTH-RATE-LIMIT");
+    assert!(
+        json.matrix.held[0].why_waiting.is_some(),
+        "a held row says why it is waiting"
+    );
+    assert!(
+        json.curated_findings.is_empty(),
+        "{:?}",
+        json.curated_findings
+    );
+    assert_eq!(json.executive_summary.held_for_review, 1);
+}
+
+/// A capped test-path row is held, never buried: an uncited AI row at critical on a tests/
+/// path, passed through the severity ceiling, lands in `held` at low with nothing in the
+/// informational group or the plan.
+#[test]
+fn a1_capped_test_path_ai_row_lands_in_held_at_low() {
+    let mut f = finding(
+        "AI-TLS-VERIFICATION-DISABLED",
+        "tests/tls_client.test.ts",
+        9,
+        "critical",
+    );
+    f.detail = "TLS certificate verification is disabled for the test HTTPS client.".to_string();
+    let f = crate::ai_audit::apply_severity_ceiling_rule(f);
+    assert_eq!(f.severity, "low");
+    let report = report_with(vec![f], vec![]);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert_eq!(json.matrix.held.len(), 1, "{:?}", json.matrix.held);
+    assert_eq!(json.matrix.held[0].severity, "low");
+    assert!(
+        json.matrix.informational.is_empty(),
+        "{:?}",
+        json.matrix.informational
+    );
+    assert!(json.matrix.plan.is_empty(), "{:?}", json.matrix.plan);
 }
 
 /// C5-7: provenance/citation are ALWAYS the tier/citation of the row's OWN rule id, never

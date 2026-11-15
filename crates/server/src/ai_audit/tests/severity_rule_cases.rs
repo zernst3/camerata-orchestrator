@@ -1312,6 +1312,10 @@ fn a1_test_file_row_is_capped_to_low_and_marked_in_test_but_production_keeps_sev
     assert_eq!(out.severity, "low", "test-only code does not ship");
     assert!(out.in_test, "the row must be marked as test scope");
     assert!(
+        out.needs_review,
+        "a capped test row is held for a reviewer, never buried"
+    );
+    assert!(
         out.calibration_rationale
             .as_deref()
             .is_some_and(|r| r.contains("test")),
@@ -1339,4 +1343,21 @@ fn a1_secret_in_a_test_file_keeps_its_severity() {
     let out = apply_severity_ceiling_rule(secret);
     assert_eq!(out.severity, "high");
     assert!(!out.in_test);
+}
+
+/// The secret exemption covers every shape of credential rule id, not only the obvious words:
+/// a vendor token rule, a service-key rule and an invented id naming a key all keep severity.
+#[test]
+fn a1_secret_shaped_rule_ids_in_a_test_file_keep_their_severity() {
+    for rule in [
+        "SEC-NO-VENDOR-TOKEN-1",
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        "AI-STRIPE-KEY-EXPOSED",
+    ] {
+        let mut secret = finding_with_detail(rule, "high", "A live credential is committed.");
+        secret.path = "tests/setup.ts".to_string();
+        let out = apply_severity_ceiling_rule(secret);
+        assert_eq!(out.severity, "high", "{rule} keeps its severity");
+        assert!(!out.in_test, "{rule} is not marked as test scope");
+    }
 }
