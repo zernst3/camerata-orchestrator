@@ -38,6 +38,14 @@ fn reviewed_row(rule: &str, severity: &str, real: &str) -> Finding {
     f
 }
 
+/// The operator-only detail of a held severity.
+fn hold_detail(f: &Finding) -> String {
+    f.captures
+        .get(SEVERITY_HOLD_DETAIL_CAPTURE)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn notes(f: &Finding) -> String {
     recorded_adjustments(f).join(" | ")
 }
@@ -58,8 +66,14 @@ fn a_rule_floor_does_not_raise_a_row_stage_one_judged_not_real_and_holds_it() {
         "the doubted row is held for a decision"
     );
     let why = notes(&rows[0]);
-    assert!(why.contains("severity held at low"), "{why}");
-    assert!(why.contains("not real"), "{why}");
+    assert!(
+        why.contains("severity held at low pending a decision"),
+        "{why}"
+    );
+    // The client reads the neutral sentence; the reviewer detail is the operator's.
+    assert!(!why.contains("not real"), "{why}");
+    let detail = hold_detail(&rows[0]);
+    assert!(detail.contains("not real"), "{detail}");
 }
 
 /// The billing cascade shape: calibration said not real AND the group reviewer said likely false
@@ -96,7 +110,13 @@ fn a_row_the_group_reviewer_doubted_after_the_floor_returns_to_stage_one_severit
     assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
     assert!(rows[0].needs_review);
     let why = notes(&rows[0]);
-    assert!(why.contains("rule a misfit"), "{why}");
+    assert!(
+        why.contains("severity held at low pending a decision"),
+        "{why}"
+    );
+    assert!(!why.contains("misfit"), "{why}");
+    let detail = hold_detail(&rows[0]);
+    assert!(detail.contains("rule a misfit"), "{detail}");
     assert_eq!(
         crate::severity_bounds::bounded_severity(&rows[0], Some(&set)),
         "low"
@@ -308,8 +328,8 @@ fn authorization_and_data_loss_reasons_both_make_a_capped_deviation_a_defect() {
     assert_eq!(rows[1].severity, "critical", "{}", notes(&rows[1]));
 }
 
-/// A plain convention deviation stays a capped deviation: no reason, a reason that is not a
-/// security or data-loss reason, or a security reason at stage 1 low.
+/// A plain convention deviation stays a capped deviation: no reason, or a reason that is not a
+/// security or data-loss reason.
 #[test]
 fn a_plain_convention_deviation_stays_a_capped_deviation() {
     let set = corpus(&[("SYN-LAYERING-CONVENTION-1", None)]);
@@ -324,14 +344,6 @@ fn a_plain_convention_deviation_stays_a_capped_deviation() {
                     Some(EscalationReason::OutlierInGroup),
                 )
             },
-            Finding {
-                line: 32,
-                ..deviation_row(
-                    "SYN-LAYERING-CONVENTION-1",
-                    "low",
-                    Some(EscalationReason::AuthorizationBypass),
-                )
-            },
         ],
         &set,
     );
@@ -344,5 +356,320 @@ fn a_plain_convention_deviation_stays_a_capped_deviation() {
     }
     assert_eq!(rows[0].severity, "medium", "capped");
     assert_eq!(rows[1].severity, "medium", "capped");
-    assert_eq!(rows[2].severity, "low");
+}
+
+// ── Round 1 of PR #156's review ─────────────────────────────────────────────────────────────
+
+/// The scan tool's row at the same place as `row`, undoubted: no reviewer stage reads it.
+fn tool_row_at(row: &Finding, severity: &str) -> Finding {
+    Finding {
+        severity: severity.to_string(),
+        captures: Default::default(),
+        preview: true,
+        preview_tool: Some("semgrep".to_string()),
+        ..row.clone()
+    }
+}
+
+/// Defect 1: a `real: no` low row, a Semgrep high row folded into it, the rule's minimum medium.
+/// The merged row counts as undoubted for severity (the merged high stands) and stays held.
+#[test]
+fn an_undoubted_tool_row_folded_into_a_doubted_row_keeps_the_merged_severity_and_holds_it() {
+    let set = corpus(&[("SYN-MERGE-1", Some("medium"))]);
+    let mut rows = vec![reviewed_row("SYN-MERGE-1", "low", "no")];
+    let semgrep = tool_row_at(&rows[0], "high");
+    let left = crate::routes::dedup_scan_previews_with(&mut rows, vec![semgrep], None, Some(&set));
+    assert!(left.is_empty(), "the tool row folds in: {left:?}");
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review, "the row stays held");
+    let detail = rows[0]
+        .captures
+        .get("severity_hold_detail")
+        .cloned()
+        .unwrap_or_default();
+    assert!(detail.contains("one source"), "{detail:?}");
+}
+
+/// The same fold, but the group reviewer's doubt arrives after the merge.
+#[test]
+fn a_group_reviewer_doubt_after_an_undoubted_tool_row_was_folded_in_does_not_lower_the_row() {
+    let set = corpus(&[("SYN-MERGE-2", Some("medium"))]);
+    let mut rows = vec![reviewed_row("SYN-MERGE-2", "low", "yes")];
+    let semgrep = tool_row_at(&rows[0], "high");
+    crate::routes::dedup_scan_previews_with(&mut rows, vec![semgrep], None, Some(&set));
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    rows[0].review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}
+
+/// A doubted tool-free row: the tool row is promoted over it by precedence. The doubted source
+/// is demoted into the merged row, which is held.
+#[test]
+fn a_doubted_row_demoted_under_a_promoted_tool_row_holds_the_merged_row() {
+    let set = corpus(&[("SYN-MERGE-3", Some("medium"))]);
+    let mut rows = vec![reviewed_row("SYN-MERGE-3", "low", "no")];
+    let mut semgrep = tool_row_at(&rows[0], "high");
+    semgrep.rule_id = "syn.tool.rule".to_string();
+    let mut selectors = std::collections::HashMap::new();
+    selectors.insert("SYN-MERGE-3".to_string(), vec!["syn.tool.rule".to_string()]);
+    crate::routes::dedup_scan_previews_with(&mut rows, vec![semgrep], Some(&selectors), Some(&set));
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}
+
+/// Defect 1, the review tree's raise: a tool row collapsed into a doubted survivor raises it to
+/// the tool row's severity. The raise stands and the row stays held.
+#[test]
+fn the_review_trees_collapse_of_a_tool_row_into_a_doubted_row_keeps_the_raise_and_holds_it() {
+    let set = corpus(&[("SYN-COLLAPSE-1", Some("medium"))]);
+    let mut model = reviewed_row("SYN-COLLAPSE-1", "low", "no");
+    model.located = true;
+    let mut tool = tool_row_at(&model, "high");
+    tool.located = true;
+    let outcome = crate::review_tree::collapse_identical(
+        vec![model, tool],
+        &crate::review_tree::ToolMap::from_selectors(None),
+    );
+    let mut rows = outcome.rows;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].severity, "high", "the collapse raises it");
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}
+
+/// The same collapse where the undoubted source is another model row, not a tool.
+#[test]
+fn the_review_trees_collapse_of_an_undoubted_model_row_into_a_doubted_row_keeps_the_raise() {
+    let set = corpus(&[("SYN-COLLAPSE-2", Some("medium"))]);
+    // The survivor is the deterministic row (tier above the model's), doubted through a verdict.
+    let mut survivor = reviewed_row("SYN-COLLAPSE-2", "low", "no");
+    survivor.located = true;
+    let mut source = reviewed_row("SYN-COLLAPSE-2", "high", "yes");
+    source.located = true;
+    source.confidence = Some("high".to_string());
+    let outcome = crate::review_tree::collapse_identical(
+        vec![survivor, source],
+        &crate::review_tree::ToolMap::from_selectors(None),
+    );
+    let mut rows = outcome.rows;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].severity, "high", "the collapse raises it");
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}
+
+/// Defect 1, the other half of the rule: a row is returned to its reviewed severity only when a
+/// floor is what put it where it is. A doubted row more severe than every floor was raised by
+/// something else and is left alone.
+#[test]
+fn a_doubted_row_more_severe_than_every_floor_is_not_lowered() {
+    let set = corpus(&[("SYN-OTHER-RAISE-1", Some("medium"))]);
+    let mut rows = vec![reviewed_row("SYN-OTHER-RAISE-1", "low", "yes")];
+    rows[0].severity = "critical".to_string();
+    rows[0].review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "critical", "{}", notes(&rows[0]));
+}
+
+// ── Defect 2 and the mutation gaps ──────────────────────────────────────────────────────────
+
+/// A TLS row of a production file whose wording trips the phrase floor. Not held, not in a test
+/// file: nothing but the floor's own hold can hold it.
+fn tls_production_row(real: &str) -> Finding {
+    let mut f = tls_test_row(real);
+    f.path = "src/client.ts".to_string();
+    f.in_test = false;
+    f.needs_review = false;
+    f
+}
+
+#[test]
+fn the_phrase_floor_holds_a_doubted_production_row_that_was_not_held_before() {
+    let before = tls_production_row("no");
+    assert!(!before.needs_review, "the fixture starts unheld");
+    let rows = crate::ai_audit::apply_severity_calibration_rules(vec![before]);
+    assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review, "the doubted row is held");
+}
+
+/// M2: a phrase-floor raise followed by the group reviewer's doubt goes back to stage 1's
+/// severity; with no corpus rule, only the phrase floor can say a floor raised it.
+#[test]
+fn a_group_reviewer_doubt_after_a_phrase_floor_raise_returns_the_row_to_stage_one_severity() {
+    let mut rows =
+        crate::ai_audit::apply_severity_calibration_rules(vec![tls_production_row("yes")]);
+    assert_eq!(rows[0].severity, "critical", "the phrase floor raised it");
+    rows[0].review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    follow_reviewers(&mut rows, None);
+    assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
+}
+
+/// M3: the return holds the row. The phrase floor did not hold it (nobody doubted it then), and
+/// no corpus floor holds it afterwards, so the return's own hold is the only one.
+#[test]
+fn the_return_to_stage_one_severity_after_a_phrase_floor_raise_holds_the_row() {
+    let mut rows =
+        crate::ai_audit::apply_severity_calibration_rules(vec![tls_production_row("yes")]);
+    assert!(
+        !rows[0].needs_review,
+        "nobody doubted it when it was raised"
+    );
+    rows[0].review.escalation_reason = Some(EscalationReason::LikelyFalseAlarmAtHighSeverity);
+    follow_reviewers(&mut rows, None);
+    assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review, "the row is held for a decision");
+}
+
+// ── The owner's rulings ─────────────────────────────────────────────────────────────────────
+
+/// A Deviation with a security reason is a Defect at any severity, one stage 1 rated low too.
+#[test]
+fn a_security_reason_deviation_stage_one_rated_low_becomes_a_defect() {
+    let set = corpus(&[("SYN-LOW-CONVENTION-1", None)]);
+    let rows = after_group_review(
+        vec![deviation_row(
+            "SYN-LOW-CONVENTION-1",
+            "low",
+            Some(EscalationReason::AuthorizationBypass),
+        )],
+        &set,
+    );
+    assert!(is_defect(&rows[0]), "{:?}", rows[0].kind);
+    assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
+}
+
+/// A row only the group reviewer doubted, with no stage 1 severity: it keeps its severity and is
+/// held, because a floor touches it.
+#[test]
+fn a_row_only_the_group_reviewer_doubted_with_no_stage_one_severity_keeps_its_severity_and_is_held()
+{
+    let set = corpus(&[("SYN-NO-STAGE1-1", Some("high"))]);
+    let mut row = reviewed_row("SYN-NO-STAGE1-1", "low", "yes");
+    row.captures.clear();
+    let mut rows = vec![row];
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "no reviewer had doubted it yet");
+    rows[0].review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}
+
+/// Doubted rows no floor touches are not held by this change.
+#[test]
+fn a_doubted_row_no_floor_touches_is_not_held() {
+    let set = corpus(&[("SYN-NO-FLOOR-1", None)]);
+    let mut row = reviewed_row("SYN-NO-FLOOR-1", "medium", "yes");
+    row.review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    let mut rows = vec![row];
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "medium");
+    assert!(!rows[0].needs_review);
+}
+
+fn cors_row(real: &str) -> Finding {
+    let mut f = reviewed_row("AI-CORS-REFLECTED-ORIGIN-1", "low", real);
+    f.detail = "The CORS configuration reflects any origin and allows credentials.".to_string();
+    f
+}
+
+fn redirect_row(real: &str) -> Finding {
+    let mut f = reviewed_row("AI-LOGIN-REDIRECT-1", "low", real);
+    f.detail = "The login handler is an open redirect: it sends the user to the next parameter."
+        .to_string();
+    f
+}
+
+/// The CORS and open-redirect clamps lower a doubted row as before, but never raise one.
+#[test]
+fn the_cors_and_redirect_clamps_never_raise_a_doubted_row_and_hold_it() {
+    for (name, row) in [("cors", cors_row("no")), ("redirect", redirect_row("no"))] {
+        let rows = crate::ai_audit::apply_severity_ceiling_rules(vec![row]);
+        assert_eq!(rows[0].severity, "low", "{name}: {}", notes(&rows[0]));
+        assert!(rows[0].needs_review, "{name}: held for a decision");
+    }
+}
+
+/// The control: the same rows nobody doubted are clamped up to medium.
+#[test]
+fn the_cors_and_redirect_clamps_still_raise_a_row_nobody_doubted() {
+    for (name, row) in [("cors", cors_row("yes")), ("redirect", redirect_row("yes"))] {
+        let rows = crate::ai_audit::apply_severity_ceiling_rules(vec![row]);
+        assert_eq!(rows[0].severity, "medium", "{name}: {}", notes(&rows[0]));
+        assert!(!rows[0].needs_review, "{name}");
+    }
+}
+
+/// A doubted row the clamp would LOWER is lowered as before.
+#[test]
+fn the_cors_clamp_still_lowers_a_doubted_row() {
+    let mut row = cors_row("no");
+    row.severity = "high".to_string();
+    let rows = crate::ai_audit::apply_severity_ceiling_rules(vec![row]);
+    assert_eq!(rows[0].severity, "medium", "{}", notes(&rows[0]));
+}
+
+// ── Smaller items ───────────────────────────────────────────────────────────────────────────
+
+/// The held note is always kept: a row already at the most notes drops its oldest other note.
+#[test]
+fn the_held_note_is_kept_when_the_row_already_has_the_most_notes() {
+    let mut f = reviewed_row("SYN-NOTES-1", "low", "no");
+    for n in 0..8 {
+        crate::severity_bounds::record_adjustment(&mut f, format!("severity raised, step {n}"));
+    }
+    assert_eq!(recorded_adjustments(&f).len(), 8);
+    crate::severity_bounds::record_adjustment(
+        &mut f,
+        "severity held at low pending a decision".to_string(),
+    );
+    let all = recorded_adjustments(&f);
+    assert_eq!(all.len(), 8, "{all:?}");
+    assert!(
+        all.contains(&"severity held at low pending a decision".to_string()),
+        "{all:?}"
+    );
+    assert!(
+        !all.contains(&"severity raised, step 0".to_string()),
+        "the oldest note made room: {all:?}"
+    );
+    // A note that is not a held note is still dropped when the row is full.
+    crate::severity_bounds::record_adjustment(&mut f, "severity raised, step 9".to_string());
+    assert!(!recorded_adjustments(&f).contains(&"severity raised, step 9".to_string()));
+}
+
+/// An exported doubted row lands in the held bucket, not among the curated findings.
+#[test]
+fn an_exported_doubted_row_lands_in_the_held_bucket() {
+    let set = corpus(&[("SYN-HELD-BUCKET-1", Some("critical"))]);
+    let mut rows = vec![reviewed_row("SYN-HELD-BUCKET-1", "low", "no")];
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    let sealed = {
+        let mut report = crate::release_gate::test_scan_report();
+        report.findings = rows;
+        report.seal()
+    };
+    let json = crate::report_export::build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &Default::default()),
+        Some(&set),
+        &crate::report_export::ReportOptions::default(),
+    );
+    let sites = |groups: &[crate::report_export::CuratedGroupJson]| {
+        groups.iter().map(|g| g.sites.len()).sum::<usize>()
+    };
+    assert_eq!(sites(&json.held_for_review_findings), 1);
+    assert_eq!(sites(&json.curated_findings), 0);
 }

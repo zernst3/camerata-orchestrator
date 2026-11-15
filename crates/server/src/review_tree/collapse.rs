@@ -346,6 +346,12 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                     folded_rows.push(src.clone());
                 }
                 carry_stage1_record(&mut row, &src);
+                // A source nobody doubted folded into a doubted survivor makes the row
+                // undoubted for severity (the raise below stands) and holds it (R-7).
+                if crate::follow_reviewers::reviewer_doubt(&src).is_none() {
+                    crate::follow_reviewers::mark_undoubted_source_folded(&mut row);
+                }
+                crate::follow_reviewers::hold_partly_doubted(&mut row);
                 if donor.is_none() && src.fix_specific.is_some() {
                     donor = Some(src);
                 }

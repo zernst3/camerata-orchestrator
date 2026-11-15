@@ -567,6 +567,7 @@ pub(crate) fn dedup_scan_previews_with(
                 // The collapsed tool row keeps its own rule, tool, key and line (A1).
                 existing[idx].flagged_by.push(flagged_by_of(&preview));
                 merged.apply(&mut existing[idx]);
+                crate::follow_reviewers::fold_source_doubt(&mut existing[idx], &preview);
                 // drop the preview finding (continue to next)
             } else {
                 // Preview has higher precedence: promote it to canonical, demote existing.
@@ -586,6 +587,7 @@ pub(crate) fn dedup_scan_previews_with(
                     .append(&mut existing[idx].flagged_by);
                 new_canonical.flagged_by.push(flagged_by_of(&existing[idx]));
                 merged.apply(&mut new_canonical);
+                crate::follow_reviewers::fold_source_doubt(&mut new_canonical, &existing[idx]);
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
             }
@@ -600,10 +602,40 @@ pub(crate) fn dedup_scan_previews_with(
 }
 
 /// The tools whose severity is a strictness preference about style, not a judgement about
-/// harm: a project fails its build on an ESLint or Clippy "error" by choice (W24, see
-/// `scan_tools::capped_preview_severity`). Semgrep and Ruff are not on the list: Semgrep is a
-/// security scanner and Ruff carries the bandit-derived security family.
-const STYLE_LINTERS: &[&str] = &["eslint", "clippy"];
+/// harm: a project fails its build on an ESLint, Clippy or Ruff "error" by choice (W24, see
+/// `scan_tools::capped_preview_severity`). Semgrep is not on the list: it is a security scanner.
+/// The security family inside a style linter is exempt, row by row ([`is_security_family_lint`]).
+const STYLE_LINTERS: &[&str] = &["eslint", "clippy", "ruff"];
+
+/// Whether `preview`, a style linter's row, is one of the linter's security checks, which a
+/// reviewed severity does not outrank: an `eslint-plugin-security` id (`security/...`), a Ruff `S`
+/// rule (flake8-bandit, `S` and three digits), or any lint the corpus maps to a security rule
+/// (the row it folds into is of a security rule and the lint is that rule's tool).
+fn is_security_family_lint(
+    preview: &crate::onboard::Finding,
+    existing: &crate::onboard::Finding,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> bool {
+    let id = preview.rule_id.to_ascii_lowercase();
+    let last = id.rsplit(['/', ':']).next().unwrap_or(&id);
+    let is_ruff_s = last.len() == 4
+        && last.starts_with('s')
+        && last[1..].bytes().all(|b| b.is_ascii_digit())
+        && preview
+            .preview_tool
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("ruff"));
+    let is_security_plugin = id
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|segment| segment.contains("security"));
+    let mapped_to_security_rule = crate::ai_audit::finding_class(existing)
+        == crate::ai_audit::FindingClass::Security
+        && (preview.rule_id == existing.rule_id
+            || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors));
+    is_ruff_s || is_security_plugin || mapped_to_security_rule
+}
 
 /// Whether `f` is a style linter's preview row.
 fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
@@ -616,7 +648,7 @@ fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
 /// What a preview collapse does to the merged row's severity: the severity it ends at and the
 /// note it leaves.
 pub(crate) struct MergedSeverity {
-    severity: String,
+    pub(crate) severity: String,
     /// The severity the merged row's canonical side carried before, for the note.
     from: String,
     /// Why, as the end of the note's sentence; `None` when the two severities agreed.
@@ -669,6 +701,7 @@ pub(crate) fn merged_preview_severity(
     let reviewed = crate::ai_audit::stage1_of(existing).is_some();
     if is_style_linter_row(preview)
         && reviewed
+        && !is_security_family_lint(preview, existing, selectors)
         && !corpus_authors_severity(preview, existing, selectors, corpus)
     {
         let tool = preview.preview_tool.as_deref().unwrap_or("style linter");

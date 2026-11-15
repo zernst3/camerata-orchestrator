@@ -76,10 +76,13 @@ pub struct InternalTriage {
     pub outlier_why: String,
     /// "severity: medium, group reviewer: critical (why)" for each disagreement, joined by "; ".
     pub stage2_disagreement: String,
+    /// Why the row's severity is held for a decision: which reviewer stage doubted it and which
+    /// floor that held back, one sentence per line joined by "; ". Never in a client package.
+    pub severity_hold_detail: String,
 }
 
 /// The labels of [`InternalTriage`]'s columns on an internal workbook, in field order.
-pub const INTERNAL_TRIAGE_HEADERS: [&str; 9] = [
+pub const INTERNAL_TRIAGE_HEADERS: [&str; 10] = [
     "Escalation",
     "Escalation reason",
     "Stage 2 rank",
@@ -89,11 +92,12 @@ pub const INTERNAL_TRIAGE_HEADERS: [&str; 9] = [
     "Outlier reason",
     "Outlier why",
     "Stage 2 disagreement",
+    "Severity hold detail",
 ];
 
 impl InternalTriage {
     /// The cells, in [`INTERNAL_TRIAGE_HEADERS`] order.
-    pub fn cells(&self) -> [&str; 9] {
+    pub fn cells(&self) -> [&str; 10] {
         [
             &self.escalation_state,
             &self.escalation_reason,
@@ -104,6 +108,7 @@ impl InternalTriage {
             &self.outlier_reason,
             &self.outlier_why,
             &self.stage2_disagreement,
+            &self.severity_hold_detail,
         ]
     }
 }
@@ -276,5 +281,10 @@ pub fn internal_triage(f: &Finding) -> InternalTriage {
             })
             .collect::<Vec<_>>()
             .join("; "),
+        severity_hold_detail: f
+            .captures
+            .get(crate::follow_reviewers::SEVERITY_HOLD_DETAIL_CAPTURE)
+            .map(|d| d.lines().collect::<Vec<_>>().join("; "))
+            .unwrap_or_default(),
     }
 }

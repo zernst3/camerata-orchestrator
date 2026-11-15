@@ -2589,6 +2589,9 @@ mod fn_batch_b_tests;
 mod fn_batch_c_adjust_tests;
 
 #[cfg(test)]
+mod held_severity_text_tests;
+
+#[cfg(test)]
 mod fn_batch_c_dep_tests;
 
 #[cfg(test)]

@@ -130,8 +130,10 @@ pub trait BoundedFinding {
         None
     }
     /// Hold the row for a decision: called when a floor would have raised it but a reviewer
-    /// doubted it, so the human reviewer decides it. The default does nothing.
-    fn hold_for_decision(&mut self) {}
+    /// doubted it, so the human reviewer decides it. `detail` says why in the operator's words
+    /// (who doubted it, and which floor was held back); it is for the operator's own package
+    /// only, never for a client. The default does nothing.
+    fn hold_for_decision(&mut self, _detail: String) {}
 }
 
 /// E2: clamp `severity` DOWN to `rule`'s [`Rule::max_severity`], when one is declared and
@@ -207,20 +209,34 @@ fn floor_that_would_raise<F: BoundedFinding + ?Sized>(
     (severity_rank(severity) > severity_rank(&floor)).then_some(floor)
 }
 
+/// What R-7 says about a floor that did not raise a row: the note a client may read and the
+/// detail only the operator reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldFloor {
+    /// Neutral, for the client: "severity held at low pending a decision".
+    pub note: String,
+    /// For the operator's package only: who doubted the row and which floor was held back.
+    pub detail: String,
+}
+
 /// R-7: the note for the floor that WOULD have raised `severity` but did not, because a reviewer
 /// doubted the row. `None` when the row is not doubted or no floor would have moved it. The
 /// caller holds the row for a decision and records the note ([`apply_corpus_severity_bounds`]).
+/// The note is neutral because it reaches the client; the reviewer detail is separate.
 pub fn floor_held_for_doubt<F: BoundedFinding + ?Sized>(
     severity: &str,
     f: &F,
     rule: Option<&Rule>,
-) -> Option<String> {
+) -> Option<HeldFloor> {
     let doubt = f.reviewer_doubt()?;
     let floor = floor_that_would_raise(severity, f, rule)?;
-    Some(format!(
-        "severity held at {severity}: {doubt}, so the rule's minimum severity ({floor}) does \
-         not raise it, and it is held for a decision"
-    ))
+    Some(HeldFloor {
+        note: format!("severity held at {severity} pending a decision"),
+        detail: format!(
+            "{doubt}, so the rule's minimum severity ({floor}) does not raise it; the row keeps \
+             {severity} and is held for a decision"
+        ),
+    })
 }
 
 /// A5.2: clamp a [`BoundKind::Deviation`] row's severity DOWN to its rule's authored
@@ -312,7 +328,7 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
         DEVIATION_CAP_WHY.to_string(),
     );
     if let Some(note) = held {
-        notes.insert(0, note);
+        notes.insert(0, note.note);
     }
     (last, notes)
 }
@@ -354,7 +370,7 @@ pub fn apply_corpus_severity_bounds<'c, F: BoundedFinding>(
     for f in findings.iter_mut() {
         let rule = resolve(f.rule_id());
         let start = normalize_severity(f.severity());
-        let held = floor_held_for_doubt(&start, f, rule).is_some();
+        let held = floor_held_for_doubt(&start, f, rule);
         let (bounded, notes) = bounded_severity_explained(f, rule);
         // Compare against the NORMALIZED original, so an unrelated casing difference
         // ("High" vs "high") is not mistaken for a bound moving the severity.
@@ -362,13 +378,13 @@ pub fn apply_corpus_severity_bounds<'c, F: BoundedFinding>(
         if moved {
             f.set_severity(bounded);
         }
-        if moved || held {
+        if moved || held.is_some() {
             for note in notes {
                 f.note_severity_adjustment(note);
             }
         }
-        if held {
-            f.hold_for_decision();
+        if let Some(held) = held {
+            f.hold_for_decision(held.detail);
         }
     }
 }
@@ -648,7 +664,7 @@ mod tests {
             self.doubted
                 .then(|| "the reviewer judged it not real".to_string())
         }
-        fn hold_for_decision(&mut self) {
+        fn hold_for_decision(&mut self, _detail: String) {
             self.held = true;
         }
     }

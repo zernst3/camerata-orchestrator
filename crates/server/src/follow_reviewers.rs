@@ -42,6 +42,112 @@ impl Doubt {
     }
 }
 
+/// The `Finding::captures` key holding the operator-only detail of a held severity: which
+/// reviewer doubted the row and which floor was held back, one sentence per line. A client
+/// package never prints it (`severity_adjustments` are the client's notes and say only "Severity
+/// held at <level> pending a decision."); the internal workbook shows it in its triage columns
+/// ([`crate::report_export::internal_triage`]), the way it shows the escalation reason.
+pub const SEVERITY_HOLD_DETAIL_CAPTURE: &str = "severity_hold_detail";
+
+/// The `Finding::captures` key marking a row that a source nobody doubted was folded into (a
+/// scan-tool row collapsed into it, or an identical row the reviewers did not doubt). Such a row
+/// counts as undoubted for severity: the minimum and the merged severity apply (R-7, owner
+/// ruling on a merge of a doubted and an undoubted source), and the row stays held.
+pub const UNDOUBTED_SOURCE_CAPTURE: &str = "undoubted_source_folded";
+
+/// Whether a source nobody doubted is folded into `f`: the marker a merge leaves, or a scan-tool
+/// row among the rows collapsed into it (`flagged_by` with a tool: a tool's row never went
+/// through a reviewer stage).
+pub fn undoubted_source_folded_in(f: &Finding) -> bool {
+    f.captures.contains_key(UNDOUBTED_SOURCE_CAPTURE)
+        || f.flagged_by.iter().any(|fb| fb.tool.is_some())
+}
+
+/// Mark `f` as holding a source nobody doubted.
+pub fn mark_undoubted_source_folded(f: &mut Finding) {
+    f.captures
+        .insert(UNDOUBTED_SOURCE_CAPTURE.to_string(), "1".to_string());
+}
+
+/// The doubt a severity floor must respect: [`reviewer_doubt`], unless a source nobody doubted is
+/// folded into the row ([`undoubted_source_folded_in`]), when the row counts as undoubted for
+/// severity.
+pub fn doubt_for_severity(f: &Finding) -> Option<Doubt> {
+    reviewer_doubt(f).filter(|_| !undoubted_source_folded_in(f))
+}
+
+/// Record that `f` is held at its severity: the neutral sentence a client reads (always kept,
+/// see [`crate::severity_bounds::record_adjustment`]) and the operator-only `detail`. Does not
+/// set `needs_review`; the caller does, so the hold stays visible where it is decided.
+pub(crate) fn record_hold(f: &mut Finding, detail: &str) {
+    crate::severity_bounds::record_adjustment(f, held_note(&f.severity));
+    let entry = f
+        .captures
+        .entry(SEVERITY_HOLD_DETAIL_CAPTURE.to_string())
+        .or_default();
+    if entry.lines().any(|l| l == detail) {
+        return;
+    }
+    if !entry.is_empty() {
+        entry.push('\n');
+    }
+    entry.push_str(detail);
+}
+
+/// The sentence a client reads when a row's severity is held.
+pub(crate) fn held_note(severity: &str) -> String {
+    format!("{HELD_NOTE_PREFIX}{severity} pending a decision")
+}
+
+/// How every held-severity note starts (see [`held_note`]).
+pub(crate) const HELD_NOTE_PREFIX: &str = "severity held at ";
+
+/// `source` was just folded into `row` by a merge. A source nobody doubted marks the row as
+/// holding one ([`UNDOUBTED_SOURCE_CAPTURE`]); a source a reviewer doubted, folded into a row
+/// nobody doubted, holds the row with a note that one source was doubted. Either way a doubted
+/// row that now holds an undoubted source is held ([`hold_partly_doubted`]).
+pub fn fold_source_doubt(row: &mut Finding, source: &Finding) {
+    match reviewer_doubt(source) {
+        None => mark_undoubted_source_folded(row),
+        Some(doubt) if reviewer_doubt(row).is_none() => {
+            row.needs_review = true;
+            record_hold(
+                row,
+                &format!(
+                    "one source folded into this row was doubted ({}); another was not, so the \
+                     minimum severity and the merged severity apply and the row is held for a \
+                     decision",
+                    doubt.phrase()
+                ),
+            );
+        }
+        Some(_) => {}
+    }
+    hold_partly_doubted(row);
+}
+
+/// A row a reviewer doubted that a source nobody doubted was folded into: the floor and the
+/// merged severity apply, and the row is held for a decision with a detail saying one source was
+/// doubted. Idempotent. Run wherever the bounds run, so a merge before the reviewers and a
+/// reviewer after the merge reach the same row.
+pub fn hold_partly_doubted(f: &mut Finding) {
+    let Some(doubt) = reviewer_doubt(f) else {
+        return;
+    };
+    if !undoubted_source_folded_in(f) {
+        return;
+    }
+    f.needs_review = true;
+    record_hold(
+        f,
+        &format!(
+            "one source folded into this row was doubted ({}); another was not, so the \
+             minimum severity and the merged severity apply and the row is held for a decision",
+            doubt.phrase()
+        ),
+    );
+}
+
 /// Whether a reviewer stage doubted `f`, and which. Read from what the stages already store on
 /// the row: stage 1's verdict capture, and the group reviewer's escalation reason and recorded
 /// disagreements. No text of the row is read. `unclear` is not doubt: it holds the row already
@@ -70,7 +176,8 @@ pub fn reviewer_doubt(f: &Finding) -> Option<Doubt> {
 ///
 /// 1. **Kind follows the claim** ([`security_deviation_becomes_defect`]). A deviation the group
 ///    reviewer gave a security or data-loss reason is a defect.
-/// 2. **A doubted row returns to stage 1's severity** ([`return_doubted_row_to_reviewed_severity`]).
+/// 2. **A doubted row returns to stage 1's severity** ([`return_doubted_row_to_reviewed_severity`]),
+///    when a floor is what raised it and no source nobody doubted is folded into it.
 ///    The corpus floor ran before the group reviewer read the rows (it has to: the reviewer
 ///    ranks by the shown severity), so a row only the group reviewer doubted was already raised.
 /// 3. **The corpus bounds run again**, so the ceilings have the last word over the severities
@@ -99,16 +206,16 @@ pub fn is_security_or_data_loss(reason: EscalationReason) -> bool {
 ///
 /// After the group reviewer: a Deviation whose row carries a security or data-loss escalation
 /// reason ([`is_security_or_data_loss`], read from the closed list the group reviewer writes on
-/// the row, never from its text) and that stage 1 rated medium or higher becomes a
-/// [`FindingKind::Defect`]. It is a defect BEFORE the deviation cap: the cap ran before the group
-/// reviewer, so the severity it took off (read back from the cap's own note) is restored, and
-/// the bounds that run next do not cap a defect. The note says why; the cap's earlier note stays,
-/// so the row's history is whole.
+/// the row, never from its text) and that stage 1 rated becomes a [`FindingKind::Defect`], at any
+/// severity (owner ruling, consistent with A1: a row stage 1 rated low is a defect too). It is a
+/// defect BEFORE the deviation cap: the cap ran before the group reviewer, so the severity it took
+/// off (read back from the cap's own note) is restored, and the bounds that run next do not cap a
+/// defect. The note says why; the cap's earlier note stays, so the row's history is whole.
 ///
 /// The review tree already turns a convention row's security reason into `rule_misfit` when a
 /// row of a security rule shares its site, so a reason still here is the reviewer's view of this
-/// row alone. Untouched: any other kind, a reason off the list, no reason, and a row stage 1 rated
-/// below medium or never rated.
+/// row alone. Untouched: any other kind, a reason off the list, no reason, and a row stage 1
+/// never rated.
 fn security_deviation_becomes_defect(f: &mut Finding) {
     use camerata_api_types::audit::FindingKind;
     use camerata_rules::severity_bounds::{
@@ -124,17 +231,17 @@ fn security_deviation_becomes_defect(f: &mut Finding) {
     else {
         return;
     };
-    let Some(rated) = crate::ai_audit::stage1_of(f).and_then(|s| s.severity) else {
-        return;
-    };
-    // Lower rank is MORE severe here (the rules crate's vocabulary).
-    if severity_rank(&normalize_severity(&rated)) > severity_rank("medium") {
+    if crate::ai_audit::stage1_of(f)
+        .and_then(|s| s.severity)
+        .is_none()
+    {
         return;
     }
     f.kind = Some(FindingKind::Defect);
+    // This sentence reaches the client: it names the problem, not the reviewer stage.
     let why = format!(
-        "the group reviewer named {} at this site, so the row is a defect rather than a \
-         consistency deviation, and the deviation cap does not apply",
+        "{} was named at this site, so the row is a defect rather than a consistency \
+         deviation, and the deviation cap does not apply",
         reason.phrase()
     );
     let shown = normalize_severity(&f.severity);
@@ -154,14 +261,24 @@ fn security_deviation_becomes_defect(f: &mut Finding) {
     }
 }
 
-/// R-7 after the group reviewer: a row a reviewer doubted that a floor (the rule's minimum or the
-/// phrase floor) raised above the severity stage 1 left on it goes back to stage 1's severity, is
-/// held for a decision (`needs_review`) and its severity note says which reviewer doubted it.
+/// R-7 after the group reviewer: a row a reviewer doubted whose shown severity came from a floor
+/// (the rule's minimum or the phrase floor) goes back to stage 1's severity and is held for a
+/// decision (`needs_review`). The client reads "Severity held at <level> pending a decision."; the
+/// operator's detail says which reviewer doubted it ([`SEVERITY_HOLD_DETAIL_CAPTURE`]).
 ///
-/// Untouched: a row nobody doubted; a row with no stage 1 severity recorded (a deterministic row,
-/// or a run saved before stage 1's severity was kept: nothing says what it was rated, and nothing
-/// guesses); a row at or below stage 1's severity; a row no floor would raise from stage 1's
-/// severity (what raised it is not a floor, so the ruling does not reach it); and a row whose
+/// "Came from a floor" means the shown severity is above stage 1's and no more severe than the
+/// strongest floor that applies to the row ([`strongest_floor`]); a row more severe than every
+/// floor was raised by something else and the ruling does not reach it.
+///
+/// A source nobody doubted folded into the row (a scan tool's row, an identical row the reviewers
+/// did not doubt) makes the row undoubted for severity: it keeps the merged severity, the floor
+/// applies, and it is held with a note that one source was doubted ([`hold_partly_doubted`]).
+///
+/// A row with no stage 1 severity (only the group reviewer spoke on it) cannot be returned to a
+/// severity nobody recorded: when a floor touches it, it keeps its severity and is held.
+///
+/// Untouched: a row nobody doubted; a row at or below stage 1's severity; a row no floor
+/// touches (not held here: the possible-false-positive flag marks it); and a row whose
 /// severity the human reviewer set, which is theirs.
 fn return_doubted_row_to_reviewed_severity(
     f: &mut Finding,
@@ -171,48 +288,72 @@ fn return_doubted_row_to_reviewed_severity(
     let Some(doubt) = reviewer_doubt(f) else {
         return;
     };
+    if undoubted_source_folded_in(f) {
+        hold_partly_doubted(f);
+        return;
+    }
     if crate::report_export::overlay::reviewer_edited_field(
         f,
         camerata_api_types::edits::EditField::Severity,
     ) {
         return;
     }
-    let Some(reviewed) = crate::ai_audit::stage1_of(f).and_then(|s| s.severity) else {
+    let Some(floor) = strongest_floor(f, corpus) else {
         return;
     };
-    let reviewed = normalize_severity(&reviewed);
     let shown = normalize_severity(&f.severity);
-    // Lower rank is MORE severe here (the rules crate's vocabulary).
-    if severity_rank(&shown) >= severity_rank(&reviewed) {
+    // Lower rank is MORE severe here (the rules crate's vocabulary). A shown severity above
+    // every floor did not come from one.
+    if severity_rank(&shown) < severity_rank(&floor) {
         return;
     }
-    if !a_floor_raises(f, &reviewed, corpus) {
-        return;
+    match crate::ai_audit::stage1_of(f).and_then(|s| s.severity) {
+        Some(reviewed) => {
+            let reviewed = normalize_severity(&reviewed);
+            if severity_rank(&shown) >= severity_rank(&reviewed)
+                || severity_rank(&floor) >= severity_rank(&reviewed)
+            {
+                return;
+            }
+            f.severity = reviewed.clone();
+            f.needs_review = true;
+            record_hold(
+                f,
+                &format!(
+                    "{}, so no minimum severity raises it; it keeps the reviewed severity \
+                     ({reviewed}) instead of {shown} and is held for a decision",
+                    doubt.phrase()
+                ),
+            );
+        }
+        None => {
+            f.needs_review = true;
+            record_hold(
+                f,
+                &format!(
+                    "{}, and no reviewed severity was recorded, so the row keeps {shown} and is \
+                     held for a decision",
+                    doubt.phrase()
+                ),
+            );
+        }
     }
-    crate::ai_audit::record_severity_adjustment(
-        f,
-        &shown,
-        &reviewed,
-        &format!(
-            "{}, so no minimum severity raises it; it keeps the reviewed severity and is held \
-             for a decision",
-            doubt.phrase()
-        ),
-    );
-    f.severity = reviewed;
-    f.needs_review = true;
 }
 
-/// Whether the rule's minimum or the phrase floor ranks above `from` for `f`: the two floors the
-/// ruling names. Reviewer doubt is deliberately not consulted: this asks what a floor did.
-fn a_floor_raises(f: &Finding, from: &str, corpus: Option<&camerata_rules::RuleSet>) -> bool {
+/// The strongest floor that applies to `f`: the rule's minimum or the phrase floor, whichever
+/// ranks higher, normalized; `None` when neither applies. The two floors the ruling names.
+/// Reviewer doubt is deliberately not consulted: this asks what a floor could have done.
+fn strongest_floor(f: &Finding, corpus: Option<&camerata_rules::RuleSet>) -> Option<String> {
     use camerata_rules::severity_bounds::{normalize_severity, severity_rank};
-    let above = |floor: &str| severity_rank(&normalize_severity(floor)) < severity_rank(from);
     let rule_floor = crate::report_export::corpus_rule_for(&f.rule_id, corpus)
         .and_then(|r| r.min_severity.as_deref())
-        .is_some_and(above);
-    rule_floor
-        || crate::ai_audit::severity_calibration_floor(f).is_some_and(|(floor, _)| above(floor))
+        .map(normalize_severity);
+    let phrase_floor =
+        crate::ai_audit::severity_calibration_floor(f).map(|(floor, _)| normalize_severity(floor));
+    [rule_floor, phrase_floor]
+        .into_iter()
+        .flatten()
+        .min_by_key(|floor| severity_rank(floor))
 }
 
 #[cfg(test)]

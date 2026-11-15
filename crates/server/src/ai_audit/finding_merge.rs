@@ -957,6 +957,10 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
     // says the same bound applied, not that they are about the same object.
     crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // Why a severity is held for a decision (operator only), and the marker that a source nobody
+    // doubted was folded into a row. Bookkeeping on the row, not objects it names.
+    crate::follow_reviewers::SEVERITY_HOLD_DETAIL_CAPTURE,
+    crate::follow_reviewers::UNDOUBTED_SOURCE_CAPTURE,
     // What stage 1 left on the row for the group reviewer and the tree: its verdict (`real` and
     // the one-line reason) and the outlier reasons it recorded (`severity_raise_held`). They say
     // the same thing about every row they sit on; they name no object.
