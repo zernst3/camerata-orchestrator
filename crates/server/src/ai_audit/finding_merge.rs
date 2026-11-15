@@ -597,6 +597,13 @@ pub(super) fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
         match entry.iter().find(|(s, _)| same_snippet(s, &snip)) {
             Some(&(_, at)) => {
                 if severity_rank(&f.severity) > severity_rank(&kept[at].severity) {
+                    let from = kept[at].severity.clone();
+                    record_severity_adjustment(
+                        &mut kept[at],
+                        &from,
+                        &f.severity,
+                        "a repeat of this finding at the same place was rated higher",
+                    );
                     kept[at].severity = f.severity;
                 }
             }
