@@ -703,3 +703,62 @@ fn an_undoubted_survivor_does_not_inherit_a_folded_sources_doubt() {
     assert_eq!(rows[0].severity, "critical", "{}", notes(&rows[0]));
     assert!(rows[0].needs_review, "the row stays held");
 }
+
+/// A row of another rule that absorbed `site`, the way the review tree leaves a survivor.
+fn host_with_site(site: crate::onboard::MergedLocation) -> Finding {
+    let mut host = reviewed_row("SYN-UNF-HOST-1", "low", "yes");
+    host.path = "src/host.ts".to_string();
+    host.also_locations = vec![site];
+    host
+}
+
+/// Defect 2a (round 2): an absorbed site rated higher than the doubted row that stands for its
+/// place raises that row on unfold. The raise carries no marker unless unfold sets one, so
+/// `follow_reviewers` wrote the row back to its reviewed severity.
+#[test]
+fn an_absorbed_sites_higher_rating_raises_a_doubted_row_and_keeps_it_held() {
+    let set = corpus(&[("SYN-UNF-1", Some("high"))]);
+    let doubted = reviewed_row("SYN-UNF-1", "low", "no");
+    let site = crate::onboard::MergedLocation::site(
+        &doubted.repo,
+        &doubted.path,
+        doubted.line,
+        &doubted.rule_id,
+        &doubted.snippet,
+        false,
+    )
+    .with_rating("high", "Synthetic headline");
+    let mut rows = vec![doubted, host_with_site(site)];
+    assert_eq!(crate::review_tree::unfold_also_locations(&mut rows), 0);
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "high", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review, "the row stays held");
+}
+
+/// Defect 2b (round 2): a promoted site row copies its host, stage 1 record and all. Its severity
+/// follows its own rating and the rule's minimum, and it is held.
+#[test]
+fn a_promoted_site_row_does_not_carry_the_hosts_doubt() {
+    let set = corpus(&[("SYN-UNF-2", Some("high"))]);
+    let mut host = reviewed_row("SYN-UNF-2", "low", "no");
+    host.also_locations = vec![crate::onboard::MergedLocation::site(
+        &host.repo,
+        "src/other.ts",
+        30,
+        &host.rule_id,
+        "another site",
+        false,
+    )
+    .with_rating("medium", "Synthetic headline")];
+    let mut rows = vec![host];
+    assert_eq!(crate::review_tree::unfold_also_locations(&mut rows), 1);
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    let promoted = rows.iter().find(|f| f.path == "src/other.ts").unwrap();
+    assert_eq!(promoted.severity, "high", "{}", notes(promoted));
+    assert!(promoted.needs_review, "{}", notes(promoted));
+    // The host's own doubt still holds it at its reviewed severity.
+    assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review);
+}

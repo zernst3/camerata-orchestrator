@@ -35,6 +35,11 @@ fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
     row.possible_duplicate_of = None;
     row.site_key = String::new();
     row.group_role = GroupRole::Member;
+    // The copy carries the host's stage 1 record, so any doubt it shows was never about this
+    // site; the site's own source is not known to be doubted. The row counts as undoubted for
+    // severity (its rating and the rule's minimum apply) and, if it shows a doubt, is held.
+    crate::follow_reviewers::mark_undoubted_source_folded(&mut row);
+    crate::follow_reviewers::hold_partly_doubted(&mut row);
     row
 }
 
@@ -125,6 +130,10 @@ pub fn unfold_also_locations(findings: &mut Vec<Finding>) -> usize {
                 ),
             );
             row.severity.clone_from(&site.severity);
+            // The raise came from a site that was absorbed, not from a doubted source: the
+            // row counts as undoubted for severity, so no pass writes the raise back.
+            crate::follow_reviewers::mark_undoubted_source_folded(row);
+            crate::follow_reviewers::hold_partly_doubted(row);
         }
     }
     let mut result: Vec<Finding> = Vec::with_capacity(originals.len() + added);
