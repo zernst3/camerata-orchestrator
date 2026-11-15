@@ -150,8 +150,8 @@ async fn each_new_rule_cites_published_sources_and_ships_a_fix_on_both_options()
 }
 
 /// The effect-cleanup rule is the one whose precise half a deterministic check answers, so it is
-/// classified CI-tier; the other two are judged by the semantic read alone and must not claim a
-/// detector they do not have.
+/// architectural with a review-only checker (2026-11-15 ruling); the other two are judged by the
+/// semantic read alone and must not claim a detector they do not have.
 #[tokio::test]
 async fn only_the_effect_cleanup_rule_claims_a_deterministic_check() {
     let set = corpus().await;
