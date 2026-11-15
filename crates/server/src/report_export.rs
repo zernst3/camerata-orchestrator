@@ -2555,6 +2555,9 @@ pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFacts
 mod coverage_gaps_tests;
 
 #[cfg(test)]
+mod patterns_open_tests;
+
+#[cfg(test)]
 mod wo9 {
     mod decisions_file_tests;
     mod edit_ids_tests;
