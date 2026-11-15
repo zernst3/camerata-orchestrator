@@ -76,6 +76,7 @@ pub mod jobs;
 pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
 pub mod failure_report;
+pub mod rewrite_advisory;
 /// The failure classes and typed transport failure, re-exported for callers of the server.
 pub use camerata_llm::failure;
 pub mod dev_implement_run;
@@ -1893,6 +1894,8 @@ pub fn router(state: AppState) -> Router {
         // that creates a phantom unit.
         // The review read model (WO9c): the routes live in `routes/review_routes.rs`.
         .merge(crate::routes::review_routes())
+        // The operator's rewrite advisory (internal only): `routes/rewrite_advisory_route.rs`.
+        .merge(crate::routes::rewrite_advisory_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::native_units::unknown_native_unit_gate,

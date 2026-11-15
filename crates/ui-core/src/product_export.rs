@@ -108,4 +108,42 @@ mod tests {
         assert_eq!(value["options"]["executive_summary_override"], "S");
         assert!(value["options"].get("client_name").is_none());
     }
+
+    /// Owner ruling: fix or rewrite is the architect's call alone. The request that asks for a
+    /// client's export carries no advisory field, whatever options are set, so the advisory cannot
+    /// ride along even by accident.
+    #[test]
+    fn the_request_carries_no_rewrite_advisory_field() {
+        let mut dispositions = HashMap::new();
+        dispositions.insert("k".to_string(), "v".to_string());
+        let value = request_body(
+            &dispositions,
+            &ProductExportOptions {
+                project_title: "T".to_string(),
+                prepared_by: "P".to_string(),
+                executive_summary_override: Some("S".to_string()),
+                triage_log: true,
+                unsynced_changes: Vec::new(),
+            },
+        );
+        let mut options: Vec<&str> = value["options"]
+            .as_object()
+            .expect("options")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        options.sort_unstable();
+        assert_eq!(
+            options,
+            vec![
+                "executive_summary_override",
+                "prepared_by",
+                "project_title",
+                "triage_log",
+                "unsynced_changes"
+            ]
+        );
+        let found = camerata_api_types::rewrite_advisory::terms_in(&value.to_string());
+        assert!(found.is_empty(), "{found:?} in the export request: {value}");
+    }
 }
