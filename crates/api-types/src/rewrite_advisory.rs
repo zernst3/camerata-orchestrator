@@ -31,7 +31,7 @@ pub const INTERNAL_ONLY_KEYS: &[&str] = &[
 ];
 
 /// Phrases the advisory's text uses. The gate searches every client surface for these, ignoring
-/// case.
+/// case and treating any whitespace run as one space.
 pub const INTERNAL_ONLY_PHRASES: &[&str] = &[
     "Rewrite advisory",
     "rewrite conversation",
@@ -104,11 +104,22 @@ pub fn terms() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Every deny-listed term in `text`, ignoring case, in list order, each once.
+/// `text` with every whitespace run (a newline from a wrapped PDF line, a non-breaking space, any
+/// other Unicode whitespace) as one space, lower-cased.
+fn squashed(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Every deny-listed term in `text`, in list order, each once. Case is ignored and every
+/// whitespace run counts as one space, in the text and in the term, so a phrase wrapped across
+/// lines (as PDF text extraction wraps it) is still found.
 pub fn terms_in(text: &str) -> Vec<&'static str> {
-    let lower = text.to_lowercase();
+    let flat = squashed(text);
     terms()
-        .filter(|term| lower.contains(&term.to_lowercase()))
+        .filter(|term| flat.contains(&squashed(term)))
         .collect()
 }
 
@@ -175,6 +186,23 @@ mod tests {
             vec!["structural_share"]
         );
         assert_eq!(terms_in("the rewrite advisory"), vec!["Rewrite advisory"]);
+    }
+
+    /// PDF text extraction puts a newline at each wrapped line, and a document can hold a
+    /// non-breaking space or a run of spaces: a phrase split that way is still the phrase.
+    #[test]
+    fn a_phrase_is_found_across_a_line_break_or_any_whitespace() {
+        assert_eq!(terms_in("Rewrite\n  advisory"), vec!["Rewrite advisory"]);
+        assert_eq!(terms_in("rewrite\u{a0}advisory"), vec!["Rewrite advisory"]);
+        assert_eq!(
+            terms_in("worth\ta\r\n\u{2003}conversation"),
+            vec!["worth a conversation"]
+        );
+        assert_eq!(
+            terms_in("it is worth a\nconversation"),
+            vec!["worth a conversation"]
+        );
+        assert!(terms_in("rewrite the advisory").is_empty());
     }
 
     /// A searched key that is a common word would refuse ordinary client packages.

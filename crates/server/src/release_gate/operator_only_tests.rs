@@ -204,6 +204,16 @@ fn the_pdf_text_is_read_and_an_unreadable_pdf_is_refused() {
         "{problems:?}"
     );
 
+    // A phrase wrapped across two lines of the PDF's text is still the phrase.
+    let wrapped = audit_zip(&released.bytes, Some("it is worth a\nconversation"));
+    assert!(
+        wrapped
+            .checks
+            .iter()
+            .any(|o| o.check == CheckId::InternalNotes && !o.problems.is_empty()),
+        "a wrapped phrase passed the gate: {wrapped:?}"
+    );
+
     let mut stand_in = package();
     stand_in.pdf = b"%PDF-1.7 stand-in with fix_hours_per_kloc in it".to_vec();
     let failure = refused(release(stand_in), "stand-in PDF");
