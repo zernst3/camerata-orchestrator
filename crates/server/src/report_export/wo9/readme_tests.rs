@@ -197,6 +197,27 @@ fn the_readme_describes_findings_json_as_every_row_not_ruled_out() {
     }
 }
 
+/// `csv/all-findings.csv` and `json/all-findings.json` are the rows of `findings.json`, not a
+/// sheet of the workbook, so the README must not call every file of `csv/` and `json/` a table of
+/// the workbook.
+#[test]
+fn the_readme_does_not_call_every_csv_and_json_file_a_table_of_the_workbook() {
+    for readme in client_readmes() {
+        let text = flat(&readme);
+        let paragraph = text
+            .split(" csv/ and json/ ")
+            .nth(1)
+            .and_then(|rest| rest.split(" manifest.json ").next())
+            .expect("the README describes csv/ and json/");
+        assert!(
+            !paragraph.contains("The tables of the workbook, one file for each"),
+            "{paragraph}"
+        );
+        assert!(paragraph.contains("all-findings"), "{paragraph}");
+        assert!(paragraph.contains("findings.json"), "{paragraph}");
+    }
+}
+
 #[test]
 fn the_tickets_paragraph_points_at_the_all_problems_sheet_and_the_fix_id() {
     let readme = flat(&client_readmes()[0]);

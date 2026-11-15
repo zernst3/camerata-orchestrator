@@ -4003,8 +4003,9 @@ pub fn product_export_readme(
          \x20 workbook is the same list.\n\
          \n\
          csv/ and json/\n\
-         \x20 The tables of the workbook, one file for each, as CSV and as JSON, for tools that do\n\
-         \x20 not read Excel.\n\
+         \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
+         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
+         \x20 findings.json, as one flat table.\n\
          \n\
          manifest.json\n\
          \x20 The list of the files in this ZIP with a checksum for each.\n\
@@ -4431,21 +4432,25 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     let purpose = if path.ends_with(".pdf") {
         "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
-        "Complete working dataset across sheets, for engineers."
+        "The complete working list, sheet by sheet, for the engineers doing the fixes."
     } else if path == "findings.json" {
         "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
     } else if path == "README.txt" {
-        "Plain-text manifest of what each file is."
+        "A plain-text guide to what each file is."
     } else if path == "decisions.json" {
         "Every decision record the report was reviewed with, for tools."
     } else if path == "csv/tickets.csv" {
         "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
+    } else if path == "csv/all-findings.csv" {
+        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
+    } else if path == "json/all-findings.json" {
+        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
     } else if path.starts_with("csv/") {
-        "One xlsx data table as RFC 4180 CSV, for tools that do not read Excel."
+        "One table of the workbook as a CSV file, for tools that do not read Excel."
     } else if path.starts_with("json/") {
-        "One xlsx data table as a flat JSON array, for structured ingestion."
+        "One table of the workbook as a flat JSON list, for tools."
     } else {
-        "Product-export artifact."
+        "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.

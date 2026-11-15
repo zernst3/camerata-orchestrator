@@ -354,8 +354,10 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
         "README.txt",
         "decisions.json",
         "csv/tickets.csv",
-        "csv/all-problems.csv",
-        "json/all-problems.json",
+        "csv/all-findings.csv",
+        "json/all-findings.json",
+        "csv/deviations.csv",
+        "json/deviations.json",
         "something-else.bin",
     ] {
         let (purpose, _) = manifest_file_facts(path);
@@ -367,9 +369,39 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
             );
         }
         assert!(
-            !purpose.contains(['\u{2014}', '\u{2013}']) && !purpose.contains(", and "),
+            !purpose.contains(['\u{2014}', '\u{2013}'])
+                && !purpose.contains(", and ")
+                && !purpose.contains(", or "),
             "{path}: {purpose:?}"
         );
+    }
+    // The two all-findings files are the rows of findings.json, not a sheet of the workbook.
+    for path in ["csv/all-findings.csv", "json/all-findings.json"] {
+        let (purpose, _) = manifest_file_facts(path);
+        assert!(
+            !purpose.to_lowercase().contains("table of the workbook")
+                && !purpose.to_lowercase().contains("xlsx"),
+            "{path}: {purpose:?} calls it a workbook table"
+        );
+        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+    }
+    for old in [
+        "manifest",
+        "RFC 4180",
+        "ingestion",
+        "artifact",
+        "across sheets",
+    ] {
+        for path in [
+            "a-inspection-findings.xlsx",
+            "README.txt",
+            "csv/deviations.csv",
+            "json/deviations.json",
+            "something-else.bin",
+        ] {
+            let (purpose, _) = manifest_file_facts(path);
+            assert!(!purpose.contains(old), "{path}: {purpose:?} says {old:?}");
+        }
     }
     let (tickets, _) = manifest_file_facts("csv/tickets.csv");
     assert!(tickets.contains("each fix"), "{tickets}");
