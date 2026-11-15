@@ -1973,7 +1973,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         ..crate::cost_cap::RunControls::default()
     };
     let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
-    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None)
+    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None, None)
         .await
         .expect("it ran");
     assert_eq!(outcome.rules_reviewed, 1);
@@ -1994,7 +1994,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false, None)
+        review_scan_report(&mut empty, &llm, &controls, &rules, false, None, None)
             .await
             .is_none()
     );

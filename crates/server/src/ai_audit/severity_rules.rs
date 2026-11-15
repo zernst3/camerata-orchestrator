@@ -302,7 +302,7 @@ pub(super) fn floor_may_apply(f: &Finding) -> bool {
 /// precondition cap (which can only LOWER a Critical floor to High, never raise or lower
 /// anything else), then the RLS-hedge guard (which can only RAISE whatever floor is already
 /// computed, never lower it — see the combine step in `apply_severity_calibration_rule`).
-pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
+pub(crate) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
     if !floor_may_apply(f) {
         return None;
     }
@@ -391,9 +391,32 @@ pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, S
 /// touched the finding (even when the floor didn't change anything — the architect can see the
 /// rule considered it and found the existing severity already sufficient). Never lowers a
 /// severity that already ranks at or above the floor.
+///
+/// Owner ruling R-7: a row a reviewer doubted (`crate::follow_reviewers::reviewer_doubt`; here
+/// that is stage 1's `real: no`, the only reviewer that has spoken yet) is never raised by this
+/// floor. It keeps stage 1's severity, is held for a decision (`needs_review`) and its severity
+/// note says why, so it stays in the review queue for the human reviewer.
 pub(super) fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
     if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
-        if severity_rank(&f.severity) < severity_rank(floor_sev) {
+        let would_raise = severity_rank(&f.severity) < severity_rank(floor_sev);
+        if let Some(doubt) = crate::follow_reviewers::reviewer_doubt(&f).filter(|_| would_raise) {
+            let note = format!(
+                "severity held at {}: {}, so the severity floor for its wording ({floor_sev}) \
+                 does not raise it, and it is held for a decision",
+                f.severity,
+                doubt.phrase()
+            );
+            crate::severity_bounds::record_adjustment(&mut f, note);
+            f.needs_review = true;
+            f.calibration_rationale = Some(format!(
+                "Severity floor not applied: {}, so the row keeps the reviewed severity ({}) and \
+                 is held for a decision.",
+                doubt.phrase(),
+                f.severity
+            ));
+            return f;
+        }
+        if would_raise {
             let before = f.severity.clone();
             f.severity = floor_sev.to_string();
             record_severity_adjustment(&mut f, &before, floor_sev, &reason);

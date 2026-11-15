@@ -121,6 +121,17 @@ pub trait BoundedFinding {
     /// bound that moved it. The default drops the note, so a caller with nowhere to put it
     /// (the CI gate) is unchanged.
     fn note_severity_adjustment(&mut self, _note: String) {}
+    /// Whether a reviewer stage doubted this row, as a plain clause naming who and how (for
+    /// example "the per-site reviewer judged it not real"): stage 1 said it is not real, or the
+    /// group reviewer called it a rule misfit or a likely false alarm (owner ruling R-7). A floor
+    /// never raises such a row. The default is `None`, so a caller with no reviewers (the CI
+    /// gate) is unchanged.
+    fn reviewer_doubt(&self) -> Option<String> {
+        None
+    }
+    /// Hold the row for a decision: called when a floor would have raised it but a reviewer
+    /// doubted it, so the human reviewer decides it. The default does nothing.
+    fn hold_for_decision(&mut self) {}
 }
 
 /// E2: clamp `severity` DOWN to `rule`'s [`Rule::max_severity`], when one is declared and
@@ -162,23 +173,54 @@ pub fn clamp_to_max_severity(severity: String, rule: Option<&Rule>) -> String {
 ///    SUPABASE-RLS-POLICY-DISABLED-1's platform-owned row (`info`, "confirm in the dashboard")
 ///    into a `critical` in both the scan and `camerata-check`. The decision (logged 2026-10-28)
 ///    is that `info` is exempt, whatever the kind and whoever the producer.
+/// 4. **Not a row a reviewer doubted** ([`BoundedFinding::reviewer_doubt`]). Owner ruling R-7
+///    (2026-11-15): the auditor reports a borderline case at `low`, and a reviewer stage that
+///    then says the row is not real, a rule misfit or a likely false alarm has said the floor's
+///    premise (an under-rated defect) does not hold. The floor lifted exactly those rows to
+///    `critical` and `high` in the graded runs. Such a row keeps its reviewed severity; see
+///    [`floor_held_for_doubt`] for the note and the hold.
 pub fn raise_to_min_severity<F: BoundedFinding + ?Sized>(
     severity: String,
     f: &F,
     rule: Option<&Rule>,
 ) -> String {
+    if f.reviewer_doubt().is_some() {
+        return severity;
+    }
+    match floor_that_would_raise(&severity, f, rule) {
+        Some(floor) => floor,
+        None => severity,
+    }
+}
+
+/// The rule's floor when it ranks above `severity` and the floor's first three preconditions
+/// hold (see [`raise_to_min_severity`]); reviewer doubt is NOT consulted here.
+fn floor_that_would_raise<F: BoundedFinding + ?Sized>(
+    severity: &str,
+    f: &F,
+    rule: Option<&Rule>,
+) -> Option<String> {
     if !f.bound_kind().is_accusing() || f.is_unlocated() || severity == "info" {
-        return severity;
+        return None;
     }
-    let Some(raw_floor) = rule.and_then(|r| r.min_severity.as_deref()) else {
-        return severity;
-    };
-    let floor = normalize_severity(raw_floor);
-    if severity_rank(&severity) > severity_rank(&floor) {
-        floor
-    } else {
-        severity
-    }
+    let floor = normalize_severity(rule.and_then(|r| r.min_severity.as_deref())?);
+    (severity_rank(severity) > severity_rank(&floor)).then_some(floor)
+}
+
+/// R-7: the note for the floor that WOULD have raised `severity` but did not, because a reviewer
+/// doubted the row. `None` when the row is not doubted or no floor would have moved it. The
+/// caller holds the row for a decision and records the note ([`apply_corpus_severity_bounds`]).
+pub fn floor_held_for_doubt<F: BoundedFinding + ?Sized>(
+    severity: &str,
+    f: &F,
+    rule: Option<&Rule>,
+) -> Option<String> {
+    let doubt = f.reviewer_doubt()?;
+    let floor = floor_that_would_raise(severity, f, rule)?;
+    Some(format!(
+        "severity held at {severity}: {doubt}, so the rule's minimum severity ({floor}) does \
+         not raise it, and it is held for a decision"
+    ))
 }
 
 /// A5.2: clamp a [`BoundKind::Deviation`] row's severity DOWN to its rule's authored
@@ -227,7 +269,10 @@ pub fn bounded_severity<F: BoundedFinding + ?Sized>(f: &F, rule: Option<&Rule>) 
 /// [`bounded_severity`] plus one plain sentence for every bound that moved the severity, in the
 /// order they ran. The severity is the same value `bounded_severity` returns (that function
 /// calls this one), so the reason can never disagree with the result. A bound that leaves the
-/// severity alone adds nothing; an unmoved finding returns an empty list.
+/// severity alone adds nothing, with one exception: a floor a reviewer's doubt held back (R-7)
+/// says so ([`floor_held_for_doubt`]), because a row the floor did not raise is exactly the row the
+/// reader would otherwise expect at the floor. An unmoved finding with no held floor returns an
+/// empty list.
 pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
     f: &F,
     rule: Option<&Rule>,
@@ -245,6 +290,7 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
         after
     };
     let start = normalize_severity(f.severity());
+    let held = floor_held_for_doubt(&start, f, rule);
     let raised = step(
         &start,
         raise_to_min_severity(start.clone(), f, rule),
@@ -263,10 +309,17 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
     let last = step(
         &capped,
         clamp_deviation_severity(capped.clone(), f, rule),
-        "a consistency deviation is capped below the severity of a defect".to_string(),
+        DEVIATION_CAP_WHY.to_string(),
     );
+    if let Some(note) = held {
+        notes.insert(0, note);
+    }
     (last, notes)
 }
+
+/// Why the A5.2 deviation ceiling lowered a row, as its note says it.
+pub const DEVIATION_CAP_WHY: &str =
+    "a consistency deviation is capped below the severity of a defect";
 
 /// Apply every severity bound to every finding, in place. `resolve` maps a finding's rule id
 /// to its corpus rule (a plain `RuleSet::get_by_id`, or a lookup that also grounds an external
@@ -279,19 +332,31 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
 /// - **Minimal write.** The severity is only rewritten when a bound actually moves it. A finding
 ///   no bound touches keeps its producer's exact string; this does not re-case or re-vocabulary
 ///   a severity as a side effect.
+/// - **A held floor holds the row (R-7).** A row whose floor a reviewer's doubt held back is
+///   passed to [`BoundedFinding::hold_for_decision`] and given the held note, whether or not a
+///   ceiling moved it. A rerun hands the same note again; the server's note writer keeps one.
 pub fn apply_corpus_severity_bounds<'c, F: BoundedFinding>(
     findings: &mut [F],
     resolve: impl Fn(&str) -> Option<&'c Rule>,
 ) {
     for f in findings.iter_mut() {
-        let (bounded, notes) = bounded_severity_explained(f, resolve(f.rule_id()));
+        let rule = resolve(f.rule_id());
+        let start = normalize_severity(f.severity());
+        let held = floor_held_for_doubt(&start, f, rule).is_some();
+        let (bounded, notes) = bounded_severity_explained(f, rule);
         // Compare against the NORMALIZED original, so an unrelated casing difference
         // ("High" vs "high") is not mistaken for a bound moving the severity.
-        if bounded != normalize_severity(f.severity()) {
+        let moved = bounded != start;
+        if moved {
             f.set_severity(bounded);
+        }
+        if moved || held {
             for note in notes {
                 f.note_severity_adjustment(note);
             }
+        }
+        if held {
+            f.hold_for_decision();
         }
     }
 }
@@ -538,6 +603,75 @@ mod tests {
                 bounded_severity(&f, rule)
             );
         }
+    }
+
+    /// A row a reviewer doubted (owner ruling R-7), keeping its notes and its hold.
+    #[derive(Debug, Clone)]
+    struct DoubtedRow {
+        inner: NotedRow,
+        doubted: bool,
+        held: bool,
+    }
+
+    impl BoundedFinding for DoubtedRow {
+        fn severity(&self) -> &str {
+            self.inner.severity()
+        }
+        fn rule_id(&self) -> &str {
+            self.inner.rule_id()
+        }
+        fn bound_kind(&self) -> BoundKind {
+            self.inner.bound_kind()
+        }
+        fn is_unlocated(&self) -> bool {
+            self.inner.is_unlocated()
+        }
+        fn set_severity(&mut self, severity: String) {
+            self.inner.set_severity(severity);
+        }
+        fn note_severity_adjustment(&mut self, note: String) {
+            self.inner.note_severity_adjustment(note);
+        }
+        fn reviewer_doubt(&self) -> Option<String> {
+            self.doubted
+                .then(|| "the reviewer judged it not real".to_string())
+        }
+        fn hold_for_decision(&mut self) {
+            self.held = true;
+        }
+    }
+
+    fn doubted(severity: &str, doubted: bool) -> DoubtedRow {
+        DoubtedRow {
+            inner: noted(severity, BoundKind::Defect),
+            doubted,
+            held: false,
+        }
+    }
+
+    #[test]
+    fn a_floor_never_raises_a_row_a_reviewer_doubted_and_holds_it_with_a_note() {
+        let set = rule_set(|r| r.min_severity = Some("critical".to_string()));
+        let mut rows = vec![doubted("low", true), doubted("low", false)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].inner.inner.severity, "low");
+        assert!(rows[0].held, "the doubted row is held for a decision");
+        assert_eq!(rows[0].inner.notes.len(), 1, "{:?}", rows[0].inner.notes);
+        assert!(
+            rows[0].inner.notes[0].starts_with("severity held at low"),
+            "{:?}",
+            rows[0].inner.notes
+        );
+        // Nobody doubted the second row: the floor raises it and does not hold it.
+        assert_eq!(rows[1].inner.inner.severity, "critical");
+        assert!(!rows[1].held);
+        // A ceiling still lowers a doubted row: doubt only ever blocks a raise.
+        let set = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let mut rows = vec![doubted("high", true)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.inner.severity, "low");
+        assert!(!rows[0].held, "no floor was held, so nothing to decide");
     }
 
     #[test]

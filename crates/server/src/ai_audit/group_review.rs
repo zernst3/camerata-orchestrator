@@ -2171,6 +2171,10 @@ pub async fn review_groups_metered(
 /// settings or the flags), the rule text from the rules the run checked, the spend limit from the
 /// run's meter. Does nothing for a report with no findings. Records the model on the report's
 /// provenance. Returns what the run came to, or `None` when it did not run.
+///
+/// Last, the severities and kinds follow what the reviewers said
+/// ([`crate::follow_reviewers::follow_reviewers`], owner ruling R-7): `corpus` is the run's rule
+/// set, the one its severity bounds were applied with.
 pub async fn review_scan_report(
     report: &mut ScanReport,
     llm: &dyn LlmPort,
@@ -2178,6 +2182,7 @@ pub async fn review_scan_report(
     rules: &[(String, String)],
     cli_backend: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
         return None;
@@ -2210,6 +2215,7 @@ pub async fn review_scan_report(
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);
+    crate::follow_reviewers::follow_reviewers(&mut report.findings, corpus);
     Some(outcome)
 }
 
