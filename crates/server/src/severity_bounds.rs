@@ -73,6 +73,18 @@ impl BoundedFinding for Finding {
     fn note_severity_adjustment(&mut self, note: String) {
         record_adjustment(self, note);
     }
+
+    fn reviewer_doubt(&self) -> Option<String> {
+        crate::follow_reviewers::doubt_for_severity(self).map(|d| d.phrase().to_string())
+    }
+
+    /// Held for a decision: the row joins the rows held for review (`needs_review`), which the
+    /// exporters route to the held set and the human reviewer decides. `detail` goes to the
+    /// operator-only field, never to a client note.
+    fn hold_for_decision(&mut self, detail: String) {
+        self.needs_review = true;
+        crate::follow_reviewers::record_hold(self, &detail);
+    }
 }
 
 /// The `Finding::captures` key a severity adjustment is recorded under, one sentence per line.
@@ -89,14 +101,38 @@ const MAX_RECORDED_ADJUSTMENTS: usize = 8;
 
 /// Append `note` to the finding's recorded adjustments (never twice, and at most
 /// [`MAX_RECORDED_ADJUSTMENTS`]). The ONE writer: the corpus bounds and the AI tier's ceilings
-/// both record through it.
+/// both record through it. A note that a row is held for a decision is always kept: when the row
+/// already has the most notes, it replaces the oldest note that is not a held note.
 pub(crate) fn record_adjustment(f: &mut Finding, note: String) {
     let entry = f
         .captures
         .entry(SEVERITY_ADJUSTMENTS_CAPTURE.to_string())
         .or_default();
-    if entry.lines().any(|l| l == note) || entry.lines().count() >= MAX_RECORDED_ADJUSTMENTS {
+    if entry.lines().any(|l| l == note) {
         return;
+    }
+    // A row returned to its reviewed severity already says it is held; a held-in-place sentence
+    // after it would say the same thing twice.
+    if note.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX)
+        && entry
+            .lines()
+            .any(|l| l.starts_with(crate::follow_reviewers::RETURNED_NOTE_PREFIX))
+    {
+        return;
+    }
+    if entry.lines().count() >= MAX_RECORDED_ADJUSTMENTS {
+        if !crate::follow_reviewers::is_hold_note(&note) {
+            return;
+        }
+        let mut lines: Vec<&str> = entry.lines().collect();
+        let Some(oldest) = lines
+            .iter()
+            .position(|l| !crate::follow_reviewers::is_hold_note(l))
+        else {
+            return;
+        };
+        lines.remove(oldest);
+        *entry = lines.join("\n");
     }
     if !entry.is_empty() {
         entry.push('\n');
@@ -137,7 +173,15 @@ pub(crate) fn severity_adjustment_lines(
         f,
         corpus_rule_for(&f.rule_id, corpus),
     );
+    let returned = notes
+        .iter()
+        .any(|n| n.starts_with(crate::follow_reviewers::RETURNED_NOTE_PREFIX));
     for note in now {
+        // A row returned to its reviewed severity already says it is held (see
+        // [`record_adjustment`]).
+        if returned && note.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX) {
+            continue;
+        }
         if !notes.contains(&note) {
             notes.push(note);
         }
@@ -186,6 +230,11 @@ pub fn apply_corpus_severity_bounds(findings: &mut [Finding], corpus: &camerata_
     camerata_rules::severity_bounds::apply_corpus_severity_bounds(findings, |id| {
         corpus_rule_for(id, Some(corpus))
     });
+    // A doubted row with a source nobody doubted folded in takes the floor and the merged
+    // severity (above), and is held.
+    for f in findings.iter_mut() {
+        crate::follow_reviewers::hold_partly_doubted(f);
+    }
 }
 
 /// [`apply_corpus_severity_bounds`] for a caller holding the scan pipeline's

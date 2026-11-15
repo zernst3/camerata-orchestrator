@@ -674,6 +674,22 @@ fn two_distinct_findings_of_one_rule_at_one_path_and_line_are_both_kept() {
     assert_eq!(all.len(), 2, "different snippets are different findings");
 }
 
+/// Every merge that changes a severity says so in the row's severity note.
+#[test]
+fn a_repeat_that_raises_the_kept_row_records_the_adjustment() {
+    let a = finding("AI-X-1", "low", "first");
+    let b = finding("AI-X-1", "high", "second");
+    let mut all = vec![a, b];
+    dedup_findings_keep_max_severity(&mut all);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].severity, "high");
+    let notes = crate::severity_bounds::recorded_adjustments(&all[0]).join(" | ");
+    assert!(
+        notes.contains("severity raised from low to high"),
+        "{notes}"
+    );
+}
+
 #[test]
 fn a_repeat_collapses_and_keeps_the_highest_severity_seen() {
     let a = finding("AI-X-1", "low", "first");
@@ -1214,7 +1230,7 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 26] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 28] = [
     "severity_adjustments",
     "stage1_verdict",
     "outlier_reasons",
@@ -1242,6 +1258,8 @@ const BOOKKEEPING_KEY_NAMES: [&str; 26] = [
     "provenance",
     "merged_into",
     "merged_into_label",
+    "severity_hold_detail",
+    "undoubted_source_folded",
 ];
 
 /// A value that would read as identity if it were counted: three or more characters, and shaped

@@ -427,7 +427,7 @@ pub(crate) fn dedup_scan_previews(
     existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
-    dedup_scan_previews_with(existing, previews, None)
+    dedup_scan_previews_with(existing, previews, None, None)
 }
 
 /// The tool rule selectors each corpus rule names in its `sources[].linter` entries, by native
@@ -508,12 +508,16 @@ pub(crate) fn note_also_seen_by(f: &mut crate::onboard::Finding, tool: &str) {
 /// 3. both share a security category (as before).
 ///
 /// Both ids stay on the merged row (the folded one in `also_matches`) and the merged row keeps
-/// the higher of the two severities: a collapse never lowers a severity and never drops a
-/// violation (the folded row's place is the canonical row's place).
+/// the higher of the two severities ([`merged_preview_severity`]), with one exception: a style
+/// linter's label never outranks a reviewed severity unless the corpus authors a severity for
+/// that check. A collapse never lowers a severity and never drops a violation (the folded row's
+/// place is the canonical row's place), and a collapse that changes a severity, or keeps a
+/// reviewed one over a style linter's higher label, says so in the row's severity note.
 pub(crate) fn dedup_scan_previews_with(
     existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
     selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+    corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
     let tools = crate::review_tree::ToolMap::from_selectors(selectors);
@@ -543,14 +547,9 @@ pub(crate) fn dedup_scan_previews_with(
         if let Some(idx) = twin_idx {
             let existing_rank = finding_dedup_rank(&existing[idx]);
             let preview_rank = finding_dedup_rank(&preview);
-            // The merged row keeps the higher severity of the two.
-            let severity = if crate::report_export::severity_rank(&preview.severity)
-                < crate::report_export::severity_rank(&existing[idx].severity)
-            {
-                preview.severity.clone()
-            } else {
-                existing[idx].severity.clone()
-            };
+            // The merged row keeps the higher severity of the two, unless that is a style
+            // linter's label over a reviewed severity; the note says what the merge did.
+            let merged = merged_preview_severity(&existing[idx], &preview, selectors, corpus);
 
             if preview_rank >= existing_rank {
                 // Existing row has equal or higher precedence: keep it, fold preview in.
@@ -567,7 +566,8 @@ pub(crate) fn dedup_scan_previews_with(
                 }
                 // The collapsed tool row keeps its own rule, tool, key and line (A1).
                 existing[idx].flagged_by.push(flagged_by_of(&preview));
-                existing[idx].severity = severity;
+                merged.apply(&mut existing[idx]);
+                crate::follow_reviewers::fold_source_doubt(&mut existing[idx], &preview);
                 // drop the preview finding (continue to next)
             } else {
                 // Preview has higher precedence: promote it to canonical, demote existing.
@@ -586,7 +586,8 @@ pub(crate) fn dedup_scan_previews_with(
                     .flagged_by
                     .append(&mut existing[idx].flagged_by);
                 new_canonical.flagged_by.push(flagged_by_of(&existing[idx]));
-                new_canonical.severity = severity;
+                merged.apply(&mut new_canonical);
+                crate::follow_reviewers::fold_source_doubt(&mut new_canonical, &existing[idx]);
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
             }
@@ -598,6 +599,152 @@ pub(crate) fn dedup_scan_previews_with(
     }
 
     out
+}
+
+/// The tools whose severity is a strictness preference about style, not a judgement about
+/// harm: a project fails its build on an ESLint, Clippy or Ruff "error" by choice (W24, see
+/// `scan_tools::capped_preview_severity`). Semgrep is not on the list: it is a security scanner.
+/// The security family inside a style linter is exempt, row by row ([`is_security_family_lint`]).
+const STYLE_LINTERS: &[&str] = &["eslint", "clippy", "ruff"];
+
+/// Whether `preview`, a style linter's row, is one of the linter's security checks, which a
+/// reviewed severity does not outrank: an `eslint-plugin-security` id (`security/...`), a Ruff `S`
+/// rule (flake8-bandit, `S` and three digits), or any lint the corpus maps to a security rule
+/// (the row it folds into is of a security rule and the lint is that rule's tool).
+fn is_security_family_lint(
+    preview: &crate::onboard::Finding,
+    existing: &crate::onboard::Finding,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> bool {
+    let id = preview.rule_id.to_ascii_lowercase();
+    let last = id.rsplit(['/', ':']).next().unwrap_or(&id);
+    let is_ruff_s = last.len() == 4
+        && last.starts_with('s')
+        && last[1..].bytes().all(|b| b.is_ascii_digit())
+        && preview
+            .preview_tool
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("ruff"));
+    let is_security_plugin = id
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|segment| segment.contains("security"));
+    let mapped_to_security_rule = crate::ai_audit::finding_class(existing)
+        == crate::ai_audit::FindingClass::Security
+        && (preview.rule_id == existing.rule_id
+            || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors));
+    is_ruff_s || is_security_plugin || mapped_to_security_rule
+}
+
+/// Whether `f` is a style linter's preview row.
+fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
+    f.preview
+        && f.preview_tool
+            .as_deref()
+            .is_some_and(|t| STYLE_LINTERS.iter().any(|s| t.eq_ignore_ascii_case(s)))
+}
+
+/// What a preview collapse does to the merged row's severity: the severity it ends at and the
+/// note it leaves.
+pub(crate) struct MergedSeverity {
+    pub(crate) severity: String,
+    /// The severity the merged row's canonical side carried before, for the note.
+    from: String,
+    /// Why, as the end of the note's sentence; `None` when the two severities agreed.
+    why: Option<String>,
+    /// The note says "kept" (a reviewed severity held over a style label), not "raised".
+    kept: bool,
+}
+
+impl MergedSeverity {
+    /// Write the severity onto the merged row and record the note through the one shared
+    /// writer (`severity_bounds::record_adjustment`).
+    fn apply(self, row: &mut crate::onboard::Finding) {
+        if let Some(why) = self.why {
+            if self.kept {
+                crate::severity_bounds::record_adjustment(
+                    row,
+                    format!("severity kept at {}: {why}", self.severity),
+                );
+            } else {
+                crate::ai_audit::record_severity_adjustment(row, &self.from, &self.severity, &why);
+            }
+        }
+        row.severity = self.severity;
+    }
+}
+
+/// The severity of a collapse of `preview` into `existing` (cause 2 of the 2026-11-15 false-alarm
+/// diagnosis). The higher of the two, as before, except that a STYLE LINTER's label never
+/// outranks a REVIEWED severity (a row stage 1 rated) unless the corpus rule for that check
+/// itself authors a severity (`min_severity`): about 67 style rows shipped at medium that way
+/// although the auditor and calibration both said low. Whichever row ends canonical, the note
+/// is written against the severity the existing row carried.
+pub(crate) fn merged_preview_severity(
+    existing: &crate::onboard::Finding,
+    preview: &crate::onboard::Finding,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> MergedSeverity {
+    let rank = crate::report_export::severity_rank;
+    let from = existing.severity.clone();
+    if rank(&preview.severity) >= rank(&existing.severity) {
+        // Not higher: the existing severity stands and nothing changed.
+        return MergedSeverity {
+            severity: from.clone(),
+            from,
+            why: None,
+            kept: false,
+        };
+    }
+    let reviewed = crate::ai_audit::stage1_of(existing).is_some();
+    if is_style_linter_row(preview)
+        && reviewed
+        && !is_security_family_lint(preview, existing, selectors)
+        && !corpus_authors_severity(preview, existing, selectors, corpus)
+    {
+        let tool = preview.preview_tool.as_deref().unwrap_or("style linter");
+        return MergedSeverity {
+            severity: from.clone(),
+            from,
+            why: Some(format!(
+                "the style linter {tool} rated this place {}, and a style linter's label does not \
+                 outrank the reviewed severity",
+                preview.severity
+            )),
+            kept: true,
+        };
+    }
+    let who = preview
+        .preview_tool
+        .as_deref()
+        .map(|t| format!("the {t} row folded in at the same place"))
+        .unwrap_or_else(|| "the row folded in at the same place".to_string());
+    MergedSeverity {
+        severity: preview.severity.clone(),
+        from,
+        why: Some(format!("{who} was rated higher")),
+        kept: false,
+    }
+}
+
+/// Whether the corpus authors a severity (`min_severity`) for the check `preview` reports: the
+/// corpus rule its own id resolves to, or the native rule it is the tool of (the existing row's
+/// rule, through the rule file's `sources[].linter` mapping or the built-in tool map).
+fn corpus_authors_severity(
+    preview: &crate::onboard::Finding,
+    existing: &crate::onboard::Finding,
+    selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> bool {
+    let authored = |id: &str| {
+        crate::report_export::corpus_rule_for(id, corpus).is_some_and(|r| r.min_severity.is_some())
+    };
+    authored(&preview.rule_id)
+        || ((preview.rule_id == existing.rule_id
+            || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors))
+            && authored(&existing.rule_id))
 }
 
 /// The record a row leaves on the row it is collapsed into: its own rule, tool, line and key.
@@ -716,7 +863,14 @@ pub async fn merge_scan_preview(
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
                 // and the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
-                join_repo_previews(report, previews, Some(&selectors), &repo_files, Some(dir));
+                join_repo_previews(
+                    report,
+                    previews,
+                    Some(&selectors),
+                    Some(set),
+                    &repo_files,
+                    Some(dir),
+                );
                 report.coverage_notes.append(&mut notes);
             }
         }
@@ -751,10 +905,11 @@ pub(crate) fn join_repo_previews(
     report: &mut crate::onboard::ScanReport,
     previews: Vec<crate::onboard::Finding>,
     selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
+    corpus: Option<&camerata_rules::RuleSet>,
     files: &[(String, String)],
     root: Option<&std::path::Path>,
 ) {
-    let mut deduped = dedup_scan_previews_with(&mut report.findings, previews, selectors);
+    let mut deduped = dedup_scan_previews_with(&mut report.findings, previews, selectors, corpus);
     crate::onboard::evidence_check::verify_and_record(
         &mut report.ledger,
         &mut deduped,

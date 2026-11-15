@@ -302,7 +302,7 @@ pub(super) fn floor_may_apply(f: &Finding) -> bool {
 /// precondition cap (which can only LOWER a Critical floor to High, never raise or lower
 /// anything else), then the RLS-hedge guard (which can only RAISE whatever floor is already
 /// computed, never lower it — see the combine step in `apply_severity_calibration_rule`).
-pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
+pub(crate) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
     if !floor_may_apply(f) {
         return None;
     }
@@ -391,9 +391,33 @@ pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, S
 /// touched the finding (even when the floor didn't change anything — the architect can see the
 /// rule considered it and found the existing severity already sufficient). Never lowers a
 /// severity that already ranks at or above the floor.
+///
+/// Owner ruling R-7: a row a reviewer doubted (`crate::follow_reviewers::doubt_for_severity`; here
+/// that is stage 1's `real: no`, the only reviewer that has spoken yet) is never raised by this
+/// floor. It keeps stage 1's severity and is held for a decision (`needs_review`), so it stays in
+/// the review queue for the human reviewer. The notes a client reads are neutral; which reviewer
+/// doubted the row is in the operator-only hold detail.
 pub(super) fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
     if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
-        if severity_rank(&f.severity) < severity_rank(floor_sev) {
+        let would_raise = severity_rank(&f.severity) < severity_rank(floor_sev);
+        if let Some(doubt) = crate::follow_reviewers::doubt_for_severity(&f).filter(|_| would_raise)
+        {
+            f.needs_review = true;
+            let detail = format!(
+                "{}, so the severity floor for its wording ({floor_sev}) does not raise it; the \
+                 row keeps {} and is held for a decision",
+                doubt.phrase(),
+                f.severity
+            );
+            crate::follow_reviewers::record_hold(&mut f, &detail);
+            f.calibration_rationale = Some(format!(
+                "Severity floor not applied: the row keeps its severity ({}) and is held for a \
+                 decision.",
+                f.severity
+            ));
+            return f;
+        }
+        if would_raise {
             let before = f.severity.clone();
             f.severity = floor_sev.to_string();
             record_severity_adjustment(&mut f, &before, floor_sev, &reason);
@@ -724,6 +748,32 @@ pub(super) fn is_secret_class_row(f: &Finding) -> bool {
         .any(|w| w == "KEY" || w == "KEYS")
 }
 
+/// The bidirectional clamp of R2 and R3: set `f` to exactly `target`, with `rationale`. Owner
+/// ruling R-7: the clamp lowers a doubted row as before, but never RAISES one a reviewer doubted
+/// (`crate::follow_reviewers::doubt_for_severity`); that row keeps its severity and is held for a
+/// decision, with a neutral note for the client and the reviewer detail for the operator.
+fn clamp_to(f: &mut Finding, target: &str, rationale: &str) {
+    let raises = severity_rank(&f.severity) < severity_rank(target);
+    if let Some(doubt) = crate::follow_reviewers::doubt_for_severity(f).filter(|_| raises) {
+        f.needs_review = true;
+        let detail = format!(
+            "{}, so the severity ceiling that sets this class to exactly {target} does not raise \
+             it; the row keeps {} and is held for a decision",
+            doubt.phrase(),
+            f.severity
+        );
+        crate::follow_reviewers::record_hold(f, &detail);
+        f.calibration_rationale = Some(format!(
+            "Severity ceiling not applied: the row keeps its severity ({}) and is held for a \
+             decision.",
+            f.severity
+        ));
+        return;
+    }
+    f.severity = target.to_string();
+    f.calibration_rationale = Some(rationale.to_string());
+}
+
 pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
     // W31 — checked FIRST, and cap-only.
     //
@@ -834,33 +884,33 @@ pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
     // floor-earned critical is never clamped, and CORS words in another rule's prose never
     // move its rating.
     if names_cors_class(&f) && !floor_earned_critical && mentions_cors_misconfig(&text) {
-        f.severity = "medium".to_string();
-        f.calibration_rationale = Some(
+        clamp_to(
+            &mut f,
+            "medium",
             "Severity ceiling: a browser-mediated CORS/cross-origin misconfiguration requires a \
              victim's browser and an active session to exploit — it is neither a direct \
              unauthenticated exposure (Critical) nor safe to leave buried (Low). Calibrated to \
-             exactly Medium."
-                .to_string(),
+             exactly Medium.",
         );
         return f;
     }
 
     if mentions_open_redirect(&text) && !floor_earned_critical {
         if mentions_redirect_chained_to_credential_capture(&text) {
-            f.severity = "high".to_string();
-            f.calibration_rationale = Some(
+            clamp_to(
+                &mut f,
+                "high",
                 "Severity ceiling: an open/unvalidated redirect chained to credential capture — \
                  the destination can read or exfiltrate a token, cookie, or credential — lets an \
-                 attacker walk away with something usable. Calibrated to exactly High."
-                    .to_string(),
+                 attacker walk away with something usable. Calibrated to exactly High.",
             );
         } else {
-            f.severity = "medium".to_string();
-            f.calibration_rationale = Some(
+            clamp_to(
+                &mut f,
+                "medium",
                 "Severity ceiling: an open/unvalidated redirect, on its own, only harms the user \
                  who follows it and hands the attacker nothing — not High or Critical unless \
-                 chained to credential capture. Calibrated to exactly Medium."
-                    .to_string(),
+                 chained to credential capture. Calibrated to exactly Medium.",
             );
         }
         return f;

@@ -64,6 +64,7 @@ pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
+pub mod follow_reviewers;
 pub mod github_issues;
 mod governed_rules;
 pub mod grounding;
@@ -2543,6 +2544,7 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                corpus.as_ref(),
             )
             .await;
         }
@@ -3120,6 +3122,7 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            corpus.as_ref(),
                         ),
                     ),
                 )

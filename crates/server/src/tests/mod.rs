@@ -13,6 +13,7 @@ async fn body_json(resp: Response) -> serde_json::Value {
 
 mod credentials_engagement;
 mod exports_context;
+mod lint_merge_severity;
 mod runs_feedback;
 mod scan_dedup_ci;
 mod settings_projects;
