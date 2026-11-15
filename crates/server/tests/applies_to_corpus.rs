@@ -20,6 +20,8 @@ enum Family {
     CiPipelines,
     /// Code that reads a list of records through a query builder, an ORM or raw SQL.
     ListQueries,
+    /// ECMAScript files that use a React effect hook.
+    ReactEffects,
 }
 
 impl Family {
@@ -102,6 +104,12 @@ impl Family {
                 // Raw SQL in a Go handler.
                 ("internal/http/orders.go", "rows, err := db.Query(\"SELECT id FROM orders\")"),
             ],
+            Family::ReactEffects => vec![
+                ("src/components/Clock.tsx", "useEffect(() => { setInterval(tick, 1000); }, []);"),
+                ("app/feed/page.jsx", "React.useEffect(() => { ch.subscribe(); });"),
+                ("src/hooks/usePosition.ts", "useLayoutEffect(() => measure(), []);"),
+                ("lib/legacy.js", "import { useEffect } from 'react';"),
+            ],
         }
     }
 
@@ -112,6 +120,11 @@ impl Family {
             Family::ListQueries => (
                 "src/components/OrderList.tsx",
                 "export const OrderList = ({ orders }) => <ul>{orders.map((o) => <li key={o.id}>{o.id}</li>)}</ul>;",
+            ),
+            // A component with no effect hook cannot hold an effect without cleanup.
+            Family::ReactEffects => (
+                "src/components/Badge.tsx",
+                "export const Badge = ({ n }) => <b>{n}</b>;",
             ),
             _ => (
                 "src/lib/format.ts",
@@ -154,6 +167,7 @@ const REVIEWED: &[(&str, Family)] = &[
     ("CICD-LEAST-PRIVILEGE-TOKEN-1", Family::CiPipelines),
     ("CICD-NO-SECRETS-ON-FORK-PR-1", Family::CiPipelines),
     ("ARCH-BOUNDED-LIST-READS-1", Family::ListQueries),
+    ("JAVASCRIPT-REACT-EFFECT-CLEANUP-1", Family::ReactEffects),
 ];
 
 async fn corpus() -> camerata_rules::RuleSet {

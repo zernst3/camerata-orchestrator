@@ -17,14 +17,24 @@ struct Expected {
     fault_option: &'static str,
 }
 
-const EXPECTED: &[Expected] = &[Expected {
-    id: "ARCH-BOUNDED-LIST-READS-1",
-    domain: "api-layer",
-    min_severity: "medium",
-    max_severity: "medium",
-    default_option: "list-reads-are-bounded-by-a-limit-or-page",
-    fault_option: "list-reads-return-the-whole-collection",
-}];
+const EXPECTED: &[Expected] = &[
+    Expected {
+        id: "ARCH-BOUNDED-LIST-READS-1",
+        domain: "api-layer",
+        min_severity: "medium",
+        max_severity: "medium",
+        default_option: "list-reads-are-bounded-by-a-limit-or-page",
+        fault_option: "list-reads-return-the-whole-collection",
+    },
+    Expected {
+        id: "JAVASCRIPT-REACT-EFFECT-CLEANUP-1",
+        domain: "javascript:react",
+        min_severity: "medium",
+        max_severity: "medium",
+        default_option: "effects-return-a-cleanup-for-what-they-start",
+        fault_option: "effects-start-work-they-never-stop",
+    },
+];
 
 async fn corpus() -> camerata_rules::RuleSet {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_CORPUS_PATH);

@@ -2029,6 +2029,60 @@ mod tests {
         }
     }
 
+    /// `JAVASCRIPT-REACT-EFFECT-CLEANUP-1` lives in the `javascript:react` domain, which any repo
+    /// whose manifest depends on React arms (a Next.js app included), so no `domains_for_stack`
+    /// edit is needed. A Python-only repo is not handed it.
+    #[tokio::test]
+    async fn react_effect_cleanup_is_proposed_for_react_and_next_stacks_and_not_for_python() {
+        const ID: &str = "JAVASCRIPT-REACT-EFFECT-CLEANUP-1";
+        for (repo, source, manifest) in [
+            (
+                "acme/web-js",
+                "src/app.jsx",
+                r#"{"dependencies":{"react":"18.2.0"}}"#,
+            ),
+            (
+                "acme/web-ts",
+                "src/App.tsx",
+                r#"{"dependencies":{"react":"18.2.0"}}"#,
+            ),
+            (
+                "acme/next-app",
+                "app/page.tsx",
+                r#"{"dependencies":{"next":"15.0.0","react":"19.0.0"}}"#,
+            ),
+        ] {
+            let repo_files = files(&[(source, ""), ("package.json", manifest)]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(
+                domains.contains(&"javascript:react".to_string()),
+                "{repo}: {domains:?}"
+            );
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "javascript:react");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+        }
+
+        let py_files = files(&[("app/main.py", "print('hi')")]);
+        let stack = detect_stack("acme/py-app", &py_files);
+        let domains = domains_for_stack(&stack);
+        let proposed = propose_corpus_rules(&[("acme/py-app".to_string(), domains)]).await;
+        let rule = proposed.iter().find(|r| r.id == ID);
+        assert!(
+            rule.is_none_or(|r| !r.recommended),
+            "a Python-only repo must not have {ID} suggested: {rule:?}"
+        );
+    }
+
     /// `STYLE-NEEDLESS-COMPLEXITY-1` (Wave D) lives in the `javascript` domain, which a
     /// JavaScript repo reaches directly and a TypeScript repo through the `javascript:typescript`
     /// parent expansion, so no `domains_for_stack` edit is needed. A Python repo is not handed it.

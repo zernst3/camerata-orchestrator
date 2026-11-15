@@ -156,7 +156,8 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
     }
     let expected: BTreeMap<String, usize> = [
         ("architecture", 7usize),
-        ("framework", 114),
+        // 114 plus JAVASCRIPT-REACT-EFFECT-CLEANUP-1 (a new rule, not a re-labelled one).
+        ("framework", 115),
         // 91 plus STYLE-NEEDLESS-COMPLEXITY-1 (W29 Wave D).
         ("language", 92),
         ("library", 34),
