@@ -40,9 +40,10 @@ pub use archive::{
 pub use consistency::{
     client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
     dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
-    marking_problems, package_stem, parse_readme_provenance, patterns_section_problems,
-    pdf_count_reconciliation_problems, pdf_marking_problems, place_archive_problems, row_parity,
-    verify_manifest, verify_readme_provenance, ReadmeProvenance,
+    marking_problems, package_stem, parse_readme_provenance, patterns_clean_cell_problems,
+    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems,
+    place_archive_problems, row_parity, verify_manifest, verify_readme_provenance,
+    ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 

@@ -2165,3 +2165,128 @@ fn a_rule_the_ledger_does_not_show_as_run_keeps_the_no_preview_tool_line() {
         "one rule is on no ledger entry as run, so the line stays: {lines:?}"
     );
 }
+
+// ── What's healthy never lists a rule beside an open problem in its family ─────────────
+
+fn healthy_ids(json: &AuditReportJson) -> Vec<&str> {
+    json.whats_healthy
+        .rules
+        .iter()
+        .map(|r| r.rule_id.as_str())
+        .collect()
+}
+
+fn two_repo_report_with(findings: Vec<Finding>) -> crate::onboard::ScanReport {
+    let mut report = report_with(findings, vec!["SEC-R-1", "SEC-CLEAN-1"]);
+    report.repos = vec!["owner/repo".to_string(), "owner/other".to_string()];
+    for repo in ["owner/repo", "owner/other"] {
+        for rule in ["SEC-R-1", "SEC-CLEAN-1"] {
+            report.ledger.record_rule(
+                repo,
+                rule,
+                crate::scan_ledger::RuleTier::Semantic,
+                true,
+                None,
+                5,
+                0,
+            );
+        }
+    }
+    report
+}
+
+#[test]
+fn whats_healthy_drops_a_rule_a_collapsed_source_flagged() {
+    let mut host = finding("TOOL-X-1", "a.rs", 1, "high");
+    host.flagged_by = vec![crate::review_tree::FlaggedBy {
+        rule_id: "SEC-R-1".to_string(),
+        tool: None,
+        site_key: "k".to_string(),
+        path: "a.rs".to_string(),
+        line: 1,
+    }];
+    let report = two_repo_report_with(vec![host]);
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let ids = healthy_ids(&json);
+    assert!(
+        !ids.contains(&"SEC-R-1"),
+        "a source collapsed into a row is an open problem for its rule: {ids:?}"
+    );
+    assert!(ids.contains(&"SEC-CLEAN-1"), "anti-vacuity: {ids:?}");
+}
+
+#[test]
+fn whats_healthy_drops_a_rule_that_has_a_tool_row_filed_under_its_node() {
+    const NATIVE: &str = "JAVASCRIPT-REACT-RULES-OF-HOOKS-1";
+    // The tool's row is filed under the native rule's node; the native rule's own check found
+    // nothing.
+    let mut tool_row = finding("react-hooks/rules-of-hooks", "a.js", 1, "high");
+    tool_row.preview_tool = Some("eslint".to_string());
+    let mut report = two_repo_report_with(vec![tool_row]);
+    for repo in ["owner/repo", "owner/other"] {
+        report.ledger.record_rule(
+            repo,
+            NATIVE,
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            5,
+            0,
+        );
+    }
+    report.provenance.audited_rule_ids.push(NATIVE.to_string());
+    let sealed = report.seal();
+    assert_eq!(
+        sealed.findings[0].group_path.get(1).map(String::as_str),
+        Some(format!("rule:{NATIVE}").as_str()),
+        "anti-vacuity: the tool row is filed under the native rule's node"
+    );
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let ids = healthy_ids(&json);
+    assert!(
+        !ids.contains(&NATIVE),
+        "a row under the rule's node is a problem in its family: {ids:?}"
+    );
+    assert!(ids.contains(&"SEC-CLEAN-1"), "anti-vacuity: {ids:?}");
+}
+
+#[test]
+fn whats_healthy_in_several_services_drops_a_rule_with_no_clean_cell() {
+    let mut report = two_repo_report_with(Vec::new());
+    // An architectural rule that evaluated no file in either service is not applicable in both:
+    // there is no service where it is clean.
+    for repo in ["owner/repo", "owner/other"] {
+        report.ledger.record_rule(
+            repo,
+            "SEC-NOFILES-1",
+            crate::scan_ledger::RuleTier::Architectural,
+            true,
+            None,
+            0,
+            0,
+        );
+    }
+    report
+        .provenance
+        .audited_rule_ids
+        .push("SEC-NOFILES-1".to_string());
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let ids = healthy_ids(&json);
+    assert!(
+        !ids.contains(&"SEC-NOFILES-1"),
+        "a rule with no clean service is not listed as healthy: {ids:?}"
+    );
+    assert!(ids.contains(&"SEC-CLEAN-1"), "anti-vacuity: {ids:?}");
+}

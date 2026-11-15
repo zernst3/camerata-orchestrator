@@ -830,9 +830,11 @@ const PATTERNS: &str = "patterns across services";
 ///   when it does not, and the workbook has the matching sheet or none;
 /// * the section carries no severity anywhere;
 /// * no pattern row sits inside the `findings` array, so every count read off that array (and
-///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only.
+///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only;
+/// * no cell says clean for a service and rule that has an open problem in the package
+///   ([`patterns_clean_cell_problems`]).
 pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
-    let mut problems = Vec::new();
+    let mut problems = patterns_clean_cell_problems(entries, report);
     let findings_json: Option<Value> = entries
         .get("findings.json")
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
@@ -906,6 +908,210 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
                 }
             }
         }
+    }
+    problems
+}
+
+/// The open problems `findings.json` holds, by service and rule: the count for `(repo, rule)`
+/// read the way the patterns section reads a cell. A row counts for its own rule, for the rule
+/// its sub-group stands under (`group` is `sub:<rule>/<n>`), for every rule a source collapsed
+/// into it was flagged under (`flagged_by`) and for every rule it also matches (`also_matches`,
+/// ids and titles), and every absorbed site (`also_locations`) counts in its own repo for its
+/// own rule. A convention the service follows and a check that could not be completed are not
+/// problems. A ruled-out problem is not in `findings.json`, so it is never counted; a problem
+/// that needs a decision is, because it is open.
+struct OpenProblems {
+    /// `(repo, upper-cased rule id or title)` to the number of open problems.
+    by_repo_rule: BTreeMap<(String, String), usize>,
+    /// `(repo, upper-cased also_matches text)` of every open row that has one. The text is a list
+    /// of rule titles joined by `, `, and a title may itself hold a comma, so it is searched for
+    /// an exact title rather than split ([`lists_name`]).
+    also_matches: Vec<(String, String)>,
+}
+
+/// Whether `list` (names joined by `, `) holds `name` as one whole entry. Matches whole entries
+/// only, so a title that holds a comma is found as itself and a shorter name is not found inside a
+/// longer one. Both are upper-cased.
+fn lists_name(list: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    list.match_indices(name).any(|(at, _)| {
+        let before = at == 0 || list[..at].ends_with(", ");
+        let rest = &list[at + name.len()..];
+        before && (rest.is_empty() || rest.starts_with(", "))
+    })
+}
+
+impl OpenProblems {
+    fn of(rows: &[Value]) -> Self {
+        let mut by_repo_rule: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut also_matches: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+            if matches!(kind, "convention_observed" | "not_assessed") {
+                continue;
+            }
+            let repo = cell_text(row, "repo");
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            names.insert(cell_text(row, "rule_id"));
+            if let Some(rule) = row
+                .get("group")
+                .and_then(Value::as_str)
+                .and_then(|g| g.strip_prefix("sub:"))
+                .and_then(|g| g.rsplit_once('/'))
+                .map(|(rule, _)| rule.to_string())
+            {
+                names.insert(rule);
+            }
+            for source in row
+                .get("flagged_by")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                names.insert(cell_text(source, "rule_id"));
+            }
+            let also = cell_text(row, "also_matches").trim().to_ascii_uppercase();
+            if !also.is_empty() {
+                also_matches.push((repo.clone(), also));
+            }
+            for name in names {
+                let name = name.trim().to_ascii_uppercase();
+                if !name.is_empty() {
+                    *by_repo_rule.entry((repo.clone(), name)).or_insert(0) += 1;
+                }
+            }
+            for site in row
+                .get("also_locations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let rule = cell_text(site, "rule_id").trim().to_ascii_uppercase();
+                if !rule.is_empty() {
+                    *by_repo_rule
+                        .entry((cell_text(site, "repo"), rule))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        Self {
+            by_repo_rule,
+            also_matches,
+        }
+    }
+
+    /// Add the places of other rules that ruled-out rows carry (`open_beside_ruled_out`): the
+    /// ruled-out row is not among the rows, but these places are still open.
+    fn add_sites(&mut self, sites: Option<&Value>) {
+        for site in sites.and_then(Value::as_array).into_iter().flatten() {
+            let rule = cell_text(site, "rule_id").trim().to_ascii_uppercase();
+            if !rule.is_empty() {
+                *self
+                    .by_repo_rule
+                    .entry((cell_text(site, "repo"), rule))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// The open problems for the rule (by its id or its title) in `repo`.
+    fn count(&self, repo: &str, rule_id: &str, title: &str) -> usize {
+        let get = |name: &str| {
+            let name = name.trim().to_ascii_uppercase();
+            let direct = self
+                .by_repo_rule
+                .get(&(repo.to_string(), name.clone()))
+                .copied()
+                .unwrap_or(0);
+            let listed = self
+                .also_matches
+                .iter()
+                .filter(|(r, list)| r == repo && lists_name(list, &name))
+                .count();
+            direct + listed
+        };
+        let by_id = get(rule_id);
+        if title.trim().is_empty() || title.eq_ignore_ascii_case(rule_id) {
+            by_id
+        } else {
+            by_id.max(get(title))
+        }
+    }
+}
+
+/// One problem for each cell of a patterns section that says clean for a service and rule that
+/// has an open problem in the package: a false all-clear a reader could trust. `section` is the
+/// section as it ships in `file` (`findings.json`'s key, or the PDF's data).
+fn clean_beside_open_problem(file: &str, section: &Value, open: &OpenProblems) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (i, row) in section
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let rule_id = cell_text(row, "rule_id");
+        let title = cell_text(row, "title");
+        for (j, cell) in row
+            .get("cells")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if cell.get("state").and_then(Value::as_str) != Some("clean") {
+                continue;
+            }
+            let repo = cell_text(cell, "repo");
+            let n = open.count(&repo, &rule_id, &title);
+            if n > 0 {
+                problems.push(problem(
+                    file,
+                    &format!("patterns_across_services.rows[{i}].cells[{j}]"),
+                    format!(
+                        "the patterns section says {rule_id} is clean in {repo}, and the package \
+                         holds {} open for that rule in {repo}; a clean cell beside an open \
+                         problem is a false all-clear",
+                        crate::xlsx_export::vocabulary::places_count(n)
+                    ),
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// The patterns section never says clean beside an open problem: for every cell that reads
+/// clean, in `findings.json`'s section and in the PDF's data, `findings.json` holds no open
+/// problem for that service and rule ([`OpenProblems`]). A `findings.json` that is absent or
+/// does not parse is left to the checks that read it first.
+pub fn patterns_clean_cell_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    let Some(findings_json) = entries
+        .get("findings.json")
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+    else {
+        return Vec::new();
+    };
+    let rows: Vec<Value> = findings_json
+        .get("findings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut open = OpenProblems::of(&rows);
+    open.add_sites(findings_json.get("open_beside_ruled_out"));
+    let mut problems = Vec::new();
+    if let Some(section) = findings_json.get("patterns_across_services") {
+        problems.extend(clean_beside_open_problem("findings.json", section, &open));
+    }
+    if let Some(section) = report
+        .patterns_across_services
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok())
+    {
+        problems.extend(clean_beside_open_problem("PDF data", &section, &open));
     }
     problems
 }

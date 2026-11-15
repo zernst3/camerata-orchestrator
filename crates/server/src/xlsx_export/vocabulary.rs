@@ -438,6 +438,20 @@ pub fn places_count(n: usize) -> String {
     format!("{n} {}", places_word(n))
 }
 
+/// "problem" or "problems" for a count.
+pub fn problems_word(n: usize) -> &'static str {
+    if n == 1 {
+        "problem"
+    } else {
+        "problems"
+    }
+}
+
+/// "3 problems", "1 problem": the count of open problems (the release gate's message).
+pub fn problems_count(n: usize) -> String {
+    format!("{n} {}", problems_word(n))
+}
+
 /// What a fix that closes several rules says of them: "Closes 6 rules: A, B". Empty for a fix
 /// of one rule, which has nothing to add.
 pub fn closes_rules(rules: &[String]) -> String {
@@ -1591,6 +1605,8 @@ mod tests {
         );
         assert_eq!(places_count(1), "1 place");
         assert_eq!(places_count(3), "3 places");
+        assert_eq!(problems_count(1), "1 problem");
+        assert_eq!(problems_count(2), "2 problems");
         assert_eq!(
             more_in_sheet(4, FIX_PLAN),
             "and 4 more in the Fix plan sheet"
