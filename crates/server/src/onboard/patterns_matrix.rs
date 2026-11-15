@@ -17,7 +17,10 @@
 //! The cell states are the ledger's own ([`CellState`] is defined once, in `scan_ledger`); this
 //! module only refines a cell with the report's findings, which can only move a cell toward
 //! violated (a finding is a finding) or away from clean (a check that could not be completed is
-//! not a clean check).
+//! not a clean check). The one move toward clean is a reviewer's: a cell whose every problem the
+//! reviewer ruled out reads clean ([`cell_with`]). A cell is clean only when its service has no
+//! open problem for the rule or its family, and the release gate refuses a package where one
+//! says otherwise.
 //!
 //! An optional model pass can group the rows into themes ([`Theme`]). It sees only the rows and
 //! one headline per violated cell, never code, and [`keep_valid_themes`] drops any theme that
