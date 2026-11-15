@@ -674,3 +674,35 @@ fn a_place_a_tool_found_keeps_the_tool_as_its_source() {
         "the Source column reads Tool: semgrep from this: {b}"
     );
 }
+
+// ── the backstop's producer ──────────────────────────────────────────────────────────────
+
+#[test]
+fn the_backstop_key_lists_a_place_a_ruled_out_host_still_carries() {
+    // A reviewed report the overlay did not unfold: the ruled-out host still carries rule B's
+    // place, and the export's key lists it.
+    let sealed = api_host_absorbing_a_web_site().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        host_key(&sealed),
+        DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "the value is a constant".to_string(),
+            ..DispositionWire::default()
+        },
+    );
+    let reviewed = ReviewedReport::unreviewed_without_unfold(&sealed, &dispositions);
+    assert!(
+        unfolded(&reviewed, RULE_B).is_empty(),
+        "anti-vacuity: nothing was unfolded"
+    );
+    let export_key = {
+        let json = build_report_json(&reviewed, None, &ReportOptions::default());
+        build_findings_export(&reviewed, None, &json, &HashMap::new()).open_beside_ruled_out
+    };
+    assert_eq!(export_key.len(), 1, "{export_key:?}");
+    assert_eq!(export_key[0].rule_id, RULE_B);
+    assert_eq!(export_key[0].repo, WEB);
+    assert_eq!(export_key[0].path, "src/query.ts");
+    assert_eq!(export_key[0].line, 7);
+}

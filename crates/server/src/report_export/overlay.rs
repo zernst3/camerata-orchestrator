@@ -219,10 +219,21 @@ impl ReviewedReport {
     /// This report with `dispositions` (an older client's export request) as the decisions. Used
     /// only while the decision store holds no record for the project.
     #[must_use]
-    pub fn with_legacy_dispositions(
-        mut self,
-        dispositions: HashMap<String, DispositionWire>,
+    pub fn with_legacy_dispositions(self, dispositions: HashMap<String, DispositionWire>) -> Self {
+        self.with_legacy(dispositions, true)
+    }
+
+    /// A reviewed report whose rulings never went through the unfold, for the tests of the
+    /// backstops that catch a report the overlay did not unfold.
+    #[cfg(test)]
+    pub(crate) fn unreviewed_without_unfold(
+        sealed: &SealedReport,
+        dispositions: &HashMap<String, DispositionWire>,
     ) -> Self {
+        apply_overlay(sealed, &[], &[], &[]).with_legacy(dispositions.clone(), false)
+    }
+
+    fn with_legacy(mut self, dispositions: HashMap<String, DispositionWire>, unfold: bool) -> Self {
         self.dispositions = dispositions;
         self.legacy = true;
         // An older client's rulings unfold the places they leave open, like the store's.
@@ -232,7 +243,7 @@ impl ReviewedReport {
             .filter(|(_, d)| d.state == "FalsePositive")
             .map(|(key, _)| key.clone())
             .collect();
-        if !ruled_out.is_empty() {
+        if unfold && !ruled_out.is_empty() {
             self.report = self.report.overlaid(|r| {
                 let unfolded = super::unfold::unfold_ruled_out(r, &|f| {
                     ruled_out.contains(&super::finding_key(f))
