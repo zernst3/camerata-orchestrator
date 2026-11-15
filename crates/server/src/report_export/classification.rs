@@ -1013,7 +1013,7 @@ pub(crate) fn default_narrative(
              engine analyzed {} and produced {}. {curated_total} {} for action \
              ({do_now} First, {do_next} Next, {plan} Later, {accepted} already carried \
              as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             a human reviewer's decision, {informational} {} information only, and \
+             a human reviewer's decision, {informational} {} information only and \
              {excluded_fp} {} ruled out automatically.{dep_clause}",
             noun(files_scanned, "file", "files"),
             noun(candidates_reviewed, "problem", "problems"),

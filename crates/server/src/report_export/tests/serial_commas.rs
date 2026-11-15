@@ -5,7 +5,19 @@
 /// continuations joined, and in a Typst template the whole text. Comments and the test module
 /// are left out.
 fn authored_prose(source: &str, is_template: bool) -> Vec<String> {
-    let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+    // Only a test module ends the production code; `#[cfg(test)]` on a single item does not.
+    let mut end = source.len();
+    let mut from = 0;
+    while let Some(at) = source[from..].find("#[cfg(test)]") {
+        let at = from + at;
+        let after = source[at + "#[cfg(test)]".len()..].trim_start();
+        if after.starts_with("mod ") || after.starts_with("pub mod ") {
+            end = at;
+            break;
+        }
+        from = at + 1;
+    }
+    let source = &source[..end];
     if is_template {
         return vec![source
             .lines()
@@ -65,7 +77,7 @@ fn serial_commas(text: &str) -> Vec<String> {
                 continue;
             };
             let last_item = &clause[previous + 2..];
-            if last_item.split_whitespace().count() <= 3
+            if last_item.split_whitespace().count() <= 6
                 && !last_item.contains(" and ")
                 && !last_item.contains(" or ")
             {
@@ -78,7 +90,31 @@ fn serial_commas(text: &str) -> Vec<String> {
 
 #[test]
 fn authored_prose_has_no_serial_comma() {
-    let sources: [(&str, &str, bool); 11] = [
+    let sources: [(&str, &str, bool); 19] = [
+        ("row_facts.rs", include_str!("../row_facts.rs"), false),
+        ("tree_view.rs", include_str!("../tree_view.rs"), false),
+        ("overlay.rs", include_str!("../overlay.rs"), false),
+        ("prose_checks.rs", include_str!("../prose_checks.rs"), false),
+        (
+            "review_sheets.rs",
+            include_str!("../../xlsx_export/review_sheets.rs"),
+            false,
+        ),
+        (
+            "subgroups.rs",
+            include_str!("../../xlsx_export/subgroups.rs"),
+            false,
+        ),
+        (
+            "tables.rs",
+            include_str!("../../xlsx_export/tables.rs"),
+            false,
+        ),
+        (
+            "triage_log.rs",
+            include_str!("../../xlsx_export/triage_log.rs"),
+            false,
+        ),
         (
             "report_export.rs",
             include_str!("../../report_export.rs"),
@@ -161,6 +197,48 @@ fn the_client_readme_has_no_serial_comma() {
             serial_commas(&readme)
         );
     }
+}
+
+/// The executive summary sentence as the PDF prints it, in both review states and with and
+/// without the dependency clause: the source scan sees only the literal fragments around the
+/// numbers, so the printed sentence is scanned too.
+#[test]
+fn the_executive_summary_sentence_has_no_serial_comma() {
+    use crate::report_export::{classification::default_narrative, ReviewState};
+    for state in [ReviewState::Raw, ReviewState::Reviewed] {
+        for (held, info, ruled_out, advisories) in [(14, 6, 0, 0), (1, 1, 1, 3), (0, 0, 7, 0)] {
+            let sentence = default_narrative(
+                state, 120, 40, ruled_out, 12, held, advisories, 3, 4, 5, 0, info,
+            );
+            assert!(
+                serial_commas(&sentence).is_empty(),
+                "{state:?}: {sentence}\n{:?}",
+                serial_commas(&sentence)
+            );
+        }
+    }
+}
+
+#[test]
+fn the_serial_comma_scan_finds_a_list_whose_last_item_is_a_short_clause() {
+    assert!(!serial_commas(
+        "1 needs a decision, 6 are information only, and 0 were ruled out automatically."
+    )
+    .is_empty());
+    assert!(
+        serial_commas("1 needs a decision, 6 are information only and 0 were ruled out.")
+            .is_empty()
+    );
+}
+
+/// A `#[cfg(test)]` on a single item (a helper only the tests call) does not end the production
+/// code of the file: only a test module does.
+#[test]
+fn the_scan_reads_past_a_cfg_test_item_and_stops_at_the_test_module() {
+    let source = "const A: &str = \"x\";\n#[cfg(test)]\nfn helper() {}\nconst B: &str = \"a, b, and c\";\n#[cfg(test)]\nmod tests {\n    const C: &str = \"d, e, and f\";\n}\n";
+    let literals = authored_prose(source, false);
+    assert!(literals.iter().any(|l| l == "a, b, and c"), "{literals:?}");
+    assert!(!literals.iter().any(|l| l == "d, e, and f"), "{literals:?}");
 }
 
 #[test]
