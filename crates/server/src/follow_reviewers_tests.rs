@@ -673,3 +673,33 @@ fn an_exported_doubted_row_lands_in_the_held_bucket() {
     assert_eq!(sites(&json.held_for_review_findings), 1);
     assert_eq!(sites(&json.curated_findings), 0);
 }
+
+// ── Round 2 of PR #156's review ─────────────────────────────────────────────────────────────
+
+/// Defect 1 (round 2): the survivor of a collapse is the deterministic row (no stage 1 record, so
+/// nobody doubted it); the folded source is an identical model row stage 1 judged not real. The
+/// survivor takes the source's stage 1 record, and that doubt must not strip its rule minimum.
+#[test]
+fn an_undoubted_survivor_does_not_inherit_a_folded_sources_doubt() {
+    let set = corpus(&[("SYN-INHERIT-1", Some("critical"))]);
+    let mut survivor = reviewed_row("SYN-INHERIT-1", "medium", "yes");
+    survivor.captures.remove(crate::ai_audit::STAGE1_CAPTURE);
+    survivor.located = true;
+    let mut source = reviewed_row("SYN-INHERIT-1", "low", "no");
+    source.located = true;
+    source.confidence = Some("medium".to_string());
+    let outcome = crate::review_tree::collapse_identical(
+        vec![survivor, source],
+        &crate::review_tree::ToolMap::from_selectors(None),
+    );
+    let mut rows = outcome.rows;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].confidence.is_none(),
+        "the deterministic row survived"
+    );
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "critical", "{}", notes(&rows[0]));
+    assert!(rows[0].needs_review, "the row stays held");
+}
