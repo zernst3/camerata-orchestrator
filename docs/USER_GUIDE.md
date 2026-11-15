@@ -4,56 +4,17 @@ This is the "I have a repo new to Camerata — where do I start, and how do I ta
 the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status (updated 2026-06-27): the brownfield **onboarding flow is built and live** — per-repo
-> stack detection + rule selection, **custom rules** (per-repo + project-global), an optional code
-> audit you can scope with a **scan-type selector** (AI review and/or deterministic scans), four scan
-> modes, an opt-in **thorough-calibration** consensus pass, a **scan-time deterministic preview** that
-> runs your selected mechanical linters during the scan, a three-table finding triage, and an **Apply**
-> step that writes governance onto a local branch and pushes it (no PR until you ask). Two opt-in
-> **CI/CD security rules** (Semgrep, CodeQL) are available but **never auto-recommended or pre-checked**.
-> Re-onboarding an already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos
-> resolve to **local folders** with a health check, and onboarding state **auto-saves**. Governed
-> Development is now a **3-phase cockpit** (Intake · Investigation & Refinement · Development) with
-> free navigation between phases, **Finish/Reopen** controls per phase, **per-story repo/branch
-> scoping** (Intake, with the repos-in-scope selector at the top of the page), **prose contract settling**
-> and a **contract precondition** (no development for cross-boundary work without a contract), and a
-> **per-repo Ship panel** with a "Ship all repos" chain button. UoWs reach a **Done/archive** terminal
-> state. Settings is a **single consolidated nav item** (no settings button on the Governed Development
-> page): cross-project credentials (OpenRouter key + GitHub token, keychain-backed, masked) and Bombe
-> animation controls on one side; per-project **model configuration** on the other. Model tiering is
-> **domain-aware**: Strongest / Balanced / Fast fleet bands, an optional project-wide **Designer
-> (vision) band** for visual work, **suggested profiles** (Balanced / Max Efficiency / Max Quality /
-> Custom), and individually selectable **helper-agent models** (audit, calibration, research chat,
-> story authoring, decomposition, escalation, clarification). L3 AI code review has its own model
-> selector (defaults to Balanced). The **Rules page** is rules-only (model config moved to Settings).
-> The **Rules view** has an **"Emit rules locally"** button that regenerates governance files directly
-> into local repo clones. Emit is **local-only by default**, with three **cascading** toggles (each
-> requires the previous): **Save emits on a new branch → Push to GitHub → Open a PR**. The UI theme
-> is **Bletchley industrial amber** with a background **Bombe machine** that is an **AI-activity
-> indicator**: it powers up (lights up, rotors spin) only while genuine AI / heavy work runs (chat
-> turns, authoring, investigation, live runs, scans, audits) and powers down to a dim idle otherwise;
-> the rotor knobs freeze in place between runs and resume from there. Trivial fetches never animate
-> it. Settings exposes a global ON/OFF and a Play/Pause preview. The **Intake page** renders the whole
-> story inline (no separate modal) with a large **"Context for the investigation agent"** field that
-> is editable and deletable after it is added. The **Rules page** groups rule tables by domain,
-> collapsed by default; clicking a row opens a rule-detail modal. **Blank UoWs you author with AI**,
-> an **AI-assisted Update-branch** control, a work-item modal with comments + @-mention autocomplete,
-> a one-time **layer-2 bootstrap bypass** for installing tooling, a one-click **Gate self-check**
-> (go/no-go), **multiple concurrent UoWs** (each runs in its own isolated git worktree), **PR
-> lifecycle buttons** per UoW (push, open PR, pull PR info, resolve with agent), and **structured
-> clarifications** that auto-save at pause points. Dev runs and onboarding scans show **run liveness**:
-> an amber **stall warning** appears when a run makes no progress for the watched threshold, and a
-> **Stop button** is always available to cancel any running dev run or scan at any time (the run ends
-> in a **Cancelled** state). Scan findings now include a **Test badge** for test-scope violations, a
-> separate **Scan coverage** section (tools that didn't run), and scan tools (Semgrep/ESLint)
-> **auto-install on first use**. The in-app assistant retains **conversation context** across messages
-> and is grounded on your active project and pulled issues. A persistent **token usage meter** tracks
-> 5-hour and session-wide spend. The **check manifest** (`.camerata/checks.toml`) is the single
-> source of truth for custom deterministic gates: one entry wires a check into BOTH the in-loop dev
-> gate and the generated CI workflow. The runtime is **provider-agnostic**: a native in-process
-> `ApiAgentDriver` owns the MCP tool-use loop for any provider; the `ClaudeCliDriver` remains for
-> the Claude subscription path. Credentials are an **OpenRouter API key** (for API-path models) and
-> a **GitHub token** (for repo operations).
+> Status (updated 2026-11-15): the Codebase Inspection (the audit of an existing repository, ending
+> in a client package) and the governed development flow are both built and live. A new project is a
+> **client engagement**: it runs only on the Anthropic API with first-party Anthropic models, and it
+> refuses the **CLI** backend and any OpenRouter model before any file is read or any model is called.
+> The client's own build tooling (the `cargo clippy` scan preview and the dev loop's layer-2 checks)
+> runs only when the operator opts in for that engagement. The operator turns **Client engagement**
+> off per project for their own development. Credentials are an **Anthropic API key** and a **GitHub
+> token**, both set in Settings (keychain-backed, shown masked); an OpenRouter key is for the
+> operator's own development only. The inspection ends in a review stage (a tree, an escalation queue
+> and a group reviewer, described in section 3) and a client package (PDF, Excel workbook,
+> `findings.json` and `csv/tickets.csv`). Each feature is described in the section where it applies.
 
 ---
 
@@ -455,6 +416,43 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    the story*). There is no separate "fix the findings" button — fixing a finding is just its
    resolve-now story flowing into the dev layer. Triage/Process is **not required** to finish
    onboarding.
+
+   **The review stage: lanes, the group reviewer and the escalation queue.** The review screen has
+   five lanes, switched by their tabs or by the keys `1` to `5`: **Tree**, **Escalations**, **Engine
+   Check**, **Flat view** and **Settings**. The Queue described in this section (the three tables,
+   the Order select, the progress strip) is the **Flat view**.
+
+   - **The group reviewer (stage 2).** After the per-site review (stage 1, the calibration model),
+     the group reviewer reads each rule group together. One structured call per rule writes the
+     summary the operator reads at that node, sorts the members into sub-groups by shared cause,
+     marks the sites that do not belong with the rest (outliers, each with one reason from a closed
+     list) and picks the places the architect should read in person, each with one reason from a
+     closed list. It never removes a site, never overwrites stage 1's answer (a disagreement is
+     stored beside it) and never writes a count: the numbers come from the tree. Its model is
+     Claude Fable 5.1 by default, changed only by `--group-review-model` or the project's review
+     settings. In a client engagement it must be an Anthropic API model like every other stage.
+   - **Tree.** The operator works through areas (categories), rules and sub-groups. A node is either
+     an escalation node (it holds a security-class or high-severity site, so the operator expects
+     to open it) or a bulk node (routine sites that can be decided as a batch). Decisions and
+     edits are stored under a site key, so on a rerun a decision on an unchanged site is kept, a
+     moved site shows its old decision beside it as stale rather than applying it silently, and a
+     site that is gone keeps its decision for history.
+   - **Escalations.** The escalation queue orders the places that most need a person's eyes. A
+     budget decides how many reach the queue: by default 1 place per 1,000 counted lines of code
+     with a floor of 20 (`--escalation-rate`, or the **Escalation formula** in the Settings lane).
+     A critical place whose reason is a severe kind (unauthenticated reach, a secret exposed, data
+     loss, cross-tenant access, authorization bypass or injection) goes past the budget, and so does
+     a high place whose reason is a secret exposed, data loss, cross-tenant access, authorization
+     bypass or injection. A place with unverified evidence always goes past it, because the release
+     gate refuses that row without a decision. Places below the line are listed by **Show below the
+     line** and are checked like any other problem. Once a queue row is decided, its **Needed me**
+     box records whether the reviewer needed to see that place; it is available only for rows above
+     the line, and the workbook marks escalated places "Reviewed in person".
+   - **Engine Check.** An internal sample of rows for the operator's own quality control: one
+     Yes or No question per card, and a No opens the correction in place. It is never in a client
+     file.
+   - **Settings.** The stage models, the escalation formula with its live budget, the list of
+     reasons that may exceed the budget and the sample size per run.
 
    **Code viewer.** To read the code a finding is about without leaving the app, press **O** while
    the detail pane has focus, or click **Code**, or the `path:line` tag in the pane, or **Open in
