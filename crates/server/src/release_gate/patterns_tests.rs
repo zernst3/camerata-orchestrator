@@ -357,3 +357,86 @@ fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refus
         "{problems:?}"
     );
 }
+
+/// The package as built, with `findings.json`'s rows replaced by `rows` and the patterns row's
+/// title by `title`, and the portal's cell planted clean.
+fn gate_problems_with_rows(rows: Value, title: Option<&str>) -> Vec<Problem> {
+    let (mut entries, report) = entries_of(package_for(two_repo_report()));
+    plant_clean_cell(&mut entries, "acme/portal");
+    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    findings["findings"] = rows;
+    if let Some(title) = title {
+        findings["patterns_across_services"]["rows"][0]["title"] = json!(title);
+    }
+    entries.insert(
+        "findings.json".to_string(),
+        serde_json::to_vec(&findings).unwrap(),
+    );
+    // The PDF side is not under test: it keeps the section as built.
+    let mut no_pdf_section = report.clone();
+    no_pdf_section.patterns_across_services = None;
+    patterns_clean_cell_problems(&entries, &no_pdf_section)
+}
+
+fn refuses_portal(problems: &[Problem]) -> bool {
+    problems.iter().any(|p| {
+        p.file == "findings.json"
+            && p.message.contains("acme/portal")
+            && p.message.contains("clean")
+    })
+}
+
+#[test]
+fn the_gate_counts_a_row_in_a_sub_group_of_the_rule_as_open_for_the_rule() {
+    let rows = json!([{"repo": "acme/portal", "rule_id": "SEC-OTHER-RULE-1",
+        "group": format!("sub:{RULE}/2"), "kind": "deviation"}]);
+    assert!(refuses_portal(&gate_problems_with_rows(rows, None)));
+    let unrelated = json!([{"repo": "acme/portal", "rule_id": "SEC-OTHER-RULE-1",
+        "group": "sub:SEC-ELSE-1/2", "kind": "deviation"}]);
+    assert!(
+        !refuses_portal(&gate_problems_with_rows(unrelated, None)),
+        "anti-vacuity: a sub-group of another rule does not count"
+    );
+}
+
+#[test]
+fn the_gate_counts_a_row_a_source_was_collapsed_into_as_open_for_the_source_rule() {
+    let rows = json!([{"repo": "acme/portal", "rule_id": "SEC-OTHER-RULE-1", "kind": "deviation",
+        "flagged_by": [{"rule_id": RULE, "path": "src/db.rs", "line": 12}]}]);
+    assert!(refuses_portal(&gate_problems_with_rows(rows, None)));
+}
+
+#[test]
+fn the_gate_counts_a_row_that_also_matches_the_rule_by_title_as_open_for_it() {
+    let rows = json!([{"repo": "acme/portal", "rule_id": "SEC-OTHER-RULE-1", "kind": "deviation",
+        "also_matches": "Some other title, Raw SQL building"}]);
+    assert!(refuses_portal(&gate_problems_with_rows(
+        rows,
+        Some("Raw SQL building")
+    )));
+}
+
+#[test]
+fn the_gate_matches_a_rule_title_that_holds_a_comma_as_one_title() {
+    let rows = json!([{"repo": "acme/portal", "rule_id": "SEC-OTHER-RULE-1", "kind": "deviation",
+        "also_matches": "Some other title, Queries built by joining text, not parameters"}]);
+    assert!(refuses_portal(&gate_problems_with_rows(
+        rows.clone(),
+        Some("Queries built by joining text, not parameters")
+    )));
+    assert!(
+        !refuses_portal(&gate_problems_with_rows(
+            rows,
+            Some("Queries built by joining")
+        )),
+        "anti-vacuity: a title the row does not list is not found"
+    );
+}
+
+#[test]
+fn the_gate_counts_a_site_absorbed_in_another_service_as_open_in_its_own() {
+    let rows = json!([{"repo": "acme/web", "rule_id": "SEC-OTHER-RULE-1", "kind": "deviation",
+        "also_locations": [{"repo": "acme/portal", "path": "src/db.rs", "line": 12,
+            "rule_id": RULE, "snippet": "x", "consequence": false}]}]);
+    assert!(refuses_portal(&gate_problems_with_rows(rows, None)));
+}

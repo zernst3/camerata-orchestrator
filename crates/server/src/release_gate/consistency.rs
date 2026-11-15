@@ -923,11 +923,30 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
 struct OpenProblems {
     /// `(repo, upper-cased rule id or title)` to the number of open problems.
     by_repo_rule: BTreeMap<(String, String), usize>,
+    /// `(repo, upper-cased also_matches text)` of every open row that has one. The text is a list
+    /// of rule titles joined by `, `, and a title may itself hold a comma, so it is searched for
+    /// an exact title rather than split ([`lists_name`]).
+    also_matches: Vec<(String, String)>,
+}
+
+/// Whether `list` (names joined by `, `) holds `name` as one whole entry. Matches whole entries
+/// only, so a title that holds a comma is found as itself and a shorter name is not found inside a
+/// longer one. Both are upper-cased.
+fn lists_name(list: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    list.match_indices(name).any(|(at, _)| {
+        let before = at == 0 || list[..at].ends_with(", ");
+        let rest = &list[at + name.len()..];
+        before && (rest.is_empty() || rest.starts_with(", "))
+    })
 }
 
 impl OpenProblems {
     fn of(rows: &[Value]) -> Self {
         let mut by_repo_rule: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut also_matches: Vec<(String, String)> = Vec::new();
         for row in rows {
             let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
             if matches!(kind, "convention_observed" | "not_assessed") {
@@ -953,8 +972,9 @@ impl OpenProblems {
             {
                 names.insert(cell_text(source, "rule_id"));
             }
-            for also in cell_text(row, "also_matches").split(", ") {
-                names.insert(also.to_string());
+            let also = cell_text(row, "also_matches").trim().to_ascii_uppercase();
+            if !also.is_empty() {
+                also_matches.push((repo.clone(), also));
             }
             for name in names {
                 let name = name.trim().to_ascii_uppercase();
@@ -976,7 +996,10 @@ impl OpenProblems {
                 }
             }
         }
-        Self { by_repo_rule }
+        Self {
+            by_repo_rule,
+            also_matches,
+        }
     }
 
     /// Add the places of other rules that ruled-out rows carry (`open_beside_ruled_out`): the
@@ -996,10 +1019,18 @@ impl OpenProblems {
     /// The open problems for the rule (by its id or its title) in `repo`.
     fn count(&self, repo: &str, rule_id: &str, title: &str) -> usize {
         let get = |name: &str| {
-            self.by_repo_rule
-                .get(&(repo.to_string(), name.trim().to_ascii_uppercase()))
+            let name = name.trim().to_ascii_uppercase();
+            let direct = self
+                .by_repo_rule
+                .get(&(repo.to_string(), name.clone()))
                 .copied()
-                .unwrap_or(0)
+                .unwrap_or(0);
+            let listed = self
+                .also_matches
+                .iter()
+                .filter(|(r, list)| r == repo && lists_name(list, &name))
+                .count();
+            direct + listed
         };
         let by_id = get(rule_id);
         if title.trim().is_empty() || title.eq_ignore_ascii_case(rule_id) {
