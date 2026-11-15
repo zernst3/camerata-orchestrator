@@ -14,8 +14,10 @@
 //!   the internal note says so);
 //! * it is held for a decision (`needs_review`), with the neutral client note
 //!   [`UNFOLD_CLIENT_NOTE`] as its explanation (after the absorbed site's own headline, when the
-//!   host recorded one) and an internal-only note, [`UNFOLDED_FROM_CAPTURE`], that names the host;
-//! * its severity starts as the host's severity before the ruling; the exporters then apply the
+//!   host recorded one) and an internal-only note, [`UNFOLDED_FROM_CAPTURE`], that names the host
+//!   by its readable id;
+//! * its severity is the higher of the place's own recorded severity and the host's before the
+//!   ruling; the exporters then apply the
 //!   carried rule's own bounds (its floor, among them) like any other row;
 //! * its site key is built from the host's key, the carried rule and the place's own key, so a
 //!   decision on it sticks across exports, and a ruling that rules it out leaves nothing to unfold
@@ -39,7 +41,7 @@ use crate::onboard::{Finding, ScanReport};
 /// the place was merged into. A bookkeeping key; no client output reads it.
 pub const UNFOLDED_FROM_CAPTURE: &str = "unfolded_from";
 /// What a client reads on an unfolded row.
-pub const UNFOLD_CLIENT_NOTE: &str = "Was merged into a row ruled out; still open.";
+pub const UNFOLD_CLIENT_NOTE: &str = "Was grouped with a problem that was ruled out; still open.";
 
 /// One place a ruled-out row carried for another rule.
 struct Carried {
@@ -49,6 +51,8 @@ struct Carried {
     rule_id: String,
     snippet: String,
     headline: String,
+    /// The severity the place was rated before it was grouped; empty when none was recorded.
+    severity: String,
     consequence: bool,
 }
 
@@ -96,6 +100,7 @@ pub(crate) fn unfold_ruled_out(
                     rule_id: l.rule_id,
                     snippet: l.snippet,
                     headline: l.headline,
+                    severity: l.severity,
                     consequence: l.consequence,
                 });
             } else {
@@ -111,6 +116,7 @@ pub(crate) fn unfold_ruled_out(
                     rule_id: rule,
                     snippet: host.snippet.clone(),
                     headline: String::new(),
+                    severity: String::new(),
                     consequence: false,
                 });
             } else {
@@ -158,8 +164,12 @@ fn row_for(host: &Finding, host_key: &str, c: Carried, key: String) -> Finding {
         )
     };
     let mut note = format!(
-        "Merged into {} at {}:{} in {} (row {host_key}), which was ruled out.",
-        host.rule_id, host.path, host.line, host.repo
+        "Grouped with {} at {}:{} in {} (problem {}), which was ruled out.",
+        host.rule_id,
+        host.path,
+        host.line,
+        host.repo,
+        super::site_id(host_key)
     );
     if c.snippet.is_empty() {
         note.push_str(" The host held no snippet for this place.");
@@ -169,16 +179,35 @@ fn row_for(host: &Finding, host_key: &str, c: Carried, key: String) -> Finding {
         path: c.path,
         line: c.line,
         rule_id: c.rule_id,
-        severity: host.severity.clone(),
+        severity: higher_severity(&c.severity, &host.severity),
         snippet: c.snippet,
         detail,
         status: "active".to_string(),
         needs_review: true,
-        confidence: Some("needs-review".to_string()),
+        // The source stays the place's own: a tool's pass keeps its tool, and no confidence
+        // is set that would relabel it. The hold is `needs_review`.
+        preview_tool: host.preview_tool.clone(),
         located: !c.consequence,
         kind: Some(FindingKind::Defect),
         site_key: key,
         captures: BTreeMap::from([(UNFOLDED_FROM_CAPTURE.to_string(), note)]),
         ..Finding::default()
+    }
+}
+
+/// The more severe of two severities (an empty one counts for nothing). The exporters then apply
+/// the carried rule's own bounds.
+fn higher_severity(own: &str, host: &str) -> String {
+    use camerata_rules::severity_bounds::{normalize_severity, severity_rank};
+    if own.trim().is_empty() {
+        return host.to_string();
+    }
+    if host.trim().is_empty() {
+        return own.to_string();
+    }
+    if severity_rank(&normalize_severity(own)) < severity_rank(&normalize_severity(host)) {
+        own.to_string()
+    } else {
+        host.to_string()
     }
 }

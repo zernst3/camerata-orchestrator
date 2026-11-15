@@ -199,7 +199,7 @@ fn the_unfolded_row_copies_the_evidence_and_carries_the_neutral_client_note() {
     );
     assert_eq!(
         UNFOLD_CLIENT_NOTE,
-        "Was merged into a row ruled out; still open."
+        "Was grouped with a problem that was ruled out; still open."
     );
 }
 
@@ -261,7 +261,14 @@ fn the_internal_note_names_the_host_and_the_client_files_do_not() {
         .captures
         .get(UNFOLDED_FROM_CAPTURE)
         .expect("the note");
-    assert!(note.contains(&key), "the note names the host row: {note}");
+    assert!(
+        note.contains(&site_id(&key)),
+        "the note names the host row by its readable id: {note}"
+    );
+    assert!(
+        !note.contains('\u{0}'),
+        "the note never carries the raw site key: {note:?}"
+    );
     assert!(note.contains("src/admin.ts"), "{note}");
     let (json, findings) = exports(&reviewed);
     let data = render_data_json(&json).expect("data.json renders");
@@ -611,4 +618,59 @@ fn two_places_with_no_snippet_in_one_file_are_two_problems() {
     let r = host_carrying(vec![b_site_at(7, ""), b_site_at(30, "")]);
     let (_sealed, reviewed, _key) = ruled_out_host(r);
     assert_eq!(lines_of(&reviewed, RULE_B), vec![7, 30]);
+}
+
+// ── what the new problem says about itself ───────────────────────────────────────────────
+
+#[test]
+fn a_split_out_problem_takes_the_higher_of_its_own_severity_and_the_hosts() {
+    // The place was rated critical on its own; the host was high. The place keeps its rating.
+    let mut r = host_carrying(vec![b_site_at(7, "query(a)")
+        .with_rating("critical", "Query built from user input")]);
+    r.findings[0].severity = "high".to_string();
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    let row = unfolded(&reviewed, RULE_B);
+    assert_eq!(row.len(), 1);
+    assert_eq!(row[0].severity, "critical");
+
+    // The place was rated low; the host was high. The host's rating stands.
+    let mut r = host_carrying(vec![b_site_at(7, "query(a)")
+        .with_rating("low", "Query built from user input")]);
+    r.findings[0].severity = "high".to_string();
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    assert_eq!(unfolded(&reviewed, RULE_B)[0].severity, "high");
+
+    // A place with no recorded rating takes the host's.
+    let mut r = host_carrying(vec![MergedLocation::site(
+        WEB,
+        "src/query.ts",
+        7,
+        RULE_B,
+        "query(a)",
+        false,
+    )]);
+    r.findings[0].severity = "high".to_string();
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    assert_eq!(unfolded(&reviewed, RULE_B)[0].severity, "high");
+}
+
+#[test]
+fn a_place_a_tool_found_keeps_the_tool_as_its_source() {
+    let mut r = host_carrying(vec![web_site()]);
+    r.findings[0].preview_tool = Some("semgrep".to_string());
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    let row = unfolded(&reviewed, RULE_B);
+    assert_eq!(row[0].preview_tool.as_deref(), Some("semgrep"));
+    assert_ne!(
+        row[0].confidence.as_deref(),
+        Some("needs-review"),
+        "the held mark is needs_review, not a confidence that relabels the source"
+    );
+    let (_json, findings) = exports(&reviewed);
+    let rows = rows_of(&findings);
+    let b = row_for(&rows, RULE_B).expect("the rule B row");
+    assert_eq!(
+        b["provenance"], "Preview: semgrep",
+        "the Source column reads Tool: semgrep from this: {b}"
+    );
 }
