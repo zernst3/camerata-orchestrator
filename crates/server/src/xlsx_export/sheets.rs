@@ -1291,7 +1291,7 @@ pub(super) fn patterns_table(patterns: &crate::report_export::PatternsAcrossServ
                 .cells
                 .iter()
                 .find(|cell| &cell.repo == repo)
-                .map(|cell| super::sheet_cell_label(&cell.state))
+                .map(|cell| crate::report_export::pattern_cell_label(&cell.state))
                 .unwrap_or_default();
             cells.push(Cell::wrap(label));
         }

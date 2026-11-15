@@ -1813,18 +1813,6 @@ fn held_reasons(f: &crate::onboard::Finding) -> String {
     reasons.join("; ")
 }
 
-/// A grid cell of the patterns sheet: "3 problems", "Clean", "Not applicable (reason)" or "Not
-/// reviewed (reason)".
-fn sheet_cell_label(state: &crate::scan_ledger::CellState) -> String {
-    use crate::scan_ledger::CellState;
-    match state {
-        CellState::Violated { sites } => crate::xlsx_export::vocabulary::problems_count(*sites),
-        CellState::Clean => "Clean".to_string(),
-        CellState::NotApplicable { reason } => format!("Not applicable ({reason})"),
-        CellState::NotReviewed { reason } => format!("Not reviewed ({reason})"),
-    }
-}
-
 /// One concise, client-facing line summarising what this inspection actually checked (G3:
 /// "coverage IS client-facing, but concise and useful, not exhaustive. A one-line summary,
 /// written for a client, never an internal diagnostic dump"). The per-rule table below it is

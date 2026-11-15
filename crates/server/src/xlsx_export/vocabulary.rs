@@ -447,8 +447,7 @@ pub fn problems_word(n: usize) -> &'static str {
     }
 }
 
-/// "3 problems", "1 problem": what a Patterns across services cell says of a service that has
-/// open problems for the rule.
+/// "3 problems", "1 problem": the count of open problems (the release gate's message).
 pub fn problems_count(n: usize) -> String {
     format!("{n} {}", problems_word(n))
 }

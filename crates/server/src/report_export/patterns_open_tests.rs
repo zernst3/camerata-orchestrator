@@ -252,7 +252,7 @@ fn a_problem_the_reviewer_ruled_out_lets_the_cell_read_clean() {
     assert_eq!(cell(&s, WEB).state, CellState::Violated { sites: 1 });
     assert_eq!(
         cell(&s, WEB).label,
-        "1 problem",
-        "a cell with problems says so in the product's word and names the count"
+        "1 place",
+        "a cell with problems names the count of places"
     );
 }

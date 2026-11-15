@@ -154,7 +154,7 @@ pub struct ConventionsSummaryJson {
 }
 
 /// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
-/// the finished label ("3 problems", "Clean", "Not applicable: ...", "Not reviewed: ...").
+/// the finished label ("3 places", "Clean", "Not applicable: ...", "Not reviewed: ...").
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternCellJson {
     pub repo: String,
@@ -184,7 +184,7 @@ pub struct PatternsAcrossServicesJson {
     pub note: String,
     pub rows: Vec<PatternRowJson>,
     pub themes: Vec<crate::onboard::patterns_matrix::Theme>,
-    /// One line for each rule the services differ on ("Title: repo A violated, 3 places; repo B
+    /// One line for each rule the services differ on ("Title: repo A 3 places; repo B
     /// clean"), at most [`PDF_MAX_CROSS_SERVICE_LINES`]. The PDF prints these, not the cells.
     pub summary_lines: Vec<String>,
     /// "and 4 more in the Patterns across services sheet"; empty when none are left out.
@@ -200,7 +200,7 @@ pub const PATTERNS_NOTE: &str = "This section compares the services of this proj
 pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
     use crate::scan_ledger::CellState;
     match state {
-        CellState::Violated { sites } => crate::xlsx_export::vocabulary::problems_count(*sites),
+        CellState::Violated { sites } => crate::xlsx_export::vocabulary::places_count(*sites),
         CellState::Clean => "Clean".to_string(),
         CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
         CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
