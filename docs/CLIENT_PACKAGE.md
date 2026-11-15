@@ -124,6 +124,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Fix | One cause and one change that clears a whole set of problems, wherever they appear. | Fix plan; the Fix column on All problems |
 | Rule group | The places of one rule that share one cause. A fix is made of one or more rule groups. | How problems were grouped |
 | Open | A fix or a place with at least one rule no reviewer has ruled on yet. The count says how many rules are decided. | The Decision so far column of Fix plan and All problems |
+| Check: possible false alarm | A place sent for review in person because the problem was in doubt, not because the place is dangerous. It takes no review slot a dangerous problem needs. | The Escalations section of the report |
 | Mixed | Shown as Mixed, see rules: the rules of a fix were decided differently, so the Rules column and the reviewer decisions say which way each went. | The Decision so far column of Fix plan and All problems |
 | Shares places with | The other fixes that list the same place without one containing the other, with how many places they share. | Fix plan |
 | Place | One file and line, or one whole file, where a problem was seen. | File and Line columns; every Places count |

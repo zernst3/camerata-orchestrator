@@ -1045,6 +1045,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                 .map(|s| s.why.clone())
                 .unwrap_or_default(),
             held: false,
+            lane: camerata_api_types::review::EscalationLane::Urgent,
         };
         if let Some(s) = rows[i].stage2.as_mut() {
             s.state = c.state();
@@ -1753,6 +1754,7 @@ fn assemble(
             engine_check: engine.cards.len(),
             engine_check_off: p.sample_size == 0,
             flat_rows: unresolved,
+            check: budget.check,
         },
         export_gate: gate.clone(),
         stale: StaleSummary {

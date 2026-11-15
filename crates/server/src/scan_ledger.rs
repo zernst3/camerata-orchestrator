@@ -629,6 +629,14 @@ pub struct EscalationBlock {
     pub escalated_rows: usize,
     /// `escalated - budget` when positive.
     pub over_budget: usize,
+    /// Of `escalated`, the sites on the "Check: possible false alarm" list: escalated only for a
+    /// doubt about the finding. The rest are the urgent list. Zero in a run saved before the
+    /// lists existed.
+    #[serde(default)]
+    pub check: usize,
+    /// The rows behind `check`.
+    #[serde(default)]
+    pub check_rows: usize,
     /// The sites in the report, so the share below is checkable.
     pub total_sites: usize,
     /// `escalated / total_sites`.
@@ -708,6 +716,13 @@ impl EscalationBlock {
             candidate_rows: candidates.len(),
             escalated_rows,
             over_budget: escalated.saturating_sub(budget),
+            check: Self::check_slots(candidates.iter().copied()),
+            check_rows: candidates
+                .iter()
+                .filter(|c| {
+                    c.escalated && c.lane == camerata_api_types::review::EscalationLane::Check
+                })
+                .count(),
             total_sites: total,
             share_escalated: if total == 0 {
                 0.0
@@ -752,6 +767,18 @@ impl EscalationBlock {
         out
     }
 
+    /// How many escalated slots of `candidates` are on the "Check: possible false alarm" list.
+    pub fn check_slots<'a>(
+        candidates: impl IntoIterator<Item = &'a camerata_api_types::review::EscalationCandidate>,
+    ) -> usize {
+        camerata_api_types::review::count_slots(
+            candidates.into_iter().filter(|c| {
+                c.escalated && c.lane == camerata_api_types::review::EscalationLane::Check
+            }),
+        )
+        .1
+    }
+
     /// [`Self::over_budget_reasons`] parsed; a name that is not a reason is left out.
     fn allowed_reasons(&self) -> Vec<camerata_api_types::review::EscalationReason> {
         self.over_budget_reasons
@@ -764,6 +791,19 @@ impl EscalationBlock {
     /// 300 (47 over, all unauthenticated reach at critical, and secret exposure at high or
     /// critical)".
     pub fn sentence(&self) -> String {
+        let line = self.line_sentence();
+        if self.check == 0 {
+            return line;
+        }
+        format!(
+            "{line}, {} of them on the {} list",
+            self.check,
+            crate::xlsx_export::vocabulary::CHECK_POSSIBLE_FALSE_ALARM
+        )
+    }
+
+    /// The first half of [`Self::sentence`]: the line against the budget, both lists together.
+    fn line_sentence(&self) -> String {
         use camerata_api_types::review::EscalationReason;
         if self.over_budget == 0 {
             return format!(

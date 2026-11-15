@@ -513,6 +513,7 @@ fn problem_cols(lay: &Layout, waiting: bool) -> Vec<Col> {
             Col::technical(v::H_REVIEW_FLAGS, 36.0),
             Col::technical(v::H_HELD, 40.0),
             Col::technical(v::H_ESCALATED, 10.0),
+            Col::technical(v::CHECK_POSSIBLE_FALSE_ALARM, 14.0),
         ]);
         for h in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS {
             cols.push(Col::technical(h, 28.0));
@@ -584,7 +585,8 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
     if lay.internal {
         c.put(v::H_REVIEW_FLAGS, Cell::wrap(&row.review_flags))
             .put(v::H_HELD, Cell::wrap(&row.held))
-            .put(v::H_ESCALATED, yes(row.facts.escalated));
+            .put(v::H_ESCALATED, yes(row.facts.escalated))
+            .put(v::CHECK_POSSIBLE_FALSE_ALARM, yes(row.facts.check_list));
         if let Some(triage) = &row.internal_triage {
             for (h, cell) in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS
                 .iter()
@@ -774,6 +776,10 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
         .put(
             v::H_ESCALATED,
             yes(members.iter().any(|r| r.facts.escalated)),
+        )
+        .put(
+            v::CHECK_POSSIBLE_FALSE_ALARM,
+            yes(members.iter().any(|r| r.facts.check_list)),
         );
     }
     c

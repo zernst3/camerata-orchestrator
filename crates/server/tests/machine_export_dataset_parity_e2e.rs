@@ -631,13 +631,15 @@ fn problem_projection() -> Projection {
 
 /// Keys of a findings row the All problems worksheet shows in a derived form, not one-to-one:
 /// `rule_id` and `also_matches` are in the Rules and Rule ids columns, `bucket` is the fix order,
-/// `disposition_label` is the decision so far, `escalated` is internal-only.
-const FINDING_DERIVED_KEYS: [&str; 5] = [
+/// `disposition_label` is the decision so far, `escalated` and `check_list` (the "Check: possible
+/// false alarm" list) are internal-only.
+const FINDING_DERIVED_KEYS: [&str; 6] = [
     "rule_id",
     "also_matches",
     "bucket",
     "disposition_label",
     "escalated",
+    "check_list",
 ];
 
 /// Keys of a findings row that no All problems column carries: the machine-readable files are
@@ -673,7 +675,7 @@ const FINDING_JSON_ONLY: [&str; 18] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 42] = [
+const FINDING_BASE_KEYS: [&str; 43] = [
     "severity",
     "headline",
     "repo",
@@ -712,6 +714,7 @@ const FINDING_BASE_KEYS: [&str; 42] = [
     "sub_group",
     "sub_group_cause",
     "escalated",
+    "check_list",
     "merged_into",
     "carried_by",
     "is_fp",
@@ -1097,6 +1100,7 @@ fn check_dependencies(xlsx: &[u8], rows: &[Value]) {
             "sub_group",
             "sub_group_cause",
             "escalated",
+            "check_list",
             "merged_into",
             "carried_by",
         ],

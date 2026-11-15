@@ -544,6 +544,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 over_budget_reason: None,
                 why: r.why,
                 held: r.held,
+                lane: camerata_api_types::review::EscalationLane::Urgent,
             });
         }
     }

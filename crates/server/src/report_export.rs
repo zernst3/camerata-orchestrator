@@ -1339,6 +1339,7 @@ pub fn build_report_json(
     // problems (one for each place) from it, the way the workbook's scorecard does.
     let crate::xlsx_export::PdfSections {
         escalated: escalated_items,
+        check: check_items,
         patterns: sub_group_patterns,
         fixes: fix_facts,
         conventions,
@@ -2061,6 +2062,16 @@ pub fn build_report_json(
         escalations: EscalationsJson {
             sentence: escalation_sentence,
             items: escalated_items,
+            check_line: check_line_of(check_items.len()),
+            check_more_line: if check_items.len() > escalation_cap {
+                crate::xlsx_export::vocabulary::more_in_sheet(
+                    check_items.len() - escalation_cap,
+                    crate::xlsx_export::vocabulary::ALL_PROBLEMS,
+                )
+            } else {
+                String::new()
+            },
+            check_items,
             cap: escalation_cap,
             more_line: escalation_more_line,
             intro: format!(
@@ -2187,6 +2198,23 @@ pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) ->
         };
     }
     out
+}
+
+/// The line the PDF prints under the escalations for the "Check: possible false alarm" list:
+/// how many places are on it and where they are. Empty when the list is empty.
+pub(crate) fn check_line_of(places: usize) -> String {
+    use crate::xlsx_export::vocabulary as v;
+    if places == 0 {
+        return String::new();
+    }
+    format!(
+        "{}: {} sent for review in person because the problem was in doubt, not because the \
+         place is dangerous. They took no review slot a dangerous problem needed. Worst first; \
+         every one is on the {} sheet.",
+        v::CHECK_POSSIBLE_FALSE_ALARM,
+        v::places_count(places),
+        v::ALL_PROBLEMS
+    )
 }
 
 /// "The other fixes": a line for each Fix that is not one of the entries "The most serious
@@ -2559,6 +2587,7 @@ mod wo9 {
     mod decisions_file_tests;
     mod edit_ids_tests;
     mod fix_tests;
+    mod lane_tests;
     mod pdf_tests;
     mod place_tests;
     mod plan_tests;

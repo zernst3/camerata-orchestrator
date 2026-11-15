@@ -6990,7 +6990,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    Chips sit beside `.kind-chip` and take its sizing. Each class is one row of the spec's chip
    table; the markers column draws at most two and folds the rest into a "+N". */
 .mark-esc, .mark-cand, .mark-over, .mark-outlier, .mark-new, .mark-stale, .mark-moved,
-.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried {
+.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-check {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   border-radius: 999px; padding: 1px 8px; white-space: nowrap; border: 1px solid transparent;
 }
@@ -7006,6 +7006,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .mark-new { background: transparent; color: var(--warning-color); padding-left: 2px; }
 /* Stale and moved: gray fill. */
 .mark-stale, .mark-moved { background: #3a3530; border-color: var(--line); color: var(--ink-soft); }
+/* Check: possible false alarm: a hollow soft outline, a doubt and not a danger. */
+.mark-check { background: transparent; border-color: var(--ink-soft); color: var(--ink-soft); }
 /* Held: a red outline and a lock. */
 .mark-held { background: transparent; border-color: var(--danger-color); color: var(--danger-color); }
 /* Possible duplicate: a gray outline. */
@@ -7204,6 +7206,12 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   padding: 4px 8px; font-size: 11.5px; color: var(--ink-soft); background: rgba(220, 38, 38, 0.06);
   border-bottom: 1px dashed var(--danger-color); white-space: normal; overflow-wrap: anywhere;
 }
+.queue-check-heading td {
+  padding: 5px 8px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft);
+  border-top: 1px dashed var(--ink-soft); border-bottom: 1px solid var(--line); background: transparent;
+  white-space: normal; overflow-wrap: anywhere;
+}
+.queue-row.row-check td:first-child { box-shadow: inset 2px 0 0 var(--ink-soft); }
 .queue-below-heading td {
   padding: 5px 8px; text-align: center; font-size: 11.5px; font-weight: 700; color: var(--accent);
   border-top: 1px dashed var(--accent); border-bottom: 1px solid var(--line); background: transparent;

@@ -91,7 +91,18 @@ pub fn lane_tabs(lanes: &LaneCounts, active: Lane) -> Vec<LaneTab> {
                     lane.label().to_string(),
                     Some(format!("{} undecided", thousands(lanes.tree_undecided))),
                 ),
-                Lane::Escalations => (lane.label().to_string(), Some(thousands(lanes.escalations))),
+                Lane::Escalations => (
+                    lane.label().to_string(),
+                    Some(if lanes.check == 0 {
+                        thousands(lanes.escalations)
+                    } else {
+                        format!(
+                            "{}, {} to check",
+                            thousands(lanes.escalations),
+                            thousands(lanes.check)
+                        )
+                    }),
+                ),
                 Lane::EngineCheck if lanes.engine_check_off => {
                     ("Engine Check off".to_string(), None)
                 }
@@ -169,6 +180,7 @@ mod tests {
             engine_check: 50,
             engine_check_off: false,
             flat_rows: 600,
+            check: 0,
         };
         let tabs = lane_tabs(&lanes, Lane::Tree);
         let text: Vec<(String, Option<String>, bool)> = tabs
@@ -189,6 +201,20 @@ mod tests {
                 ("Settings".to_string(), None, false),
             ]
         );
+    }
+
+    #[test]
+    fn the_escalations_tab_counts_the_check_list_apart_when_it_has_places() {
+        let lanes = LaneCounts {
+            escalations: 35,
+            check: 13,
+            ..data().shell.lanes
+        };
+        let tab = lane_tabs(&lanes, Lane::Tree)
+            .into_iter()
+            .find(|t| t.lane == Lane::Escalations)
+            .unwrap();
+        assert_eq!(tab.count.as_deref(), Some("35, 13 to check"));
     }
 
     #[test]

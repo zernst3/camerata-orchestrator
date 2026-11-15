@@ -265,6 +265,7 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         over_budget_reason: None,
         why: "reachable without signing in".to_string(),
         held: false,
+        lane: camerata_api_types::review::EscalationLane::Urgent,
     };
     let mut candidates = vec![
         candidate(

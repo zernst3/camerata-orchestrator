@@ -40,7 +40,17 @@ pub struct EscalationsJson {
     /// "Escalated 347 of a budget of 300 (47 over, ...)", worked out from the reviewed tree. Empty
     /// when the group review did not run for this report.
     pub sentence: String,
+    /// The urgent list: the escalated places a danger put there, worst first.
     pub items: Vec<EscalatedSiteJson>,
+    /// The "Check: possible false alarm" list: the escalated places only a doubt put there,
+    /// worst first. The PDF prints them after the urgent entries, at most [`Self::cap`].
+    pub check_items: Vec<EscalatedSiteJson>,
+    /// The sentence above the check entries: "Check: possible false alarm: 13 places ...",
+    /// empty when the list is empty.
+    pub check_line: String,
+    /// "and 4 more in the All problems sheet" when the cap leaves check entries out; empty
+    /// otherwise.
+    pub check_more_line: String,
     /// How many of `items` the PDF prints, worst first ([`PDF_MAX_SERIOUS_PROBLEMS`]).
     pub cap: usize,
     /// "and 4 more in the Fix plan sheet" when the cap leaves some out; empty otherwise.

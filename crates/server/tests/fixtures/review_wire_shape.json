@@ -3,6 +3,7 @@
     "after": {
       "budget": "number",
       "candidates": "number",
+      "check": "number",
       "counted_lines": "number",
       "escalated": "number",
       "floor": "number",
@@ -13,6 +14,7 @@
     "before": {
       "budget": "number",
       "candidates": "number",
+      "check": "number",
       "counted_lines": "number",
       "escalated": "number",
       "floor": "number",
@@ -383,6 +385,7 @@
           "escalated": "bool",
           "global_rank": "number",
           "key": "string",
+          "lane": "string",
           "node_id": "string",
           "over_budget_reason": "null",
           "reason": "string",
@@ -489,6 +492,7 @@
     "budget": {
       "budget": "number",
       "candidates": "number",
+      "check": "number",
       "counted_lines": "number",
       "escalated": "number",
       "floor": "number",
@@ -622,6 +626,7 @@
       "budget": {
         "budget": "number",
         "candidates": "number",
+        "check": "number",
         "counted_lines": "number",
         "escalated": "number",
         "floor": "number",
@@ -654,6 +659,7 @@
     "budget": {
       "budget": "number",
       "candidates": "number",
+      "check": "number",
       "counted_lines": "number",
       "escalated": "number",
       "floor": "number",
@@ -700,6 +706,7 @@
     },
     "group_reviewed": "bool",
     "lanes": {
+      "check": "number",
       "engine_check": "number",
       "engine_check_off": "bool",
       "escalations": "number",

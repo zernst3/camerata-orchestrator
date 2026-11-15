@@ -159,6 +159,9 @@ pub struct NodeCounts {
     pub outliers: usize,
     /// Sites under the node the group reviewer did not place in a sub-group.
     pub unplaced: usize,
+    /// Of `escalated`, the sites on the "Check: possible false alarm" list.
+    #[serde(default)]
+    pub check: usize,
 }
 
 /// The review tree of one report. Sealed with it, stored in the inspection entry.
@@ -283,9 +286,11 @@ impl ReviewTree {
             .count();
         let mut escalated = 0;
         let mut below_the_line = 0;
+        let mut check = 0;
         for c in self.candidates.iter().filter(|c| members.contains(&c.key)) {
             if c.escalated {
                 escalated += 1;
+                check += usize::from(c.lane == camerata_api_types::review::EscalationLane::Check);
             } else {
                 below_the_line += 1;
             }
@@ -296,6 +301,7 @@ impl ReviewTree {
             below_the_line,
             outliers: outliers.len(),
             unplaced,
+            check,
         }
     }
 

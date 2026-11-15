@@ -1882,26 +1882,38 @@ fn plan_fix_ids(xlsx: &[u8]) -> Result<Vec<String>, String> {
 /// that are Fixes of `findings.json`.
 pub fn fix_report_problems(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
     let mut problems = Vec::new();
-    let slots: BTreeSet<(String, String, String)> = findings
+    let rows: Vec<serde_json::Value> = findings
         .findings
         .iter()
         .filter_map(|r| serde_json::to_value(r).ok())
-        .filter(|r| cell_text(r, "escalated") == "true")
-        .map(|r| {
-            (
-                cell_text(&r, "repo"),
-                cell_text(&r, "path"),
-                cell_text(&r, "line"),
-            )
-        })
         .collect();
-    let entries: Vec<(String, String, String)> = report
-        .escalations
-        .items
+    let place = |r: &serde_json::Value| {
+        (
+            cell_text(r, "repo"),
+            cell_text(r, "path"),
+            cell_text(r, "line"),
+        )
+    };
+    let slots: BTreeSet<(String, String, String)> = rows
         .iter()
-        .map(|i| (i.repo.clone(), i.path.clone(), i.line.to_string()))
+        .filter(|r| cell_text(r, "escalated") == "true")
+        .map(place)
         .collect();
-    let listed: BTreeSet<&(String, String, String)> = entries.iter().collect();
+    // The places on the "Check: possible false alarm" list: escalated only for a doubt.
+    let check_slots: BTreeSet<(String, String, String)> = rows
+        .iter()
+        .filter(|r| cell_text(r, "escalated") == "true" && cell_text(r, "check_list") == "true")
+        .map(place)
+        .collect();
+    let entry = |i: &crate::report_export::EscalatedSiteJson| {
+        (i.repo.clone(), i.path.clone(), i.line.to_string())
+    };
+    let urgent: Vec<(String, String, String)> =
+        report.escalations.items.iter().map(entry).collect();
+    let check: Vec<(String, String, String)> =
+        report.escalations.check_items.iter().map(entry).collect();
+    let entries: Vec<&(String, String, String)> = urgent.iter().chain(&check).collect();
+    let listed: BTreeSet<&(String, String, String)> = entries.iter().copied().collect();
     if listed.len() != entries.len() {
         problems.push(problem(
             "PDF data",
@@ -1917,6 +1929,24 @@ pub fn fix_report_problems(report: &AuditReportJson, findings: &FindingsExport) 
                 "the escalation list has {} entries and findings.json has {} escalated places",
                 entries.len(),
                 slots.len()
+            ),
+        ));
+    }
+    // Danger before doubt: a place findings.json puts on the check list is never an urgent
+    // entry, and the check list holds exactly those places.
+    let on_urgent = urgent.iter().filter(|e| check_slots.contains(*e)).count();
+    let check_set: BTreeSet<&(String, String, String)> = check.iter().collect();
+    if on_urgent > 0 || check_set != check_slots.iter().collect::<BTreeSet<_>>() {
+        problems.push(problem(
+            "PDF data",
+            "escalations",
+            format!(
+                "the {} list has {} entries and findings.json has {} such places ({} of them \
+                 listed as urgent)",
+                crate::xlsx_export::vocabulary::CHECK_POSSIBLE_FALSE_ALARM,
+                check.len(),
+                check_slots.len(),
+                on_urgent
             ),
         ));
     }

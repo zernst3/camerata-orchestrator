@@ -412,6 +412,10 @@ pub struct LaneCounts {
     pub engine_check_off: bool,
     /// "Flat view": the rows of the flat queue.
     pub flat_rows: usize,
+    /// Of `escalations`, the places on the "Check: possible false alarm" list; the rest are the
+    /// urgent list.
+    #[serde(default)]
+    pub check: usize,
 }
 
 /// Decisions and edits that no longer sit well on this run (spec section 8: stale, moved, new).

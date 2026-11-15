@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 11, "every queue state is built");
+    assert_eq!(states().len(), 12, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -325,4 +325,31 @@ fn the_merge_picker_on_an_empty_pool_says_what_the_pool_is_and_the_remedy_that_w
         "{html}"
     );
     assert!(html.contains("site-detail-merge-form"));
+}
+
+#[test]
+fn the_check_list_page_draws_its_rows_after_the_urgent_ones_under_their_heading() {
+    let html = page("queue/check-list");
+    assert_eq!(count(&html, "class=\"queue-check-heading\""), 1, "{html}");
+    let heading_at = html.find("queue-check-heading").unwrap();
+    let first_check = html.find("row-check").expect("a check row is drawn");
+    assert!(
+        first_check > heading_at,
+        "the check rows follow their heading"
+    );
+    let last_urgent = html
+        .rfind("row-escalated\"")
+        .or_else(|| html.rfind("row-over"));
+    if let Some(at) = last_urgent {
+        assert!(
+            at < heading_at,
+            "every urgent row is drawn above the check list"
+        );
+    }
+    assert!(html.contains("Check: possible false alarm: "), "{html}");
+    assert!(
+        html.contains(" on Check: possible false alarm"),
+        "the counts line says it"
+    );
+    assert!(html.contains(" to check"), "the lane tab says it");
 }
