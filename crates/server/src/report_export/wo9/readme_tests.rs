@@ -149,6 +149,54 @@ fn the_client_readme_uses_no_retired_synonym_and_no_banned_character() {
     }
 }
 
+/// The README speaks of the client in the third person: no "you", "your" or "yours" outside a
+/// sheet name the vocabulary owns ("Your conventions").
+#[test]
+fn the_client_readme_has_no_second_person() {
+    for readme in client_readmes() {
+        let mut text = flat(&readme);
+        for sheet in v::SHEETS {
+            text = text.replace(sheet.name, " ");
+        }
+        for word in text.split(|c: char| !c.is_alphanumeric() && c != '\'') {
+            assert!(
+                !["you", "your", "yours", "yourself", "you'll", "you're"]
+                    .contains(&word.to_lowercase().as_str()),
+                "the README addresses the reader with {word:?}:\n{readme}"
+            );
+        }
+    }
+}
+
+/// `findings.json` is every row that was not ruled out, of every kind, before the All problems
+/// sheet shows each problem once. It is not "the same rows" as that sheet.
+#[test]
+fn the_readme_describes_findings_json_as_every_row_not_ruled_out() {
+    for readme in client_readmes() {
+        let text = flat(&readme);
+        let paragraph = text
+            .split(" findings.json ")
+            .nth(1)
+            .and_then(|rest| rest.split(" decisions.json ").next())
+            .expect("the README describes findings.json");
+        assert!(
+            !paragraph.contains("same rows as the workbook"),
+            "{paragraph}"
+        );
+        assert!(paragraph.contains("not ruled out"), "{paragraph}");
+        assert!(
+            paragraph.contains(&format!(
+                "{}, {} and {}",
+                v::ALL_PROBLEMS,
+                v::YOUR_CONVENTIONS,
+                v::NOT_CHECKED
+            )),
+            "{paragraph}"
+        );
+        assert!(!paragraph.contains("never disagrees"), "{paragraph}");
+    }
+}
+
 #[test]
 fn the_tickets_paragraph_points_at_the_all_problems_sheet_and_the_fix_id() {
     let readme = flat(&client_readmes()[0]);
