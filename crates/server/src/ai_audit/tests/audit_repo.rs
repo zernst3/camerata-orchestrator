@@ -2144,6 +2144,31 @@ fn a1_objective_authorization_fault_stays_defect_but_still_counts_as_a_departure
     }
 }
 
+/// An objective-fault reason is a Defect even under a convention rule whose id names no
+/// security word: "any other user's record" reaches across users. A low sibling with no such
+/// phrase stays a Deviation.
+#[test]
+fn a1_other_users_phrase_marks_a_hygiene_rule_row_a_defect() {
+    use camerata_api_types::audit::FindingKind;
+    let rule = "ARCH-LAYER-STRUCTURE-1";
+    let mut reach = deviation_fixture(rule, "src/routes/records.js", 40);
+    reach.severity = "high".to_string();
+    reach.detail = "any authenticated user can modify any other user's record".to_string();
+    let mut style = deviation_fixture(rule, "src/routes/notes.js", 12);
+    style.severity = "low".to_string();
+    style.detail = "the handler is laid out differently from its siblings".to_string();
+    let mut findings = vec![reach, style];
+    let recs = vec![deviation_rec(rule, "opt-a", Some(4))];
+    let alts = vec![two_option_alternatives(rule, Some("opt-a"))];
+    assign_deviation_kinds(&mut findings, &recs, &alts);
+    assert_eq!(findings[0].kind, Some(FindingKind::Defect));
+    assert!(
+        matches!(&findings[1].kind, Some(FindingKind::Deviation(_))),
+        "the low sibling stays a Deviation, got {:?}",
+        findings[1].kind
+    );
+}
+
 /// req A5.3: "no convention adopted" is ONE informational row per rule, enforced
 /// structurally — even a malformed recommendations vec carrying TWO no-convention
 /// entries for one rule yields exactly one row. Verified failing by removing the

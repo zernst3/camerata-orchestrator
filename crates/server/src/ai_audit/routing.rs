@@ -764,8 +764,10 @@ const OBJECTIVE_FAULT_PHRASES: &[&str] = &[
     "cross-tenant",
     "cross tenant",
     "another user's",
+    "other user's",
     "other users'",
     "another tenant's",
+    "other tenant's",
     "other tenants'",
 ];
 
