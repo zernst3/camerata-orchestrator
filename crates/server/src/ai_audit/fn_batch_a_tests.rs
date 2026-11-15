@@ -674,6 +674,22 @@ fn two_distinct_findings_of_one_rule_at_one_path_and_line_are_both_kept() {
     assert_eq!(all.len(), 2, "different snippets are different findings");
 }
 
+/// Every merge that changes a severity says so in the row's severity note.
+#[test]
+fn a_repeat_that_raises_the_kept_row_records_the_adjustment() {
+    let a = finding("AI-X-1", "low", "first");
+    let b = finding("AI-X-1", "high", "second");
+    let mut all = vec![a, b];
+    dedup_findings_keep_max_severity(&mut all);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].severity, "high");
+    let notes = crate::severity_bounds::recorded_adjustments(&all[0]).join(" | ");
+    assert!(
+        notes.contains("severity raised from low to high"),
+        "{notes}"
+    );
+}
+
 #[test]
 fn a_repeat_collapses_and_keeps_the_highest_severity_seen() {
     let a = finding("AI-X-1", "low", "first");

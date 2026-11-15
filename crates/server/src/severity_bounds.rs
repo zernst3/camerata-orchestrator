@@ -73,6 +73,16 @@ impl BoundedFinding for Finding {
     fn note_severity_adjustment(&mut self, note: String) {
         record_adjustment(self, note);
     }
+
+    fn reviewer_doubt(&self) -> Option<String> {
+        crate::follow_reviewers::reviewer_doubt(self).map(|d| d.phrase().to_string())
+    }
+
+    /// Held for a decision: the row joins the rows held for review (`needs_review`), which the
+    /// exporters route to the held set and the human reviewer decides.
+    fn hold_for_decision(&mut self) {
+        self.needs_review = true;
+    }
 }
 
 /// The `Finding::captures` key a severity adjustment is recorded under, one sentence per line.

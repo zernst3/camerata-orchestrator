@@ -1326,6 +1326,7 @@ pub async fn run_inspect_pipeline_with(
                     &rules,
                     llm_backend == camerata_server::llm::Backend::Cli,
                     None,
+                    corpus.as_ref(),
                 ),
             ),
         )
