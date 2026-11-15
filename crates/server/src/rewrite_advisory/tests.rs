@@ -490,6 +490,67 @@ fn an_incomplete_run_is_not_enough_to_say() {
     assert_guarded(&advisory(&no_repo), GuardReason::IncompleteRun);
 }
 
+/// One incomplete-run cause alone gives the guard, with the sentence for that cause and no other.
+fn assert_only_cause(report: &ScanReport, sentence: &str, what: &str) {
+    let a = advisory(report);
+    assert_eq!(a.outcome, Outcome::NotEnoughToSay, "{what}: {a:?}");
+    assert_eq!(
+        a.guards
+            .iter()
+            .map(|g| (g.reason, g.detail.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(GuardReason::IncompleteRun, sentence)],
+        "{what}"
+    );
+}
+
+/// Each cause of an incomplete run holds the guard on its own: no scan (gated, then blocked),
+/// the AI review not run, the ledger's outage stop and the ledger's spend cap.
+#[test]
+fn each_incomplete_run_cause_holds_the_guard_alone() {
+    let base = || report_of(BIG, &lows(3), Vec::new());
+    assert!(advisory(&base()).guards.is_empty());
+
+    let mut gated = base();
+    gated.gated = true;
+    assert_only_cause(&gated, text::NO_SCAN, "gated");
+    let mut blocked = base();
+    blocked.blocked = true;
+    assert_only_cause(&blocked, text::NO_SCAN, "blocked");
+
+    let mut ai_blocked = base();
+    ai_blocked.ai_blocked_reason = Some("no key".to_string());
+    assert_only_cause(&ai_blocked, text::AI_NOT_RUN, "ai_blocked_reason");
+
+    let mut outage = base();
+    outage
+        .ledger
+        .record_outage(crate::run_health::OutageRecord {
+            trigger: crate::run_health::OutageTrigger {
+                class: FailureClass::OutageStop,
+                detail: "provider unreachable".to_string(),
+                at: "2026-11-15T10:00:00Z".to_string(),
+            },
+            not_run_passes: Vec::new(),
+            not_run_stages: Vec::new(),
+            repos_not_finished: Vec::new(),
+        });
+    assert!(outage.ledger.is_outage_stopped());
+    assert!(!outage.ledger.is_cost_capped());
+    assert_only_cause(&outage, text::RUN_STOPPED, "ledger outage stop");
+
+    let mut capped = base();
+    capped
+        .ledger
+        .record_cost_cap(crate::cost_cap::CostCapRecord {
+            repos_not_finished: vec!["acme/api".to_string()],
+            ..Default::default()
+        });
+    assert!(capped.ledger.is_cost_capped());
+    assert!(!capped.ledger.is_outage_stopped());
+    assert_only_cause(&capped, text::RUN_STOPPED, "ledger spend cap");
+}
+
 #[test]
 fn a_run_with_no_review_tree_is_not_enough_to_say() {
     let mut report = report_of(BIG, &lows(3), Vec::new());
