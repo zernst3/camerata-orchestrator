@@ -186,7 +186,22 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     cmd
 }
 
+/// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
+/// session file).
+fn spawn_dir(req: &LlmRequest) -> std::path::PathBuf {
+    match &req.repo_read_dir {
+        Some(dir) => dir.clone(),
+        None => camerata_api_types::claude_cli::engine_empty_cwd(),
+    }
+}
+
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
+    // Isolation first: the working directory (the repo, or an empty engine-owned one, never the
+    // launcher's) and the flags that keep project settings and the operator's memory out.
+    camerata_api_types::claude_cli::isolate_claude_call(
+        cmd.as_std_mut(),
+        req.repo_read_dir.as_deref(),
+    );
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
@@ -200,8 +215,7 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
             cmd.arg("--allowedTools")
                 .arg(READ_ONLY_TOOLS.join(" "))
                 .arg("--add-dir")
-                .arg(dir)
-                .current_dir(dir);
+                .arg(dir);
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
@@ -2098,10 +2112,7 @@ impl Llm {
         // client's source" must be able to find it. Every attempt is its own session.
         let session_id = new_session_id();
         if let Some(sink) = &self.sessions {
-            let cwd = match &req.repo_read_dir {
-                Some(dir) => dir.clone(),
-                None => std::env::current_dir().unwrap_or_default(),
-            };
+            let cwd = spawn_dir(req);
             sink.record(ModelSession {
                 session_id: session_id.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
@@ -3569,6 +3580,8 @@ pub async fn call_with_fallback(
 mod temperature_tests;
 
 // The model-input chokepoint: every wire builder redacts what it is about to send.
+#[cfg(test)]
+mod cli_isolation_tests;
 #[cfg(test)]
 mod model_input_tests;
 
@@ -5953,7 +5966,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         assert_eq!(lines[at + 1], recorded[0].session_id);
         assert_eq!(
             recorded[0].cwd,
-            std::env::current_dir().expect("cwd").to_string_lossy()
+            camerata_api_types::claude_cli::engine_empty_cwd().to_string_lossy()
         );
         assert!(!recorded[0].created_at.is_empty());
     }
