@@ -137,6 +137,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
         efficiency,
         max_cost_usd: None,
         estimate_hint_usd: None,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,

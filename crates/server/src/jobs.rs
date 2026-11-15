@@ -127,6 +127,11 @@ pub struct JobState {
     /// any stage reports and after the job ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_progress: Option<StageProgress>,
+    /// The latest re-quote after a repo's scan stage, in the pre-flight's format (owner ruling
+    /// R-9; see [`crate::quote`]). The cockpit's run view shows it. `None` until a scan stage has
+    /// finished on a run that carries a pre-flight plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requote: Option<String>,
     /// ROUTES-5: the project this job scanned, captured at creation from the active
     /// project. `latest_deep_report(project_id)` filters on this so a project's
     /// deep-report export returns ITS OWN latest deep report, not an arbitrary one.
@@ -359,6 +364,11 @@ impl JobStore {
             .lock()
             .ok()
             .and_then(|g| g.get(id).map(|j| j.deterministic.clone()))
+    }
+
+    /// Show `line`, the latest re-quote after a scan stage, on the job (see [`JobState::requote`]).
+    pub fn set_requote(&self, id: &str, line: &str) {
+        self.with(id, |j| j.requote = Some(line.to_string()));
     }
 
     /// Record the Anthropic Message Batch id on the job. Called by the batch scan mode

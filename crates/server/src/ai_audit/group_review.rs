@@ -2095,6 +2095,8 @@ fn record_ledger(
 pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter) {
     // The batch runner's notes are kept whether or not a limit was set, and join the scan's.
     report.ledger.record_runner_notes(meter.notes());
+    // The two-step quote's actual: this meter continues the scan's, so its spend is the run's.
+    report.ledger.set_quote_actual(meter.spent_usd());
     // The spend limit: what it stopped here is a failed part and joins the scan's record.
     if let Some(cap) = meter.cost_cap_record() {
         let has_new = !cap.not_run_passes.is_empty() || !cap.not_run_stages.is_empty();

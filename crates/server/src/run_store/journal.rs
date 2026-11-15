@@ -1164,6 +1164,77 @@ fn part_finished(record: &RunRecord, kind: PartKind, repo: &str) -> bool {
 }
 
 /// What a resume of `record` would cost, from the stored files of `dir`.
+/// The file of a run's folder that holds the re-quotes the run made after each repo's scan stage
+/// ([`crate::quote`]), oldest first.
+const REQUOTES_FILE: &str = "requotes.json";
+
+/// Keep `q` in the run's folder `dir`, after the re-quotes already there, so a resume can price
+/// what remains from the latest one. Best effort: a run whose folder cannot be written still runs,
+/// and its resume then prices what remains from the pre-flight figure, as before.
+pub(crate) fn save_requote(dir: &Path, q: &camerata_ui_core::scan::Requote) {
+    let mut all = load_requotes(dir);
+    all.push(q.clone());
+    if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+        if let Err(e) = write_atomic(&dir.join(REQUOTES_FILE), &bytes) {
+            eprintln!(
+                "[camerata-server] the re-quote could not be kept with the run ({e}); a resume \
+                 prices what remains from the pre-flight figure"
+            );
+        }
+    }
+}
+
+/// The re-quotes kept in the run's folder `dir`, oldest first (none when it holds none).
+pub fn load_requotes(dir: &Path) -> Vec<camerata_ui_core::scan::Requote> {
+    read_json(&dir.join(REQUOTES_FILE)).unwrap_or_default()
+}
+
+/// Whether a stored call of `kind` belongs to the stages that run after a repo's scan stage.
+fn after_the_scan(kind: PartKind) -> bool {
+    matches!(
+        kind,
+        PartKind::Calibration
+            | PartKind::Detail
+            | PartKind::Fix
+            | PartKind::GroupReview
+            | PartKind::Other
+    )
+}
+
+/// What the stored replies of the work still ahead cost, once `repo`'s scan stage has finished on
+/// a resumed run in `dir`: the replies of `repo`'s stages after the scan, every reply about a repo
+/// in `later`, and the run-wide stages (the group review, the clone judge) whose prompt names no
+/// repo. Only replies a resume replays count: those it will not pay for again. The re-quote takes
+/// them off the work that remains ([`crate::quote`]).
+pub fn stored_ahead_usd(dir: &Path, repo: &str, later: &[&str]) -> f64 {
+    let mut ahead = 0.0f64;
+    let Ok(entries) = std::fs::read_dir(dir.join("calls")) else {
+        return 0.0;
+    };
+    for file in entries
+        .filter_map(Result::ok)
+        .filter_map(|e| read_json::<CallFile>(&e.path()))
+    {
+        let counts = if file.repo == repo {
+            after_the_scan(file.kind)
+        } else if file.repo.is_empty() {
+            matches!(file.kind, PartKind::GroupReview | PartKind::Other)
+        } else {
+            later.contains(&file.repo.as_str())
+        };
+        if !counts {
+            continue;
+        }
+        ahead += file
+            .entries
+            .values()
+            .filter(|entry| entry_replays(entry, file.kind))
+            .map(|entry| entry.cost_usd)
+            .sum::<f64>();
+    }
+    ahead
+}
+
 pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstimate {
     let mut stored = 0usize;
     let mut again = 0usize;

@@ -20,6 +20,7 @@ fn capped(cap: f64) -> UsageMeter {
         efficiency: Default::default(),
         max_cost_usd: Some(cap),
         estimate_hint_usd: None,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,

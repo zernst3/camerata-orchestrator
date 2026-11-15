@@ -17,6 +17,7 @@ fn outcome() -> InspectOutcome {
         release_gate: String::new(),
         stage_telemetry: None,
         preflight: None,
+        quotes: None,
         efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
         cost_cap: None,
         outage: None,

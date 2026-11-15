@@ -117,6 +117,7 @@ fn controls(cap: Option<f64>) -> RunControls {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: cap,
         estimate_hint_usd: None,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,

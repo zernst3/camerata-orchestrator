@@ -97,6 +97,7 @@ pub mod project;
 /// Delimiting client content for a model with a per-run random token (prompt-injection defense).
 pub mod prompt_frame;
 pub mod provider;
+pub mod quote;
 pub mod reconcile;
 /// Inspection findings become units of work (roadmap 2c): the plan and create routes, the
 /// implementer's findings grounding and the delta retest evidence.

@@ -115,6 +115,10 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
+    /// What the pre-flight priced (the repos, models and flags, and its figure), so the run can
+    /// quote again once each repo's scan stage has run (owner ruling R-9; see [`crate::quote`]).
+    /// `None` for a caller that made no pre-flight: the run then makes no re-quote.
+    pub quote_plan: Option<crate::quote::QuotePlan>,
 }
 
 impl RunControls {

@@ -44,6 +44,9 @@ pub struct UsageMeter {
     /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
     /// admission refuses every new part. See [`crate::run_health`].
     health: crate::run_health::RunHealth,
+    /// The re-quotes made after each repo's scan stage ([`crate::quote`]), in the order they were
+    /// made, for the scan ledger.
+    requotes: std::sync::Mutex<Vec<camerata_ui_core::scan::Requote>>,
 }
 
 /// Why a pass was not admitted.
@@ -337,6 +340,44 @@ impl UsageMeter {
             return false;
         }
         self.stage_blocked(repo, stage)
+    }
+
+    /// Whether the re-quote after `repo`'s scan stage has been made on this meter.
+    pub fn has_requoted(&self, repo: &str) -> bool {
+        self.requotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|q| q.repo == repo)
+    }
+
+    /// Keep a re-quote for the scan ledger ([`Self::quote_record`]).
+    pub fn note_requote(&self, q: camerata_ui_core::scan::Requote) {
+        self.requotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(q);
+    }
+
+    /// The re-quotes made on this meter, oldest first.
+    pub fn requotes(&self) -> Vec<camerata_ui_core::scan::Requote> {
+        self.requotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The run's quotes and what it has cost so far, for the scan ledger: `None` when the run
+    /// carries no pre-flight plan ([`crate::cost_cap::RunControls::quote_plan`]).
+    pub fn quote_record(&self) -> Option<crate::quote::QuoteRecord> {
+        let plan = self.controls.quote_plan.as_ref()?;
+        Some(crate::quote::QuoteRecord {
+            preflight_expected_usd: plan.preflight_expected_usd,
+            preflight_ceiling_usd: plan.preflight_ceiling_usd,
+            requotes: self.requotes(),
+            actual_usd: Some(self.spent_usd()),
+            stored_usd: self.controls.stored_spend_usd.max(0.0),
+        })
     }
 
     /// True when this run is a resume that carries stored spend: the journal and the stages'

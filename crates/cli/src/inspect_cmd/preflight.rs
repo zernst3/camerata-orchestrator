@@ -46,6 +46,9 @@ pub struct Preflight {
     pub text: String,
     /// The estimated dollars for the whole run; `None` when a model is unpriced.
     pub estimate_usd: Option<f64>,
+    /// What the figure was made from, so the run can quote again once the scan stage has run
+    /// (owner ruling R-9). `None` when the scan or calibration model is unpriced.
+    pub plan: Option<camerata_server::quote::QuotePlan>,
 }
 
 fn price_of(model: &str) -> Option<(f64, f64)> {
@@ -82,26 +85,21 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     // that could not be read counts nothing and is named in the output instead. The rule router
     // splits each repo into groups (the rules of one scope share one file subset), and each
     // group has its own rule batches, so the pass count follows the group count.
-    let est_inputs: Vec<RunRepoInput> = inputs
-        .repos
-        .iter()
-        .filter(|r| r.read_error.is_none())
-        .map(|r| RunRepoInput {
-            repo: r.repo.clone(),
-            code_chars: r.code_chars,
-            files: r.files.len(),
-            selected: r.semantic.len(),
-            multi_option_selected: r.multi_option_rules,
-            routing_groups: camerata_server::scan_routing::plan_routes(
-                &camerata_server::scan_routing::rules_from_pairs(&r.semantic),
-                &r.files,
-                true,
-            )
-            .groups
-            .len()
-            .max(1),
-        })
-        .collect();
+    let est_inputs: Vec<RunRepoInput> = camerata_server::quote::run_inputs(inputs.repos);
+    let plan = camerata_server::quote::QuotePlan::new(
+        &camerata_server::quote::QuoteModelIds {
+            scan: inputs.model.clone(),
+            calibration: inputs.calibration_model.clone(),
+            group_review: inputs.group_review_model.clone(),
+            fix: inputs.fix_model.clone(),
+            clone_judge: inputs.clone_judge_model.clone(),
+        },
+        est_inputs.clone(),
+        inputs.backend,
+        inputs.batch,
+        inputs.terse_output,
+        inputs.consensus,
+    );
     // Consensus runs the whole AI audit several times over the same inputs.
     let runs = if inputs.consensus {
         camerata_server::consensus::CONSENSUS_PASSES
@@ -348,6 +346,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     Preflight {
         text: out,
         estimate_usd: estimate.map(|(_, d, _, _, _)| d),
+        plan,
     }
 }
 
@@ -435,6 +434,33 @@ mod tests {
         // site rate seen as well as on the repeat rounds, so the "at most" line stays.
         let p = build(&inputs(&repos, None));
         assert!(p.text.contains("at most $"), "{}", p.text);
+    }
+
+    /// R-9: the plan the run quotes again from is the one the printed figure was made from, so
+    /// the re-quote is set beside the same pre-flight number.
+    #[test]
+    fn the_plan_carries_the_printed_figure() {
+        for consensus in [false, true] {
+            let repos = [repo(400_000, 30), named("acme/web", 20_000, 5)];
+            let mut i = inputs(&repos, None);
+            i.consensus = consensus;
+            i.terse_output = true;
+            i.fix_model = Some("claude-haiku-5-5".into());
+            let p = build(&i);
+            let plan = p.plan.expect("priced models give a plan");
+            assert!(
+                (plan.preflight_expected_usd - p.estimate_usd.unwrap()).abs() < 1e-9,
+                "{} vs {:?}",
+                plan.preflight_expected_usd,
+                p.estimate_usd
+            );
+            assert_eq!(plan.repos.len(), 2);
+            assert_eq!(plan.repos[1].repo, "acme/web");
+        }
+        let repos = [repo(1_000, 3)];
+        let mut unpriced = inputs(&repos, None);
+        unpriced.model = "some-unlisted-model".into();
+        assert!(build(&unpriced).plan.is_none());
     }
 
     #[test]
