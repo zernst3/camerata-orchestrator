@@ -1471,6 +1471,17 @@ pub fn build_report_json(
             std::iter::once(f.rule_id.clone())
                 .chain(f.also_matches.iter().cloned())
                 .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+                // A source collapsed into the row fired under its own rule at this place, and a
+                // row the review tree files under a rule's node is a problem in that rule's
+                // family (a tool's row the mapping assigns to the native rule): neither rule
+                // is clean.
+                .chain(f.flagged_by.iter().map(|b| b.rule_id.clone()))
+                .chain(
+                    f.group_path
+                        .get(1)
+                        .and_then(|node| node.strip_prefix("rule:"))
+                        .map(str::to_string),
+                )
         })
         .collect();
     // W1: "verified clean" is sourced from the LEDGER (`ran && findings_emitted == 0`) when
@@ -1485,16 +1496,22 @@ pub fn build_report_json(
     } else {
         report.provenance.audited_rule_ids.clone()
     };
+    let several_services = has_rule_ledger_data && report.repos.len() > 1;
     let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
-        .map(|rid| {
-            let (clean_in, not_applicable_in) = if has_rule_ledger_data && report.repos.len() > 1 {
+        .filter_map(|rid| {
+            let (clean_in, not_applicable_in) = if several_services {
                 healthy_repos_for(report, rid, dispositions)
             } else {
                 (Vec::new(), Vec::new())
             };
-            HealthyRuleJson {
+            // With several services, a rule that is clean in none of them is not healthy: the
+            // list would name it without saying where it was checked and found clean.
+            if several_services && clean_in.is_empty() {
+                return None;
+            }
+            Some(HealthyRuleJson {
                 rule_id: rid.clone(),
                 title: corpus
                     .and_then(|c| c.get_by_id(rid))
@@ -1503,7 +1520,7 @@ pub fn build_report_json(
                 citation: resolve_citation(rid, None, corpus),
                 clean_in,
                 not_applicable_in,
-            }
+            })
         })
         .collect();
     healthy_rules.sort_by(|a, b| {
