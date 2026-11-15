@@ -202,3 +202,35 @@ async fn the_second_pass_is_asked_once_and_only_for_a_file_it_can_show() {
 
 static NEEDS_AUTH_BARE: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| NEEDS_AUTH.replace("src/auth.ts", "auth.ts"));
+
+// ── The rubric: unauthenticated access is high by default (owner ruling R-8) ──────────────
+
+#[test]
+fn the_rubric_rates_unauthenticated_access_high_by_default_and_critical_on_two_conditions() {
+    let system = verify_system_prompt();
+    let flat: String = system.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "Unauthenticated access to a protected resource or operation is \"high\" by default."
+        ),
+        "{flat}"
+    );
+    // The two conditions that make it critical, and nothing else.
+    assert!(
+        flat.contains("It is \"critical\" only when it reaches sensitive data or allows a write:"),
+        "{flat}"
+    );
+    assert!(flat.contains("(a) it reaches sensitive data"), "{flat}");
+    assert!(flat.contains("(b) it allows a write"), "{flat}");
+    assert!(
+        flat.contains("An unauthenticated read of data that is not sensitive stays \"high\"."),
+        "{flat}"
+    );
+    // The old rule of thumb is gone, and no other line still says it.
+    assert!(!flat.contains("ALWAYS \"critical\""), "{flat}");
+    assert!(!flat.contains("Unauthenticated access to ANY protected resource"));
+    assert!(
+        !flat.contains("\"critical\" is reserved for an unauthenticated reach or"),
+        "the client-side gate line follows the ruling: {flat}"
+    );
+}

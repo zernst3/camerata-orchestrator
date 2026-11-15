@@ -191,8 +191,10 @@ async fn stage1_prompt_contains_no_confidence_instruction() {
     // The first-reviewer framing, and the rules of thumb word for word.
     assert!(system.contains("You are the first reviewer of an automated audit."));
     assert!(system.contains("You never remove one."));
+    // Owner ruling R-8: unauthenticated access is high by default (pinned word for word in
+    // `calibration_context_tests`).
     assert!(system.contains(
-        "Unauthenticated access to ANY protected resource or operation, OR a path to full-account"
+        "Unauthenticated access to a protected resource or operation is \"high\" by default."
     ));
     assert!(system.contains(
         "An open or unvalidated redirect (the destination is attacker-controlled or otherwise"

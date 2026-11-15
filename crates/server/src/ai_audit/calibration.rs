@@ -299,7 +299,10 @@ impl Stage1Verdict {
     }
 }
 
-/// The system prompt for the stage 1 first reviewer. It frames the model as the first reader of
+/// The system prompt for the stage 1 first reviewer. Its rule of thumb for unauthenticated access
+/// follows owner ruling R-8 (2026-11-15): high by default, critical only when the access reaches
+/// sensitive data or allows a write.
+/// It frames the model as the first reader of
 /// each finding, never a filter: every site is kept, and the answers (`severity`, `real`,
 /// `effort`, `category`, `reason`) only tell the architect where to look. It names no model, so
 /// it works for any capable one, and it carries no confidence instruction: doubt is the one word
@@ -322,8 +325,14 @@ Answer four things, and give a one-line reason:
     into critical out of general alarm, and never assign "critical" to a debatable preference.
   * RULES OF THUMB (apply these consistently — the SAME shape of finding must get the SAME
     severity every run, not a per-run judgment call):
-    - Unauthenticated access to ANY protected resource or operation, OR a path to full-account
-      compromise (takeover, impersonation, assuming any user's identity) — ALWAYS "critical".
+    - Unauthenticated access to a protected resource or operation is "high" by default. It is
+      "critical" only when it reaches sensitive data or allows a write: (a) it reaches sensitive
+      data (credentials or secrets, payment data, PII, health or government ID records, another
+      user's private content), or (b) it allows a write (creating, changing or deleting data, or
+      running a privileged or financial operation). An unauthenticated read of data that is not
+      sensitive stays "high".
+    - A path to full-account compromise (takeover, impersonation, assuming any user's identity)
+      is "critical".
     - An AUTHENTICATED user reading another tenant's/user's data they should not see (cross-
       tenant read) is "high" by default — NOT "critical" — unless the data class itself escalates
       it: payment data, credentials/secrets, or PII of the sensitive kind (SSN, health records,
@@ -345,8 +354,9 @@ Answer four things, and give a one-line reason:
       control is not the security boundary; a client can always be made to skip what only the
       client enforces. Judge it by what the SERVER allows an authenticated caller to do once that
       gate is bypassed. An authenticated privilege escalation confined to a single resource or
-      operation is "high"; "critical" is reserved for an unauthenticated reach or a system- or
-      account-wide compromise, neither of which a client-side-only gate states by itself.
+      operation is "high"; "critical" is reserved for an unauthenticated reach to sensitive data or
+      a write, or a system- or account-wide compromise, none of which a client-side-only gate
+      states by itself.
   * A concrete, demonstrable SECURITY or CORRECTNESS break that does NOT clear the critical bar
     above (injection needing extra steps to reach, missing auth on a write path with contained
     blast radius, data loss/corruption, a real but non-catastrophic exploit) is "high".
