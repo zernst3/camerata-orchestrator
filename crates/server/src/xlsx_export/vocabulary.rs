@@ -329,6 +329,34 @@ pub const TECHNICAL_BAND_NOTE: &str = "Technical (ids for tooling)";
 pub const H_REVIEW_FLAGS: &str = "Review flags";
 pub const H_HELD: &str = "Held";
 pub const H_ESCALATED: &str = "Escalated";
+/// The flag on a row the engine itself has reasons to doubt, and the internal column that lists
+/// its reasons. Reviewers only: a flagged row stays a problem until a reviewer rules it out.
+pub const POSSIBLE_FALSE_POSITIVE: &str = camerata_api_types::review::PossibleFalsePositive::TERM;
+
+/// The internal column's cell: the short name of each reason, in the row's order. Empty for a
+/// row with none.
+pub fn possible_false_positive_cell(
+    flag: Option<&camerata_api_types::review::PossibleFalsePositive>,
+) -> String {
+    flag.map(|p| {
+        p.reasons
+            .iter()
+            .map(|r| r.label())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+    .unwrap_or_default()
+}
+
+/// The internal Start here count: how many rows the engine flagged and how many of those a
+/// reviewer has decided (confirmed, ruled out or any other decision).
+pub fn possible_false_positive_count_line(flagged: usize, decided: usize) -> String {
+    if flagged == 1 {
+        format!("1 row flagged as a possible false positive, {decided} decided")
+    } else {
+        format!("{flagged} rows flagged as possible false positives, {decided} decided")
+    }
+}
 
 // The Glossary and Start here tables.
 pub const H_TERM: &str = "Term";
@@ -398,6 +426,8 @@ pub const P_FILES_SCANNED: &str = "Files scanned";
 pub const P_CODE_VOLUME: &str = "Code volume";
 pub const P_GENERATED: &str = "Generated";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";
+/// The internal Start here line's label for the possible false positive count.
+pub const P_POSSIBLE_FALSE_POSITIVES: &str = "Possible false positives";
 pub const P_PREPARED_BY: &str = "Prepared by";
 pub const P_PREPARED_FOR: &str = "Prepared for";
 /// The workbook's title line.

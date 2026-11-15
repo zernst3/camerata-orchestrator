@@ -6990,7 +6990,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    Chips sit beside `.kind-chip` and take its sizing. Each class is one row of the spec's chip
    table; the markers column draws at most two and folds the rest into a "+N". */
 .mark-esc, .mark-cand, .mark-over, .mark-outlier, .mark-new, .mark-stale, .mark-moved,
-.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried {
+.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-fp {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   border-radius: 999px; padding: 1px 8px; white-space: nowrap; border: 1px solid transparent;
 }
@@ -7008,6 +7008,9 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .mark-stale, .mark-moved { background: #3a3530; border-color: var(--line); color: var(--ink-soft); }
 /* Held: a red outline and a lock. */
 .mark-held { background: transparent; border-color: var(--danger-color); color: var(--danger-color); }
+/* Possible false positive: a dashed violet outline, so it reads as a question and not a verdict.
+   The reasons are its hover text and the detail's lines. */
+.mark-fp { background: transparent; border: 1px dashed #a78bfa; color: #c4b5fd; cursor: help; }
 /* Possible duplicate: a gray outline. */
 .mark-dup { background: transparent; border-color: var(--ink-faint); color: var(--ink-soft); }
 /* Also matches (a row that carries other rules at its place) and carried (a row another row at
@@ -7172,6 +7175,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .review-queue-budget { color: var(--ink-soft); font-size: 12.5px; }
 .review-queue-counts, .review-queue-needed { margin: 3px 0; font-size: 12.5px; color: var(--ink-soft); }
 .review-queue-needed { color: var(--ink-faint); }
+.review-queue-fp { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12.5px; color: var(--ink-soft); }
+.review-queue-fp .btn-edit-sm[aria-pressed="true"] { border-color: #a78bfa; color: #c4b5fd; }
+.site-detail-fp-reasons { margin: 0; padding-left: 16px; }
+.site-detail-fp-reasons li { margin: 0 0 2px; }
+.site-detail-fp-label { font-weight: 700; color: #c4b5fd; }
 .review-queue-toast {
   display: flex; align-items: center; gap: 10px; margin: 6px 0 10px; padding: 8px 10px;
   border: 1px solid var(--accent); border-radius: 4px; background: var(--accent-wash);

@@ -2562,6 +2562,7 @@ mod wo9 {
     mod pdf_tests;
     mod place_tests;
     mod plan_tests;
+    mod possible_fp_tests;
     mod readme_tests;
     mod review_level_tests;
     mod row_set_tests;

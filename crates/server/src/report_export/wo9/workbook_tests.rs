@@ -509,6 +509,7 @@ fn internal_headers() -> Vec<String> {
     headers.extend([
         v::H_REVIEW_FLAGS.to_string(),
         v::H_HELD.to_string(),
+        v::POSSIBLE_FALSE_POSITIVE.to_string(),
         v::H_ESCALATED.to_string(),
         "Summary source".to_string(),
         "Below the line".to_string(),
@@ -533,17 +534,23 @@ fn a_client_export_carries_none_of_the_internal_columns() {
     }
     let glossary = xlsx_sheet_grid(&xlsx, v::GLOSSARY).unwrap();
     let terms: Vec<&str> = glossary.iter().map(|r| r[0].as_str()).collect();
-    assert!(
-        !terms.contains(&"Escalated"),
-        "the Glossary defines a reviewers-only term"
-    );
+    for reviewers_only in [
+        "Escalated",
+        v::POSSIBLE_FALSE_POSITIVE,
+        camerata_api_types::review::FpReason::TestCodeOnly.label(),
+    ] {
+        assert!(
+            !terms.contains(&reviewers_only),
+            "the Glossary defines the reviewers-only term {reviewers_only:?}"
+        );
+    }
 }
 
 #[test]
 fn an_internal_export_adds_the_internal_columns_to_all_problems() {
     let xlsx = workbook_of(&reviewed_mixed().0, true);
     let grid = table(&xlsx, v::ALL_PROBLEMS);
-    for h in internal_headers().iter().take(11) {
+    for h in internal_headers().iter().take(12) {
         assert!(
             column(&grid, h).is_some(),
             "{h:?} is missing from an internal export"

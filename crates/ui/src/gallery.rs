@@ -112,6 +112,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "detail-form-open",
             "merge-picker-empty-pool",
             "place",
+            "possible-false-positive",
         ],
     ),
     (

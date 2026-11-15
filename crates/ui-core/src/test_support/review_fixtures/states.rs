@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::edits::EditField;
-use camerata_api_types::review::EscalationBudget;
+use camerata_api_types::review::{EscalationBudget, FpReason, PossibleFalsePositive};
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, EscalationBudgetReq, HeldRow, HoldReason, Marker, SiteRow, TreeLevel,
     SITES_PAGE_SIZE,
@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 71] = [
+pub const FIXTURE_IDS: [&str; 72] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -43,6 +43,7 @@ pub const FIXTURE_IDS: [&str; 71] = [
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
     "queue/place",
+    "queue/possible-false-positive",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -583,6 +584,34 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 first.site.carries.clone_from(&carrier.carries);
             }
             queue_state(&ds, queue)
+        }
+        "queue/possible-false-positive" => {
+            // "Possible false positives first" on: inside each band the flagged rows lead, each
+            // with its chip, and the first of them is focused so the detail lists its reasons.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            for (i, r) in queue.escalated.iter_mut().enumerate() {
+                let reasons = match i % 9 {
+                    4 => vec![
+                        FpReason::ConventionRuleAtMediumOrHigher,
+                        FpReason::ModelOnly,
+                    ],
+                    7 => vec![FpReason::SeverityFromRuleMinimum],
+                    _ => continue,
+                };
+                r.site.possible_false_positive = PossibleFalsePositive::from_reasons(reasons);
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let focused = queue
+                .escalated
+                .iter()
+                .find(|r| r.site.possible_false_positive.is_some())
+                .map(|r| r.candidate.key.clone());
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = focused;
+            }
+            fx
         }
         "detail/carrier" => {
             let ds = base();

@@ -720,3 +720,106 @@ fn a_new_since_decision_row_in_the_queue_says_the_verb_the_tree_says() {
         .text
         .contains("you decided this group"));
 }
+
+// ── Possible false positives first (a look only) ──────────────────────────────────────────
+
+/// The base queue with every third escalated row and the last candidate flagged.
+fn flagged_view() -> QueueView {
+    use camerata_api_types::review::{FpReason, PossibleFalsePositive};
+    let mut v = view();
+    for (i, r) in v.escalated.iter_mut().enumerate() {
+        if i % 3 == 2 {
+            r.site.possible_false_positive =
+                PossibleFalsePositive::from_reasons(vec![FpReason::CalibrationDoubt]);
+        }
+    }
+    if let Some(last) = v.below.last_mut() {
+        last.site.possible_false_positive =
+            PossibleFalsePositive::from_reasons(vec![FpReason::TestCodeOnly]);
+    }
+    v
+}
+
+fn drawn(l: &Layout<'_>) -> Vec<(Band, bool, String)> {
+    l.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((
+                band_of(r),
+                r.site.possible_false_positive.is_some(),
+                r.candidate.key.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn possible_false_positives_first_lists_flagged_rows_first_inside_each_band() {
+    let v = flagged_view();
+    let mut state = QueueState {
+        show_below: true,
+        shown: usize::MAX,
+        ..QueueState::default()
+    };
+    let plain = layout(&v, &state);
+    state.toggle_fp_first();
+    assert!(state.fp_first);
+    let first = layout(&v, &state);
+    let got = drawn(&first);
+    // Inside each band the flagged rows come first, and the bands keep their order.
+    for band in [Band::WithinBudget, Band::OverBudget, Band::BelowLine] {
+        let flags: Vec<bool> = got
+            .iter()
+            .filter(|(b, _, _)| *b == band)
+            .map(|(_, f, _)| *f)
+            .collect();
+        let flagged = flags.iter().filter(|f| **f).count();
+        assert!(
+            flags.iter().take(flagged).all(|f| *f),
+            "{band:?}: flagged rows are not first: {flags:?}"
+        );
+    }
+    let bands: Vec<Band> = got.iter().map(|(b, _, _)| *b).collect();
+    let mut sorted = bands.clone();
+    sorted.sort();
+    assert_eq!(bands, sorted, "the bands keep their order");
+    assert!(got.iter().any(|(b, f, _)| *b == Band::WithinBudget && *f));
+    assert!(got.iter().any(|(b, f, _)| *b == Band::BelowLine && *f));
+    // A look only: the same rows, the same line in the same place, the same footer.
+    let mut a: Vec<String> = drawn(&plain).into_iter().map(|(_, _, k)| k).collect();
+    let mut b: Vec<String> = got.into_iter().map(|(_, _, k)| k).collect();
+    assert_ne!(a, b, "the order changed");
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "no row is added or dropped");
+    let line_at = |l: &Layout<'_>| l.entries.iter().position(|e| matches!(e, Entry::Line(_)));
+    assert_eq!(line_at(&plain), line_at(&first));
+    assert_eq!(plain.footer, first.footer);
+    assert_eq!(plain.hidden_escalated, first.hidden_escalated);
+    // Off again is the server's order.
+    state.toggle_fp_first();
+    assert_eq!(drawn(&layout(&v, &state)), drawn(&plain));
+}
+
+#[test]
+fn the_queue_counts_its_possible_false_positives() {
+    let v = flagged_view();
+    let want = v
+        .escalated
+        .iter()
+        .chain(&v.below)
+        .filter(|r| r.site.possible_false_positive.is_some())
+        .count();
+    assert!(want > 1);
+    assert_eq!(possible_false_positive_count(&v), want);
+    assert_eq!(
+        fp_first_label(&v, false),
+        format!("Possible false positives first ({want})")
+    );
+    assert_eq!(
+        fp_first_label(&v, true),
+        format!("Back to rank order ({want} flagged)")
+    );
+    assert_eq!(possible_false_positive_count(&view()), 0);
+}

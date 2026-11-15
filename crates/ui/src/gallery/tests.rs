@@ -29,6 +29,7 @@ const SPEC_STATES: &[&str] = &[
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
     "queue/place",
+    "queue/possible-false-positive",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",

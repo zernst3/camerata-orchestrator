@@ -37,6 +37,7 @@ pub(super) fn QueuePage(props: PageProps) -> Element {
         .map(|r| r.candidate.key.clone());
     let state = QueueState {
         show_below: props.id == "queue/line-lowered",
+        fp_first: props.id == "queue/possible-false-positive",
         cursor: body.selected_site.clone().or(first),
         ..QueueState::default()
     };
@@ -103,6 +104,7 @@ states! {
     detail_form_open => "queue/detail-form-open",
     merge_picker_empty_pool => "queue/merge-picker-empty-pool",
     place => "queue/place",
+    possible_false_positive => "queue/possible-false-positive",
 }
 
 #[cfg(test)]

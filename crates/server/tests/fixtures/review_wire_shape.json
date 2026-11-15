@@ -56,6 +56,7 @@
     ],
     "markers": [
       "held",
+      "possible_false_positive",
       "escalated",
       "candidate",
       "over_budget",
@@ -260,6 +261,11 @@
             "line": "number",
             "path": "string",
             "rule_id": "string"
+          },
+          "possible_false_positive": {
+            "reasons": [
+              "string"
+            ]
           },
           "repo": "string",
           "review_flags": [
@@ -816,6 +822,11 @@
           "line": "number",
           "path": "string",
           "rule_id": "string"
+        },
+        "possible_false_positive": {
+          "reasons": [
+            "string"
+          ]
         },
         "repo": "string",
         "review_flags": [
