@@ -58,6 +58,15 @@ fn authored_prose(source: &str, is_template: bool) -> Vec<String> {
     literals
 }
 
+/// An aside is a bare pair of words ("past and future") set off by commas inside a longer clause
+/// ("Shared with everyone with access, past and future, and stays readable"), not an item of a
+/// list. A longer item with its own conjunction ("identity and access management") is a list item,
+/// and so is a pair after a short lead ("a, b and c, or d").
+fn is_aside(lead: &str, item: &str) -> bool {
+    let words: Vec<&str> = item.split_whitespace().collect();
+    words.len() == 3 && matches!(words[1], "and" | "or") && lead.split_whitespace().count() >= 4
+}
+
 /// `a, b, and c` / `a, b, or c`: a comma before the last item of a list of three or more.
 fn serial_commas(text: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -78,8 +87,7 @@ fn serial_commas(text: &str) -> Vec<String> {
             };
             let last_item = &clause[previous + 2..];
             if last_item.split_whitespace().count() <= 6
-                && !last_item.contains(" and ")
-                && !last_item.contains(" or ")
+                && !is_aside(&clause[..previous], last_item)
             {
                 found.push(format!("{}{conjunction}", clause.trim()));
             }
@@ -323,6 +331,11 @@ fn the_serial_comma_scan_finds_a_list_and_leaves_a_clause_alone() {
     // A long lead-in does not hide a list, and an aside with its own "and" is not a list.
     assert!(!serial_commas(
         "It is advisory and not a certification, warranty, or guarantee of security."
+    )
+    .is_empty());
+    assert!(!serial_commas("a, b and c, or d").is_empty());
+    assert!(!serial_commas(
+        "No review of organizational controls, identity and access management, or infrastructure."
     )
     .is_empty());
     assert!(

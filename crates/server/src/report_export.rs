@@ -2008,7 +2008,7 @@ pub fn build_report_json(
                  production."
                     .to_string()
             },
-            "No review of organizational controls, identity and access management, or \
+            "No review of organizational controls, identity and access management or \
              infrastructure configuration."
                 .to_string(),
         ],
