@@ -1106,11 +1106,11 @@ fn preview_finding(
     let detail = if message.is_empty() {
         format!(
             "Found by {tool_name} during this scan ({rule_id}). This check has not yet been \
-             added to your CI pipeline, so it does not block builds on its own yet."
+             added to the CI pipeline, so it does not block builds on its own yet."
         )
     } else {
         format!(
-            "{message} (found by {tool_name} during this scan; not yet part of your CI \
+            "{message} (found by {tool_name} during this scan; not yet part of the CI \
              pipeline)."
         )
     };

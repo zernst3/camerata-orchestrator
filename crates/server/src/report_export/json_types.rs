@@ -652,8 +652,9 @@ pub struct CuratedSiteJson {
     /// is demoted to a smaller subtitle line for registry traceability.
     pub headline: String,
     /// Why this held site is waiting for a reviewer, in plain words
-    /// (`report_export::waiting_reason`), or `None`. Rendered in the card footer beside the
-    /// disposition; never a prefix on `headline`.
+    /// (`report_export::waiting_reason`), or `None`. The PDF template does not print it (a test
+    /// keeps it so): the workbook's "Why it is waiting" column carries it. Never a prefix on
+    /// `headline`.
     pub why_waiting: Option<String>,
     /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]) — rendered as
     /// its own "Fix:" line in the template, distinct from `detail`'s explanation of the

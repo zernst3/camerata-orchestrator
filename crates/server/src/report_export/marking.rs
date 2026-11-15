@@ -871,8 +871,8 @@ pub(crate) fn next_steps_note_for(
         }
     };
     format!(
-        "There are three steps from here. First, the fixes above get done, by your own \
-         team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
+        "There are three steps from here. First, the fixes above get done, by the \
+         client's own team, an outside contractor or the reviewing engineer. {fix_rate_sentence} Second, a \
          retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
          signs a short addendum confirming each item is closed. Third, ongoing coverage: a \
          monthly delta rescan plus on-call architect availability for anything new \

@@ -3979,10 +3979,10 @@ pub fn product_export_readme(
          \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
          \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
          \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
-         \x20 order to do them. The {all_problems} sheet has every problem once, as a row you can\n\
+         \x20 order to do them. The {all_problems} sheet has every problem once, as a row to\n\
          \x20 sort and filter, with the place it was seen and what to do there. The {needs} sheet\n\
-         \x20 holds the problems a reviewer must rule on before you act on them. {conventions},\n\
-         \x20 {departures} and {dependencies} say what your code already does consistently,\n\
+         \x20 holds the problems a reviewer must rule on before anyone acts on them. {conventions},\n\
+         \x20 {departures} and {dependencies} say what the code already does consistently,\n\
          \x20 where it departs from that and which packages it depends on are vulnerable. The\n\
          \x20 {rules_checked} sheet lists every rule we checked, whether it found anything or not,\n\
          \x20 the {ruled_out} sheet gives the reason each problem was ruled out and the\n\
@@ -3991,11 +3991,11 @@ pub fn product_export_readme(
          \x20 {grouped}.\n\
          \n\
          findings.json\n\
-         \x20 The same rows as the workbook's {all_problems} sheet, for scripts, CI and your own\n\
-         \x20 tools: severity, area, repo, path and line, the code seen, the explanation, the fix,\n\
-         \x20 the decision so far, effort, confidence, citation and more, wrapped with the report's\n\
-         \x20 summary counts. It never disagrees with the workbook, because both are built from\n\
-         \x20 the same pass over the scan.\n\
+         \x20 Every row that was not ruled out, of every kind: the rows behind {all_problems},\n\
+         \x20 {conventions} and {not_checked} together, before the {all_problems} sheet shows each\n\
+         \x20 problem once. For scripts, CI and other tools: severity, area, repo, path and line,\n\
+         \x20 the code seen, the explanation, the fix, the decision so far, effort, confidence,\n\
+         \x20 citation and more, wrapped with the report's summary counts.\n\
          \n\
          decisions.json\n\
          \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
@@ -4003,8 +4003,9 @@ pub fn product_export_readme(
          \x20 workbook is the same list.\n\
          \n\
          csv/ and json/\n\
-         \x20 The tables of the workbook, one file for each, as CSV and as JSON, for tools that do\n\
-         \x20 not read Excel.\n\
+         \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
+         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
+         \x20 findings.json, as one flat table.\n\
          \n\
          manifest.json\n\
          \x20 The list of the files in this ZIP with a checksum for each.\n\
@@ -4018,7 +4019,7 @@ pub fn product_export_readme(
          \x20 of the {all_problems} sheet. To import the file:\n\
          \x20 - Jira: map {title} to Summary, {description} to Description, {priority} to Priority\n\
          \x20   (Highest, High, Medium or Low), {labels} to Labels (split on commas) and {place_list} to\n\
-         \x20   a text field of your choice. {estimate} is text, not a duration.\n\
+         \x20   any text field. {estimate} is text, not a duration.\n\
          \x20 - Linear: {title}, {description} and {labels} map to the fields of the same name.\n\
          \x20   {priority} maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
          \x20   Low.\n\
@@ -4429,23 +4430,27 @@ pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enf
 fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     let base = path.rsplit('/').next().unwrap_or(path);
     let purpose = if path.ends_with(".pdf") {
-        "Curated narrative report for a decision-maker."
+        "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
-        "Complete working dataset across sheets, for engineers."
+        "The complete working list, sheet by sheet, for the engineers doing the fixes."
     } else if path == "findings.json" {
-        "All-Findings rows wrapped with provenance and summary counts, for tooling."
+        "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
     } else if path == "README.txt" {
-        "Plain-text manifest of what each file is."
+        "A plain-text guide to what each file is."
     } else if path == "decisions.json" {
-        "Every decision record the report was reviewed with, for tooling."
+        "Every decision record the report was reviewed with, for tools."
     } else if path == "csv/tickets.csv" {
-        "One ticket for each sub-group, for a Jira, Linear or GitHub Issues importer."
+        "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
+    } else if path == "csv/all-findings.csv" {
+        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
+    } else if path == "json/all-findings.json" {
+        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
     } else if path.starts_with("csv/") {
-        "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
+        "One table of the workbook as a CSV file, for tools that do not read Excel."
     } else if path.starts_with("json/") {
-        "One xlsx data table as a flat JSON array, for structured ingestion."
+        "One table of the workbook as a flat JSON list, for tools."
     } else {
-        "Product-export artifact."
+        "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.

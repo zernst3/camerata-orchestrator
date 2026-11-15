@@ -210,7 +210,7 @@ pub(crate) fn resolve_citation(
         // `xlsx_export::provenance` computation this label feeds.
         return CitationJson {
             kind: "preview".to_string(),
-            label: format!("Preview check by {tool} ({rule_id}); not yet part of your CI pipeline"),
+            label: format!("Preview check by {tool} ({rule_id}); not yet part of the CI pipeline"),
             sources: Vec::new(),
         };
     }

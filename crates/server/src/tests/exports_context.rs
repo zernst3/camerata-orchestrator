@@ -342,6 +342,71 @@ fn product_export_readme_names_the_product_and_never_says_audit() {
     );
 }
 
+/// The purpose line the manifest prints for each file speaks the client vocabulary: no retired
+/// word, no word of the old package ("curated", "All-Findings"), no dash and no serial comma.
+#[test]
+fn the_manifest_purposes_use_the_client_vocabulary() {
+    use crate::xlsx_export::vocabulary as v;
+    for path in [
+        "a-inspection.pdf",
+        "a-inspection-findings.xlsx",
+        "findings.json",
+        "README.txt",
+        "decisions.json",
+        "csv/tickets.csv",
+        "csv/all-findings.csv",
+        "json/all-findings.json",
+        "csv/deviations.csv",
+        "json/deviations.json",
+        "something-else.bin",
+    ] {
+        let (purpose, _) = manifest_file_facts(path);
+        assert_eq!(v::banned_synonym_in(&purpose), None, "{path}: {purpose}");
+        for old in ["curated", "all-findings", "sub-group", "provenance"] {
+            assert!(
+                !purpose.to_lowercase().contains(old),
+                "{path}: {purpose:?} says {old:?}"
+            );
+        }
+        assert!(
+            !purpose.contains(['\u{2014}', '\u{2013}'])
+                && !purpose.contains(", and ")
+                && !purpose.contains(", or "),
+            "{path}: {purpose:?}"
+        );
+    }
+    // The two all-findings files are the rows of findings.json, not a sheet of the workbook.
+    for path in ["csv/all-findings.csv", "json/all-findings.json"] {
+        let (purpose, _) = manifest_file_facts(path);
+        assert!(
+            !purpose.to_lowercase().contains("table of the workbook")
+                && !purpose.to_lowercase().contains("xlsx"),
+            "{path}: {purpose:?} calls it a workbook table"
+        );
+        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+    }
+    for old in [
+        "manifest",
+        "RFC 4180",
+        "ingestion",
+        "artifact",
+        "across sheets",
+    ] {
+        for path in [
+            "a-inspection-findings.xlsx",
+            "README.txt",
+            "csv/deviations.csv",
+            "json/deviations.json",
+            "something-else.bin",
+        ] {
+            let (purpose, _) = manifest_file_facts(path);
+            assert!(!purpose.contains(old), "{path}: {purpose:?} says {old:?}");
+        }
+    }
+    let (tickets, _) = manifest_file_facts("csv/tickets.csv");
+    assert!(tickets.contains("each fix"), "{tickets}");
+}
+
 // ── Corpus freshness is operator-only (design amendment 2026-10-21, part 4) ──
 //
 // The corpus-freshness nag, banner and `corpus_freshness` JSON are for the operator who
