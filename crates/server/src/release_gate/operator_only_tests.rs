@@ -186,6 +186,29 @@ fn a_term_in_any_workbook_part_is_refused() {
     );
 }
 
+/// A rich-text shared string can split a phrase across `<r>` runs, so no workbook part holds it
+/// whole; only the cell-text pass, which joins the runs, can find it.
+#[test]
+fn a_phrase_split_across_rich_text_runs_in_the_workbook_is_refused() {
+    let mut pkg = package();
+    pkg.xlsx = rewrite_xlsx_part(&pkg.xlsx, "xl/sharedStrings.xml", |xml| {
+        xml.replacen(
+            "</sst>",
+            "<si><r><t xml:space=\"preserve\">worth a </t></r><r><t>conversation</t></r></si></sst>",
+            1,
+        )
+    });
+    let failure = refused(release(pkg), "rich-text runs");
+    let problems = internal_notes_problems(&failure);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.location.starts_with("shared string #")
+                && p.evidence.as_deref() == Some("worth a conversation")),
+        "{problems:?}"
+    );
+}
+
 /// The PDF's text: the caller's own extraction, the bytes of a stand-in, and a PDF that cannot
 /// be read, which is refused because it could not be checked.
 #[test]
