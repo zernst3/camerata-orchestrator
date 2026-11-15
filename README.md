@@ -84,17 +84,17 @@ The full graph of all 30 workspace members is in [`PLATFORM.md`](PLATFORM.md#the
 
 ## By the numbers
 
-I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In under five months:
+I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In five months:
 
 | | |
 |---|---|
-| Rust | over 650,000 lines of Rust across 29 crates and one maintainer tool, including tests |
-| Tests | 11,000+ automated tests; roughly half the lines are test code |
+| Rust | over 700,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Tests | 12,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
 | Rule library | 443 rules across 22 domains; 442 cite at least one published source (901 sources in all) |
 | Commits | 2,800+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
-The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
+The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so deterministic detectors ship with a positive test and a "safe twin" that proves each stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
 
 ## How it runs
 
