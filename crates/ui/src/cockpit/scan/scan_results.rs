@@ -362,6 +362,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // strip), and find the one timer here.
     use_context_provider(|| review.clone());
     let mut stats_open = use_signal(|| false);
+    // THE REWRITE ADVISORY (INTERNAL ONLY): fetched each time the stats view opens, drawn in it.
+    let mut advisory_panel =
+        use_signal(|| Option::<camerata_ui_core::rewrite_advisory::PanelState>::None);
     // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
     // persisted in the draft: it is a lens, not a decision, and the curator always wants to
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
@@ -781,6 +784,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 rsx! {
                     super::review::ReviewStatsModal {
                         stats,
+                        advisory: advisory_panel(),
                         on_save: Callback::new(move |()| {
                             let json = json.clone();
                             spawn(async move {
@@ -2055,7 +2059,21 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 project_id: project_id.clone(),
                                 counts: Some(triage_counts),
                                 review: Some(review.clone()),
-                                on_open_stats: Callback::new(move |()| stats_open.set(true)),
+                                on_open_stats: {
+                                    let advisory_pid = project_id.clone();
+                                    Callback::new(move |()| {
+                                        stats_open.set(true);
+                                        advisory_panel.set(Some(
+                                            camerata_ui_core::rewrite_advisory::PanelState::Loading,
+                                        ));
+                                        let pid = advisory_pid.clone();
+                                        spawn(async move {
+                                            let state =
+                                                super::review::fetch_rewrite_advisory(&pid).await;
+                                            advisory_panel.set(Some(state));
+                                        });
+                                    })
+                                },
                             }
                         }
                     }

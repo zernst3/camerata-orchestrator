@@ -23,6 +23,7 @@ pub mod evidence;
 pub mod held;
 pub mod holds;
 pub mod junk;
+mod operator_only;
 mod report;
 mod secrets;
 mod text_style;
@@ -377,6 +378,16 @@ fn audit_zip_with(
         CheckId::Secrets,
         archive_secret_problems(&entries, pdf_text),
     );
+    // The PDF's text, read once for the two checks that read it, when the caller has not.
+    let pdf_pages: std::collections::BTreeMap<String, text_style::PdfText> = if pdf_text.is_some() {
+        std::collections::BTreeMap::new()
+    } else {
+        entries
+            .iter()
+            .filter(|(name, _)| name.ends_with(".pdf"))
+            .map(|(name, bytes)| (name.clone(), text_style::pdf_text(bytes)))
+            .collect()
+    };
     // The operator's own review package (internal) carries engine notes, discarded rows and review
     // flags; it is not a client file, so the text-style check is a client-package check.
     report.record(
@@ -384,8 +395,13 @@ fn audit_zip_with(
         if allow_incomplete {
             Vec::new()
         } else {
-            text_style::archive_problems(&entries, pdf_text)
+            text_style::archive_problems(&entries, pdf_text, &pdf_pages)
         },
+    );
+    // The rewrite advisory is never in any zip, internal included, so this check holds both.
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::archive_problems(&entries, pdf_text, &pdf_pages),
     );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
@@ -645,6 +661,11 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     }
     report.record(CheckId::Content, package.tool_claim_problems.clone());
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    // The PDF's data, for every package: the advisory is never in any zip, internal included.
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::text_problems("PDF data (data.json)", "data.json", &package.data_json),
+    );
     // The PDF's text is whatever its data and its template make of it; a banned character in the
     // data is caught here before Typst is given anything, and the compiled PDF's own text is read
     // by the archive pass above.
@@ -716,6 +737,10 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     report.record(
         CheckId::ClientTextStyle,
         text_style::json_bytes_problems("PDF data (data.json)", data_json.as_bytes()),
+    );
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::text_problems("PDF data (data.json)", "data.json", data_json),
     );
     if report.is_clean() {
         Ok(())
@@ -796,3 +821,6 @@ mod discarded_tests;
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;
+
+#[cfg(test)]
+mod operator_only_tests;
