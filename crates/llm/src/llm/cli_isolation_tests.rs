@@ -121,3 +121,32 @@ fn the_recorded_session_directory_is_the_spawn_directory() {
         std::path::PathBuf::from("/Users/auditor/clients/acme")
     );
 }
+
+/// Guard: whatever the request holds, the built command names a working directory. A command
+/// that names none inherits the launcher's, which is what loaded a repo's instructions and the
+/// operator's notes into every audit prompt.
+#[test]
+fn no_request_shape_can_leave_the_working_directory_inherited() {
+    let launch = std::env::current_dir().expect("cwd");
+    let requests = [
+        LlmRequest::new("plain"),
+        LlmRequest::new("empty repo path").with_repo_read(""),
+        LlmRequest::new("no repo dirs").with_repo_read_dirs(Vec::new()),
+        LlmRequest::new("empty entries")
+            .with_repo_read_dirs(vec![std::path::PathBuf::new(), std::path::PathBuf::new()]),
+        LlmRequest::new("system prompt").with_system("You are an auditor."),
+        LlmRequest::new("repo").with_repo_read("/Users/auditor/clients/acme"),
+        LlmRequest::new("repos").with_repo_read_dirs(vec![
+            "/Users/auditor/clients/acme".into(),
+            "/Users/auditor/clients/beta".into(),
+        ]),
+    ];
+    for req in requests {
+        let cmd = build_cli_command(&req, "claude-sonnet-5-5", "sid");
+        let dir = cmd
+            .as_std()
+            .get_current_dir()
+            .unwrap_or_else(|| panic!("{:?} inherits the launcher's directory", req.prompt));
+        assert_ne!(dir, launch.as_path(), "{:?}", req.prompt);
+    }
+}
