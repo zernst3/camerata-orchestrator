@@ -229,6 +229,36 @@ async fn both_quotes_and_the_actual_are_in_the_ledger() {
     assert!(!shown.contains("spend limit"), "{shown}");
 }
 
+/// R-9: when the re-quote's expected cost is above `--max-cost-usd` the line says so; the run
+/// still stops at the limit as before.
+#[tokio::test]
+async fn the_requote_line_names_the_limit_when_it_is_exceeded() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(dir.path());
+    let jobs = JobStore::new();
+    let jid = jobs.create("quote e2e", None);
+    // Above the scan stage's one call, below what the stages after it are quoted at.
+    let cap = 0.015;
+    let report = scan(dir.path(), Some(cap), &jobs, &jid).await;
+
+    let requotes = report.ledger.quotes().unwrap().requotes.clone();
+    assert_eq!(requotes.len(), 1, "{requotes:?}");
+    let q = &requotes[0];
+    assert!(q.expected_usd > cap, "{q:?}");
+    let shown = jobs.get(&jid).unwrap().requote.unwrap();
+    assert!(
+        shown.contains(
+            "The expected cost is above the spend limit of $0.01: the run stops at the limit and \
+             says what was not run."
+        ),
+        "{shown}"
+    );
+    assert!(
+        report.ledger.is_cost_capped(),
+        "the limit stopped the run as it always has"
+    );
+}
+
 /// A run without a pre-flight plan makes no re-quote and keeps no quotes.
 #[tokio::test]
 async fn a_run_without_a_plan_makes_no_requote() {
