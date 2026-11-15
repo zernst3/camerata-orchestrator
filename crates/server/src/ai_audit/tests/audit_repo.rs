@@ -2104,6 +2104,46 @@ fn req_a5_6_violates_option_rows_stay_defect_never_deviation() {
     );
 }
 
+/// A1 item 1: a row of a convention rule whose own fault is an objective security fault (here a
+/// missing ownership check on an update, an IDOR) is a Defect even though the rule is decided
+/// by the codebase's majority convention. It still counts in the departure statistics (the
+/// numerator and the denominator see it), but its kind is never Deviation. A low borderline row
+/// under the SAME rule (access is enforced, only the shape departs) stays a Deviation.
+#[test]
+fn a1_objective_authorization_fault_stays_defect_but_still_counts_as_a_departure() {
+    use camerata_api_types::audit::FindingKind;
+    let rule = "ARCH-FETCH-THEN-AUTHORIZE-1";
+    let mut idor = deviation_fixture(rule, "src/routes/pieces.js", 65);
+    idor.severity = "high".to_string();
+    idor.detail = "Piece PATCH updates any piece by id without fetching or authorizing \
+        ownership. Any authenticated user can therefore modify any other user's piece, \
+        including pieces in other studios (an IDOR). The sibling delete handler scopes by \
+        user id, so this route is missing the check."
+        .to_string();
+    let mut style = deviation_fixture(rule, "src/routes/pieces.js", 54);
+    style.severity = "low".to_string();
+    style.detail = "Ownership check done inline in the handler rather than via an \
+        authorization step. Borderline: access is enforced, the check is an ad-hoc inline \
+        comparison."
+        .to_string();
+    let mut findings = vec![idor, style];
+    let recs = vec![deviation_rec(rule, "opt-a", Some(4))];
+    let alts = vec![two_option_alternatives(rule, Some("opt-a"))];
+    assign_deviation_kinds(&mut findings, &recs, &alts);
+    assert_eq!(
+        findings[0].kind,
+        Some(FindingKind::Defect),
+        "a missing ownership check on an update is an objective authorization fault"
+    );
+    match &findings[1].kind {
+        Some(FindingKind::Deviation(d)) => assert_eq!(
+            d.deviating_sites, 2,
+            "the defect row still counts as a departure from the convention"
+        ),
+        other => panic!("the low inline-check row stays a Deviation, got {other:?}"),
+    }
+}
+
 /// req A5.3: "no convention adopted" is ONE informational row per rule, enforced
 /// structurally — even a malformed recommendations vec carrying TWO no-convention
 /// entries for one rule yields exactly one row. Verified failing by removing the
