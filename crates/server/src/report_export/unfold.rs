@@ -20,8 +20,8 @@
 //! * its site key is built from the host's key, the carried rule and the place's own key, so a
 //!   decision on it sticks across exports, and a ruling that rules it out leaves nothing to unfold
 //!   again;
-//! * a place that already has a row of its own (same rule and same site key, or the same rule at
-//!   the same repo, path and line) gets no second row.
+//! * a place that already has a row of its own (the same rule at the same repo, path and line, the
+//!   identity the review tree's unfold uses) gets no second row.
 //!
 //! The carried places are removed from the host as they are unfolded, so a count that reads the
 //! host and the new rows (a Patterns across services cell) counts each place once, and
@@ -68,12 +68,10 @@ pub(crate) fn unfold_ruled_out(
         return 0;
     }
     let mut keys: HashSet<String> = HashSet::new();
-    let mut sited: HashSet<(String, String)> = HashSet::new();
     let mut placed: HashSet<(String, String, usize, String)> = HashSet::new();
     for f in &report.findings {
         let rule = f.rule_id.to_ascii_uppercase();
         keys.insert(finding_key(f));
-        sited.insert((rule.clone(), finding_key(f)));
         placed.insert((f.repo.clone(), f.path.clone(), f.line, rule));
         for b in &f.flagged_by {
             placed.insert((
@@ -124,18 +122,22 @@ pub(crate) fn unfold_ruled_out(
                 camerata_api_types::site_key::site_key(&c.repo, &c.path, &c.rule_id, &c.snippet, 0);
             let rule = c.rule_id.to_ascii_uppercase();
             let place = (c.repo.clone(), c.path.clone(), c.line, rule.clone());
-            if sited.contains(&(rule.clone(), own_key.clone())) || placed.contains(&place) {
+            if placed.contains(&place) {
                 continue;
             }
             let base = format!("{host_key}\u{0}unfolded\u{0}{}\u{0}{own_key}", c.rule_id);
+            // Two places of one rule in one file can share a snippet (or have none): the place's
+            // line tells them apart, then a counter for the rest.
             let mut key = base.clone();
+            if keys.contains(&key) {
+                key = format!("{base}\u{0}line{}", c.line);
+            }
             let mut n = 1;
             while keys.contains(&key) {
                 key = format!("{base}\u{0}{n}");
                 n += 1;
             }
             keys.insert(key.clone());
-            sited.insert((rule, own_key));
             placed.insert(place);
             added.push(row_for(host, &host_key, c, key));
         }

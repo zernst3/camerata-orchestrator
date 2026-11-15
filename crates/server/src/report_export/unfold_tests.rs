@@ -536,3 +536,79 @@ fn a_tool_row_filed_under_a_native_rule_keeps_that_rules_own_sites() {
         "the own-family site stays"
     );
 }
+
+// ── two places of one rule in one file are two problems ──────────────────────────────────
+
+fn b_site_at(line: usize, snippet: &str) -> MergedLocation {
+    MergedLocation::site(WEB, "src/query.ts", line, RULE_B, snippet, false)
+        .with_rating("medium", "Query built from user input")
+}
+
+fn host_carrying(sites: Vec<MergedLocation>) -> ScanReport {
+    let mut r = report_of(&[API, WEB]);
+    ran(&mut r, API, RULE_A, 1);
+    ran(&mut r, WEB, RULE_A, 0);
+    ran(&mut r, API, RULE_B, 0);
+    ran(&mut r, WEB, RULE_B, 1);
+    let mut h = host(API);
+    h.also_locations = sites;
+    r.findings.push(h);
+    r
+}
+
+fn lines_of(reviewed: &ReviewedReport, rule: &str) -> Vec<usize> {
+    let mut lines: Vec<usize> = unfolded(reviewed, rule).iter().map(|f| f.line).collect();
+    lines.sort_unstable();
+    lines
+}
+
+#[test]
+fn two_places_of_one_rule_with_one_snippet_in_one_file_are_two_problems() {
+    let r = host_carrying(vec![
+        b_site_at(7, "query(userInput)"),
+        b_site_at(30, "query(userInput)"),
+    ]);
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    assert_eq!(lines_of(&reviewed, RULE_B), vec![7, 30]);
+    let keys: std::collections::HashSet<&str> = unfolded(&reviewed, RULE_B)
+        .iter()
+        .map(|f| f.site_key.as_str())
+        .collect();
+    assert_eq!(keys.len(), 2, "each problem has a key of its own");
+    let host_row = reviewed
+        .report()
+        .findings
+        .iter()
+        .find(|f| f.rule_id == RULE_A)
+        .unwrap();
+    assert!(host_row.also_locations.is_empty());
+}
+
+#[test]
+fn a_carried_place_beside_a_problem_of_its_own_in_the_same_file_still_gets_a_problem() {
+    let mut r = host_carrying(vec![b_site_at(30, "query(userInput)")]);
+    r.findings.push(Finding {
+        repo: WEB.to_string(),
+        path: "src/query.ts".to_string(),
+        line: 7,
+        rule_id: RULE_B.to_string(),
+        severity: "medium".to_string(),
+        snippet: "query(userInput)".to_string(),
+        detail: "The query is built from user input.".to_string(),
+        kind: Some(FindingKind::Defect),
+        ..Finding::default()
+    });
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    assert_eq!(
+        lines_of(&reviewed, RULE_B),
+        vec![30],
+        "line 30 has no problem of its own, so it gets one"
+    );
+}
+
+#[test]
+fn two_places_with_no_snippet_in_one_file_are_two_problems() {
+    let r = host_carrying(vec![b_site_at(7, ""), b_site_at(30, "")]);
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    assert_eq!(lines_of(&reviewed, RULE_B), vec![7, 30]);
+}
