@@ -34,7 +34,9 @@
 //! - the matching stop call (`clearInterval`, `removeEventListener`, `unsubscribe`,
 //!   `removeChannel`, `close`) anywhere in the callback, nested functions included;
 //! - a handle stored on a member (`timer.current = setInterval(...)`), which another effect may
-//!   clear;
+//!   clear; the same when the start is bound to a name first and that name is later assigned to
+//!   a member or an outer variable, or passed as a call argument (`setSocket(ws)`), in the
+//!   callback;
 //! - `addEventListener` with `{ once: true }`, or on an object the callback itself created with
 //!   `new` or `document.createElement`;
 //! - `setTimeout`: a one-shot timer is often harmless, so it is left to the semantic read;
@@ -46,7 +48,8 @@
 //! The rule is wider than these shapes (a one-shot timeout that sets state after unmount, an
 //! observer, a third-party widget, a fetch with no abort). So the checker opts into
 //! [`ArchChecker::advisory_coexisting`] and the rule id stays in the semantic prompt, while
-//! [`ArchChecker::defects_need_review`] is `false`: the proven shape is a fact.
+//! [`ArchChecker::defects_need_review`] is `true` (owner ruling, 2026-11-15): the findings are
+//! review-only, never a hard CI fail, until the checker has run on real repositories.
 //!
 //! # Severity
 //!
@@ -148,9 +151,9 @@ impl ArchChecker for EffectCleanupChecker {
         true
     }
 
-    /// The proven shape is a fact: CI may fail on it.
+    /// Review-only until the checker has run on real repositories (owner ruling, 2026-11-15).
     fn defects_need_review(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -279,7 +282,7 @@ fn check_effect(path: &str, source: &str, call: Node<'_>) -> Option<ArchViolatio
                 }
             }
             "call_expression" => {
-                if let Some(start) = start_call(node, source, &created_locally) {
+                if let Some(start) = start_call(node, source, body, &created_locally) {
                     starts.push(start);
                 }
             }
@@ -287,7 +290,7 @@ fn check_effect(path: &str, source: &str, call: Node<'_>) -> Option<ArchViolatio
                 let ctor = node.child_by_field_name("constructor");
                 if let Some(c) = ctor.filter(|c| c.kind() == "identifier") {
                     let name = text(c, source);
-                    if CONNECTION_CONSTRUCTORS.contains(&name) && !stored_on_member(node) {
+                    if CONNECTION_CONSTRUCTORS.contains(&name) && !handed_off(node, body, source) {
                         starts.push(Start {
                             name: name.to_string(),
                             line: line(node),
@@ -413,7 +416,71 @@ fn stored_on_member(node: Node<'_>) -> bool {
             .is_some_and(|r| r.id() == node.id())
 }
 
-fn start_call(call: Node<'_>, source: &str, created_locally: &HashSet<String>) -> Option<Start> {
+/// Whether the handle a start returns leaves the effect for someone else to stop: stored on a
+/// member, assigned to a variable declared outside the callback, or bound to a name that is
+/// later stored on a member, assigned to an outer variable or passed as a call argument.
+fn handed_off(start: Node<'_>, body: Node<'_>, source: &str) -> bool {
+    if stored_on_member(start) {
+        return true;
+    }
+    let Some(parent) = start.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "assignment_expression" => {
+            parent
+                .child_by_field_name("right")
+                .is_some_and(|r| r.id() == start.id())
+                && parent.child_by_field_name("left").is_some_and(|l| {
+                    l.kind() == "identifier" && !declared_in(body, text(l, source), source)
+                })
+        }
+        "variable_declarator" => {
+            let Some(name) = parent
+                .child_by_field_name("name")
+                .filter(|n| n.kind() == "identifier")
+            else {
+                return false;
+            };
+            let name = text(name, source);
+            subtree(body).any(|n| escapes_as(n, name, body, source))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `node` hands the identifier `name` to code outside the effect's own straight line.
+fn escapes_as(node: Node<'_>, name: &str, body: Node<'_>, source: &str) -> bool {
+    let is_name = |n: Node<'_>| n.kind() == "identifier" && text(n, source) == name;
+    match node.kind() {
+        "assignment_expression" => {
+            let right_is_name = node.child_by_field_name("right").is_some_and(is_name);
+            right_is_name
+                && node.child_by_field_name("left").is_some_and(|l| {
+                    l.kind() == "member_expression"
+                        || (l.kind() == "identifier" && !declared_in(body, text(l, source), source))
+                })
+        }
+        "arguments" => named_children(node).into_iter().any(is_name),
+        _ => false,
+    }
+}
+
+/// Whether `name` is declared with `const`, `let` or `var` anywhere in the callback body.
+fn declared_in(body: Node<'_>, name: &str, source: &str) -> bool {
+    subtree(body).any(|n| {
+        n.kind() == "variable_declarator"
+            && n.child_by_field_name("name")
+                .is_some_and(|d| d.kind() == "identifier" && text(d, source) == name)
+    })
+}
+
+fn start_call(
+    call: Node<'_>,
+    source: &str,
+    body: Node<'_>,
+    created_locally: &HashSet<String>,
+) -> Option<Start> {
     let callee = call.child_by_field_name("function")?;
     let name = called_name(call, source)?;
     let starts = match name {
@@ -431,9 +498,12 @@ fn start_call(call: Node<'_>, source: &str, created_locally: &HashSet<String>) -
             });
             !local && !has_once_option(call, source)
         }
-        _ => callee.kind() == "member_expression" && SUBSCRIBE_METHODS.contains(&name),
+        // `subscribe` alone is too common a bare name; the modular Firebase listeners are bare
+        // calls (`onSnapshot(query, cb)`), so those names count without a receiver.
+        "subscribe" => callee.kind() == "member_expression",
+        _ => SUBSCRIBE_METHODS.contains(&name),
     };
-    if !starts || stored_on_member(call) {
+    if !starts || handed_off(call, body, source) {
         return None;
     }
     Some(Start {

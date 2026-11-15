@@ -382,3 +382,187 @@ fn malformed_input_degrades_to_no_findings() {
         let _ = one("src/x.tsx", src);
     }
 }
+
+// ── round-1 review: handle hand-offs, extra starts and pinned choices ─────
+
+#[test]
+fn safe_twin_a_handle_bound_to_a_const_then_stored_in_a_ref() {
+    let src = "\
+import { useEffect, useRef } from 'react';
+export function E() {
+  const timer = useRef(null);
+  useEffect(() => {
+    const id = setInterval(tick, 1000);
+    timer.current = id;
+  }, []);
+  useEffect(() => () => clearInterval(timer.current), []);
+  return null;
+}
+";
+    let vs = one("src/E.tsx", src);
+    assert!(vs.is_empty(), "{vs:#?}");
+}
+
+#[test]
+fn safe_twin_a_connection_bound_to_a_const_then_passed_to_a_setter() {
+    let src = "\
+import { useEffect, useState } from 'react';
+export function S({ url }) {
+  const [socket, setSocket] = useState(null);
+  useEffect(() => {
+    const ws = new WebSocket(url);
+    setSocket(ws);
+  }, [url]);
+  useEffect(() => () => socket?.close(), [socket]);
+  return null;
+}
+";
+    let vs = one("src/S.tsx", src);
+    assert!(vs.is_empty(), "{vs:#?}");
+}
+
+#[test]
+fn safe_twin_a_handle_assigned_to_a_variable_declared_outside_the_callback() {
+    let src = "\
+import { useEffect } from 'react';
+export function T() {
+  let timerId;
+  useEffect(() => {
+    timerId = setInterval(tick, 1000);
+  }, []);
+  useEffect(() => () => clearInterval(timerId), []);
+  return null;
+}
+";
+    let vs = one("src/T.tsx", src);
+    assert!(vs.is_empty(), "{vs:#?}");
+}
+
+#[test]
+fn a_handle_bound_to_a_const_and_never_used_again_is_still_reported() {
+    let src = "\
+import { useEffect } from 'react';
+export function U() {
+  useEffect(() => {
+    const id = setInterval(tick, 1000);
+  }, []);
+  return null;
+}
+";
+    let vs = one("src/U.tsx", src);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+}
+
+#[test]
+fn the_checkers_defects_need_review() {
+    assert!(
+        EffectCleanupChecker.defects_need_review(),
+        "findings are review-only until the checker has run on real repositories"
+    );
+}
+
+#[test]
+fn a_null_guard_before_a_subscription_with_no_cleanup_is_reported() {
+    let src = "\
+import { useEffect } from 'react';
+export function G({ user, client }) {
+  useEffect(() => {
+    if (!user) return null;
+    client.channel('x').subscribe();
+  }, [user, client]);
+  return null;
+}
+";
+    let vs = one("src/G.tsx", src);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert_eq!(vs[0].object.as_deref(), Some("subscribe"));
+}
+
+#[test]
+fn safe_twin_a_valued_conditional_return_keeps_the_checker_quiet() {
+    // Documented choice: any return that hands React a value silences the checker, even on one
+    // branch. Whether the other branch also needs a cleanup is the semantic read's call.
+    let src = "\
+import { useEffect } from 'react';
+export function V({ on }) {
+  useEffect(() => {
+    const id = setInterval(tick, 1000);
+    if (on) return () => clearTimeout(0);
+    window.addEventListener('resize', f);
+  }, [on]);
+  return null;
+}
+";
+    let vs = one("src/V.tsx", src);
+    assert!(vs.is_empty(), "{vs:#?}");
+}
+
+#[test]
+fn an_event_source_opened_by_an_effect_with_no_cleanup_is_reported() {
+    let src = "\
+import { useEffect } from 'react';
+export function F({ url }) {
+  useEffect(() => {
+    new EventSource(url);
+  }, [url]);
+  return null;
+}
+";
+    let vs = one("src/F.tsx", src);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert_eq!(vs[0].object.as_deref(), Some("EventSource"));
+}
+
+#[test]
+fn a_firestore_snapshot_listener_with_no_cleanup_is_reported() {
+    let src = "\
+import { useEffect } from 'react';
+import { onSnapshot } from 'firebase/firestore';
+export function Orders({ q, setRows }) {
+  useEffect(() => {
+    onSnapshot(q, (snap) => setRows(snap.docs));
+  }, [q]);
+  return null;
+}
+";
+    let vs = one("src/Orders.tsx", src);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert_eq!(vs[0].object.as_deref(), Some("onSnapshot"));
+}
+
+#[test]
+fn firebase_auth_listeners_with_no_cleanup_are_reported() {
+    for call in ["onAuthStateChanged", "onIdTokenChanged"] {
+        let src = format!(
+            "\
+import {{ useEffect }} from 'react';
+import {{ {call} }} from 'firebase/auth';
+export function Gate({{ auth, setUser }}) {{
+  useEffect(() => {{
+    {call}(auth, (u) => setUser(u));
+  }}, [auth]);
+  return null;
+}}
+"
+        );
+        let vs = one("src/Gate.tsx", &src);
+        assert_eq!(vs.len(), 1, "{call}: {vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some(call));
+    }
+}
+
+#[test]
+fn a_window_set_interval_with_no_cleanup_is_reported() {
+    let src = "\
+import { useEffect } from 'react';
+export function W() {
+  useEffect(() => {
+    window.setInterval(tick, 1000);
+  }, []);
+  return null;
+}
+";
+    let vs = one("src/W.tsx", src);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert_eq!(vs[0].object.as_deref(), Some("setInterval"));
+}
