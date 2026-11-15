@@ -102,6 +102,22 @@ pub(crate) fn held_note(severity: &str) -> String {
 /// How every held-severity note starts (see [`held_note`]).
 pub(crate) const HELD_NOTE_PREFIX: &str = "severity held at ";
 
+/// How the note of a row returned to its reviewed severity starts (see [`returned_note`]).
+pub(crate) const RETURNED_NOTE_PREFIX: &str = "severity returned to ";
+
+/// The one sentence a client reads when a floor raised a row and a reviewer's doubt sent it back
+/// to its reviewed severity. It replaces the raise note and the held note; the raise goes to the
+/// operator-only hold detail.
+pub(crate) fn returned_note(severity: &str) -> String {
+    format!("{RETURNED_NOTE_PREFIX}{severity} pending a decision")
+}
+
+/// Whether `note` says a row is held for a decision (held in place, or returned and held). Such a
+/// note is never dropped when a row is full.
+pub(crate) fn is_hold_note(note: &str) -> bool {
+    note.starts_with(HELD_NOTE_PREFIX) || note.starts_with(RETURNED_NOTE_PREFIX)
+}
+
 /// `source` was just folded into `row` by a merge. A source nobody doubted marks the row as
 /// holding one ([`UNDOUBTED_SOURCE_CAPTURE`]); a source a reviewer doubted, folded into a row
 /// nobody doubted, holds the row with a note that one source was doubted. Either way a doubted
@@ -214,8 +230,7 @@ pub fn is_security_or_data_loss(reason: EscalationReason) -> bool {
 ///
 /// The review tree already turns a convention row's security reason into `rule_misfit` when a
 /// row of a security rule shares its site, so a reason still here is the reviewer's view of this
-/// row alone. Untouched: any other kind, a reason off the list, no reason, and a row stage 1
-/// never rated.
+/// row alone. Untouched: any other kind, a reason off the list, and no reason.
 fn security_deviation_becomes_defect(f: &mut Finding) {
     use camerata_api_types::audit::FindingKind;
     use camerata_rules::severity_bounds::{
@@ -231,12 +246,6 @@ fn security_deviation_becomes_defect(f: &mut Finding) {
     else {
         return;
     };
-    if crate::ai_audit::stage1_of(f)
-        .and_then(|s| s.severity)
-        .is_none()
-    {
-        return;
-    }
     f.kind = Some(FindingKind::Defect);
     // This sentence reaches the client: it names the problem, not the reviewer stage.
     let why = format!(
@@ -317,11 +326,20 @@ fn return_doubted_row_to_reviewed_severity(
             }
             f.severity = reviewed.clone();
             f.needs_review = true;
+            // The client reads one sentence. The raise notes that put the row at `shown` go to
+            // the operator-only detail, and the held note is not written twice.
+            let raises = take_raise_notes(f, &shown);
+            crate::severity_bounds::record_adjustment(f, returned_note(&reviewed));
+            let raised = if raises.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", raises.join("; "))
+            };
             record_hold(
                 f,
                 &format!(
                     "{}, so no minimum severity raises it; it keeps the reviewed severity \
-                     ({reviewed}) instead of {shown} and is held for a decision",
+                     ({reviewed}) instead of {shown}{raised} and is held for a decision",
                     doubt.phrase()
                 ),
             );
@@ -338,6 +356,28 @@ fn return_doubted_row_to_reviewed_severity(
             );
         }
     }
+}
+
+/// Remove from `f`'s recorded adjustments the notes that raised it to `to`, and return them.
+fn take_raise_notes(f: &mut Finding, to: &str) -> Vec<String> {
+    let suffix = format!(" to {to}");
+    let mut taken = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+    for note in crate::severity_bounds::recorded_adjustments(f) {
+        let head = note.split(':').next().unwrap_or("");
+        if note.starts_with("severity raised from ") && head.ends_with(&suffix) {
+            taken.push(note);
+        } else {
+            kept.push(note);
+        }
+    }
+    if !taken.is_empty() {
+        f.captures.insert(
+            crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+            kept.join("\n"),
+        );
+    }
+    taken
 }
 
 /// The strongest floor that applies to `f`: the rule's minimum or the phrase floor, whichever

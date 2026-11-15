@@ -111,14 +111,23 @@ pub(crate) fn record_adjustment(f: &mut Finding, note: String) {
     if entry.lines().any(|l| l == note) {
         return;
     }
+    // A row returned to its reviewed severity already says it is held; a held-in-place sentence
+    // after it would say the same thing twice.
+    if note.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX)
+        && entry
+            .lines()
+            .any(|l| l.starts_with(crate::follow_reviewers::RETURNED_NOTE_PREFIX))
+    {
+        return;
+    }
     if entry.lines().count() >= MAX_RECORDED_ADJUSTMENTS {
-        if !note.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX) {
+        if !crate::follow_reviewers::is_hold_note(&note) {
             return;
         }
         let mut lines: Vec<&str> = entry.lines().collect();
         let Some(oldest) = lines
             .iter()
-            .position(|l| !l.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX))
+            .position(|l| !crate::follow_reviewers::is_hold_note(l))
         else {
             return;
         };
@@ -164,7 +173,15 @@ pub(crate) fn severity_adjustment_lines(
         f,
         corpus_rule_for(&f.rule_id, corpus),
     );
+    let returned = notes
+        .iter()
+        .any(|n| n.starts_with(crate::follow_reviewers::RETURNED_NOTE_PREFIX));
     for note in now {
+        // A row returned to its reviewed severity already says it is held (see
+        // [`record_adjustment`]).
+        if returned && note.starts_with(crate::follow_reviewers::HELD_NOTE_PREFIX) {
+            continue;
+        }
         if !notes.contains(&note) {
             notes.push(note);
         }

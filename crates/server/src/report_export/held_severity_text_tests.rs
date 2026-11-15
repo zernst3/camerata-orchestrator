@@ -162,3 +162,29 @@ fn the_internal_workbook_carries_the_reviewer_detail() {
     let client = every_cell(&workbook(&sealed, &set, false));
     assert!(!client.contains("judged it not real"), "{client}");
 }
+
+/// A row the floor raised and a reviewer's doubt sent back to its reviewed severity: the client
+/// reads one neutral sentence, with no raise and no reviewer in it.
+#[test]
+fn a_client_workbook_row_returned_to_its_reviewed_severity_says_so_in_one_sentence() {
+    let set = corpus();
+    let mut f = finding("SYN-HOLD-TEXT-1", "src/return.rs", 9, "low");
+    f.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+    f.captures.insert(
+        crate::ai_audit::STAGE1_CAPTURE.to_string(),
+        serde_json::json!({ "real": "yes", "reason": "synthetic", "severity": "low" }).to_string(),
+    );
+    let mut rows = vec![f];
+    crate::severity_bounds::apply_scan_severity_bounds(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "critical", "the floor raised it");
+    rows[0].review.escalation_reason =
+        Some(camerata_api_types::review::EscalationReason::RuleMisfit);
+    crate::follow_reviewers::follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "low");
+    let sealed = super::tests::report_with(rows, vec!["SYN-HOLD-TEXT-1"]).seal();
+    let notes = severity_notes(&workbook(&sealed, &set, false));
+    assert!(!notes.is_empty(), "the row carries a severity note");
+    for note in &notes {
+        assert_eq!(note, "Severity returned to low pending a decision.");
+    }
+}

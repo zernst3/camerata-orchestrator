@@ -111,7 +111,7 @@ fn a_row_the_group_reviewer_doubted_after_the_floor_returns_to_stage_one_severit
     assert!(rows[0].needs_review);
     let why = notes(&rows[0]);
     assert!(
-        why.contains("severity held at low pending a decision"),
+        why.contains("severity returned to low pending a decision"),
         "{why}"
     );
     assert!(!why.contains("misfit"), "{why}");
@@ -761,4 +761,39 @@ fn a_promoted_site_row_does_not_carry_the_hosts_doubt() {
     // The host's own doubt still holds it at its reviewed severity.
     assert_eq!(rows[0].severity, "low", "{}", notes(&rows[0]));
     assert!(rows[0].needs_review);
+}
+
+/// Defect 3 (round 2): a security-reason Deviation no stage 1 record rated is a Defect too.
+#[test]
+fn a_security_reason_deviation_with_no_stage_one_record_becomes_a_defect() {
+    let set = corpus(&[("SYN-NO-STAGE1-CONVENTION-1", None)]);
+    let mut row = deviation_row(
+        "SYN-NO-STAGE1-CONVENTION-1",
+        "medium",
+        Some(EscalationReason::AuthorizationBypass),
+    );
+    row.captures.remove(crate::ai_audit::STAGE1_CAPTURE);
+    let rows = after_group_review(vec![row], &set);
+    assert!(is_defect(&rows[0]), "{:?}", rows[0].kind);
+}
+
+/// Wording (round 2): a row the floor raised and the group reviewer's doubt sent back to stage
+/// 1's severity says one neutral sentence to the client, not the raise and then the hold.
+#[test]
+fn a_row_returned_to_its_reviewed_severity_says_so_in_one_sentence() {
+    let set = corpus(&[("SYN-RETURN-TEXT-1", Some("critical"))]);
+    let mut rows = vec![reviewed_row("SYN-RETURN-TEXT-1", "low", "yes")];
+    apply_scan_severity_bounds(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "critical");
+    rows[0].review.escalation_reason = Some(EscalationReason::RuleMisfit);
+    follow_reviewers(&mut rows, Some(&set));
+    assert_eq!(rows[0].severity, "low");
+    assert!(rows[0].needs_review);
+    assert_eq!(
+        recorded_adjustments(&rows[0]),
+        vec!["severity returned to low pending a decision".to_string()]
+    );
+    // The raise detail is the operator's.
+    let detail = hold_detail(&rows[0]);
+    assert!(detail.contains("critical"), "{detail}");
 }
