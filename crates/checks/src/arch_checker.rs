@@ -318,6 +318,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
         Box::new(crate::state_shape_checker::StateShapeChecker),
+        Box::new(crate::effect_cleanup_checker::EffectCleanupChecker),
         Box::new(crate::needless_complexity_checker::NeedlessComplexityChecker),
         Box::new(crate::test_assertion_checker::TestAssertionChecker),
         Box::new(crate::firebase::FirebaseRulesChecker::default()),
@@ -659,6 +660,15 @@ mod tests {
         );
         assert!(any_registered_checker_answers(
             "TESTING-MEANINGFUL-ASSERTION-1"
+        ));
+        // The effect-cleanup checker proves one shape (work started with no returned cleanup);
+        // one-shot timers, observers and widgets are the judgment half the semantic pass keeps.
+        assert!(
+            !ids.contains("JAVASCRIPT-REACT-EFFECT-CLEANUP-1"),
+            "JAVASCRIPT-REACT-EFFECT-CLEANUP-1 must stay LLM-advisory-eligible: {ids:?}"
+        );
+        assert!(any_registered_checker_answers(
+            "JAVASCRIPT-REACT-EFFECT-CLEANUP-1"
         ));
         // But the checker IS registered and DOES answer the rule id (just excluded from
         // this particular subtraction set).
