@@ -1245,6 +1245,7 @@ fn estimate_run_with_regeneration(
         flags,
         regen_of,
         scale_regen_output,
+        None,
     );
     (tokens, stages.total(), passes)
 }
@@ -1303,6 +1304,7 @@ pub fn estimate_run_stage_dollars_with(
         flags,
         regeneration_expected,
         true,
+        None,
     )
     .1
 }
@@ -1316,6 +1318,7 @@ fn estimate_run_stages_with_regeneration<'a>(
     flags: RunFlags,
     regen_of: fn(f64) -> RegenerationEstimate,
     scale_regen_output: bool,
+    known_sites: Option<usize>,
 ) -> (u64, RunStageDollars, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -1387,8 +1390,12 @@ fn estimate_run_stages_with_regeneration<'a>(
         * scan_scale;
     let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64 * scan_scale;
 
-    // The findings the scan reports, from its output volume (text, before the model's scale).
-    let (findings_out, findings) = run_findings(fit, repo, mode);
+    // The findings the scan reports, from its output volume (text, before the model's scale), or
+    // the count the scan stage actually reported once it has run (the re-quote, `requote`).
+    let (findings_out, findings) = match known_sites {
+        Some(sites) => (sites as f64 * REGEN_SCAN_TOKENS_PER_FINDING, sites as f64),
+        None => run_findings(fit, repo, mode),
+    };
 
     // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
     // and the site's own text; see [`calibration_estimate`]. ──
@@ -1611,6 +1618,11 @@ pub fn unknown_rules_repo_line(repo: &str) -> String {
 pub fn unreadable_repo_line(repo: &str, why: &str) -> String {
     format!("{repo}: could not be read ({why}). It is not in this estimate.")
 }
+
+mod requote;
+pub use requote::{
+    estimate_after_scan, requote_after_scan, requote_line, AfterScanEstimate, Requote, RequoteInput,
+};
 
 #[cfg(test)]
 mod saved_runs_tests;
