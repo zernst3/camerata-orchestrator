@@ -224,9 +224,9 @@ fn authored_pdf_prose_has_no_second_person() {
     );
 }
 
-#[test]
-fn authored_prose_has_no_serial_comma() {
-    let sources: [(&str, &str, bool); 23] = [
+/// Every source file whose string literals reach a client (the PDF, the workbook, the README).
+fn prose_sources() -> [(&'static str, &'static str, bool); 23] {
+    [
         ("scan.rs", include_str!("../../routes/scan.rs"), false),
         ("ownership.rs", include_str!("../../ownership.rs"), false),
         ("scan_tools.rs", include_str!("../../scan_tools.rs"), false),
@@ -302,7 +302,44 @@ fn authored_prose_has_no_serial_comma() {
             include_str!("../../../templates/audit_report.typ"),
             true,
         ),
-    ];
+    ]
+}
+
+/// No em or en dash in the literals of those files, except `scan_tools.rs`: it also holds the
+/// operator's own diagnostics (log and panic text), which no client reads, and its client-facing
+/// strings are held by the release gate's text-style check on the finished files.
+#[test]
+fn authored_prose_has_no_em_or_en_dash() {
+    let mut offenders = Vec::new();
+    for (name, source, is_template) in prose_sources() {
+        if name == "scan_tools.rs" {
+            continue;
+        }
+        for prose in authored_prose(source, is_template) {
+            if let Some(at) = prose.find(['\u{2014}', '\u{2013}']) {
+                let from = prose[..at]
+                    .char_indices()
+                    .rev()
+                    .nth(30)
+                    .map_or(0, |(i, _)| i);
+                let to = prose[at..]
+                    .char_indices()
+                    .nth(30)
+                    .map_or(prose.len(), |(i, _)| at + i);
+                offenders.push(format!("{name}: ...{}...", &prose[from..to]));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "em or en dash in authored prose (write a colon, a comma or two sentences):\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn authored_prose_has_no_serial_comma() {
+    let sources = prose_sources();
     let mut offenders = Vec::new();
     for (name, source, is_template) in sources {
         for prose in authored_prose(source, is_template) {
