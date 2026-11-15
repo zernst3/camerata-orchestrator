@@ -282,3 +282,78 @@ fn a_package_whose_clean_cell_has_only_a_ruled_out_problem_clears_the_gate() {
     );
     assert!(patterns_section_problems(&entries, &report).is_empty());
 }
+
+const RULE_B: &str = "SEC-OTHER-RULE-1";
+
+/// A package where the portal's only row (rule `RULE`) absorbed a rule B site in the web and the
+/// reviewer ruled that row out. Rule B's cell for the web must stay open.
+fn package_with_ruled_out_host_absorbing_another_rules_site(
+) -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let mut report = two_repo_report();
+    report
+        .ledger
+        .record_rule("acme/portal", RULE_B, RuleTier::Semantic, true, None, 5, 0);
+    report
+        .ledger
+        .record_rule("acme/web", RULE_B, RuleTier::Semantic, true, None, 5, 1);
+    report.findings[0].also_locations = vec![crate::onboard::MergedLocation::site(
+        "acme/web",
+        "src/query.rs",
+        7,
+        RULE_B,
+        "query(x)",
+        false,
+    )];
+    let sealed = report.seal();
+    let host_key = crate::report_export::finding_key(&sealed.findings[0]);
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        host_key,
+        crate::report_export::DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "the value is a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let options = client_options();
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        STEM,
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles");
+    entries_of(package)
+}
+
+#[test]
+fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refused() {
+    let (mut entries, report) = package_with_ruled_out_host_absorbing_another_rules_site();
+    let section = report.patterns_across_services.as_ref().unwrap();
+    assert_eq!(section.rows.len(), 1, "anti-vacuity: rule B differs");
+    assert_eq!(section.rows[0].rule_id, RULE_B);
+    assert_eq!(
+        section.rows[0]
+            .cells
+            .iter()
+            .find(|c| c.repo == "acme/web")
+            .unwrap()
+            .state,
+        crate::scan_ledger::CellState::Violated { sites: 1 },
+        "anti-vacuity: the absorbed site keeps the web cell open"
+    );
+    assert!(patterns_section_problems(&entries, &report).is_empty());
+    plant_clean_cell(&mut entries, "acme/web");
+    let problems = patterns_section_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.file == "findings.json"
+            && p.message.contains("acme/web")
+            && p.message.contains(RULE_B)
+            && p.message.contains("clean")),
+        "{problems:?}"
+    );
+}

@@ -2202,9 +2202,52 @@ pub struct FindingsExport {
     /// counts from the rows (design 3B). A client package carries only what the client reads; an
     /// internal one adds the architect's triage of each node.
     pub tree: TreeJson,
+    /// The places of other rules that a ruled-out row carries and that stay open: a ruling on a
+    /// row clears its own rule, not another rule's site a merge put on it. The ruled-out row is
+    /// not in `findings`, so these places are listed here and the release gate reads them with
+    /// `findings`. Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub open_beside_ruled_out: Vec<OpenSiteJson>,
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
     /// (item #1). Every row's `fix_id` names one of these.
     pub fixes: Vec<crate::review_tree::FixNode>,
+}
+
+/// One open place of a rule that a ruled-out row carries ([`FindingsExport::open_beside_ruled_out`]).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpenSiteJson {
+    pub repo: String,
+    pub rule_id: String,
+    pub path: String,
+    pub line: usize,
+}
+
+/// The places of other rules (or other services) that ruled-out rows carry: every absorbed site
+/// whose rule or service is not the row's own, and every rule the row also matches. Collapsed
+/// sources (`flagged_by`) are the same site as the row and are ruled with it.
+fn open_beside_ruled_out(rows: &[FindingRow]) -> Vec<OpenSiteJson> {
+    let mut out = Vec::new();
+    for row in rows.iter().filter(|r| r.is_fp) {
+        for site in &row.also_locations {
+            if site.repo != row.repo || !site.rule_id.eq_ignore_ascii_case(&row.rule_id) {
+                out.push(OpenSiteJson {
+                    repo: site.repo.clone(),
+                    rule_id: site.rule_id.clone(),
+                    path: site.path.clone(),
+                    line: site.line,
+                });
+            }
+        }
+        for rule in &row.also_match_ids {
+            out.push(OpenSiteJson {
+                repo: row.repo.clone(),
+                rule_id: rule.clone(),
+                path: row.path.clone(),
+                line: row.line,
+            });
+        }
+    }
+    out
 }
 
 /// The tree in `findings.json`.
@@ -2228,8 +2271,10 @@ pub fn build_findings_export(
 ) -> FindingsExport {
     let (rows, _dep_rows) =
         partition_rows_for(reviewed, corpus, chosen_options, report_json.internal);
+    let open_beside_ruled_out = open_beside_ruled_out(&rows);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
+        open_beside_ruled_out,
         provenance: report_json.cover.clone(),
         summary: report_json.executive_summary.clone(),
         findings,

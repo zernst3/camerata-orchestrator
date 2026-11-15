@@ -979,6 +979,20 @@ impl OpenProblems {
         Self { by_repo_rule }
     }
 
+    /// Add the places of other rules that ruled-out rows carry (`open_beside_ruled_out`): the
+    /// ruled-out row is not among the rows, but these places are still open.
+    fn add_sites(&mut self, sites: Option<&Value>) {
+        for site in sites.and_then(Value::as_array).into_iter().flatten() {
+            let rule = cell_text(site, "rule_id").trim().to_ascii_uppercase();
+            if !rule.is_empty() {
+                *self
+                    .by_repo_rule
+                    .entry((cell_text(site, "repo"), rule))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
     /// The open problems for the rule (by its id or its title) in `repo`.
     fn count(&self, repo: &str, rule_id: &str, title: &str) -> usize {
         let get = |name: &str| {
@@ -1055,7 +1069,8 @@ pub fn patterns_clean_cell_problems(entries: &Entries, report: &AuditReportJson)
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let open = OpenProblems::of(&rows);
+    let mut open = OpenProblems::of(&rows);
+    open.add_sites(findings_json.get("open_beside_ruled_out"));
     let mut problems = Vec::new();
     if let Some(section) = findings_json.get("patterns_across_services") {
         problems.extend(clean_beside_open_problem("findings.json", section, &open));
