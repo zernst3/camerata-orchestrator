@@ -1,5 +1,5 @@
 id = "ARCH-BOUNDED-LIST-READS-1"
-version = 1
+version = 2
 title = "Every list read that serves a request is bounded by a limit or a page, so no endpoint returns a whole growing table"
 domain = "api-layer"
 layer = "universal"
@@ -22,13 +22,14 @@ cwe = ["CWE-770"]
 # recognised code for it, and the vendor query docs cited below document the bounding call.
 # Only the owner sets `verified`.
 verification = "grounded"
-# Routing: only files that contain a query call are sent this rule. The markers are the list
-# calls of the common data-access libraries (PostgREST/Supabase and Drizzle and Knex `.select(`,
-# Prisma `findMany(`, Sequelize and JPA `findAll(`, Mongoose and TypeORM `.find(`, TypeORM
-# `getMany(`, Django `objects.all(`/`objects.filter(`, SQLAlchemy `.all()`, Rails `.all.`,
-# Entity Framework `ToList(`/`ToListAsync(`) plus raw SQL `select `. Over-inclusion only costs
+# Routing: only files that contain a query call are sent this rule. The markers are deliberately
+# broad substrings (lowercased) so a library's list call is caught whatever its spelling: `select`
+# covers PostgREST, Drizzle, Knex, Kysely `selectFrom` and raw SQL with any whitespace after the
+# keyword, `.all` covers Rails and SeaORM, `::all(` Laravel, `.where(` Rails, `.get(`/`->get(`
+# Firestore and Laravel, `getdocs(` Firestore, `.load` Diesel, `findby` Spring Data, `toarray`
+# and `tolist` Entity Framework, `objects.` the Django manager. Over-inclusion only costs
 # tokens; a missing marker would cost recall, so the list errs wide.
-applies_to = { contains_any = [".select(", "findmany(", "findall(", ".find(", "getmany(", "objects.all(", "objects.filter(", ".all()", ".all.", "tolist(", "tolistasync(", "select "] }
+applies_to = { contains_any = ["select", "findmany(", "findall(", ".find(", "getmany(", "objects.", ".all", "::all(", ".where(", ".get(", "->get(", "getdocs(", ".load", "findby", "toarray", "tolist"] }
 qualifies = "Applies to code that answers a request or runs on a schedule and reads a list of records from a database or data API: an HTTP route or API handler, a server action, a server component or page loader, a GraphQL resolver, a background job that loads rows into memory. The fault is a read of a collection that grows with use (orders, messages, users, events, audit rows, uploads) with no row limit and no pagination, so the size of the response and the memory and cost of the request grow with the table: a Supabase or PostgREST `.from(t).select(...)` with no `.limit()`, `.range()`, `.single()` or `.maybeSingle()`, a Prisma `findMany` with no `take`, a Sequelize or JPA `findAll` with no limit or Pageable, a Mongoose `find` with no `.limit()`, a Django queryset or SQLAlchemy query evaluated with `.all()` and no slice, an Entity Framework query materialised with `ToList` and no `Take`, a raw SQL `SELECT` with no `LIMIT` or `FETCH FIRST`. A filter alone does not bound a read when the filtered set itself grows (all orders of one customer, all messages in one channel). Not a fault: a read bounded by a limit, a page size, a cursor or a keyset condition; a read of a single row by its key; an aggregate or count query; a read of a collection with a hard, small upper bound that does not grow with use (a country list, a fixed set of plans, a status table), which the code or a comment makes evident; an export or migration script that deliberately streams or batches the whole table. The paging shape itself (cursor or offset) is the separate decision ARCH-CURSOR-PAGINATION-1 records; this rule only requires that some bound exists. A platform-side cap such as a PostgREST `max_rows` setting is a backstop, not the bound: it silently truncates the list instead of paging it. Coverage is the reviewed semantic read of the code; Camerata ships no deterministic check for this rule, because whether a collection has a hard upper bound is a judgment about the data that a syntax check cannot make without false alarms on lookup tables."
 
 # Source note: Names a missing maximum number of records returned in a single request as a cause of the weakness and recommends enforcing a limit on returned records per page.

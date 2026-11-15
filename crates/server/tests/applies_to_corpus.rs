@@ -105,12 +105,61 @@ impl Family {
                 ("Controllers/OrdersController.cs", "var rows = await db.Orders.ToListAsync();"),
                 // Raw SQL in a Go handler.
                 ("internal/http/orders.go", "rows, err := db.Query(\"SELECT id FROM orders\")"),
+                // Rails: a bare `Order.all` at the end of a line, and a `where` query.
+                ("app/controllers/all_orders_controller.rb", "@orders = Order.all\n"),
+                ("app/models/order_scopes.rb", "Order.where(status: 'open')"),
+                // Raw SQL with a newline or a tab after SELECT.
+                ("internal/db/orders_nl.go", "const q = `SELECT\n id FROM orders`"),
+                ("internal/db/orders_tab.go", "const q = `SELECT\tid FROM orders`"),
+                // SeaORM, Diesel, Kysely, SQLAlchemy 2.
+                (
+                    "src/repo/orders.rs",
+                    "let rows = order::Entity::find().all(&db).await?;",
+                ),
+                ("src/repo/diesel_orders.rs", "let rows = orders.load::<Order>(&mut conn)?;"),
+                (
+                    "src/repo/kysely_orders.ts",
+                    "const rows = await db.selectFrom('orders').execute();",
+                ),
+                (
+                    "app/sa2.py",
+                    "rows = session.execute(select(Order)).scalars()",
+                ),
+                // Firestore, Laravel, Entity Framework, Spring Data.
+                ("src/feed/firestore.ts", "const snap = await getDocs(collection(db, 'orders'));"),
+                (
+                    "src/feed/firestore_admin.ts",
+                    "const snap = await admin.firestore().collection('orders').get();",
+                ),
+                ("app/Http/Controllers/OrderController.php", "$orders = Order::all();"),
+                ("app/Http/Controllers/OrderGetController.php", "$orders = Order::query()->get();"),
+                ("Controllers/ArrayController.cs", "var rows = await db.Orders.ToArrayAsync();"),
+                (
+                    "src/main/java/OrderService.java",
+                    "List<Order> rows = orderRepository.findByStatus(status);",
+                ),
+                // Django queryset methods other than `all` and `filter`.
+                ("orders/exclude_views.py", "rows = Order.objects.exclude(status='x')"),
+                ("orders/values_views.py", "rows = Order.objects.values('id')"),
             ],
             Family::ReactEffects => vec![
                 ("src/components/Clock.tsx", "useEffect(() => { setInterval(tick, 1000); }, []);"),
                 ("app/feed/page.jsx", "React.useEffect(() => { ch.subscribe(); });"),
                 ("src/hooks/usePosition.ts", "useLayoutEffect(() => measure(), []);"),
                 ("lib/legacy.js", "import { useEffect } from 'react';"),
+                // Effect hooks reached through a wrapper name.
+                (
+                    "src/hooks/useSize.ts",
+                    "useIsomorphicLayoutEffect(() => { window.addEventListener('resize', f); }, []);",
+                ),
+                (
+                    "src/hooks/useTick.ts",
+                    "useUpdateEffect(() => { setInterval(tick, 1000); }, [n]);",
+                ),
+                (
+                    "src/hooks/useDeep.ts",
+                    "useDeepCompareEffect(() => { ch.subscribe(); }, [opts]);",
+                ),
             ],
             Family::AsyncCode => vec![
                 (

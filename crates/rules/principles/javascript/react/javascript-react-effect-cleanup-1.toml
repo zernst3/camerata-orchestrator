@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-EFFECT-CLEANUP-1"
-version = 1
+version = 2
 title = "An effect that starts an interval, a listener, a subscription or a connection returns a cleanup function that stops it"
 domain = "javascript:react"
 layer = "framework"
@@ -23,8 +23,9 @@ cwe = ["CWE-772"]
 # `verified`.
 verification = "grounded"
 # Routing: only ECMAScript files (the JAVASCRIPT- id prefix) that mention an effect hook are
-# sent this rule. A file with no `useEffect`/`useLayoutEffect` text cannot hold the fault.
-applies_to = { contains_any = ["useeffect", "uselayouteffect"] }
+# sent this rule. `layouteffect` and `effect(` also admit wrapper hooks such as
+# useIsomorphicLayoutEffect, useUpdateEffect and useDeepCompareEffect.
+applies_to = { contains_any = ["useeffect", "layouteffect", "effect("] }
 qualifies = "Applies to React function components and custom hooks. One shape is checked deterministically, with no judgment involved, in JavaScript, JSX, TypeScript and TSX files where useEffect or useLayoutEffect comes from react (or from Preact's hooks): a synchronous effect callback with a block body that, in its own body (not inside a nested callback), calls setInterval, addEventListener, subscribe, onAuthStateChange, onAuthStateChanged, onIdTokenChanged or onSnapshot, or constructs a WebSocket or an EventSource, and has no return statement that hands React a value. Not reported by the deterministic check: any effect that returns a value (the check does not judge whether the cleanup is complete); an expression-bodied arrow effect, which returns the subscription's own result; an async effect callback; work started only inside a nested callback; an effect that calls clearInterval, removeEventListener, unsubscribe, removeChannel, close or abort anywhere; a handle stored on a member such as a ref for another effect to stop; a listener added with once set to true, or on an object the effect itself created; setTimeout; test, story, generated, vendored and minified files. Everything else this rule covers (a one-shot timeout that sets state after the component unmounts, a ResizeObserver or IntersectionObserver never disconnected, a third-party widget never destroyed, a fetch whose response is applied after unmount with no abort or ignore flag, a cleanup that stops only part of what the effect started) is a judgment, and is assessed by the reviewed semantic read of the code rather than by the deterministic check. No off-the-shelf linter rule reports a missing effect cleanup: the React Hooks plugin checks hook order and dependency arrays only."
 
 # Source note: Step 3 of the guide states that an effect which connects, subscribes or starts
