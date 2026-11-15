@@ -18,7 +18,7 @@ const FIRED_OPENING: &str = "Worth a conversation: fix or rewrite.";
 /// The opening line when fewer than two are over.
 pub(super) const NOT_FIRED: &str = "No rewrite signal this run.";
 /// The opening line when a guard holds.
-pub(super) const NOT_ENOUGH: &str = "Not enough to say.";
+pub(super) const NOT_ENOUGH: &str = "Not enough to say whether there is a rewrite signal.";
 
 pub(super) const NO_REVIEW_TREE: &str = "The run has no review tree, so it has no Fixes to count.";
 pub(super) const NO_SCAN: &str = "The run did not complete: no scan ran.";

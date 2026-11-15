@@ -18,7 +18,9 @@
 //! ordinary words in [`GENERIC_KEYS`], which are not searched for.
 //!
 //! The bare word "rewrite" is NOT on the list (owner ruling): a client's own code and an ordinary
-//! fix can say it. Only the distinctive keys and phrases are.
+//! fix can say it. Only the distinctive keys and phrases are. "rewrite signal" is on it because
+//! every outcome's text holds it (a test pins that); "fix or rewrite" is not, since an honest fix
+//! text can say that.
 
 /// The advisory's distinctive JSON keys. The gate searches every client surface for these.
 pub const INTERNAL_ONLY_KEYS: &[&str] = &[
@@ -36,6 +38,7 @@ pub const INTERNAL_ONLY_PHRASES: &[&str] = &[
     "Rewrite advisory",
     "rewrite conversation",
     "worth a conversation",
+    "rewrite signal",
 ];
 
 /// Ordinary words the advisory's shapes also use as keys. They are common in client files too, so
@@ -128,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_deny_list_names_the_six_keys_and_three_phrases_of_the_design() {
+    fn the_deny_list_names_the_six_keys_and_four_phrases_of_the_design() {
         for key in [
             "rewrite_advisory",
             "rewrite_signals",
@@ -143,6 +146,7 @@ mod tests {
             "Rewrite advisory",
             "rewrite conversation",
             "worth a conversation",
+            "rewrite signal",
         ] {
             assert!(
                 INTERNAL_ONLY_PHRASES.contains(&phrase),

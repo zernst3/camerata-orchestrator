@@ -415,7 +415,10 @@ fn assert_guarded(a: &RewriteAdvisory, reason: GuardReason) {
         "{:?}",
         a.guards
     );
-    assert_eq!(a.lines[0], "Not enough to say.");
+    assert_eq!(
+        a.lines[0],
+        "Not enough to say whether there is a rewrite signal."
+    );
     assert_eq!(a.lines.len(), 1 + a.guards.len(), "{:?}", a.lines);
 }
 
@@ -640,6 +643,31 @@ fn the_text_never_advises_and_keeps_the_house_style() {
         assert!(
             !text.contains(", and ") && !text.contains(", or "),
             "a serial comma in {text}"
+        );
+    }
+}
+
+/// The advisory's own sentences are tied to the deny list: the text of every outcome holds a
+/// deny-listed phrase, so the gate would refuse the advisory itself if it reached a package.
+#[test]
+fn every_outcome_text_holds_a_deny_listed_term() {
+    let fired = advisory(&fired_fixture());
+    assert_eq!(fired.outcome, Outcome::Fired);
+    let not_fired = advisory(&report_of(BIG, &lows(3), Vec::new()));
+    assert_eq!(not_fired.outcome, Outcome::NotFired);
+    let mut gap = report_of(1_000, &[fx("x", None, 1)], Vec::new());
+    gap.ai_error = Some("e".to_string());
+    let guarded = advisory(&gap);
+    assert_eq!(guarded.outcome, Outcome::NotEnoughToSay);
+    for (what, a) in [
+        ("fired", &fired),
+        ("not fired", &not_fired),
+        ("not enough to say", &guarded),
+    ] {
+        assert!(
+            !camerata_api_types::rewrite_advisory::terms_in(&a.lines.join("\n")).is_empty(),
+            "{what}: no deny-listed term in {:?}",
+            a.lines
         );
     }
 }
