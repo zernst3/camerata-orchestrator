@@ -445,7 +445,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      a high place whose reason is a secret exposed, data loss, cross-tenant access, authorization
      bypass or injection. A place with unverified evidence always goes past it, because the release
      gate refuses that row without a decision. Places below the line are listed by **Show below the
-     line** and are checked like any other problem. Once a queue row is decided, its **Needed me**
+     line** and are checked like any other problem. Once a queue row is decided, its **Needed**
      box records whether the reviewer needed to see that place; it is available only for rows above
      the line, and the workbook marks escalated places "Reviewed in person".
    - **Engine Check.** An internal sample of rows for their own quality control: one
@@ -1160,7 +1160,7 @@ the `AskUserQuestion` design: the operator picks from concrete options rather th
 box.
 
 Everything is **auto-saved**: open questions and the answers survive a restart. The operator can close the
-app, come back later and resume exactly where the operator left off. The cross-UoW **attention queue** (the left rail of
+app, come back later and resume exactly where the operator left off. The cross-UoW **NEEDS YOU** queue (in the left rail of
 the Governed Development view, with a count) lists every open question across all stories, so the operator never misses a
 waiting pause point.
 
@@ -1175,9 +1175,9 @@ Beyond clarifying questions, a governed **development** run can pause for a **re
 decision only the operator should make. This happens when the agent's work meets the escalation condition of a
 rule the operator selected (for example, modifying an existing test, which `AGENTIC-NO-TEST-TAMPER-1` calls for
 review on). Instead of failing, the run **pauses**: it checkpoints its state, leaves the worktree
-intact, and parks in an **awaiting review** state with a review badge
+intact, and parks in an awaiting-review state and shows a **NEEDS YOUR REVIEW** badge
 
-The paused run shows up in the same attention queue. Open it and the operator gets a review panel:
+The paused run shows up in the same **NEEDS YOU** queue. Open it and the operator gets a review panel:
 
 - **What happened**: the rule, what specifically met its condition and the agent's reasoning.
 - A **chat** with the lead-engineer assistant to discuss it (chatting never decides anything).
@@ -1297,8 +1297,8 @@ work in flight; the transcript persists to the UoW. Failures surface as an error
 draft is kept for retry. (This is distinct from the **Bug-fix loop** below, which starts a fresh
 gated re-run on the same branch.)
 
-**Bootstrap run: skip layer-2 checks (the chicken-and-egg escape hatch).** The development-run
-control carries a **default-OFF** "bootstrap run: skip layer-2 checks" toggle. Layer 2 is
+**Bootstrap run, which skips the layer-2 checks (the chicken-and-egg escape hatch).** The development-run
+control carries a **default-OFF** bootstrap-run toggle (its label says it skips the layer-2 checks). Layer 2 is
 fail-closed: a repo with a manifest but no lint/test wired fails as "could-not-run," which is
 correct governance but creates a deadlock, the very run that would install the linters fails layer
 2 because the tools aren't there yet. Enabling this toggle skips only the post-task layer-2
@@ -2383,7 +2383,7 @@ A compact, persistent **usage meter** is pinned to the right of the cockpit nav 
 cumulative token and dollar spend for the current session: `<tokens> tok · $<cost> · <calls> calls`.
 Click it to expand a by-model breakdown table.
 
-When the provider is rate-limiting requests, the meter swaps to an amber pulsing **Rate-limited, retrying** badge instead of the normal readout. This clears automatically when the next request
+When the provider is rate-limiting requests, the meter swaps to an amber pulsing badge that says the provider is rate-limiting and the request is retrying instead of the normal readout. This clears automatically when the next request
 succeeds.
 
 The meter accumulates spend across ALL model calls, the audit, calibration, research chat, story

@@ -8,7 +8,7 @@ The package is one ZIP. It holds a PDF, an Excel workbook, files for tools and a
 
 Three kinds of reader use it, each with a different file:
 
-- **The client's leadership** reads the PDF. It is a summary of about 15 pages, written for a person who will not open a spreadsheet. It does not carry every row, and that is by design.
+- **The client's leadership** reads the PDF. It is a summary of 20 pages at most, written for a person who will not open a spreadsheet. It does not carry every row, and that is by design.
 - **The client's engineers** work from the workbook and the files for tools. The workbook holds every problem once, the fixes in the order to do them and the reason for each. The CSV and JSON files and the ticket file hold the same rows for scripts and issue trackers.
 - **The architect who reviewed the report** reads the reviewer sheets at the end of the workbook, which show how problems were grouped and what each reviewer decision was.
 
