@@ -96,6 +96,59 @@ fn serial_commas(text: &str) -> Vec<String> {
     found
 }
 
+/// Each second-person word in a prose, with the text around it (cut on character boundaries).
+fn second_person_in(prose: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    let mut from = 0;
+    while from < prose.len() {
+        let rest = &prose[from..];
+        let Some(start) = rest.find(|c: char| c.is_alphanumeric()) else {
+            break;
+        };
+        let word_len = rest[start..]
+            .find(|c: char| !c.is_alphanumeric() && c != '\'')
+            .unwrap_or(rest.len() - start);
+        let (word_start, word_end) = (from + start, from + start + word_len);
+        let word = &prose[word_start..word_end];
+        if [
+            "you", "your", "yours", "yourself", "you'll", "you're", "you've", "you'd",
+        ]
+        .contains(&word.to_lowercase().as_str())
+        {
+            let before = prose[..word_start]
+                .char_indices()
+                .rev()
+                .nth(40)
+                .map_or(0, |(i, _)| i);
+            let after = prose[word_end..]
+                .char_indices()
+                .nth(40)
+                .map_or(prose.len(), |(i, _)| word_end + i);
+            hits.push(format!("...{}", &prose[before..after]));
+        }
+        from = word_end.max(from + start + 1);
+    }
+    hits
+}
+
+#[test]
+fn the_second_person_scan_finds_every_form_and_cuts_on_a_character_boundary() {
+    for text in [
+        "you've seen it",
+        "what you'd do",
+        "If you act",
+        "Your code",
+        "yours",
+    ] {
+        assert_eq!(second_person_in(text).len(), 1, "{text}");
+    }
+    // Multi-byte characters around the hit must not panic the excerpt.
+    let text = "ééééééééééééééééééééééééééééééééééééééééééééé you ééééééééééééééééééééééééééééééééééééééééééééé";
+    assert_eq!(second_person_in(text).len(), 1);
+    assert!(second_person_in("The client's code, not yours truly's, is read").len() == 1);
+    assert!(second_person_in("a young youth").is_empty());
+}
+
 /// The PDF speaks of the client in the third person: no "you" or "your" in the prose the report
 /// writes for it, outside a sheet name the vocabulary owns ("Your conventions").
 #[test]
@@ -143,21 +196,8 @@ fn authored_pdf_prose_has_no_second_person() {
                 continue;
             }
             let prose = prose.replace(crate::xlsx_export::vocabulary::YOUR_CONVENTIONS, " ");
-            for word in prose.split(|c: char| !c.is_alphanumeric() && c != '\'') {
-                if ["you", "your", "yours", "yourself", "you'll", "you're"]
-                    .contains(&word.to_lowercase().as_str())
-                {
-                    let at = prose.find(word).unwrap_or(0);
-                    let from = prose[..at]
-                        .char_indices()
-                        .rev()
-                        .nth(40)
-                        .map_or(0, |(i, _)| i);
-                    offenders.push(format!(
-                        "{name}: ...{}",
-                        &prose[from..prose.len().min(at + 40)]
-                    ));
-                }
+            for hit in second_person_in(&prose) {
+                offenders.push(format!("{name}: {hit}"));
             }
         }
     }
