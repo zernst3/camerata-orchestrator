@@ -1075,7 +1075,7 @@ fn clean_beside_open_problem(file: &str, section: &Value, open: &OpenProblems) -
                         "the patterns section says {rule_id} is clean in {repo}, and the package \
                          holds {} open for that rule in {repo}; a clean cell beside an open \
                          problem is a false all-clear",
-                        crate::xlsx_export::vocabulary::problems_count(n)
+                        crate::xlsx_export::vocabulary::places_count(n)
                     ),
                 ));
             }

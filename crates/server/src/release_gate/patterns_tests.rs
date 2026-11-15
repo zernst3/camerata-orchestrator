@@ -206,6 +206,17 @@ fn the_gate_refuses_a_patterns_cell_that_says_clean_beside_an_open_problem() {
             && p.message.contains("clean")),
         "{problems:?}"
     );
+    let expected = format!(
+        "the patterns section says {RULE} is clean in acme/portal, and the package holds 1 place \
+         open for that rule in acme/portal; a clean cell beside an open problem is a false \
+         all-clear"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "findings.json" && p.message == expected),
+        "{problems:?}"
+    );
 }
 
 #[test]
