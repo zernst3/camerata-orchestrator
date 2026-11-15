@@ -429,7 +429,7 @@ fn the_patterns_panel_prints_each_cell_as_stated_and_is_read_only() {
         "{html}"
     );
     for expected in [
-        "Violated, 2 sites",
+        "2 places",
         "Clean",
         "Not applicable: no files",
         "Not reviewed: spend limit",
