@@ -154,7 +154,7 @@ pub(crate) struct SubgroupFacts {
     pub is_dependency: bool,
 }
 
-fn effort_majority<'a>(efforts: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn effort_majority<'a>(efforts: impl Iterator<Item = &'a str>) -> String {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for e in efforts.filter(|e| !e.is_empty()) {
         *counts.entry(e).or_default() += 1;
