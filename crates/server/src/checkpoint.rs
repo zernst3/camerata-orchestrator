@@ -421,6 +421,15 @@ pub async fn with_run_checkpoints<F: std::future::Future>(
     }
 }
 
+/// The folder of the run in scope (the parent of its checkpoint folder), or `None` outside a run.
+/// The re-quote after the scan stage is kept there ([`crate::quote`]).
+pub fn run_dir_in_scope() -> Option<PathBuf> {
+    RUN_CHECKPOINT_DIR
+        .try_with(|dir| dir.parent().map(std::path::Path::to_path_buf))
+        .ok()
+        .flatten()
+}
+
 /// The checkpoint key of one batch of a stage's round: the round, then a digest of the site keys
 /// of the findings it covers. The same findings asked in a later round (a smaller batch, a
 /// re-ask) have a key of their own, so a restart replays a round's finished batches and never

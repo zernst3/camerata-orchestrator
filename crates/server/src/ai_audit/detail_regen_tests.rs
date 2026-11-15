@@ -322,6 +322,7 @@ fn meter_with(config: EfficiencyConfig) -> UsageMeter {
         efficiency: config,
         max_cost_usd: None,
         estimate_hint_usd: None,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
@@ -777,6 +778,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        quote_plan: None,
     });
     let (findings, failed) = audit(&llm, &meter).await;
     assert_eq!(findings.len(), 1);
@@ -849,6 +851,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        quote_plan: None,
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -1584,6 +1587,7 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        quote_plan: None,
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -3126,6 +3130,7 @@ mod batch_route {
             efficiency: EfficiencyConfig::default(),
             max_cost_usd: Some(cap),
             estimate_hint_usd: None,
+            quote_plan: None,
             fix_model: None,
             clone_judge_model: None,
             consensus: false,

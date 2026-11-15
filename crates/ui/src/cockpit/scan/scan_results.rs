@@ -103,6 +103,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // `failed` or vanishes mid-poll. Rendered by `ScanJobFailedBanner`, UNCONDITIONALLY —
     // not gated on a report existing, since a failed job never produces one.
     let mut job_failed_message = use_signal(|| Option::<String>::None);
+    // The re-quote after the scan stage (owner ruling R-9), shown under the progress bar.
+    let mut job_requote = use_signal(|| Option::<String>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let mut active_audit_job = use_context::<Signal<Option<String>>>();
@@ -148,6 +150,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         active_audit_job,
                         scan_idle_ms,
                         job_failed_message,
+                        job_requote,
                         loading_count,
                     )
                     .await;
@@ -172,6 +175,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 active_audit_job,
                 scan_idle_ms,
                 job_failed_message,
+                job_requote,
                 loading_count,
             )
             .await;
@@ -1271,6 +1275,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             detail_finding.set(None);
                             job_progress.set(None);
                             det_progress.set(None);
+                            job_requote.set(None);
                             // Clear any PREVIOUS run's failure banner — a fresh scan starting
                             // is not itself a failure, and a stale message here would look
                             // like this new run already failed before it even began.
@@ -1310,6 +1315,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         active_audit_job,
                                         scan_idle_ms,
                                         job_failed_message,
+                                        job_requote,
                                         loading_count,
                                     )
                                     .await;
@@ -1771,6 +1777,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
                                 span { class: "job-progress-label", "{job_progress_label(done, total, nf, not_run)}" }
+                                JobRequoteLine { line: job_requote() }
                                 // Multi-repo scans run ONE repo at a time, and the pass
                                 // denominator grows as each repo is reached — so the agent
                                 // activity below shows only the repo currently running, not all

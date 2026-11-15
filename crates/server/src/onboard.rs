@@ -3882,6 +3882,11 @@ fn fold_spend_records(
     // orphaned) are spend the ledger cannot count. They are kept whether or not a limit was set:
     // the cap record's copy of them exists only under one.
     ledger.record_runner_notes(meter.notes());
+    // The two-step quote: the pre-flight figure, the re-quotes after each scan stage and what the
+    // run has cost so far (a later stage, the group review, adds its spend to it).
+    if let Some(quotes) = meter.quote_record() {
+        ledger.record_quotes(quotes);
+    }
     // The spend cap: what it stopped is disclosed through the same failed-pass list every other
     // incomplete pass uses, and the amounts stay on the operator ledger.
     if let Some(cap) = meter.cost_cap_record() {

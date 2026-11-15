@@ -34,6 +34,19 @@ pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Elemen
     }
 }
 
+/// The re-quote after the scan stage (owner ruling R-9), under the progress bar of a running
+/// scan: the server words it in the pre-flight's format (`re-quote after the scan stage: about $X,
+/// at most $Y (...)`), naming the spend limit when the expected cost is above it. Nothing until a
+/// scan stage has finished. Its own component so it is SSR-testable on its own.
+#[component]
+pub(in crate::cockpit) fn JobRequoteLine(line: Option<String>) -> Element {
+    rsx! {
+        if let Some(line) = line {
+            p { class: "job-progress-requote", "{line}" }
+        }
+    }
+}
+
 /// The progress line under the bar. Passes the spend limit refused are named on their own and
 /// are NOT in `done`, so a stopped scan never reads as complete.
 pub(in crate::cockpit) fn job_progress_label(

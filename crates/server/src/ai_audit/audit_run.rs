@@ -122,6 +122,9 @@ pub async fn audit_repo(
     // throughout this function) rather than threading a `&mut ScanLedger` through this
     // already-large parameter list — see `crate::scan_ledger::StageSample`'s doc comment.
     let mut stage_samples: Vec<crate::scan_ledger::StageSample> = Vec::new();
+    // What the run had spent when this repo's audit started, so the re-quote after its scan stage
+    // knows what that stage (the alternatives pass and the scan passes) actually cost.
+    let spent_at_start = meter.map_or(0.0, UsageMeter::spent_usd);
     // The delimiter token for every model call of this audit (alternatives, scan and resolution
     // passes). One per run, so the passes keep sharing their cached prefix; see `crate::prompt_frame`.
     // Drawn so that it occurs in no path or file body the run frames (the repo map's set included).
@@ -688,6 +691,18 @@ pub async fn audit_repo(
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
+
+    // TWO-STEP QUOTE (owner ruling R-9): the scan stage has finished and nothing after it has
+    // started, so the sites are a fact. Quote again from them and from what the scan stage cost,
+    // before the detail step and calibration spend most of the money. The rows that go on are the
+    // sites stage 1 calibrates, the count the pre-flight's rate per file predicts.
+    crate::quote::requote_after_scan_stage(
+        meter,
+        job,
+        repo,
+        all_findings.len(),
+        meter.map_or(0.0, UsageMeter::spent_usd) - spent_at_start,
+    );
 
     // RANK 4 `terse_output`: the scan asked for a one-sentence `detail`; the survivors of the
     // first merge get their full detail written NOW, before calibration, because calibration

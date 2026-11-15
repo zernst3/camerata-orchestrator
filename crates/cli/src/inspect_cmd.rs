@@ -281,6 +281,7 @@ impl InspectArgs {
             efficiency,
             max_cost_usd,
             estimate_hint_usd: None,
+            quote_plan: None,
             fix_model: self.fix_model.clone(),
             clone_judge_model: self.clone_judge_model.clone(),
             consensus: self.consensus,
@@ -326,6 +327,9 @@ pub struct InspectOutcome {
     /// The pre-flight estimate that was printed before the first model call (`None` when no
     /// model call was going to be made).
     pub preflight: Option<String>,
+    /// The run's two quotes (the pre-flight figure and the re-quote after each scan stage) and
+    /// what it actually cost (owner ruling R-9). Operator-only. `None` when no pre-flight was made.
+    pub quotes: Option<camerata_server::quote::QuoteRecord>,
     /// Which token-efficiency measures were on for this run.
     pub efficiency: camerata_server::efficiency::EfficiencyConfig,
     /// What the spend limit did, when one was set. Operator-only: it carries dollar figures.
@@ -1051,6 +1055,20 @@ pub async fn run_inspect_pipeline_with(
         }
         (seams.preflight_sink)(&text);
         preflight_text = Some(text);
+        // The resumed run quotes again once a scan stage has run, for the work that remains (owner
+        // ruling R-9): it needs the plan the pre-flight is made from, though it prints none.
+        controls.quote_plan = camerata_server::quote::plan_for_run(
+            &sources,
+            &selected,
+            corpus.as_ref(),
+            model,
+            calibration_model,
+            &controls,
+            &backend_resolution,
+            batch,
+            camerata_server::quote::QuoteEcho::Stdout,
+        )
+        .await;
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
@@ -1082,32 +1100,20 @@ pub async fn run_inspect_pipeline_with(
         } else {
             None
         };
-        let audit_model = camerata_server::ai_audit::resolve_audit_model(model);
-        // The models the run calls beyond the scan, resolved the way the stages resolve them: the
-        // fix stage, and the clone judge when a clone rule is selected. Both are in the figure.
+        // The models the run calls, resolved the way the stages resolve them: the scan, both
+        // reviewers, the fix stage, and the clone judge when a clone rule is selected. All are in
+        // the figure.
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
-        let judge_selected = camerata_server::cost_cap::models_the_run_will_use(
-            model,
-            calibration_model,
-            false,
-            &ids,
-            &controls,
-        )
-        .iter()
-        .any(|(roles, _)| roles.contains("the clone judge"));
+        let resolved =
+            camerata_server::quote::resolve_quote_models(model, calibration_model, &controls, &ids);
         let pf = preflight::build(&preflight::PreflightInputs {
             backend: args.backend,
             batch,
-            fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
-                controls.fix_model_for(model, calibration_model),
-            )),
-            clone_judge_model: judge_selected.then(|| controls.clone_judge_model_for()),
-            calibration_model: camerata_server::ai_audit::resolve_calibration_model(
-                calibration_model,
-                &audit_model,
-            ),
-            group_review_model: controls.group_review_model_for(),
-            model: audit_model,
+            fix_model: resolved.fix,
+            clone_judge_model: resolved.clone_judge,
+            calibration_model: resolved.calibration,
+            group_review_model: resolved.group_review,
+            model: resolved.scan,
             repos: &facts,
             incremental: incremental_prior.is_some(),
             cap_usd: controls.max_cost_usd,
@@ -1117,6 +1123,11 @@ pub async fn run_inspect_pipeline_with(
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
+        // The second quote, once the scan stage has run, is printed under the pre-flight.
+        controls.quote_plan = pf.plan.map(|plan| camerata_server::quote::QuotePlan {
+            echo: camerata_server::quote::QuoteEcho::Stdout,
+            ..plan
+        });
         preflight_text = Some(pf.text);
     }
 
@@ -1452,6 +1463,7 @@ pub async fn run_inspect_pipeline_with(
         release_gate,
         stage_telemetry: report.ledger.stage_telemetry().cloned(),
         preflight: preflight_text,
+        quotes: report.ledger.quotes().cloned(),
         efficiency: controls.efficiency,
         cost_cap: report.ledger.cost_cap().cloned(),
         outage: report.ledger.outage().cloned(),
@@ -1894,6 +1906,11 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
             .as_ref()
             .map(render_outage)
             .unwrap_or_default();
+    let quotes = outcome
+        .quotes
+        .as_ref()
+        .map(camerata_server::quote::QuoteRecord::render)
+        .unwrap_or_default();
     // What the saved run wants the operator to know that is not a failure: in the summary, not in
     // run.json alone.
     let notes: String = outcome
@@ -1903,7 +1920,7 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         .collect();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}{notes}\n{}{telemetry}",
+         {}\nintegrity ledger: {}\n{}\n{quotes}efficiency measures: {}\n{cap}{notes}\n{}{telemetry}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
@@ -2108,6 +2125,7 @@ mod tests {
             release_gate: "release gate: passed (6 checks)".to_string(),
             stage_telemetry: None,
             preflight: None,
+            quotes: None,
             efficiency,
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
@@ -2801,6 +2819,7 @@ mod tests {
             release_gate: "release gate: passed (6 checks)".to_string(),
             stage_telemetry: None,
             preflight: None,
+            quotes: None,
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
             outage: None,
@@ -2841,6 +2860,7 @@ mod tests {
             release_gate: "release gate: passed (6 checks)".to_string(),
             stage_telemetry: None,
             preflight: None,
+            quotes: None,
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
             outage: None,
@@ -2897,6 +2917,7 @@ mod tests {
             release_gate: String::new(),
             stage_telemetry: Some(meter.snapshot(8_000)),
             preflight: None,
+            quotes: None,
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
             outage: None,

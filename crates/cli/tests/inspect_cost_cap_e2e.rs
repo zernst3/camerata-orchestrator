@@ -212,6 +212,32 @@ async fn the_estimate_is_printed_before_the_first_model_call() {
     let report = camerata::inspect_cmd::format_outcome_report(&outcome);
     assert!(report.contains("warm_schedule=off"), "{report}");
     assert!(!outcome.cost_capped());
+
+    // R-9: the run quotes again after the scan stage, and keeps both quotes and the actual. The
+    // pre-flight figure on record is the one printed before the first model call.
+    assert!(outcome.quotes.is_some(), "the run kept its quotes");
+    let quotes = outcome.quotes.as_ref().unwrap();
+    assert!(
+        text.contains(&format!(
+            "estimated cost: about ${:.2}",
+            quotes.preflight_expected_usd
+        )),
+        "{text} vs {quotes:?}"
+    );
+    assert_eq!(
+        quotes.requotes.len(),
+        1,
+        "one repo, one re-quote: {quotes:?}"
+    );
+    assert_eq!(
+        quotes.actual_usd,
+        outcome.actual_usage.as_ref().map(|u| u.cost_usd),
+        "the actual is what the run cost"
+    );
+    assert!(
+        report.contains("re-quote after the scan stage: about $") && report.contains("actual: $"),
+        "{report}"
+    );
 }
 
 #[tokio::test]

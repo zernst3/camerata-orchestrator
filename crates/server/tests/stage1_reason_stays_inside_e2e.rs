@@ -127,6 +127,7 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
         efficiency,
         max_cost_usd: None,
         estimate_hint_usd: None,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,

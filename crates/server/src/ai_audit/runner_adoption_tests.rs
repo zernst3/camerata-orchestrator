@@ -839,6 +839,7 @@ fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {
         efficiency: crate::efficiency::EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
         estimate_hint_usd: hint,
+        quote_plan: None,
         fix_model: None,
         clone_judge_model: None,
         consensus: false,

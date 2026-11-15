@@ -420,6 +420,7 @@ pub async fn run_repeatability_with(
         efficiency,
         max_cost_usd: Some(per_run),
         estimate_hint_usd: pf.estimate_usd,
+        quote_plan: None,
         // No explicit fix model: the fix stage follows the `fix_on_haiku` measure, as in a default run.
         fix_model: None,
         // Repeatability measures the drift of the default configuration.

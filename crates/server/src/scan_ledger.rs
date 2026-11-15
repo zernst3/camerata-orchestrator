@@ -571,6 +571,12 @@ pub struct ScanLedger {
     /// "capped" fact. See [`crate::cost_cap`].
     #[serde(default)]
     cost_cap: Option<crate::cost_cap::CostCapRecord>,
+    /// The two-step quote (owner ruling R-9): the pre-flight figure, the re-quote made after each
+    /// repo's scan stage and what the run actually cost. Operator-only (it carries dollar figures;
+    /// no exporter renders it). `None` for a run made without a pre-flight, or a ledger written
+    /// before the record existed. See [`crate::quote`].
+    #[serde(default)]
+    quotes: Option<crate::quote::QuoteRecord>,
     /// What an outage stop left undone, when the run stopped because the model provider could not
     /// be reached (see [`crate::run_health`]). Operator-only. `None` when the run never stopped.
     #[serde(default)]
@@ -1346,6 +1352,24 @@ impl ScanLedger {
     /// Record what the spend cap did. Overwrites: one scan, one record.
     pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
         self.cost_cap = Some(record);
+    }
+
+    /// Record the run's quotes ([`Self::quotes`]). Overwrites: the meter holds every re-quote.
+    pub fn record_quotes(&mut self, record: crate::quote::QuoteRecord) {
+        self.quotes = Some(record);
+    }
+
+    /// Set what the run actually cost on its quote record, once a later stage (the group review)
+    /// has added its spend. Does nothing when the run kept no quotes.
+    pub fn set_quote_actual(&mut self, actual_usd: f64) {
+        if let Some(q) = self.quotes.as_mut() {
+            q.actual_usd = Some(actual_usd);
+        }
+    }
+
+    /// The pre-flight figure, the re-quotes after the scan stage and the actual cost of the run.
+    pub fn quotes(&self) -> Option<&crate::quote::QuoteRecord> {
+        self.quotes.as_ref()
     }
 
     /// Append the notes the batch runner kept on the run's meter (see [`Self::runner_notes`]).
